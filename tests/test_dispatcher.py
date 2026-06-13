@@ -88,3 +88,64 @@ def test_worker_cwd_falls_back_to_repo_before_worktree_exists(home, tmp_path):
 def test_worker_cwd_last_resort_is_home(home):
     cfg = Config(home=home, repo_path=None)
     assert disp._worker_cwd(cfg, "T-1") == home
+
+
+# --- dependsOn gating ---
+
+def test_parse_depends_on_empty():
+    assert disp.parse_depends_on("dependsOn: []") == []
+
+
+def test_parse_depends_on_single():
+    assert disp.parse_depends_on("dependsOn: [M-1]") == ["M-1"]
+
+
+def test_parse_depends_on_multiple():
+    assert disp.parse_depends_on("dependsOn: [M-1, M-2]") == ["M-1", "M-2"]
+
+
+def _seed_with_deps(home, key, phase=Phase.READY, depends_on=None):
+    deps_str = ", ".join(depends_on) if depends_on else ""
+    spec = f"# {key}\napproval_tier: 0\ndependsOn: [{deps_str}]\n"
+    store.atomic_write(store.spec_path(home, key), spec)
+    event_log.append(home, key, "TicketCreated",
+                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def test_ready_ticket_blocked_when_dep_not_done(home, cfg):
+    _seed_with_deps(home, "T-dep", Phase.IMPLEMENTING)
+    _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
+    snap = snap_mod.load(home, "T-1")
+    res = disp.is_due(snap, inbox_pending=False,
+                      current_spec_hash=snap.spec_hash, now=1000, blocked_dep=True)
+    assert not res.due
+    assert res.reason == "blocked-dep"
+
+
+def test_ready_ticket_unblocked_when_dep_done(home, cfg):
+    _seed_with_deps(home, "T-dep", Phase.DONE)
+    _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
+    snap = snap_mod.load(home, "T-1")
+    res = disp.is_due(snap, inbox_pending=False,
+                      current_spec_hash=snap.spec_hash, now=1000, blocked_dep=False)
+    assert res.due
+    assert res.reason == "active"
+
+
+def test_dispatch_holds_ready_ticket_with_unmet_dep(home, cfg):
+    _seed_with_deps(home, "T-dep", Phase.IMPLEMENTING)
+    _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+    assert "T-1" not in report.spawned
+    assert not any(k == "T-1" for k, _ in report.due)
+
+
+def test_dispatch_spawns_ready_ticket_when_dep_done(home, cfg):
+    _seed_with_deps(home, "T-dep", Phase.DONE)
+    _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+    assert "T-1" in report.spawned
