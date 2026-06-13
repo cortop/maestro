@@ -22,7 +22,7 @@ from . import events as E
 from . import event_log, inbox, snapshot as snap_mod, store
 from .config import Config
 from .idempotency import content_hash
-from .sessions import SessionManager, session_name
+from .sessions import SessionManager
 from .statemachine import Phase, SLEEPING_PHASES, TERMINAL_PHASES
 
 
@@ -157,7 +157,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         )
         if not res.due:
             continue
-        if session_name(key) in active:
+        if key in active:
             claimed.append(key)        # per-key serialization: one reconciler per key
             continue
         due.append((key, res.reason))

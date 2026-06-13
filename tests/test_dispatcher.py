@@ -1,6 +1,6 @@
 from maestro import dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
-from maestro.sessions import DryRunSessions, session_name
+from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 
@@ -54,7 +54,7 @@ def test_dispatch_respects_concurrency_cap(home, cfg):
 def test_dispatch_skips_live_session_for_same_key(home, cfg):
     _seed(home, "T-1", Phase.READY)
     _seed(home, "T-2", Phase.READY)
-    sessions = DryRunSessions(active={session_name("T-1")})
+    sessions = DryRunSessions(active={"T-1"})  # T-1 already has a live reconciler
     report = disp.dispatch(cfg, sessions, now=1000)
     assert "T-1" in report.claimed
     assert report.spawned == ["T-2"]

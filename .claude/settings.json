@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(maestro:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(pytest:*)",
+      "Bash(.venv/bin/:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "Bash(eval:*)",
+      "Bash(mkdir:*)",
+      "Bash(ln:*)"
+    ],
+    "deny": [
+      "Bash(git push:* --force*)",
+      "Bash(git push:* -f*)",
+      "Bash(rm -rf /*)"
+    ]
+  }
+}

@@ -24,6 +24,10 @@ class Config:
     max_failures: int = 4                  # -> dead-letter (DEGRADED)
     max_impl_turns: int = 20               # ralph-loop circuit breaker
     daily_token_ceiling: int | None = None # advisory; surfaced by `maestro doctor`
+    repo_path: str | None = None           # primary repo the reconciler builds in
+    branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
+    permission_mode: str = "acceptEdits"   # claude permission mode for reconcilers
+    reconcile_model: str = "sonnet"        # model for spawned reconciler sessions
     # Provider selection (names resolved by providers/registry).
     providers: dict = field(default_factory=lambda: {
         "tracker": "none",
@@ -58,6 +62,10 @@ def load(home_arg: str | None = None) -> Config:
         cfg.max_impl_turns = int(m.get("max_impl_turns", cfg.max_impl_turns))
         cfg.daily_token_ceiling = m.get("daily_token_ceiling", cfg.daily_token_ceiling)
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
+        cfg.repo_path = m.get("repo_path", cfg.repo_path)
+        cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
+        cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
+        cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {

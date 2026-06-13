@@ -1,20 +1,20 @@
 """Spawning and listing per-ticket reconciler sessions.
 
-A reconciler is a *top-level* ``claude --bg`` session (NOT a subagent) — that is the
-only fan-out unit on the harness that keeps the ability to spawn its own subagents
-(the Implementer/QA pair). One Workflow session would be a single failure domain for
-all tickets; N independent OS sessions are not.
+A reconciler is a detached, headless ``claude -p "/maestro-reconcile <KEY>"`` process —
+a TOP-LEVEL session (not a subagent), so it keeps the ``Agent`` tool and can run the
+Implementer/QA pair. Liveness is tracked via :mod:`maestro.claims` (pid files), because
+headless sessions don't show up in ``claude agents --json``.
 
-This module is an abstraction so the dispatcher can be unit-tested with a fake and
-so the exact ``claude`` CLI surface is isolated in one place.
+``SessionManager.list_active`` and ``spawn`` speak in terms of ticket KEYS.
 """
 from __future__ import annotations
 
-import json
-import shlex
+import os
 import subprocess
 from pathlib import Path
 from typing import Protocol
+
+from . import claims
 
 RECONCILE_PREFIX = "reconcile-"
 
@@ -23,70 +23,56 @@ def session_name(key: str) -> str:
     return f"{RECONCILE_PREFIX}{key}"
 
 
-def key_from_session(name: str) -> str | None:
-    return name[len(RECONCILE_PREFIX):] if name.startswith(RECONCILE_PREFIX) else None
-
-
 class SessionManager(Protocol):
     def list_active(self) -> set[str]:
-        """Names of currently-working reconciler sessions (the 'already claimed' set)."""
+        """Keys with a live reconciler (the 'already claimed' set)."""
 
-    def spawn(self, key: str, prompt: str, cwd: Path) -> None:
-        """Launch a detached reconciler session for ``key``."""
+    def spawn(self, key: str, prompt: str, cwd: Path) -> int | None:
+        """Launch a detached reconciler for ``key``; return its pid (or None)."""
 
 
 class ClaudeCliSessions:
-    """Real implementation backed by the ``claude`` CLI."""
+    """Real implementation: detached ``claude -p`` + a pid claim file."""
 
-    def __init__(self, model: str = "sonnet"):
+    def __init__(self, home: Path, model: str = "sonnet",
+                 permission_mode: str | None = "acceptEdits",
+                 extra_args: list[str] | None = None):
+        self.home = Path(home)
         self.model = model
+        self.permission_mode = permission_mode
+        self.extra_args = extra_args or []
 
     def list_active(self) -> set[str]:
-        try:
-            out = subprocess.run(
-                ["claude", "agents", "list", "--json"],
-                capture_output=True, text=True, timeout=30,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return set()
-        if out.returncode != 0 or not out.stdout.strip():
-            return set()
-        try:
-            data = json.loads(out.stdout)
-        except json.JSONDecodeError:
-            return set()
-        rows = data.get("agents", data) if isinstance(data, dict) else data
-        active: set[str] = set()
-        for r in rows or []:
-            name = (r.get("name") or "") if isinstance(r, dict) else ""
-            status = (r.get("status") or "").lower() if isinstance(r, dict) else ""
-            if name.startswith(RECONCILE_PREFIX) and status not in {"done", "stopped", "failed", "exited"}:
-                active.add(name)
-        return active
+        return claims.active_keys(self.home)
 
-    def spawn(self, key: str, prompt: str, cwd: Path) -> None:
-        cmd = [
-            "claude", "--bg", "--name", session_name(key),
-            "--model", self.model,
-            "-p", prompt,
-        ]
-        subprocess.Popen(
-            cmd, cwd=str(cwd),
+    def spawn(self, key: str, prompt: str, cwd: Path) -> int | None:
+        cmd = ["claude", "-p", prompt, "--model", self.model, "-n", session_name(key)]
+        if self.permission_mode:
+            cmd += ["--permission-mode", self.permission_mode]
+        cmd += self.extra_args
+        env = dict(os.environ)
+        env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd), env=env,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        claims.write_claim(self.home, key, proc.pid, session_name(key))
+        return proc.pid
 
 
 class DryRunSessions:
-    """Records spawns instead of launching anything (for --dry-run and tests)."""
+    """Records spawns instead of launching (for --dry-run and tests)."""
 
     def __init__(self, active: set[str] | None = None):
-        self._active = set(active or set())
+        self._active = set(active or set())   # KEYS
         self.spawned: list[tuple[str, str, str]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
 
-    def spawn(self, key: str, prompt: str, cwd: Path) -> None:
+    def spawn(self, key: str, prompt: str, cwd: Path) -> int | None:
         self.spawned.append((key, prompt, str(cwd)))
-        self._active.add(session_name(key))
+        self._active.add(key)
+        return None

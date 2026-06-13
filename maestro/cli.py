@@ -12,14 +12,14 @@ import json
 import sys
 from pathlib import Path
 
-from . import event_log, inbox, ops, projection, snapshot as snap_mod, store
+from . import claims, event_log, inbox, ops, projection, snapshot as snap_mod, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
-             "derived/snapshots", "derived/cursors"]
+             "derived/snapshots", "derived/cursors", "derived/claims", "agent-logs"]
 
 
 def _cfg(args) -> Config:
@@ -111,7 +111,12 @@ def cmd_doctor(args) -> int:
 # --- dispatcher / projection (launchd) --------------------------------------
 def cmd_dispatch(args) -> int:
     cfg = _cfg(args)
-    sessions = DryRunSessions() if args.dry_run else ClaudeCliSessions(model=args.model)
+    if args.dry_run:
+        sessions = DryRunSessions()
+    else:
+        sessions = ClaudeCliSessions(
+            cfg.home, model=args.model or cfg.reconcile_model,
+            permission_mode=cfg.permission_mode)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     projection.write(cfg.home)
     out = {"minted": report.minted,
@@ -201,6 +206,23 @@ def cmd_finalize(args) -> int:
     return 0
 
 
+def cmd_release(args) -> int:
+    """A reconciler calls this on exit to drop its claim (best-effort)."""
+    claims.release(_cfg(args).home, args.key)
+    _print({"released": args.key})
+    return 0
+
+
+def cmd_env(args) -> int:
+    """Resolved config essentials — used by the reconcile skill to find the repo."""
+    cfg = _cfg(args)
+    _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
+            "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
+            "max_concurrency": cfg.max_concurrency, "max_impl_turns": cfg.max_impl_turns,
+            "providers": cfg.providers})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="maestro", description="Per-ticket reconciler orchestrator.")
     p.add_argument("--home", help="MAESTRO_HOME (default: $MAESTRO_HOME or ~/.maestro)")
@@ -231,8 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("dispatch", cmd_dispatch, "one dispatcher sweep (launchd calls this)")
     sp.add_argument("--dry-run", action="store_true")
-    sp.add_argument("--model", default="sonnet")
+    sp.add_argument("--model", default=None, help="override reconcile_model from config")
     add("project", cmd_project, "regenerate dashboards")
+    add("env", cmd_env, "resolved config (home, repo_path, ...)")
 
     sp = add("snapshot", cmd_snapshot, "[agent] folded snapshot"); sp.add_argument("key")
     sp = add("events", cmd_events, "[agent] event log"); sp.add_argument("key"); sp.add_argument("--since", type=int, default=0)
@@ -259,6 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("fail", cmd_fail, "[agent] record failure (backoff or dead-letter)")
     sp.add_argument("key"); sp.add_argument("error"); sp.add_argument("--actor", default="reconciler")
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
+    sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
     return p
 
 
