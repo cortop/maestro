@@ -66,7 +66,9 @@ maestro dispatch --dry-run         # see what it WOULD spawn (no sessions launch
 maestro status                     # ticket counts by phase
 maestro show T-1                   # snapshot + event log for one ticket
 # go live:
-daemon/install.sh up               # launchd-pinned, auto-healing fleet (see daemon/README.md)
+maestro fleet up                   # launchd-pinned, auto-healing fleet (see daemon/README.md)
+maestro fleet status               # is the dispatcher loaded? heartbeat age?
+maestro fleet down                 # stop it
 ```
 
 Answer a question it asks you:

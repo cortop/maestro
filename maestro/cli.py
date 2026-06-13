@@ -12,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import claims, event_log, inbox, ops, projection, snapshot as snap_mod, store
+from . import claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions
@@ -132,6 +132,17 @@ def cmd_project(args) -> int:
     cfg = _cfg(args)
     written = projection.write(cfg.home)
     _print({"wrote": written})
+    return 0
+
+
+def cmd_fleet(args) -> int:
+    cfg = _cfg(args)
+    if args.action == "up":
+        _print(fleet.up(cfg.home, interval=args.interval))
+    elif args.action == "down":
+        _print(fleet.down(cfg.home))
+    else:
+        _print(fleet.status(cfg.home))
     return 0
 
 
@@ -256,6 +267,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model", default=None, help="override reconcile_model from config")
     add("project", cmd_project, "regenerate dashboards")
     add("env", cmd_env, "resolved config (home, repo_path, ...)")
+
+    sp = add("fleet", cmd_fleet, "manage the launchd dispatcher (up/down/status)")
+    sp.add_argument("action", choices=["up", "down", "status"])
+    sp.add_argument("--interval", type=int, default=300, help="dispatch cadence (seconds)")
 
     sp = add("snapshot", cmd_snapshot, "[agent] folded snapshot"); sp.add_argument("key")
     sp = add("events", cmd_events, "[agent] event log"); sp.add_argument("key"); sp.add_argument("--since", type=int, default=0)

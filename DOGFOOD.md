@@ -45,7 +45,8 @@ cat ~/.maestro/maestro-dev/derived/NEEDS-YOU.md
 # then let it run on its own:
 make dispatch               # one real sweep (spawns reconcilers for all due tickets)
 make loop                   # or: sweep every 5 min in the foreground
-make fleet-up               # or: launchd-pinned, survives reboot (see daemon/README.md)
+maestro fleet up            # or: launchd-pinned, survives reboot (see daemon/README.md)
+maestro fleet status        # loaded? heartbeat age? interval?
 ```
 
 ## Add your own work
