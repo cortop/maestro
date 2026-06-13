@@ -168,7 +168,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
 
     spawned: list[str] = []
     for key, _reason in to_spawn:
-        cwd = _worker_cwd(home, key)
+        cwd = _worker_cwd(cfg, key)
         prompt = f"{cfg.reconcile_command} {key}"
         sessions.spawn(key, prompt, cwd)
         spawned.append(key)
@@ -180,9 +180,18 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     )
 
 
-def _worker_cwd(home: Path, key: str) -> Path:
-    wt = home / "worktrees" / key
-    return wt if wt.exists() else home
+def _worker_cwd(cfg: Config, key: str) -> Path:
+    """Where the reconciler runs. Prefer the ticket's own worktree; before one
+    exists (e.g. the first triage step) fall back to the repo so the
+    ``/maestro-reconcile`` command + skill resolve. Only if no repo is configured
+    do we land in ``home`` (which has no ``.claude/commands`` — the reconciler
+    would no-op there)."""
+    wt = cfg.home / "worktrees" / key
+    if wt.exists():
+        return wt
+    if cfg.repo_path:
+        return Path(cfg.repo_path)
+    return cfg.home
 
 
 def _write_heartbeat(home: Path, now: float, spawned: int, active: int) -> None:

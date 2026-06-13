@@ -30,7 +30,7 @@
     <key>MAESTRO_HOME</key>
     <string>@MAESTRO_HOME@</string>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>@PATH@</string>
   </dict>
 
   <key>StartInterval</key>

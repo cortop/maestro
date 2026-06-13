@@ -1,5 +1,6 @@
 from maestro import dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
+from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
@@ -66,3 +67,24 @@ def test_mint_new_tickets_from_inbox(home, cfg):
     assert "T-9" in report.minted
     assert store.spec_path(home, "T-9").exists()
     assert snap_mod.load(home, "T-9").phase == Phase.TRIAGING.value
+
+
+def test_worker_cwd_prefers_existing_worktree(home):
+    cfg = Config(home=home, repo_path=str(home / "repo"))
+    wt = home / "worktrees" / "T-1"
+    wt.mkdir(parents=True)
+    assert disp._worker_cwd(cfg, "T-1") == wt
+
+
+def test_worker_cwd_falls_back_to_repo_before_worktree_exists(home, tmp_path):
+    # The first triage step runs before a worktree exists; it must land in the
+    # repo so the /maestro-reconcile command + skill resolve (home has neither).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = Config(home=home, repo_path=str(repo))
+    assert disp._worker_cwd(cfg, "T-1") == repo
+
+
+def test_worker_cwd_last_resort_is_home(home):
+    cfg = Config(home=home, repo_path=None)
+    assert disp._worker_cwd(cfg, "T-1") == home

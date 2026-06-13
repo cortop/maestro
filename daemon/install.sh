@@ -27,9 +27,20 @@ if [[ -z "$MAESTRO_BIN" ]]; then
   exit 1
 fi
 
+# launchd runs with a minimal PATH that omits ~/.local/bin, so the dispatcher
+# can't find `maestro`/`claude` at spawn time (FileNotFoundError -> exit 1).
+# Pin the dirs where they actually live, then the usual system locations.
+CLAUDE_BIN="$(command -v claude || true)"
+if [[ -z "$CLAUDE_BIN" ]]; then
+  echo "warning: 'claude' not on PATH — the dispatcher will fail to spawn reconcilers." >&2
+  CLAUDE_BIN="$HOME/.local/bin/claude"
+fi
+LAUNCHD_PATH="$(dirname "$MAESTRO_BIN"):$(dirname "$CLAUDE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
 mkdir -p "$HOME/Library/LaunchAgents" "$MAESTRO_HOME/agent-logs"
 sed -e "s#@MAESTRO_BIN@#${MAESTRO_BIN}#g" \
     -e "s#@MAESTRO_HOME@#${MAESTRO_HOME}#g" \
+    -e "s#@PATH@#${LAUNCHD_PATH}#g" \
     -e "s#<integer>300</integer>#<integer>${INTERVAL}</integer>#g" \
     "$HERE/com.maestro.dispatcher.plist.template" > "$PLIST"
 
