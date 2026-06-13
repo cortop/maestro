@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.DS_Store
+
+# Claude Code local per-project settings
+.claude/settings.local.json

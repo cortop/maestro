@@ -1,0 +1,148 @@
+# maestro — design
+
+A per-ticket reconciler over append-only event streams. This document is the durable
+rationale; `README.md` is the quickstart.
+
+## Problem: the wave orchestrator
+
+The predecessor pattern is a single skill that runs **waves 0→N strictly sequentially**
+under a global `STATUS=running` mutex: collect answers → fetch tracker/VCS → rebuild a
+monolithic dashboard → fan out implementers → surface questions → idle. Three structural
+problems follow from that shape:
+
+1. **Monolithic + blocking.** Every ticket moves in lockstep through the waves. The unit
+   of execution is *the run*, not *the ticket*. One run can exceed 15 minutes, and the
+   global mutex means nothing else can progress (and a crashed run wedges the lock).
+2. **Unsafe concurrent edits.** The run does read-modify-**write** on shared global files
+   (the dashboard, the question queue, the pending-work files). A human edit during the
+   read→write window is a classic lost update — so you cannot safely touch state while a
+   run is in flight.
+3. **Bloated state.** Monolithic files grow to hundreds of KB and are re-read wholesale
+   every run.
+
+## Core idea
+
+> **Per-ticket reconciler over append-only event streams.** Each ticket is a directory
+> with its own append-only event log (sole source of truth) and a tiny folded snapshot
+> (disposable cache). A cheap, level-triggered dispatcher sweeps snapshots, finds tickets
+> whose observed state lags their desired state, and fans out one independent reconciler
+> per due ticket. Each reconciler takes ONE idempotent step and exits. Humans are pure
+> producers — they only append to inboxes or edit specs. Dashboards are projections.
+
+This is the **Kubernetes controller / reconciliation** pattern (level-triggered, desired
+vs observed, idempotent, per-object workqueue) on an **event-sourcing / CQRS** substrate
+(append-only truth + regenerated read-models), with **single-writer-per-stream** +
+**fencing tokens** for correctness and **virtual-actor**-style activation for lifecycle.
+Human-in-the-loop is the **durable-workflow awakeable** ("sleep, wake on a signal")
+realized on files + a cron clock instead of an always-on server.
+
+## How each pain dies
+
+- **Blocking →** no waves, no mutex. The dispatcher only enqueues-and-exits; up to N
+  reconcilers run as independent OS-level `claude --bg` sessions. Wall-clock to drain the
+  board is the slowest *single* ticket, not the sum of waves. A human question becomes
+  "record `awaiting-human`, exit" — the slot frees immediately.
+- **Unsafe edits →** write-ownership partition. Humans append to `inbox/<KEY>.jsonl` or
+  edit `tickets/<KEY>/spec.md`; agents append to `events/<KEY>.jsonl` and atomically
+  replace `derived/*`. The two never share a read-modify-write window, so a lost update is
+  structurally impossible. A fencing token (optimistic concurrency on the log tail) guards
+  the rare same-stream race.
+- **Bloat →** a decision reads a ~1-2KB snapshot + new events; the dispatcher reads only
+  snapshots. Compaction + archival keep it bounded forever.
+
+## The Python / Claude split
+
+The decisive implementation choice: **deterministic plumbing in Python, intelligence in
+Claude.** The `maestro` package owns the correctness-critical machinery (fencing-gated
+log, atomic writes, fold, idempotent step-ids, dispatcher, leases, projections,
+dead-letter). Agents are `claude --bg` sessions that mutate state **only** through the
+`maestro` CLI, so they cannot write a torn log or clobber a file. The dispatcher needs no
+LLM at all, which is what makes an always-on fleet cheap.
+
+## Components
+
+| Component | Role | Harness primitive |
+|-----------|------|-------------------|
+| dispatcher (`maestro dispatch`) | level sweep: mint → due → spawn → exit; the sole fan-out point | launchd `StartInterval` (the durable clock; survives reboot) |
+| reconciler (`/maestro-reconcile <KEY>`) | one idempotent step per ticket | top-level `claude --bg` session (keeps the `Agent` tool → can run the Impl/QA subagents) |
+| Impl↔QA loop | the `implementing` phase body | two subagents inside the reconciler (one legal fan-out level) |
+| maestro CLI | correct-by-construction state verbs | Python (this package) |
+| projector | snapshots → dashboards, atomic | a phase of `maestro dispatch` |
+| providers | tracker / VCS / fetcher, pluggable | `config.toml` |
+
+**Why not one Workflow session as the engine:** a single Workflow process is one failure
+domain for all tickets — its crash kills the fleet. N independent `claude --bg` sessions
+are isolated; one dying is one ticket, self-healed next sweep. The no-subagent-spawning
+rule is honored because fan-out lives only at two top-level layers (dispatcher→reconcilers,
+reconciler→Impl/QA), never inside a subagent.
+
+## State machine
+
+```
+triaging ──tier0──▶ ready ──slot+deps──▶ implementing ──QA+review PASS──▶ in-review ──merged──▶ done
+   │                  ▲                       │                                              
+ tier1/2              │                  stall/maxturns                                      
+   ▼                  │                       ▼                                              
+awaiting-human ─answer┘                   degraded ──human cmd──▶ ready / terminating        
+```
+
+`awaiting-human` and `awaiting-ci` are **sleeping** (no held process). The reconciler
+records the gate + a `next_requeue_at`, then exits. The dispatcher re-wakes the ticket
+when: the inbox has a new command, the requeue timer elapses, or the spec hash changed.
+A fresh reconciler resumes by replaying the log — resumability comes from the event log we
+already have, not a separate journal.
+
+## Correctness guarantees (all tested)
+
+- **Idempotency:** `step_id = hash(key, phase, observed_seq, action)`. Two reconcilers
+  racing on the same frozen log compute the same id; the log dedups → one recorded effect.
+- **Fencing:** an append with a stale `expected_last_seq` is rejected (optimistic
+  concurrency); the loser bails and is re-derived next sweep.
+- **Crash safety:** a reconciler that dies after writing its event but before exit is
+  re-spawned, recomputes the same step-id, and no-ops.
+- **Inbox crash safety:** the reconciler acks the inbox cursor *last* (after advancing the
+  phase), so a crash re-reads the same commands rather than dropping them.
+- **Single writer per key + key isolation:** a per-key flock; distinct keys never contend.
+
+## Concurrency & safety guardrails
+
+idempotency keys · per-key claim (live-session dedup) + fencing-token authority ·
+max-concurrency cap · jittered exponential backoff on failure · dead-letter after K
+failures (one poison ticket can't wedge the fleet) · per-ticket circuit breaker
+(`max_impl_turns`) · advisory token ceiling · finalizer teardown · append-only audit via
+the event logs themselves · `dependsOn` gating to serialize coupled tickets.
+
+## Migration from a wave orchestrator (strangler-fig)
+
+Each step is independently shippable and reversible because the append-only logs are never
+rewritten.
+
+1. **Kill the clobber bug first (highest value, lowest risk).** Move all human input to
+   append-only inboxes; make the dashboard a read-only projection. The wave engine keeps
+   running unchanged. *(This is the entry point.)*
+2. Per-ticket event logs + tiny snapshots → kills the big re-reads.
+3. Stand up the dispatcher + one reconciler phase (start with `awaiting-ci` re-checks),
+   DRY-RUN alongside the wave engine.
+4. Move `triaging` + `awaiting-human` into the reconciler (sleep/wake goes live).
+5. Cut over `implementing` (your existing Impl↔QA loop, raw worktrees, raise the cap).
+   Add the launchd pin + a cloud-routine health-ping. Delete the global mutex + wave barrier.
+6. Harden: dead-letter reaper, per-ticket budgets, finalizers, log compaction,
+   `dependsOn` overlap auto-detection.
+
+## SOTA sources
+
+Reconciliation / controllers: kubernetes.io controllers & finalizers; controller-runtime
+workqueue (idempotent reconcile, MaxConcurrentReconciles); level-triggering essays.
+Durable execution / HITL: Temporal (signals, `wait_condition`), Restate awakeables,
+Inngest wait-for-event, Azure Durable Entities/external-events, AWS Step Functions task
+tokens, Cloudflare Durable Object alarms. Actors / concurrency: Orleans virtual actors
+(turn-based, ETag), Akka mailboxes, the Single-Writer Principle, optimistic concurrency
+(ETag/If-Match), lease + fencing tokens (Kleppmann). Agent frameworks: LangGraph
+persistence + interrupts + Send, OpenAI Agents SDK handoffs, AutoGen save/load state,
+CrewAI flows + @persist, Anthropic's multi-agent research system, Claude Agent SDK
+sessions. Event sourcing / CQRS: Fowler + MS Architecture Center; outbox/inbox; Kafka log
+compaction. Local-first files: POSIX durable write (fsync/rename/dir-fsync, macOS
+F_FULLFSYNC), fswatch/watchman debouncing, git-worktrees-per-agent, SQLite-as-queue,
+Automerge/Yjs CRDTs, Obsidian conflict-file mode. Pitfalls: thundering-herd + jittered
+backoff, exactly-once myth, dead-letter / poison messages, saga compensation, agent-fleet
+cost guardrails, oversight fatigue, correlation IDs.

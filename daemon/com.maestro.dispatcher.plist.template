@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  maestro dispatcher — the durable, auto-healing clock for the per-ticket fleet.
+
+  launchd fires `maestro dispatch` every StartInterval seconds. Each run does ONE
+  sweep (mint new tickets, find due tickets, spawn reconcilers up to the cap,
+  regenerate dashboards) and exits. There is no long-running process to crash, and
+  RunAtLoad + KeepAlive(crashed-only) means it survives reboot and login.
+
+  Install: copy to ~/Library/LaunchAgents/, substitute the @PLACEHOLDERS@, then
+    launchctl load ~/Library/LaunchAgents/com.maestro.dispatcher.plist
+  (see daemon/README.md). A cloud routine should health-ping `maestro doctor` and
+  alert if the heartbeat goes stale — that is the ONLY thing watching the watcher.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.maestro.dispatcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@MAESTRO_BIN@</string>
+    <string>dispatch</string>
+    <string>--model</string>
+    <string>sonnet</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MAESTRO_HOME</key>
+    <string>@MAESTRO_HOME@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>@MAESTRO_HOME@/agent-logs/dispatch.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@MAESTRO_HOME@/agent-logs/dispatch.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

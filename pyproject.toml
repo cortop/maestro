@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "maestro-orchestrator"
+version = "0.1.0"
+description = "A per-ticket reconciler over append-only event streams — a project-agnostic, concurrent successor to wave-based markdown orchestrators."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []  # stdlib-only core (tomllib, fcntl, dataclasses, argparse)
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+maestro = "maestro.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["maestro"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
