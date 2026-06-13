@@ -24,10 +24,7 @@ class StaleAppendError(store.MaestroError):
     """The log advanced since the caller folded it (lost the optimistic race)."""
 
 
-def _scan_tail(path: Path) -> tuple[int, set[str]]:
-    """Return (last_seq, step_ids_seen). Cheap on compacted logs."""
-    last_seq = 0
-    step_ids: set[str] = set()
+def _scan_file(path: Path, last_seq: int, step_ids: set[str]) -> tuple[int, set[str]]:
     if not path.exists():
         return last_seq, step_ids
     with path.open("r", encoding="utf-8") as f:
@@ -46,6 +43,13 @@ def _scan_tail(path: Path) -> tuple[int, set[str]]:
             if sid:
                 step_ids.add(sid)
     return last_seq, step_ids
+
+
+def _scan_tail(path: Path) -> tuple[int, set[str]]:
+    """Return (last_seq, step_ids_seen) across active log and its archive."""
+    archive = path.parent / (path.stem + ".archive.jsonl")
+    last_seq, step_ids = _scan_file(archive, 0, set())
+    return _scan_file(path, last_seq, step_ids)
 
 
 def last_seq(home: Path, key: str) -> int:

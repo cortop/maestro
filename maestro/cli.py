@@ -217,6 +217,11 @@ def cmd_finalize(args) -> int:
     return 0
 
 
+def cmd_compact(args) -> int:
+    _print(ops.compact(_cfg(args), args.key))
+    return 0
+
+
 def cmd_release(args) -> int:
     """A reconciler calls this on exit to drop its claim (best-effort)."""
     claims.release(_cfg(args).home, args.key)
@@ -297,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("fail", cmd_fail, "[agent] record failure (backoff or dead-letter)")
     sp.add_argument("key"); sp.add_argument("error"); sp.add_argument("--actor", default="reconciler")
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
+    sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
     return p
 

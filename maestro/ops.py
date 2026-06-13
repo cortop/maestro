@@ -4,6 +4,7 @@ refreshes the snapshot. Idempotent under crash-and-respawn.
 """
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 
@@ -119,6 +120,49 @@ def fold_inbox(cfg: Config, key: str) -> list[dict]:
 
 def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
+
+
+def compact(cfg: Config, key: str) -> dict:
+    """Move events older than the snapshot into the archive.
+
+    Under the active-log lock:
+    - Reads snapshot to learn observed_seq (the high-water mark of the last fold).
+    - Events with seq <= observed_seq are "pre-snapshot" and move to the archive.
+    - Events with seq > observed_seq stay in the active log.
+    - Archive grows monotonically; step_ids from archived events are still visible
+      to _scan_tail so idempotency is preserved across compactions.
+    """
+    snap = snap_mod.load(cfg.home, key)
+    cutoff = snap.observed_seq
+    active_path = store.events_path(cfg.home, key)
+    archive_path = store.events_archive_path(cfg.home, key)
+
+    with store.file_lock(active_path):
+        active_events = store.read_jsonl(active_path)
+        pre = [e for e in active_events if isinstance(e.get("seq"), int) and e["seq"] <= cutoff]
+        post = [e for e in active_events if not (isinstance(e.get("seq"), int) and e["seq"] <= cutoff)]
+
+        if not pre:
+            return {"archived": 0, "remaining": len(post), "cutoff_seq": cutoff}
+
+        # Avoid double-archiving: only append events with seq > last archived seq.
+        archived_events = store.read_jsonl(archive_path)
+        last_archived_seq = max((e["seq"] for e in archived_events if isinstance(e.get("seq"), int)), default=0)
+        to_archive = [e for e in pre if e["seq"] > last_archived_seq]
+
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with archive_path.open("a", encoding="utf-8") as f:
+            for ev in to_archive:
+                f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+
+        # Rewrite active log with only post-snapshot events.
+        tmp = active_path.parent / f".{active_path.name}.compact.tmp"
+        with tmp.open("w", encoding="utf-8") as f:
+            for ev in post:
+                f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+        tmp.replace(active_path)
+
+    return {"archived": len(to_archive), "remaining": len(post), "cutoff_seq": cutoff}
 
 
 def archive_done(cfg: Config) -> list[str]:
