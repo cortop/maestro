@@ -15,6 +15,7 @@ No global lock, no wave barrier. Different keys are wholly independent.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,8 +40,21 @@ def spec_hash_on_disk(home: Path, key: str) -> str | None:
     return content_hash(path.read_text(encoding="utf-8"))
 
 
+_DEPENDS_ON_RE = re.compile(r"^\s*dependsOn\s*:\s*\[([^\]]*)\]", re.MULTILINE)
+
+
+def parse_depends_on(spec_text: str) -> list[str]:
+    """Extract the dependsOn list from a spec's loose frontmatter."""
+    m = _DEPENDS_ON_RE.search(spec_text)
+    if not m:
+        return []
+    raw = m.group(1)
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
 def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
-           current_spec_hash: str | None, now: float) -> DueResult:
+           current_spec_hash: str | None, now: float,
+           blocked_dep: bool = False) -> DueResult:
     phase = Phase(snap.phase)
     if phase in TERMINAL_PHASES:
         return DueResult(False, "terminal")
@@ -48,6 +62,8 @@ def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
         return DueResult(True, "inbox")
     if current_spec_hash is not None and current_spec_hash != snap.spec_hash:
         return DueResult(True, "spec-changed")
+    if phase == Phase.READY and blocked_dep:
+        return DueResult(False, "blocked-dep")
     if phase in SLEEPING_PHASES:
         if snap.next_requeue_at is not None and snap.next_requeue_at <= now:
             return DueResult(True, "timer")
@@ -122,6 +138,19 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
     )
 
 
+def _has_unmet_deps(home: Path, key: str) -> bool:
+    """Return True if any dependsOn entry for *key* is not yet done."""
+    spec_file = store.spec_path(home, key)
+    if not spec_file.exists():
+        return False
+    deps = parse_depends_on(spec_file.read_text(encoding="utf-8"))
+    for dep in deps:
+        dep_snap = snap_mod.load(home, dep)
+        if Phase(dep_snap.phase) not in TERMINAL_PHASES:
+            return True
+    return False
+
+
 @dataclass
 class DispatchReport:
     minted: list[str]
@@ -149,11 +178,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         # Keep the dispatcher's view fresh if a writer fell behind on its fold.
         if event_log.last_seq(home, key) > snap.observed_seq:
             snap = snap_mod.rebuild(home, key)
+        blocked_dep = _has_unmet_deps(home, key)
         res = is_due(
             snap,
             inbox_pending=inbox.has_pending(home, key),
             current_spec_hash=spec_hash_on_disk(home, key),
             now=now,
+            blocked_dep=blocked_dep,
         )
         if not res.due:
             continue
