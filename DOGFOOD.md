@@ -39,7 +39,9 @@ make dry                    # safe: what the dispatcher WOULD spawn (no sessions
 make reconcile KEY=M-1      # triages M-1 -> asks a pickup question
 
 # answer questions it raises (NEEDS-YOU.md lists them):
-maestro ans M-1 "yes — go ahead"
+maestro answer                 # interactive walkthrough of all open questions
+maestro answer M-1             # or scope to one ticket
+maestro ans M-1 "yes — go ahead"  # non-interactive fallback
 cat ~/.maestro/maestro-dev/derived/NEEDS-YOU.md
 
 # then let it run on its own:

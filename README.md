@@ -71,9 +71,11 @@ maestro fleet status               # is the dispatcher loaded? heartbeat age?
 maestro fleet down                 # stop it
 ```
 
-Answer a question it asks you:
+Answer questions it asks you:
 ```bash
-maestro ans T-1 "yes, go ahead — scope to the happy path only"
+maestro answer                     # interactive: walks through every open question
+maestro answer T-1                 # scope to one ticket
+maestro ans T-1 "yes, go ahead"    # non-interactive: answer by key+text directly
 ```
 
 ## Guarantees (all covered by tests)
