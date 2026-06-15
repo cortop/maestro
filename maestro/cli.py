@@ -62,6 +62,53 @@ def cmd_ans(args) -> int:
     return 0
 
 
+def cmd_answer(args) -> int:
+    """Interactive walkthrough: find every open question and record answers."""
+    cfg = _cfg(args)
+    if not sys.stdin.isatty():
+        print(
+            "maestro answer requires an interactive terminal.\n"
+            "To answer non-interactively, use:\n"
+            "  maestro ans <KEY> \"<answer>\" [--qid <qid>]",
+            file=sys.stderr,
+        )
+        return 1
+
+    keys = [args.key] if args.key else disp.list_keys(cfg.home)
+    waiting_phases = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}
+
+    queue: list[tuple[str, str, str]] = []  # (key, qid, question_text)
+    for key in sorted(keys):
+        s = snap_mod.load(cfg.home, key)
+        if s.phase in waiting_phases and s.open_questions:
+            for qid, text in s.open_questions.items():
+                queue.append((key, qid, text))
+
+    if not queue:
+        print("Nothing waiting for your input.")
+        return 0
+
+    total = len(queue)
+    answered = 0
+    for i, (key, qid, text) in enumerate(queue):
+        remaining = total - i
+        print(f"\n[{key}] ({remaining} remaining)")
+        print(f"  {text}")
+        try:
+            raw = input("  Answer (Enter/s=skip, q=quit): ").strip()
+        except EOFError:
+            break
+        if raw in ("q", "quit"):
+            break
+        if raw in ("", "s", "skip"):
+            continue
+        inbox.append_command(cfg.home, key, "ans", {"qid": qid, "text": raw})
+        answered += 1
+
+    print(f"\n{answered} answered, {total - answered} remaining.")
+    return 0
+
+
 def cmd_cmd(args) -> int:
     cfg = _cfg(args)
     inbox.append_command(cfg.home, args.key, args.command,
@@ -258,6 +305,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("ans", cmd_ans, "answer a ticket's open question")
     sp.add_argument("key"); sp.add_argument("text"); sp.add_argument("--qid")
+
+    sp = add("answer", cmd_answer, "interactive walkthrough of all open questions")
+    sp.add_argument("key", nargs="?", default=None, help="scope to one ticket (default: all)")
 
     sp = add("cmd", cmd_cmd, "send an arbitrary command (retry/discard/...)")
     sp.add_argument("key"); sp.add_argument("command"); sp.add_argument("rest", nargs="*")
