@@ -84,6 +84,10 @@ def ticket_dir(home: Path, key: str) -> Path:
     return home / "tickets" / validate_key(key)
 
 
+def session_log_path(home: Path, key: str, session_id: str) -> Path:
+    return home / "agent-logs" / validate_key(key) / f"{session_id}.log"
+
+
 def deadletter_path(home: Path, key: str) -> Path:
     return home / "tickets" / "_deadletter" / f"{validate_key(key)}.md"
 
