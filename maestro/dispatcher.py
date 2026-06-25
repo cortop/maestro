@@ -41,6 +41,15 @@ def spec_hash_on_disk(home: Path, key: str) -> str | None:
 
 
 _DEPENDS_ON_RE = re.compile(r"^\s*dependsOn\s*:\s*\[([^\]]*)\]", re.MULTILINE)
+_KEY_RE = re.compile(r"^([A-Za-z]+)-(\d+)$")
+
+
+def split_key(key: str) -> tuple:
+    """Natural sort key: (0, prefix, number) for well-formed keys, (1, key, 0) for others."""
+    m = _KEY_RE.match(key)
+    if m:
+        return (0, m.group(1), int(m.group(2)))
+    return (1, key, 0)
 
 
 def parse_depends_on(spec_text: str) -> list[str]:
@@ -89,7 +98,7 @@ def list_keys(home: Path) -> list[str]:
                     if name.endswith(".archive"):
                         continue
                     keys.add(name)
-    return sorted(keys)
+    return sorted(keys, key=split_key)
 
 
 def mint_new_tickets(cfg: Config) -> list[str]:
