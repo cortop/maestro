@@ -38,13 +38,17 @@ def _pr_cell(snap: snap_mod.Snapshot) -> str:
     return "—"
 
 
-def ticket_rows(home: Path) -> list[tuple[str, ...]]:
+def ticket_rows(home: Path, phases: frozenset | None = None) -> list[tuple[str, ...]]:
     """Sorted rows for the live ticket table.
 
     Each tuple: (key, phase, title, pr, ci, tier, fails, row_key)
     where row_key == key and is the last element for DataTable keying.
+    If phases is provided, only tickets whose phase is in that set are returned.
     """
     snaps = [snap_mod.load(home, k) for k in list_keys(home)]
+    if phases is not None:
+        phase_values = {p.value for p in phases}
+        snaps = [s for s in snaps if s.phase in phase_values]
     snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), s.key))
     return [
         (s.key, s.phase, (s.title or "")[:48], _pr_cell(s),

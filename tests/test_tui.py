@@ -7,7 +7,7 @@ from unittest import mock
 from maestro import event_log, inbox, snapshot as snap_mod, store
 from maestro.cli import main
 from maestro.projection import ticket_rows
-from maestro.statemachine import Phase
+from maestro.statemachine import Phase, ACTIVE_PHASES
 
 
 def test_tui_missing_package_exits_2(tmp_path, capsys):
@@ -155,6 +155,81 @@ def test_ticket_rows_phase_order(home):
     assert keys.index("B-1") < keys.index("A-1"), "implementing should sort before triaging"
 
 
+# --- TUI-8: filtered views / needs-you queue ---------------------------------
+
+_NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
+
+
+def _make_ticket_at_phase(home, key, title, phase):
+    """Create a ticket and set it to the given phase."""
+    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 1\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": title, "source": "test", "spec_hash": "x"}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase, "reason": ""}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def test_ticket_rows_filter_needs_you(home):
+    """needs-you filter returns only awaiting-human and degraded tickets."""
+    _make_ticket_at_phase(home, "A-1", "awaiting", "awaiting-human")
+    _make_ticket_at_phase(home, "A-2", "degraded", "degraded")
+    _make_ticket_at_phase(home, "A-3", "implementing", "implementing")
+    _make_ticket_at_phase(home, "A-4", "ready", "ready")
+
+    rows = ticket_rows(home, _NEEDS_YOU_PHASES)
+    keys = {r[0] for r in rows}
+    assert keys == {"A-1", "A-2"}
+
+
+def test_ticket_rows_filter_needs_you_matches_cmd_status(home):
+    """Needs-you TUI filter uses the same phase set that cmd_status uses for needs_you."""
+    cmd_status_phases = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}
+    tui_phases = {p.value for p in _NEEDS_YOU_PHASES}
+    assert cmd_status_phases == tui_phases, (
+        "TUI needs-you filter must match cmd_status needs_you phase set"
+    )
+
+    _make_ticket_at_phase(home, "A-1", "awaiting", "awaiting-human")
+    _make_ticket_at_phase(home, "A-2", "implementing", "implementing")
+
+    rows = ticket_rows(home, _NEEDS_YOU_PHASES)
+    assert len(rows) == 1
+    assert rows[0][0] == "A-1"
+
+
+def test_ticket_rows_filter_active(home):
+    """active filter excludes sleeping (awaiting-human, awaiting-ci) and done tickets."""
+    _make_ticket_at_phase(home, "A-1", "implementing", "implementing")
+    _make_ticket_at_phase(home, "A-2", "awaiting-human", "awaiting-human")
+    _make_ticket_at_phase(home, "A-3", "awaiting-ci", "awaiting-ci")
+    _make_ticket_at_phase(home, "A-4", "done", "done")
+
+    rows = ticket_rows(home, ACTIVE_PHASES)
+    keys = {r[0] for r in rows}
+    assert "A-1" in keys
+    assert "A-2" not in keys
+    assert "A-3" not in keys
+    assert "A-4" not in keys
+
+
+def test_ticket_rows_filter_none_returns_all(home):
+    """ticket_rows with phases=None returns all tickets regardless of phase."""
+    _make_ticket_at_phase(home, "A-1", "awaiting", "awaiting-human")
+    _make_ticket_at_phase(home, "A-2", "implementing", "implementing")
+    _make_ticket_at_phase(home, "A-3", "done", "done")
+
+    rows = ticket_rows(home)
+    assert len(rows) == 3
+
+
+def test_ticket_rows_filter_empty_phases(home):
+    """ticket_rows with an empty frozenset returns no rows."""
+    _make_ticket_at_phase(home, "A-1", "implementing", "implementing")
+
+    rows = ticket_rows(home, frozenset())
+    assert rows == []
+
+
 # --- detail pane rendering ---------------------------------------------------
 
 from maestro.tui_detail import render as _render_detail  # noqa: E402
@@ -230,7 +305,7 @@ def test_render_detail_no_open_questions_shows_emdash():
 
 # --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
 
-from maestro.tui import MaestroTUI, _AnswerModal  # noqa: E402
+from maestro.tui import MaestroTUI, _AnswerModal, _FILTERS  # noqa: E402
 
 
 def _make_ticket_with_questions(home, key, questions: dict):
@@ -337,6 +412,38 @@ def test_answer_cancel_mid_walk_stops_at_that_question(home):
     pending = inbox.pending(home, "T-1")
     assert len(pending) == 1
     assert pending[0]["args"]["qid"] == "q1"
+
+
+def test_tui_default_filter_is_needs_you():
+    """MaestroTUI starts with filter index 0 which is 'needs-you'."""
+    app = MaestroTUI(home="/tmp")
+    assert app._filter_idx == 0
+    name, phases = _FILTERS[0]
+    assert name == "needs-you"
+
+
+def test_tui_cycle_filter_advances_and_wraps():
+    """action_cycle_filter increments the index and wraps back to 0."""
+    app = MaestroTUI(home="/tmp")
+    app._populate = mock.Mock()
+
+    assert app._filter_idx == 0
+    app.action_cycle_filter()
+    assert app._filter_idx == 1
+    app.action_cycle_filter()
+    assert app._filter_idx == 2
+    app.action_cycle_filter()
+    assert app._filter_idx == 0  # wraps around
+
+
+def test_tui_cycle_filter_calls_populate():
+    """action_cycle_filter always triggers a repopulate."""
+    app = MaestroTUI(home="/tmp")
+    populate_mock = mock.Mock()
+    app._populate = populate_mock
+
+    app.action_cycle_filter()
+    populate_mock.assert_called_once()
 
 
 def test_answer_no_questions_notifies_warning(home):
