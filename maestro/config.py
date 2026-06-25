@@ -40,6 +40,7 @@ class Config:
     # Command used to spawn a reconciler session (project may override).
     reconcile_command: str = "/maestro-reconcile"
     capture_session_logs: bool = True
+    session_log_format: str = "stream-json"  # "stream-json" | "text"
     raw: dict = field(default_factory=dict)
 
 
@@ -68,6 +69,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
         cfg.capture_session_logs = bool(m.get("capture_session_logs", cfg.capture_session_logs))
+        cfg.session_log_format = m.get("session_log_format", cfg.session_log_format)
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {
