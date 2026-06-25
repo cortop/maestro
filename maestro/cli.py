@@ -280,6 +280,16 @@ def cmd_fail(args) -> int:
     return 0
 
 
+def cmd_check_conflicts(args) -> int:
+    """Ask a conflict-resolution question if the PR is CONFLICTING and none is open yet."""
+    if args.state != "CONFLICTING":
+        _print({"conflict": False, "reason": f"mergeable={args.state}"})
+        return 0
+    asked = ops.ask_conflict(_cfg(args), args.key, args.pr_number, actor=args.actor)
+    _print({"conflict": True, "asked": asked})
+    return 0
+
+
 def cmd_finalize(args) -> int:
     cfg = _cfg(args)
     ops.finalize(cfg, args.key, actor=args.actor)
@@ -511,6 +521,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
+
+    sp = add("check-conflicts", cmd_check_conflicts,
+             "[agent] ask conflict question if PR is CONFLICTING (idempotent)")
+    sp.add_argument("key")
+    sp.add_argument("pr_number", type=int)
+    sp.add_argument("state", help="mergeable state from gh (CONFLICTING|MERGEABLE|UNKNOWN)")
+    sp.add_argument("--actor", default="reconciler")
 
     add("tui", cmd_tui, "launch the interactive TUI (requires [tui] extra)")
     return p
