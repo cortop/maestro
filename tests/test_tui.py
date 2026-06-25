@@ -153,3 +153,76 @@ def test_ticket_rows_phase_order(home):
     rows = ticket_rows(home)
     keys = [r[0] for r in rows]
     assert keys.index("B-1") < keys.index("A-1"), "implementing should sort before triaging"
+
+
+# --- detail pane rendering ---------------------------------------------------
+
+from maestro.tui_detail import render as _render_detail  # noqa: E402
+
+
+def test_render_detail_all_fields_present():
+    """All snapshot fields appear in the detail output."""
+    snap = snap_mod.Snapshot(
+        key="T-1",
+        phase="implementing",
+        title="My feature",
+        tier="1",
+        source="inbox/_new",
+        pr_number=7,
+        pr_url="https://github.com/x/y/pull/7",
+        pr_state="open",
+        pr_draft=True,
+        ci_state="passing",
+        failure_count=2,
+        last_error="boom",
+        open_questions={"q1": "Is this OK?"},
+        updated_ts="2026-06-25T00:00:00+00:00",
+    )
+    out = _render_detail(snap)
+    assert "My feature" in out
+    assert "implementing" in out
+    assert "1" in out          # tier
+    assert "inbox/_new" in out
+    assert "#7" in out
+    assert "open" in out
+    assert "passing" in out
+    assert "2" in out          # failure_count
+    assert "boom" in out
+    assert "Is this OK?" in out
+    assert "2026-06-25" in out
+
+
+def test_render_detail_missing_values_show_emdash():
+    """None / empty fields render as em-dash."""
+    snap = snap_mod.Snapshot(key="T-99")
+    out = _render_detail(snap)
+    # At least tier, source, PR, CI, last_error should all show —
+    assert out.count("—") >= 5
+
+
+def test_render_detail_no_pr_shows_emdash():
+    """When no PR exists the PR line shows em-dash."""
+    snap = snap_mod.Snapshot(key="T-2", phase="ready")
+    out = _render_detail(snap)
+    lines = [l for l in out.splitlines() if "PR" in l]
+    assert lines, "Expected a PR line"
+    assert "—" in lines[0]
+
+
+def test_render_detail_open_questions_rendered():
+    """Multiple open questions are all included in the output."""
+    snap = snap_mod.Snapshot(
+        key="T-3",
+        open_questions={"q1": "First question", "q2": "Second question"},
+    )
+    out = _render_detail(snap)
+    assert "First question" in out
+    assert "Second question" in out
+
+
+def test_render_detail_no_open_questions_shows_emdash():
+    """Empty open_questions dict renders as em-dash."""
+    snap = snap_mod.Snapshot(key="T-4", open_questions={})
+    out = _render_detail(snap)
+    lines = [l for l in out.splitlines() if "Open questions" in l or "questions" in l.lower()]
+    assert any("—" in l for l in lines)
