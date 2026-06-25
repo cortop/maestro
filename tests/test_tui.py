@@ -398,6 +398,37 @@ def test_answer_cancel_mid_walk_stops_at_that_question(home):
     assert pending[0]["args"]["qid"] == "q1"
 
 
+def test_answer_modal_receives_home(home):
+    """_AnswerModal is created with the home path so it can load the spec."""
+    _make_ticket_with_questions(home, "T-1", {"q1": "Ready?"})
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_answer()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, _AnswerModal)
+    assert screen._home == home
+
+
+def test_answer_modal_spec_loaded_from_disk(home):
+    """The spec file exists at the path _AnswerModal will read it from."""
+    _make_ticket_with_questions(home, "T-1", {"q1": "OK?"})
+    spec_content = "# T-1\napproval_tier: 1\n\n## Intent\nDo the thing."
+    store.atomic_write(store.spec_path(home, "T-1"), spec_content)
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_answer()
+
+    screen, _ = push_calls[0]
+    spec_path = home / "tickets" / "T-1" / "spec.md"
+    assert spec_path.exists()
+    assert spec_path.read_text() == spec_content
+    assert screen._question_text == "OK?"
+
+
 def test_answer_no_questions_notifies_warning(home):
     """action_answer on a ticket with no open questions shows a warning toast."""
     store.atomic_write(store.spec_path(home, "T-1"), "# T-1\napproval_tier: 0\n")
