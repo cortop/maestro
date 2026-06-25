@@ -81,6 +81,15 @@ def _fmt_age(age_s: int | None) -> str:
     return f"{age_s // 3600}h ago"
 
 
+def _render_badge(status: dict) -> str:
+    """Compact fleet state for the header: on/off, interval, heartbeat age."""
+    dot = "[green]●[/green] up" if status.get("loaded") else "[red]○[/red] down"
+    interval = status.get("interval")
+    interval_str = f"{interval}s" if interval else "—"
+    hb = _fmt_age(status.get("heartbeat_age_s"))
+    return f"{dot}  [dim]int[/dim] {interval_str}  [dim]hb[/dim] {hb} "
+
+
 def _render_fleet(status: dict, doctor: dict) -> str:
     loaded = "[green]yes[/green]" if status.get("loaded") else "[red]no[/red]"
     age = _fmt_age(status.get("heartbeat_age_s"))
@@ -130,6 +139,7 @@ class FleetScreen(Screen):
         self._home = home
         self._status: dict = {}
         self._doctor: dict = {}
+        self._log_lines: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -161,11 +171,16 @@ class FleetScreen(Screen):
         return status, doctor
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.name == "fleet-refresh" and event.state == WorkerState.SUCCESS:
-            self._status, self._doctor = event.worker.result
-            self.query_one("#fleet-status", Static).update(
-                _render_fleet(self._status, self._doctor)
-            )
+        if event.state == WorkerState.SUCCESS:
+            if event.worker.name == "fleet-refresh":
+                self._status, self._doctor = event.worker.result
+                self.query_one("#fleet-status", Static).update(
+                    _render_fleet(self._status, self._doctor)
+                )
+            elif event.worker.name in ("dispatch-sweep", "project-rebuild"):
+                self._log(str(event.worker.result))
+        elif event.state == WorkerState.ERROR:
+            self._log(f"[red]{event.worker.name} failed: {event.worker.error}[/red]")
 
     # --- key actions ---------------------------------------------------------
 
@@ -217,14 +232,22 @@ class FleetScreen(Screen):
             return str(exc)
 
     def _log(self, msg: str) -> None:
-        w = self.query_one("#fleet-log", Static)
-        current = str(w.renderable)
-        lines = (current + "\n" + msg).strip().splitlines()
-        w.update("\n".join(lines[-6:]))
+        self._log_lines.append(msg)
+        del self._log_lines[:-6]
+        self.query_one("#fleet-log", Static).update("\n".join(self._log_lines))
 
 
 class MaestroTUI(App):
     CSS = """
+    Screen { layers: base topbar; }
+    Header { layer: base; }
+    #fleet-badge {
+        layer: topbar;
+        dock: top;
+        height: 1;
+        text-align: right;
+        background: transparent;
+    }
     #tickets { width: 2fr; height: 1fr; }
     #detail  { width: 1fr; height: 1fr; padding: 0 1; }
     """
@@ -243,6 +266,7 @@ class MaestroTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static("", id="fleet-badge")
         with Horizontal():
             yield DataTable(id="tickets")
             yield Static(f"[dim]Select a ticket[/dim]", id="detail")
@@ -254,6 +278,16 @@ class MaestroTUI(App):
         table.add_columns("Key", "Phase", "Title", "PR", "CI", "Tier", "Fails")
         self._populate()
         self.set_interval(3.0, self._populate)
+        self._refresh_badge()
+        self.set_interval(5.0, self._refresh_badge)
+
+    def _refresh_badge(self) -> None:
+        self.run_worker(lambda: fleet_mod.status(self._home), thread=True,
+                        group="badge", exclusive=True, name="fleet-badge")
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
+            self.query_one("#fleet-badge", Static).update(_render_badge(event.worker.result))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
