@@ -41,6 +41,9 @@ class Config:
     reconcile_command: str = "/maestro-reconcile"
     capture_session_logs: bool = True
     session_log_format: str = "stream-json"  # "stream-json" | "text"
+    session_log_retention_days: int | None = None  # prune logs older than N days; None = keep all
+    session_log_max_per_ticket: int | None = None  # keep at most N logs per ticket; None = unlimited
+    nudge_on_human_input: bool = True  # trigger in-process dispatch after ans/cmd/create
     raw: dict = field(default_factory=dict)
 
 
@@ -70,6 +73,11 @@ def load(home_arg: str | None = None) -> Config:
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
         cfg.capture_session_logs = bool(m.get("capture_session_logs", cfg.capture_session_logs))
         cfg.session_log_format = m.get("session_log_format", cfg.session_log_format)
+        raw_days = m.get("session_log_retention_days", cfg.session_log_retention_days)
+        cfg.session_log_retention_days = int(raw_days) if raw_days is not None else None
+        raw_max = m.get("session_log_max_per_ticket", cfg.session_log_max_per_ticket)
+        cfg.session_log_max_per_ticket = int(raw_max) if raw_max is not None else None
+        cfg.nudge_on_human_input = bool(m.get("nudge_on_human_input", cfg.nudge_on_human_input))
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {
