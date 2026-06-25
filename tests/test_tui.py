@@ -4,7 +4,10 @@ from __future__ import annotations
 import sys
 from unittest import mock
 
+from maestro import event_log, snapshot as snap_mod
 from maestro.cli import main
+from maestro.projection import ticket_rows
+from maestro.statemachine import Phase
 
 
 def test_tui_missing_package_exits_2(tmp_path, capsys):
@@ -97,3 +100,56 @@ def test_tui_passes_home_to_main(tmp_path):
 
     assert received
     assert received[0].home == str(tmp_path)
+
+
+# --- ticket_rows (data layer, no textual required) ---------------------------
+
+def test_ticket_rows_empty_home(home):
+    """An empty home returns an empty list without crashing."""
+    assert ticket_rows(home) == []
+
+
+def test_ticket_rows_lists_ticket_columns(home):
+    """ticket_rows returns one row per ticket with key/phase/title in the correct positions."""
+    event_log.append(home, "T-1", "TicketCreated",
+                     {"title": "My feature", "source": "test", "spec_hash": "abc"},
+                     actor="test", step_id="tc-1")
+    snap_mod.rebuild(home, "T-1")
+
+    rows = ticket_rows(home)
+    assert len(rows) == 1
+    key, phase, title, pr, ci, tier, fails, row_key = rows[0]
+    assert key == "T-1"
+    assert phase == Phase.TRIAGING.value
+    assert title == "My feature"
+    assert pr == "—"
+    assert ci == "—"
+    assert row_key == "T-1"
+
+
+def test_ticket_rows_pr_label(home):
+    """A ticket with a PR shows '#<number>', one without shows '—'."""
+    event_log.append(home, "T-1", "PrOpened",
+                     {"number": 42, "url": "https://github.com/x/y/pull/42", "draft": True},
+                     actor="r", step_id="pr-T-1")
+    snap_mod.rebuild(home, "T-1")
+
+    rows = ticket_rows(home)
+    assert rows[0][3] == "#42"
+
+
+def test_ticket_rows_phase_order(home):
+    """Rows are sorted by WORKSTATE phase order (implementing before triaging)."""
+    event_log.append(home, "A-1", "TicketCreated", {"title": "alpha"}, actor="d")
+    event_log.append(home, "A-1", "PhaseChanged", {"phase": "triaging", "reason": ""},
+                     actor="r")
+    snap_mod.rebuild(home, "A-1")
+
+    event_log.append(home, "B-1", "TicketCreated", {"title": "beta"}, actor="d")
+    event_log.append(home, "B-1", "PhaseChanged", {"phase": "implementing", "reason": ""},
+                     actor="r")
+    snap_mod.rebuild(home, "B-1")
+
+    rows = ticket_rows(home)
+    keys = [r[0] for r in rows]
+    assert keys.index("B-1") < keys.index("A-1"), "implementing should sort before triaging"

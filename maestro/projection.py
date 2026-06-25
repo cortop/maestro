@@ -19,11 +19,38 @@ _BANNER = (
     "     or edit its spec (`tickets/<KEY>/spec.md`). This file is a projection. -->\n"
 )
 
+_TABLE_PHASE_ORDER = [
+    Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.READY,
+    Phase.TRIAGING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING, Phase.DONE,
+]
+_PHASE_RANK: dict[str, int] = {p.value: i for i, p in enumerate(_TABLE_PHASE_ORDER)}
+
 
 def _link(snap: snap_mod.Snapshot) -> str:
     if snap.pr_url and snap.pr_number:
         return f"[#{snap.pr_number}]({snap.pr_url})"
     return "—"
+
+
+def _pr_cell(snap: snap_mod.Snapshot) -> str:
+    if snap.pr_url and snap.pr_number:
+        return f"#{snap.pr_number}"
+    return "—"
+
+
+def ticket_rows(home: Path) -> list[tuple[str, ...]]:
+    """Sorted rows for the live ticket table.
+
+    Each tuple: (key, phase, title, pr, ci, tier, fails, row_key)
+    where row_key == key and is the last element for DataTable keying.
+    """
+    snaps = [snap_mod.load(home, k) for k in list_keys(home)]
+    snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), s.key))
+    return [
+        (s.key, s.phase, (s.title or "")[:48], _pr_cell(s),
+         s.ci_state or "—", s.tier or "—", str(s.failure_count), s.key)
+        for s in snaps
+    ]
 
 
 def render(home: Path) -> dict[str, str]:
