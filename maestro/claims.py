@@ -30,10 +30,13 @@ def pid_alive(pid) -> bool:
     return True
 
 
-def write_claim(home: Path, key: str, pid: int, name: str) -> None:
-    store.write_json(claim_path(home, key),
-                     {"pid": pid, "name": name, "ts": store.iso_now(),
-                      "epoch": store.now_epoch()})
+def write_claim(home: Path, key: str, pid: int, name: str,
+                *, log_path: str | None = None) -> None:
+    data: dict = {"pid": pid, "name": name, "ts": store.iso_now(),
+                  "epoch": store.now_epoch()}
+    if log_path is not None:
+        data["log_path"] = log_path
+    store.write_json(claim_path(home, key), data)
 
 
 def read_claim(home: Path, key: str) -> dict | None:
