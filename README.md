@@ -61,7 +61,8 @@ replaying the event log.
 ```bash
 pip install -e .
 maestro init                       # scaffold ~/.maestro + config.toml
-maestro create "Add retry to X" --tier 0
+maestro create                     # guided interactive flow (title → tier → priority → $EDITOR)
+maestro create "Add retry to X" --tier 0  # flag-based (scripts / CI)
 maestro dispatch --dry-run         # see what it WOULD spawn (no sessions launched)
 maestro status                     # ticket counts by phase
 maestro show T-1                   # snapshot + event log for one ticket
