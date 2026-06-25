@@ -276,6 +276,19 @@ def cmd_release(args) -> int:
     return 0
 
 
+def cmd_tui(args) -> int:
+    try:
+        from .tui import main as tui_main
+    except ImportError:
+        print(
+            "textual is not installed. Install it with:\n"
+            "  pip install 'maestro-orchestrator[tui]'",
+            file=sys.stderr,
+        )
+        return 2
+    return tui_main(args)
+
+
 def cmd_env(args) -> int:
     """Resolved config essentials — used by the reconcile skill to find the repo."""
     cfg = _cfg(args)
@@ -354,6 +367,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
+
+    add("tui", cmd_tui, "launch the interactive TUI (requires [tui] extra)")
     return p
 
 
