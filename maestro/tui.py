@@ -1,7 +1,9 @@
 """Interactive TUI for maestro — requires the `tui` extra (textual)."""
 from __future__ import annotations
 
+import json
 import subprocess
+import time
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -12,10 +14,11 @@ from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, St
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
-from . import event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
+from . import claims, event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
+from .sessions import list_sessions
 from .statemachine import Phase, ACTIVE_PHASES
 from .tui_detail import render as _render_detail
-from .tui_events import render_log
+from .tui_events import render_log, render_log_line
 
 
 class EventsScreen(Screen):
@@ -60,6 +63,79 @@ _FILTERS: list[tuple[str, frozenset | None]] = [
     ("active", ACTIVE_PHASES),
     ("all", None),
 ]
+
+
+class LogsScreen(Screen):
+    """Screen that tails the live session log for one ticket."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back")]
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+        self._stop = False
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield RichLog(id="logs-view", highlight=False, markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Logs: {self._key}"
+        self.run_worker(self._tail, thread=True, name="tail-logs")
+
+    def on_unmount(self) -> None:
+        self._stop = True
+
+    def _tail(self) -> None:
+        log_widget = self.query_one("#logs-view", RichLog)
+
+        claim = claims.read_claim(self._home, self._key)
+        live_pid = claim.get("pid") if claim else None
+        log_path_str = claim.get("log_path") if claim else None
+
+        if log_path_str:
+            log_path = Path(log_path_str)
+        else:
+            sessions_list = list_sessions(self._home, self._key)
+            if not sessions_list:
+                self.call_from_thread(log_widget.write, "(no session logs found)")
+                return
+            log_path = Path(sessions_list[0]["path"])
+
+        if not log_path.exists():
+            self.call_from_thread(log_widget.write, f"(log not found: {log_path.name})")
+            return
+
+        is_stream = log_path.name.endswith(".stream.jsonl")
+
+        with log_path.open(encoding="utf-8", errors="replace") as f:
+            buf = ""
+            while not self._stop:
+                chunk = f.read(4096)
+                if chunk:
+                    buf += chunk
+                    if is_stream:
+                        while "\n" in buf:
+                            line, buf = buf.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            for rendered in render_log_line(obj):
+                                self.call_from_thread(log_widget.write, rendered)
+                    else:
+                        self.call_from_thread(log_widget.write, chunk)
+                else:
+                    if live_pid and not claims.pid_alive(live_pid):
+                        break
+                    if not live_pid:
+                        break
+                    time.sleep(0.25)
 
 
 class _AnswerModal(ModalScreen):
@@ -452,6 +528,7 @@ class MaestroTUI(App):
         ("n", "create", "New"),
         ("t", "toggle_tail", "Tail/Full"),
         ("enter", "view_events", "Events"),
+        ("l", "view_logs", "Logs"),
     ]
 
     _selected_key: str | None = None
@@ -603,6 +680,10 @@ class MaestroTUI(App):
     def action_view_events(self) -> None:
         if self._selected_key:
             self.push_screen(EventsScreen(self._home, self._selected_key))
+
+    def action_view_logs(self) -> None:
+        if self._selected_key:
+            self.push_screen(LogsScreen(self._home, self._selected_key))
 
     def _populate(self) -> None:
         _name, phases = _FILTERS[self._filter_idx]

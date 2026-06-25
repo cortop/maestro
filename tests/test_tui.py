@@ -879,7 +879,7 @@ def test_fleet_screen_not_stale_with_recent_heartbeat(home):
 
 # --- event timeline rendering -------------------------------------------------
 
-from maestro.tui_events import render_event, render_log  # noqa: E402
+from maestro.tui_events import render_event, render_log, render_log_line  # noqa: E402
 from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
 
 
@@ -1143,3 +1143,188 @@ def test_create_shows_queued_toast(home):
     app.notify.assert_called_once()
     msg = app.notify.call_args[0][0]
     assert "queued" in msg
+
+
+# --- IMPL_STEP timeline rendering --------------------------------------------
+
+def test_render_event_impl_step_shows_kind_badge():
+    """ImplStepRecorded events render a kind badge instead of the raw type name."""
+    ev = {
+        "seq": 5,
+        "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded",
+        "actor": "reconciler",
+        "payload": {"kind": "edit", "tool": "Edit", "summary": "maestro/tui.py"},
+    }
+    line = render_event(ev)
+    assert "edit" in line
+    assert "maestro/tui.py" in line
+    # The raw event type should not appear (replaced by kind badge)
+    assert "ImplStepRecorded" not in line
+
+
+def test_render_event_impl_step_command_badge():
+    """kind=command renders a 'cmd' badge."""
+    ev = {
+        "seq": 6, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "command", "tool": "Bash", "summary": "make test"},
+    }
+    line = render_event(ev)
+    assert "cmd" in line
+    assert "make test" in line
+
+
+def test_render_event_impl_step_subagent_badge():
+    """kind=subagent renders an 'agent' badge."""
+    ev = {
+        "seq": 7, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "subagent", "tool": "Agent", "summary": "Code review"},
+    }
+    line = render_event(ev)
+    assert "agent" in line
+    assert "Code review" in line
+
+
+def test_render_event_impl_step_unknown_kind_still_renders():
+    """An unrecognised kind still produces a line with the summary."""
+    ev = {
+        "seq": 8, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "future-kind", "tool": "X", "summary": "something"},
+    }
+    line = render_event(ev)
+    assert "something" in line
+
+
+def test_render_event_phase_changed_styled():
+    """PhaseChanged uses a milestone color (contains 'blue' for styling)."""
+    ev = {
+        "seq": 1, "ts": "2026-06-25T00:00:00+00:00",
+        "type": "PhaseChanged", "actor": "reconciler",
+        "payload": {"phase": "implementing", "reason": "worktree ready"},
+    }
+    line = render_event(ev)
+    assert "blue" in line
+    assert "PhaseChanged" in line
+
+
+def test_render_event_failed_styled_red():
+    """Failed events use red milestone color."""
+    ev = {
+        "seq": 9, "ts": "2026-06-25T00:00:00+00:00",
+        "type": "Failed", "actor": "reconciler",
+        "payload": {"error": "timeout"},
+    }
+    line = render_event(ev)
+    assert "red" in line
+    assert "Failed" in line
+
+
+# --- render_log_line (stream-json → Rich markup) -----------------------------
+
+def test_render_log_line_assistant_text():
+    """Text blocks in assistant messages are returned as escaped lines."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "text", "text": "Hello world"}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert lines == ["Hello world"]
+
+
+def test_render_log_line_assistant_tool_use():
+    """tool_use blocks render with tool name badge."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "Bash" in lines[0]
+    assert "ls" in lines[0]
+
+
+def test_render_log_line_result_success():
+    """Result success renders green with duration."""
+    obj = {"type": "result", "subtype": "success", "duration_ms": 1234}
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "green" in lines[0]
+    assert "1234ms" in lines[0]
+
+
+def test_render_log_line_result_error():
+    """Result error renders red."""
+    obj = {"type": "result", "subtype": "error_during_execution"}
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "red" in lines[0]
+
+
+def test_render_log_line_unknown_type_returns_empty():
+    """Unknown event types produce no lines (safe no-op)."""
+    obj = {"type": "system", "session_id": "abc123"}
+    lines = render_log_line(obj)
+    assert lines == []
+
+
+def test_render_log_line_escapes_brackets_in_text():
+    """Rich markup chars in text content are escaped so they don't break rendering."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "text", "text": "use [bold] or [dim]?"}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    # The literal '[' should be escaped
+    assert "\\[" in lines[0]
+
+
+# --- LogsScreen construction and action_view_logs ----------------------------
+
+from maestro.tui import LogsScreen  # noqa: E402
+
+
+def test_logs_screen_constructs(home):
+    """LogsScreen can be instantiated with home and key."""
+    screen = LogsScreen(home, "T-1")
+    assert screen._home == home
+    assert screen._key == "T-1"
+
+
+def test_maestro_tui_has_logs_binding(home):
+    """MaestroTUI exposes the 'l' → view_logs binding."""
+    app = MaestroTUI(home=str(home))
+    keys = [b[0] for b in app.BINDINGS]
+    assert "l" in keys
+
+
+def test_action_view_logs_pushes_logs_screen(home):
+    """action_view_logs pushes a LogsScreen for the selected ticket."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_view_logs()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, LogsScreen)
+    assert screen._key == "T-1"
+
+
+def test_action_view_logs_no_selection_does_nothing(home):
+    """action_view_logs with no selected ticket pushes nothing."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+
+    app.action_view_logs()
+
+    assert not push_calls
