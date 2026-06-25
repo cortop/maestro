@@ -16,7 +16,7 @@ from textual.worker import Worker, WorkerState
 from .projection import ticket_rows
 from . import claims, event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
 from .sessions import list_sessions
-from .statemachine import Phase
+from .statemachine import Phase, ACTIVE_PHASES
 from .tui_detail import render as _render_detail
 from .tui_events import render_log, render_log_line
 
@@ -54,6 +54,15 @@ class EventsScreen(Screen):
         log.clear()
         for line in render_log(events, tail=self._tail_mode):
             log.write(line)
+
+_NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
+
+# Named filters: (display_name, phase_set) — None phase_set means no filtering (show all)
+_FILTERS: list[tuple[str, frozenset | None]] = [
+    ("needs-you", _NEEDS_YOU_PHASES),
+    ("active", ACTIVE_PHASES),
+    ("all", None),
+]
 
 
 class LogsScreen(Screen):
@@ -514,7 +523,8 @@ class MaestroTUI(App):
         ("c", "cmd", "Command"),
         ("ctrl+r", "retry", "Retry"),
         ("ctrl+d", "discard", "Discard"),
-        ("f", "fleet_panel", "Fleet"),
+        ("f", "cycle_filter", "Filter"),
+        ("F", "fleet_panel", "Fleet"),
         ("n", "create", "New"),
         ("t", "toggle_tail", "Tail/Full"),
         ("enter", "view_events", "Events"),
@@ -528,9 +538,11 @@ class MaestroTUI(App):
         super().__init__()
         self._home = Path(home)
         self._selected_key: str | None = None
+        self._filter_idx: int = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static("", id="filter-bar")
         yield Static("", id="fleet-badge")
         with Horizontal():
             yield DataTable(id="tickets")
@@ -569,6 +581,10 @@ class MaestroTUI(App):
         self._refresh_events()
 
     def action_refresh(self) -> None:
+        self._populate()
+
+    def action_cycle_filter(self) -> None:
+        self._filter_idx = (self._filter_idx + 1) % len(_FILTERS)
         self._populate()
 
     def action_cmd(self) -> None:
@@ -670,6 +686,32 @@ class MaestroTUI(App):
             self.push_screen(LogsScreen(self._home, self._selected_key))
 
     def _populate(self) -> None:
+        _name, phases = _FILTERS[self._filter_idx]
+
+        # Load all rows once for counting and filtering
+        all_rows = ticket_rows(self._home)
+
+        # Build filter bar: show counts per filter, bold the active one
+        parts = []
+        for i, (fname, fphases) in enumerate(_FILTERS):
+            if fphases is None:
+                count = len(all_rows)
+            else:
+                fvals = {p.value for p in fphases}
+                count = sum(1 for r in all_rows if r[1] in fvals)
+            label = f"{fname}({count})"
+            if i == self._filter_idx:
+                label = f"[bold]{label}[/bold]"
+            parts.append(label)
+        self.query_one("#filter-bar", Static).update("  " + "  |  ".join(parts))
+
+        # Apply current filter
+        if phases is not None:
+            phase_vals = {p.value for p in phases}
+            visible = [r for r in all_rows if r[1] in phase_vals]
+        else:
+            visible = all_rows
+
         table = self.query_one(DataTable)
         # Preserve cursor across clear/repopulate.
         prev_key: str | None = None
@@ -682,7 +724,7 @@ class MaestroTUI(App):
         prev_row = table.cursor_row
         table.clear()
         row_keys: list[str] = []
-        for *cells, row_key in ticket_rows(self._home):
+        for *cells, row_key in visible:
             table.add_row(*cells, key=row_key)
             row_keys.append(row_key)
         if not row_keys:
