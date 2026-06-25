@@ -289,7 +289,7 @@ def test_render_detail_escapes_brackets_in_dynamic_fields():
 
 # --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
 
-from maestro.tui import MaestroTUI, _AnswerModal  # noqa: E402
+from maestro.tui import MaestroTUI, _AnswerModal, _CreateModal  # noqa: E402
 
 
 def _make_ticket_with_questions(home, key, questions: dict):
@@ -517,3 +517,80 @@ def test_populate_empty_table_no_crash(home):
 
     app._populate()  # no tickets exist
     assert table.row_count == 0
+
+
+# --- 'n' / create modal (data-layer tests, no textual event loop required) ---
+
+
+def test_create_action_pushes_create_modal(home):
+    """action_create pushes a _CreateModal screen."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, _CreateModal)
+
+
+def test_create_appends_new_entry(home):
+    """Submitting the create form appends to _new.jsonl with correct fields."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback({
+        "title": "My new ticket",
+        "key": "FEAT-1",
+        "tier": 2,
+        "priority": 1,
+        "intent": "Do the thing",
+    })
+
+    pending = inbox.pending_new(home)
+    assert len(pending) == 1
+    _, entry = pending[0]
+    assert entry["title"] == "My new ticket"
+    assert entry["key"] == "FEAT-1"
+    assert entry["args"]["approval_tier"] == 2
+    assert entry["args"]["priority"] == 1
+    assert entry["args"]["intent"] == "Do the thing"
+
+
+def test_create_cancel_appends_nothing(home):
+    """Dismissing the create modal with None appends nothing."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback(None)
+
+    assert inbox.pending_new(home) == []
+
+
+def test_create_defaults_tier_and_priority(home):
+    """Submitting with tier=1 and priority=3 records the correct defaults."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback({"title": "Minimal ticket", "key": None, "tier": 1, "priority": 3, "intent": None})
+
+    pending = inbox.pending_new(home)
+    assert len(pending) == 1
+    _, entry = pending[0]
+    assert entry["args"]["approval_tier"] == 1
+    assert entry["args"]["priority"] == 3
+    assert entry["key"] is None
+    assert entry["args"]["intent"] is None
+
+
+def test_create_shows_queued_toast(home):
+    """Successful submission shows a toast containing 'queued'."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback({"title": "Test ticket", "key": None, "tier": 1, "priority": 3, "intent": None})
+
+    app.notify.assert_called_once()
+    msg = app.notify.call_args[0][0]
+    assert "queued" in msg
