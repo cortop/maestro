@@ -413,3 +413,83 @@ def test_answer_no_questions_notifies_warning(home):
     app.notify.assert_called_once()
     _, kwargs = app.notify.call_args
     assert kwargs.get("severity") == "warning"
+
+
+# --- event timeline rendering -------------------------------------------------
+
+from maestro.tui_events import render_event, render_log  # noqa: E402
+from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
+
+
+def test_render_event_includes_seq_ts_type_actor():
+    """render_event includes seq, truncated ts, type, and actor."""
+    ev = {
+        "seq": 3,
+        "ts": "2026-06-25T10:00:00+00:00",
+        "type": "PhaseChanged",
+        "actor": "reconciler",
+        "payload": {"phase": "implementing"},
+    }
+    line = render_event(ev)
+    assert "3" in line
+    assert "2026-06-25T10:00:00" in line
+    assert "PhaseChanged" in line
+    assert "reconciler" in line
+
+
+def test_render_event_payload_summary_limited_to_three_keys():
+    """Payload summary includes at most 3 key=value pairs."""
+    ev = {
+        "seq": 1,
+        "ts": "2026-06-25T00:00:00+00:00",
+        "type": "X",
+        "actor": "a",
+        "payload": {"a": 1, "b": 2, "c": 3, "d": 4},
+    }
+    line = render_event(ev)
+    # Only first 3 keys from payload
+    assert line.count("=") <= 3
+
+
+def test_render_event_empty_payload():
+    """Empty payload renders without crashing."""
+    ev = {"seq": 1, "ts": "2026-06-25T00:00:00", "type": "T", "actor": "a", "payload": {}}
+    line = render_event(ev)
+    assert "T" in line
+
+
+def test_render_log_order_oldest_first(home):
+    """render_log returns events oldest-first (seq ascending)."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "x"}, actor="d", step_id="tc-1")
+    event_log.append(home, "T-1", "PhaseChanged", {"phase": "triaging"}, actor="r", step_id="pc-1")
+    from maestro import event_log as el
+    evs = el.read(home, "T-1")
+    lines = render_log(evs)
+    assert len(lines) == 2
+    # seq 1 before seq 2
+    assert "1" in lines[0]
+    assert "2" in lines[1]
+
+
+def test_render_log_tail_limits_to_last_n(home):
+    """tail=True limits output to the last _TAIL_N events."""
+    from maestro.tui_events import _TAIL_N
+    from maestro import event_log as el
+    # Write more than _TAIL_N events
+    for i in range(_TAIL_N + 5):
+        el.append(home, "T-1", "Ping", {}, actor="t", step_id=f"ping-{i}")
+    evs = el.read(home, "T-1")
+    lines_full = render_log(evs, tail=False)
+    lines_tail = render_log(evs, tail=True)
+    assert len(lines_full) == _TAIL_N + 5
+    assert len(lines_tail) == _TAIL_N
+
+
+def test_render_log_tail_false_shows_all(home):
+    """tail=False shows every event regardless of count."""
+    from maestro import event_log as el
+    for i in range(5):
+        el.append(home, "T-1", "Ping", {}, actor="t", step_id=f"p-{i}")
+    evs = el.read(home, "T-1")
+    lines = render_log(evs, tail=False)
+    assert len(lines) == 5

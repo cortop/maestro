@@ -5,12 +5,48 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, Label, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
 
 from .projection import ticket_rows
-from . import inbox, snapshot as snap_mod
+from . import event_log, inbox, snapshot as snap_mod
 from .tui_detail import render as _render_detail
+from .tui_events import render_log
+
+
+class EventsScreen(Screen):
+    """Full-screen scrollable event timeline for one ticket."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("t", "toggle_tail", "Tail/Full"),
+    ]
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+        self._tail_mode = False
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield RichLog(id="events-full", highlight=True, markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Events: {self._key}"
+        self._refresh()
+
+    def action_toggle_tail(self) -> None:
+        self._tail_mode = not self._tail_mode
+        self._refresh()
+
+    def _refresh(self) -> None:
+        log = self.query_one("#events-full", RichLog)
+        events = event_log.read(self._home, self._key)
+        log.clear()
+        for line in render_log(events, tail=self._tail_mode):
+            log.write(line)
 
 
 class _AnswerModal(ModalScreen):
@@ -54,7 +90,12 @@ class MaestroTUI(App):
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
         ("a", "answer", "Answer"),
+        ("t", "toggle_tail", "Tail/Full"),
+        ("enter", "view_events", "Events"),
     ]
+
+    _selected_key: str | None = None
+    _tail_mode: bool = True  # default: show tail in the sidebar panel
 
     def __init__(self, home: str) -> None:
         super().__init__()
@@ -65,7 +106,9 @@ class MaestroTUI(App):
         yield Header()
         with Horizontal():
             yield DataTable(id="tickets")
-            yield Static(f"[dim]Select a ticket[/dim]", id="detail")
+            with Vertical(id="right"):
+                yield Static("[dim]Select a ticket[/dim]", id="detail")
+                yield RichLog(id="events", highlight=True, markup=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -80,10 +123,12 @@ class MaestroTUI(App):
         self._selected_key = key
         detail = self.query_one("#detail", Static)
         if key is None:
-            detail.update(f"[dim]Select a ticket[/dim]")
+            detail.update("[dim]Select a ticket[/dim]")
+            self.query_one("#events", RichLog).clear()
             return
         snap = snap_mod.load(self._home, key)
         detail.update(_render_detail(snap))
+        self._refresh_events()
 
     def action_refresh(self) -> None:
         self._populate()
@@ -112,18 +157,36 @@ class MaestroTUI(App):
 
         def _on_dismiss(answer: str | None) -> None:
             if answer is None:
-                # Cancelled — stop walking; no state change
                 return
             inbox.append_command(self._home, key, "ans", {"qid": qid, "text": answer})
             self._walk_questions(key, questions, idx + 1, answered + 1)
 
         self.push_screen(_AnswerModal(key, qid, text, remaining), _on_dismiss)
 
+    def action_toggle_tail(self) -> None:
+        self._tail_mode = not self._tail_mode
+        self._refresh_events()
+
+    def action_view_events(self) -> None:
+        if self._selected_key:
+            self.push_screen(EventsScreen(self._home, self._selected_key))
+
     def _populate(self) -> None:
         table = self.query_one(DataTable)
         table.clear()
         for *cells, row_key in ticket_rows(self._home):
             table.add_row(*cells, key=row_key)
+        if self._selected_key:
+            self._refresh_events()
+
+    def _refresh_events(self) -> None:
+        if not self._selected_key:
+            return
+        events = event_log.read(self._home, self._selected_key)
+        log = self.query_one("#events", RichLog)
+        log.clear()
+        for line in render_log(events, tail=self._tail_mode):
+            log.write(line)
 
 
 def main(args) -> int:
