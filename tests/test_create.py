@@ -10,13 +10,15 @@ from maestro.cli import cmd_create
 
 
 class _Args:
-    def __init__(self, title=None, key=None, tier=1, priority=3, intent=None, home=None):
+    def __init__(self, title=None, key=None, tier=1, priority=3, intent=None,
+                 home=None, no_nudge=True):
         self.title = title
         self.key = key
         self.tier = tier
         self.priority = priority
         self.intent = intent
         self.home = home
+        self.no_nudge = no_nudge
 
 
 def _run_create(cfg, title=None, key=None, tier=1, priority=3, intent=None,

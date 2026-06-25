@@ -5,7 +5,8 @@ import subprocess
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
 from textual.worker import Worker, WorkerState
@@ -56,18 +57,49 @@ class _AnswerModal(ModalScreen):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, key: str, qid: str, question_text: str, remaining: int) -> None:
+    DEFAULT_CSS = """
+    _AnswerModal {
+        align: center middle;
+    }
+    #answer-dialog {
+        width: 80%;
+        max-height: 85%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    #spec-scroll {
+        max-height: 12;
+        border: solid $panel;
+        margin-bottom: 1;
+    }
+    #question-scroll {
+        max-height: 8;
+        margin-bottom: 1;
+    }
+    """
+
+    def __init__(self, key: str, qid: str, question_text: str, remaining: int, home: Path) -> None:
         super().__init__()
         self._key = key
         self._qid = qid
         self._question_text = question_text
         self._remaining = remaining
+        self._home = home
 
     def compose(self) -> ComposeResult:
         header = f"[bold]{self._key}[/bold] ({self._remaining} remaining)"
+        spec_path = self._home / "tickets" / self._key / "spec.md"
+        spec_text = spec_path.read_text() if spec_path.exists() else ""
         with Vertical(id="answer-dialog"):
             yield Label(header)
-            yield Label(self._question_text, id="question-label")
+            if spec_text:
+                yield Label("[dim]── Spec ──[/dim]")
+                with VerticalScroll(id="spec-scroll"):
+                    yield Static(spec_text, markup=False)
+            yield Label("[dim]── Question ──[/dim]")
+            with VerticalScroll(id="question-scroll"):
+                yield Static(self._question_text, markup=False)
             yield Input(placeholder="Answer (Enter to submit, Esc to cancel)", id="answer-input")
 
     def on_mount(self) -> None:
@@ -456,7 +488,7 @@ class MaestroTUI(App):
             inbox.append_command(self._home, key, "ans", {"qid": qid, "text": answer})
             self._walk_questions(key, questions, idx + 1, answered + 1)
 
-        self.push_screen(_AnswerModal(key, qid, text, remaining), _on_dismiss)
+        self.push_screen(_AnswerModal(key, qid, text, remaining, self._home), _on_dismiss)
 
     def action_toggle_tail(self) -> None:
         self._tail_mode = not self._tail_mode
