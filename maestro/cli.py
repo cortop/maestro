@@ -163,7 +163,8 @@ def cmd_dispatch(args) -> int:
     else:
         sessions = ClaudeCliSessions(
             cfg.home, model=args.model or cfg.reconcile_model,
-            permission_mode=cfg.permission_mode)
+            permission_mode=cfg.permission_mode,
+            session_log_format=cfg.session_log_format)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     projection.write(cfg.home)
     out = {"minted": report.minted,

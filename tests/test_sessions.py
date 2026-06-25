@@ -14,6 +14,7 @@ def _make_sessions(home: Path, capture: bool = True, clock_val: float = 1_000_00
     return ClaudeCliSessions(
         home=home,
         capture_session_logs=capture,
+        session_log_format="text",  # L-1 text-capture behavior
         clock=lambda: clock_val,
     )
 
