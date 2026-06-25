@@ -1,0 +1,82 @@
+# CLAUDE.md
+
+Guidance for Claude Code working in this repo. Keep it accurate as the code changes.
+
+## What this is
+
+**maestro** — a per-ticket reconciler over append-only event streams; a project-agnostic,
+concurrent successor to wave-based markdown orchestrators. Each ticket is a directory with
+its own append-only event log (the sole source of truth) and a small folded snapshot
+(disposable cache). A cheap, level-triggered dispatcher sweeps snapshots and fans out one
+independent `claude --bg` reconciler per *due* ticket; each reconciler takes ONE idempotent
+step and exits.
+
+The governing principle: **deterministic plumbing in Python, intelligence in Claude.** The
+`maestro` package owns everything correctness-critical (fencing-gated log, atomic writes,
+fold, idempotent step-ids, dispatcher, leases, projections, dead-letter). Agents mutate
+state **only** through the `maestro` CLI, so they can never write a torn log or clobber a
+file. Read `DESIGN.md` for the full rationale, `README.md` for the quickstart.
+
+## Build / test / run
+
+- Python ≥ 3.11, **stdlib-only core** (no runtime deps — `tomllib`, `fcntl`, `dataclasses`,
+  `argparse`). Optional extras: `dev` (pytest), `tui` (textual). Keep the core dependency-free.
+- `make install` — editable install + symlink `maestro` onto PATH.
+- `make test` — run the suite (`.venv/bin/python -m pytest -q`). Run this before finishing.
+- `make status` / `make doctor` — board state / fleet health.
+- `make reconcile KEY=<KEY>` — run ONE reconcile in the foreground (best way to watch a step).
+- `make dry` — one dispatcher sweep, dry-run (mints + would-spawn, no sessions launched).
+
+## ⚠️ MAESTRO_HOME (read this before any `maestro` command)
+
+Bare `maestro` resolves home to `~/.maestro`. **The dogfood home this project drives is
+`~/.maestro/maestro-dev`.** The `Makefile` exports `MAESTRO_HOME=$(HOME)/.maestro/maestro-dev`,
+so `make` targets are correct — but a raw `maestro <cmd>` in the shell will hit the wrong home.
+Always `export MAESTRO_HOME=~/.maestro/maestro-dev` (or use a `make` target) when inspecting or
+mutating the self-dev board. `maestro env` prints the resolved paths. See `DOGFOOD.md`.
+
+## Architecture (package layout)
+
+`maestro/` (the correctness-critical core):
+- `cli.py` — argparse entrypoint; every subcommand is a `cmd_*` thin wrapper over `ops`.
+- `store.py` — filesystem primitives: home resolution, atomic writes, advisory per-key locks.
+- `event_log.py` — the append-only, **fencing-gated** event log (the heart; the sole truth).
+- `events.py` — event type vocabulary. `snapshot.py` — fold of one ticket's log → snapshot.
+- `dispatcher.py` — level-triggered, non-blocking work queue: mint → find due → spawn → exit.
+- `sessions.py` — spawn/list per-ticket reconciler `claude --bg` sessions.
+- `ops.py` — high-level reconciler verbs (each correct-by-construction); what agents call.
+- `statemachine.py` — the per-ticket phase machine. `claims.py` — per-key liveness dedup.
+- `idempotency.py` — deterministic `step_id = hash(key, phase, observed_seq, action)`.
+- `inbox.py` — per-key append-only human inbox. `projection.py` — snapshots → dashboards.
+- `config.py` — project-agnostic config (`config.toml`). `fleet.py` — launchd LaunchAgent mgmt.
+- `providers/` — pluggable tracker / VCS / fetcher / implementer (selected in config).
+- `tui.py`, `tui_detail.py` — Textual TUI (`maestro tui`, needs the `tui` extra).
+
+Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-owned),
+`events/<KEY>.jsonl` (+ `.archive.jsonl`), `inbox/<KEY>.jsonl`, `derived/snapshots/`,
+`derived/cursors/`, `derived/*.md` dashboards, `agent-logs/<KEY>/`, `tickets/_deadletter/`.
+
+## Write-ownership rules (do not violate)
+
+- **Humans** edit only `tickets/<KEY>/spec.md` and append to inboxes (`maestro ans`).
+- **Agents** append only to `events/<KEY>.jsonl` (fencing-gated) and atomically replace
+  `derived/*`. Never hand-edit an event log or a snapshot; go through the CLI / `ops`.
+- `derived/WORKSTATE.md` and `derived/NEEDS-YOU.md` are generated projections — never edit them.
+
+## Conventions
+
+- Each module starts with a one-line docstring stating its single responsibility — preserve that.
+- Correctness invariants (idempotency, fencing, crash safety, single-writer) are all tested in
+  `tests/`. If you touch the log, dispatcher, claims, or fold, add/adjust a test proving the
+  invariant still holds.
+- Reconciler behavior lives in the `/maestro-reconcile` skill (`.claude/commands/maestro-reconcile.md`,
+  mirrored in `skills/`; tracked so every worktree inherits it). Agents drive state exclusively
+  via `maestro` verbs.
+- Ticket specs follow a fixed format (front-matter `approval_tier` / `priority` / optional
+  `dependsOn`, then `## Intent`, `## Notes`, `## Acceptance criteria` as `- [ ]` checkboxes) —
+  match existing tickets, don't invent fields.
+
+## Git
+
+- Default branch `main`; reconcilers branch with prefix `maestro/` and open PRs on `cortop/maestro`.
+- Commit/push only when asked. Branch first if on `main`.
