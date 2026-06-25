@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from unittest import mock
 
-from maestro import event_log, snapshot as snap_mod
+from maestro import event_log, inbox, snapshot as snap_mod, store
 from maestro.cli import main
 from maestro.projection import ticket_rows
 from maestro.statemachine import Phase
@@ -226,3 +226,131 @@ def test_render_detail_no_open_questions_shows_emdash():
     out = _render_detail(snap)
     lines = [l for l in out.splitlines() if "Open questions" in l or "questions" in l.lower()]
     assert any("—" in l for l in lines)
+
+
+# --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
+
+from maestro.tui import MaestroTUI, _AnswerModal  # noqa: E402
+
+
+def _make_ticket_with_questions(home, key, questions: dict):
+    """Create a ticket snapshot with open questions via events."""
+    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 1\n")
+    event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+    for qid, text in questions.items():
+        event_log.append(home, key, "QuestionAsked", {"qid": qid, "text": text}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": "awaiting-human", "reason": ""}, actor="d")
+    snap_mod.rebuild(home, key)
+
+
+def _make_app_with_mocked_screen(home):
+    """Return (app, push_calls) where push_calls captures (screen, callback) tuples."""
+    app = MaestroTUI(home=str(home))
+    push_calls = []
+
+    def fake_push_screen(screen, callback=None):
+        push_calls.append((screen, callback))
+
+    app.push_screen = fake_push_screen
+    app.notify = mock.Mock()
+    app.query_one = mock.Mock(return_value=mock.Mock())
+    return app, push_calls
+
+
+def test_answer_action_appends_inbox_command(home):
+    """action_answer for a single-question ticket appends the correct ans command."""
+    _make_ticket_with_questions(home, "T-1", {"q1": "Shall I proceed?"})
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_answer()
+
+    assert len(push_calls) == 1
+    screen, callback = push_calls[0]
+    assert isinstance(screen, _AnswerModal)
+
+    # Simulate user submitting the answer
+    callback("Yes, go ahead")
+
+    pending = inbox.pending(home, "T-1")
+    assert len(pending) == 1
+    assert pending[0]["command"] == "ans"
+    assert pending[0]["args"]["qid"] == "q1"
+    assert pending[0]["args"]["text"] == "Yes, go ahead"
+
+
+def test_answer_cancel_leaves_state_untouched(home):
+    """Dismissing the modal with None (cancel) appends nothing to the inbox."""
+    _make_ticket_with_questions(home, "T-1", {"q1": "Ready?"})
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_answer()
+    _, callback = push_calls[0]
+    callback(None)  # simulate Escape / cancel
+
+    assert not inbox.pending(home, "T-1")
+
+
+def test_answer_walks_multiple_questions_one_at_a_time(home):
+    """Two open questions surface two sequential modals; both answers are queued."""
+    _make_ticket_with_questions(home, "T-1", {"q1": "First?", "q2": "Second?"})
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_answer()
+
+    # First modal presented
+    assert len(push_calls) == 1
+    _, cb1 = push_calls[0]
+    cb1("answer-one")  # submit first answer → triggers second modal
+
+    # Second modal presented
+    assert len(push_calls) == 2
+    _, cb2 = push_calls[1]
+    cb2("answer-two")  # submit second answer
+
+    pending = inbox.pending(home, "T-1")
+    assert len(pending) == 2
+    answers = {p["args"]["qid"]: p["args"]["text"] for p in pending}
+    assert answers["q1"] == "answer-one"
+    assert answers["q2"] == "answer-two"
+
+
+def test_answer_cancel_mid_walk_stops_at_that_question(home):
+    """Cancelling on the second question leaves only the first answer queued."""
+    _make_ticket_with_questions(home, "T-1", {"q1": "First?", "q2": "Second?"})
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_answer()
+    _, cb1 = push_calls[0]
+    cb1("answer-one")  # submit first → second modal opens
+
+    assert len(push_calls) == 2
+    _, cb2 = push_calls[1]
+    cb2(None)  # cancel second → walk stops
+
+    # No third modal
+    assert len(push_calls) == 2
+
+    pending = inbox.pending(home, "T-1")
+    assert len(pending) == 1
+    assert pending[0]["args"]["qid"] == "q1"
+
+
+def test_answer_no_questions_notifies_warning(home):
+    """action_answer on a ticket with no open questions shows a warning toast."""
+    store.atomic_write(store.spec_path(home, "T-1"), "# T-1\napproval_tier: 0\n")
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_answer()
+
+    assert not push_calls
+    app.notify.assert_called_once()
+    _, kwargs = app.notify.call_args
+    assert kwargs.get("severity") == "warning"

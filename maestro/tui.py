@@ -4,23 +4,57 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, Input, Label, Static
 
 from .projection import ticket_rows
-from . import snapshot as snap_mod
+from . import inbox, snapshot as snap_mod
 from .tui_detail import render as _render_detail
+
+
+class _AnswerModal(ModalScreen):
+    """Single-question input modal; dismisses with the answer string or None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, key: str, qid: str, question_text: str, remaining: int) -> None:
+        super().__init__()
+        self._key = key
+        self._qid = qid
+        self._question_text = question_text
+        self._remaining = remaining
+
+    def compose(self) -> ComposeResult:
+        header = f"[bold]{self._key}[/bold] ({self._remaining} remaining)"
+        with Vertical(id="answer-dialog"):
+            yield Label(header)
+            yield Label(self._question_text, id="question-label")
+            yield Input(placeholder="Answer (Enter to submit, Esc to cancel)", id="answer-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#answer-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if text:
+            self.dismiss(text)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class MaestroTUI(App):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
+        ("a", "answer", "Answer"),
     ]
 
     def __init__(self, home: str) -> None:
         super().__init__()
         self._home = Path(home)
+        self._selected_key: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -37,6 +71,7 @@ class MaestroTUI(App):
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
+        self._selected_key = key
         detail = self.query_one("#detail", Static)
         if key is None:
             detail.update(f"[dim]Select a ticket[/dim]")
@@ -46,6 +81,37 @@ class MaestroTUI(App):
 
     def action_refresh(self) -> None:
         self._populate()
+
+    def action_answer(self) -> None:
+        key = self._selected_key
+        if key is None:
+            return
+        snap = snap_mod.load(self._home, key)
+        if not snap.open_questions:
+            self.notify("No open questions for this ticket", severity="warning")
+            return
+        self._walk_questions(key, list(snap.open_questions.items()), 0, 0)
+
+    def _walk_questions(
+        self, key: str, questions: list[tuple[str, str]], idx: int, answered: int
+    ) -> None:
+        if idx >= len(questions):
+            if answered:
+                self.notify(f"{answered} answer(s) queued for {key}")
+                snap = snap_mod.load(self._home, key)
+                self.query_one("#detail", Static).update(_render_detail(snap))
+            return
+        qid, text = questions[idx]
+        remaining = len(questions) - idx
+
+        def _on_dismiss(answer: str | None) -> None:
+            if answer is None:
+                # Cancelled — stop walking; no state change
+                return
+            inbox.append_command(self._home, key, "ans", {"qid": qid, "text": answer})
+            self._walk_questions(key, questions, idx + 1, answered + 1)
+
+        self.push_screen(_AnswerModal(key, qid, text, remaining), _on_dismiss)
 
     def _populate(self) -> None:
         table = self.query_one(DataTable)
