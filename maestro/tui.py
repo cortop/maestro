@@ -70,6 +70,7 @@ class MaestroTUI(App):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
+        table.cursor_type = "row"
         table.add_columns("Key", "Phase", "Title", "PR", "CI", "Tier", "Fails")
         self._populate()
         self.set_interval(3.0, self._populate)

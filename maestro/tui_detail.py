@@ -14,7 +14,7 @@ def render(snap: snap_mod.Snapshot) -> str:
     pr_info = _EM
     if snap.pr_url and snap.pr_number:
         draft = " [dim](draft)[/dim]" if snap.pr_draft else ""
-        pr_info = f"[link={snap.pr_url}]#{snap.pr_number}[/link]{draft} ({v(snap.pr_state)})"
+        pr_info = f'[link="{snap.pr_url}"]#{snap.pr_number}[/link]{draft} ({v(snap.pr_state)})'
 
     questions = _EM
     if snap.open_questions:
