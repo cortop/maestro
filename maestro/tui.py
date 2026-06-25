@@ -8,13 +8,13 @@ from textual.app import App, ComposeResult
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
 from . import event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
 from .statemachine import Phase
-from .tui_detail import render as _render_detail
+from .tui_detail import render as _render_detail, render_pending as _render_pending
 from .tui_events import render_log
 
 
@@ -416,6 +416,59 @@ class FleetScreen(Screen):
         self.query_one("#fleet-log", Static).update("\n".join(self._log_lines))
 
 
+class SpecScreen(Screen):
+    """Full-screen spec viewer + pending inbox for one ticket."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("e", "edit_spec", "Edit"),
+        ("r", "refresh_spec", "Refresh"),
+    ]
+
+    CSS = """
+    SpecScreen #spec-body   { height: 1fr; }
+    SpecScreen #spec-pending { height: auto; max-height: 8;
+                               border-top: solid $primary; padding: 0 1; }
+    """
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll(id="spec-body"):
+            yield Markdown("", id="spec-md")
+        yield Static("", id="spec-pending", markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Spec: {self._key}"
+        self._refresh()
+
+    def _refresh(self) -> None:
+        spec_path = self._home / "tickets" / self._key / "spec.md"
+        spec_text = spec_path.read_text() if spec_path.exists() else "(no spec)"
+        pending_cmds = inbox.pending(self._home, self._key)
+        self.query_one("#spec-md", Markdown).update(spec_text)
+        pending_markup = _render_pending(pending_cmds)
+        self.query_one("#spec-pending", Static).update(
+            f"[bold]Pending inbox[/bold]  {pending_markup}"
+        )
+
+    def action_edit_spec(self) -> None:
+        import os
+        spec_path = self._home / "tickets" / self._key / "spec.md"
+        editor = os.environ.get("EDITOR", "vi")
+        with self.app.suspend():
+            subprocess.run([editor, str(spec_path)])
+        self._refresh()
+
+    def action_refresh_spec(self) -> None:
+        self._refresh()
+
+
 class MaestroTUI(App):
     CSS = """
     Screen { layers: base topbar; }
@@ -440,6 +493,7 @@ class MaestroTUI(App):
         ("ctrl+d", "discard", "Discard"),
         ("f", "fleet_panel", "Fleet"),
         ("n", "create", "New"),
+        ("s", "show_spec", "Spec"),
         ("t", "toggle_tail", "Tail/Full"),
         ("enter", "view_events", "Events"),
     ]
@@ -531,6 +585,12 @@ class MaestroTUI(App):
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_show_spec(self) -> None:
+        if self._selected_key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(SpecScreen(self._home, self._selected_key))
 
     def action_create(self) -> None:
         def _on_dismiss(result: dict | None) -> None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from unittest import mock
 
 from maestro import event_log, inbox, snapshot as snap_mod, store
@@ -1029,3 +1030,113 @@ def test_create_shows_queued_toast(home):
     app.notify.assert_called_once()
     msg = app.notify.call_args[0][0]
     assert "queued" in msg
+
+
+# --- 's' / spec screen (TUI-10) -----------------------------------------------
+
+from maestro.tui import SpecScreen  # noqa: E402
+from maestro.tui_detail import render_pending  # noqa: E402
+
+
+def test_spec_screen_constructs(home):
+    """SpecScreen can be instantiated with home and key."""
+    screen = SpecScreen(home, "T-1")
+    assert screen._home == home
+    assert screen._key == "T-1"
+
+
+def test_spec_screen_has_edit_binding():
+    """SpecScreen exposes the 'e' → edit_spec binding."""
+    screen = SpecScreen(Path("/tmp"), "T-1")
+    keys = [b[0] for b in screen.BINDINGS]
+    assert "e" in keys
+
+
+def test_maestro_tui_has_spec_binding(home):
+    """MaestroTUI exposes the 's' → show_spec binding."""
+    app = MaestroTUI(home=str(home))
+    keys = [b[0] for b in app.BINDINGS]
+    assert "s" in keys
+
+
+def test_action_show_spec_pushes_spec_screen(home):
+    """action_show_spec pushes a SpecScreen with the correct home/key."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+    app.action_show_spec()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, SpecScreen)
+    assert screen._key == "T-1"
+    assert screen._home == home
+
+
+def test_action_show_spec_no_selection_warns(home):
+    """action_show_spec with no selected ticket shows a warning and pushes nothing."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+    app.action_show_spec()
+
+    assert not push_calls
+    app.notify.assert_called_once()
+    _, kwargs = app.notify.call_args
+    assert kwargs.get("severity") == "warning"
+
+
+# --- render_pending -----------------------------------------------------------
+
+def test_render_pending_empty_returns_emdash():
+    """Empty command list renders as em-dash."""
+    out = render_pending([])
+    assert "—" in out
+
+
+def test_render_pending_shows_command_name():
+    """A pending command includes the command name."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "retry", "args": {}}]
+    out = render_pending(cmds)
+    assert "retry" in out
+
+
+def test_render_pending_shows_args():
+    """A command with args includes arg key and value."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "ans", "args": {"qid": "q1", "text": "yes"}}]
+    out = render_pending(cmds)
+    assert "qid" in out
+    assert "q1" in out
+    assert "text" in out
+    assert "yes" in out
+
+
+def test_render_pending_multiple_commands():
+    """All commands appear when multiple are pending."""
+    cmds = [
+        {"ts": "2026-06-25T00:00:00", "command": "retry", "args": {}},
+        {"ts": "2026-06-25T00:00:01", "command": "ans", "args": {"qid": "q1"}},
+    ]
+    out = render_pending(cmds)
+    assert "retry" in out
+    assert "ans" in out
+
+
+def test_render_pending_escapes_brackets():
+    """Brackets in args are escaped so the markup stays valid."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "ans", "args": {"text": "use [a] or [b]"}}]
+    out = render_pending(cmds)
+    _assert_valid_markup(out)
+    assert "[a]" in out.replace("\\", "")
+
+
+def test_render_pending_valid_markup_empty():
+    """Empty pending list yields valid markup."""
+    _assert_valid_markup(render_pending([]))
+
+
+def test_render_pending_valid_markup_with_commands():
+    """Non-empty pending list yields valid markup."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "retry", "args": {}}]
+    _assert_valid_markup(render_pending(cmds))

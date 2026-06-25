@@ -42,3 +42,22 @@ def render(snap: snap_mod.Snapshot) -> str:
         f"[dim]Open questions[/dim] {questions}\n"
         f"[dim]Updated[/dim]       {v(snap.updated_ts)}\n"
     )
+
+
+def render_pending(cmds: list[dict]) -> str:
+    """Build Rich markup string listing unconsumed inbox commands."""
+    if not cmds:
+        return _EM
+    lines = []
+    for cmd in cmds:
+        ts = _esc(str(cmd.get("ts", "")))
+        command = _esc(str(cmd.get("command", "")))
+        args = cmd.get("args", {})
+        args_str = "  ".join(
+            f"[dim]{_esc(k)}[/dim]={_esc(str(v))}" for k, v in args.items()
+        )
+        line = f"[dim]{ts}[/dim]  [bold cyan]{command}[/bold cyan]"
+        if args_str:
+            line += f"  {args_str}"
+        lines.append(line)
+    return "\n".join(lines)
