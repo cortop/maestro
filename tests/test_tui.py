@@ -4,8 +4,9 @@ from __future__ import annotations
 import sys
 from unittest import mock
 
-from maestro import event_log, inbox, snapshot as snap_mod, store
+from maestro import claims, event_log, inbox, snapshot as snap_mod, store
 from maestro.cli import main
+from maestro.config import Config
 from maestro.projection import ticket_rows
 from maestro.statemachine import Phase, ACTIVE_PHASES
 
@@ -1143,3 +1144,174 @@ def test_create_shows_queued_toast(home):
     app.notify.assert_called_once()
     msg = app.notify.call_args[0][0]
     assert "queued" in msg
+
+
+# ---------------------------------------------------------------------------
+# Compact action
+# ---------------------------------------------------------------------------
+
+def _make_ticket(home, key, n_events=3):
+    """Create a ticket with n pre-snapshot events and one post-snapshot event."""
+    for i in range(n_events):
+        event_log.append(home, key, "Note", {"n": i}, actor="t")
+    snap_mod.rebuild(home, key)
+    event_log.append(home, key, "Note", {"n": n_events}, actor="t")
+
+
+def test_compact_action_pushes_confirm_modal(home):
+    """action_compact for a selected ticket pushes a _ConfirmModal."""
+    from maestro.tui import _ConfirmModal
+    _make_ticket(home, "T-1")
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_compact()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, _ConfirmModal)
+
+
+def test_compact_action_no_ticket_notifies(home):
+    """action_compact with no selected ticket shows a warning."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+
+    app.action_compact()
+
+    assert len(push_calls) == 0
+    app.notify.assert_called_once()
+    assert app.notify.call_args[1].get("severity") == "warning"
+
+
+def test_compact_action_cancel_does_nothing(home):
+    """Cancelling the compact confirm modal leaves the event log unchanged."""
+    _make_ticket(home, "T-1", n_events=3)
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    before = store.read_jsonl(store.events_path(home, "T-1"))
+    app.action_compact()
+    _, callback = push_calls[0]
+    callback(False)  # cancel
+
+    after = store.read_jsonl(store.events_path(home, "T-1"))
+    assert len(after) == len(before)
+
+
+def test_compact_action_confirm_reduces_active_log(home):
+    """Confirming compact moves pre-snapshot events to the archive."""
+    _make_ticket(home, "T-1", n_events=3)
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_compact()
+    _, callback = push_calls[0]
+
+    # Intercept the worker call to run it synchronously
+    workers = []
+    app.run_worker = lambda fn, **kw: workers.append(fn)
+    callback(True)
+
+    assert len(workers) == 1
+    result = workers[0]()  # run the compact
+    assert result["archived"] == 3
+    assert result["remaining"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Release action
+# ---------------------------------------------------------------------------
+
+def _write_claim(home, key):
+    """Write a dummy claim file for key."""
+    import json
+    claim_dir = home / "derived" / "claims"
+    claim_dir.mkdir(parents=True, exist_ok=True)
+    (claim_dir / f"{key}.json").write_text(json.dumps({"pid": 99999, "key": key}))
+
+
+def test_release_action_pushes_confirm_modal(home):
+    """action_release for a selected ticket pushes a _ConfirmModal."""
+    from maestro.tui import _ConfirmModal
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_release()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, _ConfirmModal)
+
+
+def test_release_action_no_ticket_notifies(home):
+    """action_release with no selected ticket shows a warning."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+
+    app.action_release()
+
+    assert len(push_calls) == 0
+    app.notify.assert_called_once()
+    assert app.notify.call_args[1].get("severity") == "warning"
+
+
+def test_release_action_cancel_leaves_claim(home):
+    """Cancelling the release confirm modal leaves the claim file intact."""
+    _write_claim(home, "T-1")
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_release()
+    _, callback = push_calls[0]
+    callback(False)  # cancel
+
+    assert claims.claim_path(home, "T-1").exists()
+
+
+def test_release_action_confirm_clears_claim(home):
+    """Confirming release removes the claim file for the ticket."""
+    _write_claim(home, "T-1")
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_release()
+    _, callback = push_calls[0]
+    callback(True)  # confirm
+
+    assert not claims.is_claimed(home, "T-1")
+    app.notify.assert_called_once()
+    msg = app.notify.call_args[0][0]
+    assert "T-1" in msg
+
+
+# ---------------------------------------------------------------------------
+# Project rebuild action
+# ---------------------------------------------------------------------------
+
+def test_project_rebuild_action_spawns_worker(home):
+    """action_project_rebuild enqueues a worker."""
+    app, _ = _make_app_with_mocked_screen(home)
+    workers = []
+    app.run_worker = lambda fn, **kw: workers.append((fn, kw))
+
+    app.action_project_rebuild()
+
+    assert len(workers) == 1
+    _, kw = workers[0]
+    assert kw.get("thread") is True
+
+
+def test_project_rebuild_worker_calls_projection(home):
+    """The worker calls projection.write and returns a summary string."""
+    app, _ = _make_app_with_mocked_screen(home)
+    result = app._run_project()
+    assert "projection files" in result
+
+
+def test_maestro_tui_has_compact_release_project_bindings(home):
+    """MaestroTUI exposes x/z/p bindings for compact, release, and project."""
+    binding_keys = {b[0] for b in MaestroTUI.BINDINGS}
+    assert "x" in binding_keys
+    assert "z" in binding_keys
+    assert "p" in binding_keys

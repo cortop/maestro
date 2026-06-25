@@ -12,7 +12,8 @@ from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, St
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
-from . import event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
+from . import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
+from .config import Config
 from .statemachine import Phase, ACTIVE_PHASES
 from .tui_detail import render as _render_detail
 from .tui_events import render_log
@@ -259,6 +260,38 @@ class _CreateModal(ModalScreen):
         })
 
 
+class _ConfirmModal(ModalScreen):
+    """Simple yes/no confirmation modal; dismisses with True on confirm, False on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label(self._message)
+            yield Label("[dim]y / Enter → confirm · n / Esc → cancel[/dim]")
+            yield Input(placeholder="y to confirm", id="confirm-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#confirm-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        val = event.value.strip().lower()
+        self.dismiss(val in ("y", "yes", ""))
+
+    def on_key(self, event) -> None:
+        if event.key == "y":
+            self.dismiss(True)
+        elif event.key == "n":
+            self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 def _fmt_age(age_s: int | None) -> str:
     if age_s is None:
         return "never"
@@ -452,6 +485,9 @@ class MaestroTUI(App):
         ("n", "create", "New"),
         ("t", "toggle_tail", "Tail/Full"),
         ("enter", "view_events", "Events"),
+        ("x", "compact", "Compact"),
+        ("z", "release", "Release"),
+        ("p", "project_rebuild", "Project"),
     ]
 
     _selected_key: str | None = None
@@ -490,6 +526,19 @@ class MaestroTUI(App):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
             self.query_one("#fleet-badge", Static).update(_render_badge(event.worker.result))
+        elif event.worker.name == "compact":
+            if event.state == WorkerState.SUCCESS:
+                r = event.worker.result
+                self.notify(
+                    f"Compacted: {r.get('archived', 0)} archived, {r.get('remaining', 0)} remaining"
+                )
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"Compact failed: {event.worker.error}", severity="error")
+        elif event.worker.name == "project-rebuild":
+            if event.state == WorkerState.SUCCESS:
+                self.notify(str(event.worker.result))
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"Project failed: {event.worker.error}", severity="error")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
@@ -595,6 +644,50 @@ class MaestroTUI(App):
             self._walk_questions(key, questions, idx + 1, answered + 1)
 
         self.push_screen(_AnswerModal(key, qid, text, remaining, self._home), _on_dismiss)
+
+    def action_compact(self) -> None:
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+
+        def _on_confirm(ok: bool) -> None:
+            if not ok:
+                return
+            cfg = Config(home=self._home)
+            self.run_worker(lambda: ops_mod.compact(cfg, key), thread=True, name="compact")
+
+        self.app.push_screen(
+            _ConfirmModal(f"Compact log for [bold]{key}[/bold]?"), _on_confirm
+        )
+
+    def action_release(self) -> None:
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+
+        def _on_confirm(ok: bool) -> None:
+            if not ok:
+                return
+            claims.release(self._home, key)
+            self.notify(f"Claim released for {key}")
+
+        self.app.push_screen(
+            _ConfirmModal(f"Release claim for [bold]{key}[/bold]?"), _on_confirm
+        )
+
+    def action_project_rebuild(self) -> None:
+        self.notify("Rebuilding projection…")
+        self.run_worker(self._run_project, thread=True, name="project-rebuild")
+
+    def _run_project(self) -> str:
+        try:
+            from . import projection
+            written = projection.write(self._home)
+            return f"Wrote {len(written)} projection files"
+        except Exception as exc:
+            return str(exc)
 
     def action_toggle_tail(self) -> None:
         self._tail_mode = not self._tail_mode
