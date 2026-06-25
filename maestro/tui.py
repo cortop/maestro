@@ -121,9 +121,26 @@ class MaestroTUI(App):
 
     def _populate(self) -> None:
         table = self.query_one(DataTable)
+        # Preserve cursor across clear/repopulate.
+        prev_key: str | None = None
+        try:
+            rk = table.cursor_row_key
+            if rk is not None and rk.value is not None:
+                prev_key = str(rk.value)
+        except Exception:
+            pass
+        prev_row = table.cursor_row
         table.clear()
+        row_keys: list[str] = []
         for *cells, row_key in ticket_rows(self._home):
             table.add_row(*cells, key=row_key)
+            row_keys.append(row_key)
+        if not row_keys:
+            return
+        if prev_key and prev_key in row_keys:
+            table.move_cursor(row=row_keys.index(prev_key))
+        else:
+            table.move_cursor(row=min(prev_row, len(row_keys) - 1))
 
 
 def main(args) -> int:
