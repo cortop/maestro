@@ -415,6 +415,110 @@ def test_answer_no_questions_notifies_warning(home):
     assert kwargs.get("severity") == "warning"
 
 
+# --- cursor preservation across _populate ------------------------------------
+
+def _make_tickets(home, keys):
+    """Create minimal tickets so ticket_rows returns one row per key."""
+    for key in keys:
+        store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+        event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+        snap_mod.rebuild(home, key)
+
+
+class _FakeRowKey:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeDataTable:
+    """Minimal DataTable stand-in to test _populate cursor logic without Textual."""
+
+    def __init__(self):
+        self._rows: list[str] = []
+        self.cursor_row = 0
+        self._cursor_key: str | None = None
+
+    @property
+    def row_count(self):
+        return len(self._rows)
+
+    @property
+    def cursor_row_key(self):
+        if self._cursor_key is None:
+            return None
+        return _FakeRowKey(self._cursor_key)
+
+    def clear(self):
+        self._rows = []
+        self._cursor_key = None
+
+    def add_row(self, *cells, key=None):
+        self._rows.append(key)
+
+    def move_cursor(self, *, row):
+        self.cursor_row = max(0, min(row, len(self._rows) - 1))
+        self._cursor_key = self._rows[self.cursor_row] if self._rows else None
+
+
+def _make_app_with_fake_table(home, table):
+    app = MaestroTUI(home=str(home))
+    app.query_one = mock.Mock(return_value=table)
+    return app
+
+
+def test_populate_preserves_cursor_on_refresh(home):
+    """Cursor stays on the same ticket key after _populate is called again."""
+    _make_tickets(home, ["A-1", "A-2", "A-3"])
+    table = _FakeDataTable()
+    app = _make_app_with_fake_table(home, table)
+
+    # First populate — cursor lands on row 0
+    app._populate()
+    assert table.row_count == 3
+
+    # Simulate user moving cursor to the second row
+    table.move_cursor(row=1)
+    key_before = table.cursor_row_key.value
+
+    # Refresh (same tickets) — cursor should stay on the same key
+    app._populate()
+    assert table.cursor_row_key.value == key_before
+
+
+def test_populate_clamps_cursor_when_ticket_removed(home):
+    """If the highlighted ticket disappears, cursor clamps to a valid row (no crash)."""
+    _make_tickets(home, ["B-1", "B-2", "B-3"])
+    table = _FakeDataTable()
+    app = _make_app_with_fake_table(home, table)
+
+    app._populate()
+    # Move to last row
+    table.move_cursor(row=2)
+    assert table.cursor_row_key.value == "B-3"
+
+    # Remove B-3 from the store by patching ticket_rows
+    remaining = ["B-1", "B-2"]
+    with mock.patch("maestro.tui.ticket_rows") as mock_rows:
+        # ticket_rows returns (key, phase, title, pr, ci, tier, fails, row_key)
+        mock_rows.return_value = [
+            (k, "triaging", k, "—", "—", "—", 0, k) for k in remaining
+        ]
+        app._populate()
+
+    # Cursor should be on a valid row, not crashed
+    assert table.cursor_row < table.row_count
+    assert table.cursor_row_key is not None
+
+
+def test_populate_empty_table_no_crash(home):
+    """_populate on an empty ticket list does not crash and leaves table empty."""
+    table = _FakeDataTable()
+    app = _make_app_with_fake_table(home, table)
+
+    app._populate()  # no tickets exist
+    assert table.row_count == 0
+
+
 # --- 'n' / create modal (data-layer tests, no textual event loop required) ---
 
 
