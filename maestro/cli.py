@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, store
+from . import claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -417,6 +417,17 @@ def cmd_release(args) -> int:
     return 0
 
 
+def cmd_fold_steps(args) -> int:
+    """Fold notable stream steps from a session log into IMPL_STEP events."""
+    cfg = _cfg(args)
+    if args.log:
+        n = steplog.fold_stream(cfg.home, args.key, Path(args.log))
+    else:
+        n = steplog.fold_current_session(cfg.home, args.key)
+    _print({"folded_steps": n})
+    return 0
+
+
 def _render_stream_jsonl(path: Path) -> None:
     """Print a human-readable view of a stream-jsonl session log."""
     seen_msg_ids: dict[str, dict] = {}
@@ -630,6 +641,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
+
+    sp = add("fold-steps", cmd_fold_steps, "[agent] fold stream steps into IMPL_STEP events")
+    sp.add_argument("key")
+    sp.add_argument("--log", default=None, help="path to a specific stream.jsonl (default: current claim log)")
 
     add("tui", cmd_tui, "launch the interactive TUI (requires [tui] extra)")
     return p

@@ -22,6 +22,7 @@ PR_OPENED = "PrOpened"                  # {number, url, draft}
 PR_UPDATED = "PrUpdated"                # {number, draft, merged}
 CI_OBSERVED = "CiObserved"              # {state}  e.g. "passing" | "failing" | "pending"
 IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-off
+IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
 
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket
