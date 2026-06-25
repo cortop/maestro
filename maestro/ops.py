@@ -122,6 +122,83 @@ def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
 
 
+def prune_session_logs(cfg: Config, key: str) -> int:
+    """Delete stale session log files for *key* per retention settings.
+
+    Never removes the log belonging to a currently-live reconciler (pid alive).
+    Returns the number of files deleted.
+    """
+    from . import claims
+    from .sessions import list_sessions
+
+    retention_days = cfg.session_log_retention_days
+    max_per_ticket = cfg.session_log_max_per_ticket
+    if retention_days is None and max_per_ticket is None:
+        return 0
+
+    all_files = list_sessions(cfg.home, key)
+    if not all_files:
+        return 0
+
+    # Paths belonging to the live session (if any) are off-limits.
+    live_paths: set[str] = set()
+    claim = claims.read_claim(cfg.home, key)
+    if claim and claims.pid_alive(claim.get("pid")):
+        lp = claim.get("log_path")
+        if lp:
+            live_paths.add(lp)
+            stem = lp.removesuffix(".stream.jsonl").removesuffix(".log")
+            live_paths.add(stem + ".log")
+            live_paths.add(stem + ".stream.jsonl")
+
+    # Group files by session_id so .log and .stream.jsonl for the same session
+    # are treated as one unit for the "max" limit.
+    by_id: dict[str, list[dict]] = {}
+    for f in all_files:
+        by_id.setdefault(f["session_id"], []).append(f)
+
+    # Sort session ids: newest epoch first.
+    sorted_ids = sorted(
+        by_id,
+        key=lambda sid: max(f["epoch"] for f in by_id[sid]),
+        reverse=True,
+    )
+
+    to_delete: set[str] = set()
+    now = store.now_epoch()
+
+    if max_per_ticket is not None:
+        kept = 0
+        for sid in sorted_ids:
+            files = by_id[sid]
+            if any(f["path"] in live_paths for f in files):
+                continue  # live sessions don't count toward the limit
+            if kept < max_per_ticket:
+                kept += 1
+            else:
+                for f in files:
+                    to_delete.add(f["path"])
+
+    if retention_days is not None:
+        cutoff = now - retention_days * 86400
+        for sid in sorted_ids:
+            files = by_id[sid]
+            if any(f["path"] in live_paths for f in files):
+                continue
+            if max(f["epoch"] for f in files) < cutoff:
+                for f in files:
+                    to_delete.add(f["path"])
+
+    pruned = 0
+    for path_str in to_delete:
+        try:
+            Path(path_str).unlink(missing_ok=True)
+            pruned += 1
+        except OSError:
+            pass
+    return pruned
+
+
 def compact(cfg: Config, key: str) -> dict:
     """Move events older than the snapshot into the archive.
 
@@ -162,7 +239,9 @@ def compact(cfg: Config, key: str) -> dict:
                 f.write(json.dumps(ev, separators=(",", ":")) + "\n")
         tmp.replace(active_path)
 
-    return {"archived": len(to_archive), "remaining": len(post), "cutoff_seq": cutoff}
+    pruned_logs = prune_session_logs(cfg, key)
+    return {"archived": len(to_archive), "remaining": len(post), "cutoff_seq": cutoff,
+            "pruned_logs": pruned_logs}
 
 
 def archive_done(cfg: Config) -> list[str]:
