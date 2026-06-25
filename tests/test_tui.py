@@ -289,7 +289,7 @@ def test_render_detail_escapes_brackets_in_dynamic_fields():
 
 # --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
 
-from maestro.tui import MaestroTUI, _AnswerModal  # noqa: E402
+from maestro.tui import MaestroTUI, _AnswerModal, _CreateModal  # noqa: E402
 
 
 def _make_ticket_with_questions(home, key, questions: dict):
@@ -417,7 +417,23 @@ def test_answer_no_questions_notifies_warning(home):
 
 # --- fleet panel (unit-level, no Textual event loop) --------------------------
 
-from maestro.tui import FleetScreen, _IntervalModal, _fmt_age, _render_fleet  # noqa: E402
+from maestro.tui import FleetScreen, _IntervalModal, _fmt_age, _render_badge, _render_fleet  # noqa: E402
+
+
+def test_render_badge_up_shows_interval_and_heartbeat():
+    out = _render_badge({"loaded": True, "interval": 300, "heartbeat_age_s": 12})
+    assert "up" in out
+    assert "green" in out
+    assert "300s" in out
+    assert "12s ago" in out
+
+
+def test_render_badge_down_shows_dashes():
+    out = _render_badge({"loaded": False, "interval": None, "heartbeat_age_s": None})
+    assert "down" in out
+    assert "red" in out
+    assert "—" in out
+    assert "never" in out
 
 
 def test_fmt_age_none_returns_never():
@@ -558,3 +574,264 @@ def test_fleet_screen_not_stale_with_recent_heartbeat(home):
         _status, doctor = screen._load_status()
 
     assert doctor["stale"] is False
+
+
+# --- event timeline rendering -------------------------------------------------
+
+from maestro.tui_events import render_event, render_log  # noqa: E402
+from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
+
+
+def test_render_event_includes_seq_ts_type_actor():
+    """render_event includes seq, truncated ts, type, and actor."""
+    ev = {
+        "seq": 3,
+        "ts": "2026-06-25T10:00:00+00:00",
+        "type": "PhaseChanged",
+        "actor": "reconciler",
+        "payload": {"phase": "implementing"},
+    }
+    line = render_event(ev)
+    assert "3" in line
+    assert "2026-06-25T10:00:00" in line
+    assert "PhaseChanged" in line
+    assert "reconciler" in line
+
+
+def test_render_event_payload_summary_limited_to_three_keys():
+    """Payload summary includes at most 3 key=value pairs."""
+    ev = {
+        "seq": 1,
+        "ts": "2026-06-25T00:00:00+00:00",
+        "type": "X",
+        "actor": "a",
+        "payload": {"a": 1, "b": 2, "c": 3, "d": 4},
+    }
+    line = render_event(ev)
+    # Only first 3 keys from payload
+    assert line.count("=") <= 3
+
+
+def test_render_event_empty_payload():
+    """Empty payload renders without crashing."""
+    ev = {"seq": 1, "ts": "2026-06-25T00:00:00", "type": "T", "actor": "a", "payload": {}}
+    line = render_event(ev)
+    assert "T" in line
+
+
+def test_render_log_order_oldest_first(home):
+    """render_log returns events oldest-first (seq ascending)."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "x"}, actor="d", step_id="tc-1")
+    event_log.append(home, "T-1", "PhaseChanged", {"phase": "triaging"}, actor="r", step_id="pc-1")
+    from maestro import event_log as el
+    evs = el.read(home, "T-1")
+    lines = render_log(evs)
+    assert len(lines) == 2
+    # seq 1 before seq 2
+    assert "1" in lines[0]
+    assert "2" in lines[1]
+
+
+def test_render_log_tail_limits_to_last_n(home):
+    """tail=True limits output to the last _TAIL_N events."""
+    from maestro.tui_events import _TAIL_N
+    from maestro import event_log as el
+    # Write more than _TAIL_N events
+    for i in range(_TAIL_N + 5):
+        el.append(home, "T-1", "Ping", {}, actor="t", step_id=f"ping-{i}")
+    evs = el.read(home, "T-1")
+    lines_full = render_log(evs, tail=False)
+    lines_tail = render_log(evs, tail=True)
+    assert len(lines_full) == _TAIL_N + 5
+    assert len(lines_tail) == _TAIL_N
+
+
+def test_render_log_tail_false_shows_all(home):
+    """tail=False shows every event regardless of count."""
+    from maestro import event_log as el
+    for i in range(5):
+        el.append(home, "T-1", "Ping", {}, actor="t", step_id=f"p-{i}")
+    evs = el.read(home, "T-1")
+    lines = render_log(evs, tail=False)
+    assert len(lines) == 5
+
+
+# --- cursor preservation across _populate ------------------------------------
+
+def _make_tickets(home, keys):
+    """Create minimal tickets so ticket_rows returns one row per key."""
+    for key in keys:
+        store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+        event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+        snap_mod.rebuild(home, key)
+
+
+class _FakeRowKey:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeDataTable:
+    """Minimal DataTable stand-in to test _populate cursor logic without Textual."""
+
+    def __init__(self):
+        self._rows: list[str] = []
+        self.cursor_row = 0
+        self._cursor_key: str | None = None
+
+    @property
+    def row_count(self):
+        return len(self._rows)
+
+    @property
+    def cursor_row_key(self):
+        if self._cursor_key is None:
+            return None
+        return _FakeRowKey(self._cursor_key)
+
+    def clear(self):
+        self._rows = []
+        self._cursor_key = None
+
+    def add_row(self, *cells, key=None):
+        self._rows.append(key)
+
+    def move_cursor(self, *, row):
+        self.cursor_row = max(0, min(row, len(self._rows) - 1))
+        self._cursor_key = self._rows[self.cursor_row] if self._rows else None
+
+
+def _make_app_with_fake_table(home, table):
+    app = MaestroTUI(home=str(home))
+    app.query_one = mock.Mock(return_value=table)
+    return app
+
+
+def test_populate_preserves_cursor_on_refresh(home):
+    """Cursor stays on the same ticket key after _populate is called again."""
+    _make_tickets(home, ["A-1", "A-2", "A-3"])
+    table = _FakeDataTable()
+    app = _make_app_with_fake_table(home, table)
+
+    # First populate — cursor lands on row 0
+    app._populate()
+    assert table.row_count == 3
+
+    # Simulate user moving cursor to the second row
+    table.move_cursor(row=1)
+    key_before = table.cursor_row_key.value
+
+    # Refresh (same tickets) — cursor should stay on the same key
+    app._populate()
+    assert table.cursor_row_key.value == key_before
+
+
+def test_populate_clamps_cursor_when_ticket_removed(home):
+    """If the highlighted ticket disappears, cursor clamps to a valid row (no crash)."""
+    _make_tickets(home, ["B-1", "B-2", "B-3"])
+    table = _FakeDataTable()
+    app = _make_app_with_fake_table(home, table)
+
+    app._populate()
+    # Move to last row
+    table.move_cursor(row=2)
+    assert table.cursor_row_key.value == "B-3"
+
+    # Remove B-3 from the store by patching ticket_rows
+    remaining = ["B-1", "B-2"]
+    with mock.patch("maestro.tui.ticket_rows") as mock_rows:
+        # ticket_rows returns (key, phase, title, pr, ci, tier, fails, row_key)
+        mock_rows.return_value = [
+            (k, "triaging", k, "—", "—", "—", 0, k) for k in remaining
+        ]
+        app._populate()
+
+    # Cursor should be on a valid row, not crashed
+    assert table.cursor_row < table.row_count
+    assert table.cursor_row_key is not None
+
+
+def test_populate_empty_table_no_crash(home):
+    """_populate on an empty ticket list does not crash and leaves table empty."""
+    table = _FakeDataTable()
+    app = _make_app_with_fake_table(home, table)
+
+    app._populate()  # no tickets exist
+    assert table.row_count == 0
+
+
+# --- 'n' / create modal (data-layer tests, no textual event loop required) ---
+
+
+def test_create_action_pushes_create_modal(home):
+    """action_create pushes a _CreateModal screen."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, _CreateModal)
+
+
+def test_create_appends_new_entry(home):
+    """Submitting the create form appends to _new.jsonl with correct fields."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback({
+        "title": "My new ticket",
+        "key": "FEAT-1",
+        "tier": 2,
+        "priority": 1,
+        "intent": "Do the thing",
+    })
+
+    pending = inbox.pending_new(home)
+    assert len(pending) == 1
+    _, entry = pending[0]
+    assert entry["title"] == "My new ticket"
+    assert entry["key"] == "FEAT-1"
+    assert entry["args"]["approval_tier"] == 2
+    assert entry["args"]["priority"] == 1
+    assert entry["args"]["intent"] == "Do the thing"
+
+
+def test_create_cancel_appends_nothing(home):
+    """Dismissing the create modal with None appends nothing."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback(None)
+
+    assert inbox.pending_new(home) == []
+
+
+def test_create_defaults_tier_and_priority(home):
+    """Submitting with tier=1 and priority=3 records the correct defaults."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback({"title": "Minimal ticket", "key": None, "tier": 1, "priority": 3, "intent": None})
+
+    pending = inbox.pending_new(home)
+    assert len(pending) == 1
+    _, entry = pending[0]
+    assert entry["args"]["approval_tier"] == 1
+    assert entry["args"]["priority"] == 3
+    assert entry["key"] is None
+    assert entry["args"]["intent"] is None
+
+
+def test_create_shows_queued_toast(home):
+    """Successful submission shows a toast containing 'queued'."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_create()
+
+    _, callback = push_calls[0]
+    callback({"title": "Test ticket", "key": None, "tier": 1, "priority": 3, "intent": None})
+
+    app.notify.assert_called_once()
+    msg = app.notify.call_args[0][0]
+    assert "queued" in msg
