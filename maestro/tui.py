@@ -100,12 +100,12 @@ class LogsScreen(Screen):
         else:
             sessions_list = list_sessions(self._home, self._key)
             if not sessions_list:
-                self.call_from_thread(log_widget.write, "(no session logs found)")
+                self.app.call_from_thread(log_widget.write, "(no session logs found)")
                 return
             log_path = Path(sessions_list[0]["path"])
 
         if not log_path.exists():
-            self.call_from_thread(log_widget.write, f"(log not found: {log_path.name})")
+            self.app.call_from_thread(log_widget.write, f"(log not found: {log_path.name})")
             return
 
         is_stream = log_path.name.endswith(".stream.jsonl")
@@ -127,9 +127,9 @@ class LogsScreen(Screen):
                             except json.JSONDecodeError:
                                 continue
                             for rendered in render_log_line(obj):
-                                self.call_from_thread(log_widget.write, rendered)
+                                self.app.call_from_thread(log_widget.write, rendered)
                     else:
-                        self.call_from_thread(log_widget.write, chunk)
+                        self.app.call_from_thread(log_widget.write, chunk)
                 else:
                     if live_pid and not claims.pid_alive(live_pid):
                         break
