@@ -45,6 +45,11 @@ class _AnswerModal(ModalScreen):
 
 
 class MaestroTUI(App):
+    CSS = """
+    #tickets { width: 2fr; height: 1fr; }
+    #detail  { width: 1fr; height: 1fr; padding: 0 1; }
+    """
+
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
