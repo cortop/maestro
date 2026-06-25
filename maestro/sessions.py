@@ -6,10 +6,12 @@ Implementer/QA pair. Liveness is tracked via :mod:`maestro.claims` (pid files), 
 headless sessions don't show up in ``claude agents --json``.
 
 ``SessionManager.list_active`` and ``spawn`` speak in terms of ticket KEYS.
+``list_sessions`` enumerates captured log files for a key, sorted newest-first.
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Callable, Protocol
@@ -17,6 +19,44 @@ from typing import Callable, Protocol
 from . import claims, store
 
 RECONCILE_PREFIX = "reconcile-"
+
+# Filename pattern: reconcile-<KEY>-<epoch>.{log,stream.jsonl}
+_SESSION_FILE_RE = re.compile(
+    r"^(reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+))\.(?P<ext>log|stream\.jsonl)$"
+)
+
+
+def list_sessions(home: Path, key: str) -> list[dict]:
+    """Return session log metadata for *key*, newest-first.
+
+    Each dict has: ``session_id``, ``path``, ``format`` ('text'|'stream-json'),
+    ``epoch`` (float), ``ts`` (ISO string).
+    """
+    store.validate_key(key)
+    log_dir = home / "agent-logs" / key
+    if not log_dir.exists():
+        return []
+    out = []
+    for f in log_dir.iterdir():
+        m = _SESSION_FILE_RE.match(f.name)
+        if not m:
+            continue
+        epoch = float(m.group("epoch"))
+        fmt = "stream-json" if m.group("ext") == "stream.jsonl" else "text"
+        out.append({
+            "session_id": m.group(1),
+            "path": str(f),
+            "format": fmt,
+            "epoch": epoch,
+            "ts": _epoch_to_iso(epoch),
+        })
+    out.sort(key=lambda d: d["epoch"], reverse=True)
+    return out
+
+
+def _epoch_to_iso(epoch: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def session_name(key: str) -> str:

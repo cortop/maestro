@@ -16,6 +16,7 @@ help:
 	@echo "make doctor      fleet health (heartbeat, dead-letters)"
 	@echo "make reconcile KEY=M-1   run ONE reconcile in the foreground (for testing)"
 	@echo "make fleet-up / fleet-down   install / remove the launchd dispatcher"
+	@echo "make run-tui-dev"
 
 install:
 	$(PY) -m pip -q install -e ".[dev]"
@@ -54,3 +55,6 @@ fleet-up:
 
 fleet-down:
 	daemon/install.sh down
+
+run-tui-dev:
+	.venv/bin/maestro --home ${MAESTRO_HOME} tui

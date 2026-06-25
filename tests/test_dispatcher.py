@@ -149,3 +149,27 @@ def test_dispatch_spawns_ready_ticket_when_dep_done(home, cfg):
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert "T-1" in report.spawned
+
+
+# --- natural key ordering ---
+
+def test_split_key_well_formed():
+    assert disp.split_key("M-8") == (0, "M", 8)
+    assert disp.split_key("TUI-10") == (0, "TUI", 10)
+    assert disp.split_key("L-2") == (0, "L", 2)
+
+
+def test_split_key_malformed():
+    result = disp.split_key("BROKEN")
+    assert result[0] == 1  # sorted after well-formed keys
+
+
+def test_list_keys_natural_order(home):
+    for key in ["TUI-10", "M-10", "TUI-2", "M-2", "L-1", "NOID"]:
+        store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+        event_log.append(home, key, "TicketCreated",
+                         {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    keys = disp.list_keys(home)
+    well_formed = [k for k in keys if k != "NOID"]
+    assert well_formed == ["L-1", "M-2", "M-10", "TUI-2", "TUI-10"]
+    assert keys[-1] == "NOID"  # malformed sorts last

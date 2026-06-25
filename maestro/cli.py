@@ -10,12 +10,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
-from .sessions import ClaudeCliSessions, DryRunSessions
+from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
@@ -28,6 +29,21 @@ def _cfg(args) -> Config:
 
 def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str) if not isinstance(obj, str) else obj)
+
+
+def _nudge(cfg: Config) -> None:
+    """In-process dispatch sweep after a human-input verb (ans/cmd/create).
+
+    Spawns are detached Popen so this returns quickly. The existing per-key
+    claim dedup prevents double-spawning if a reconciler is already live.
+    """
+    sessions = ClaudeCliSessions(
+        cfg.home, model=cfg.reconcile_model,
+        permission_mode=cfg.permission_mode,
+        capture_session_logs=cfg.capture_session_logs,
+        session_log_format=cfg.session_log_format,
+    )
+    disp.dispatch(cfg, sessions, now=store.now_epoch())
 
 
 # --- lifecycle / human verbs -------------------------------------------------
@@ -49,6 +65,8 @@ def cmd_create(args) -> int:
         a["intent"] = args.intent
     inbox.append_new(cfg.home, args.title, key=args.key, args=a)
     _print(f"queued create: {args.key or '(auto-key)'} — {args.title}")
+    if not args.no_nudge and cfg.nudge_on_human_input:
+        _nudge(cfg)
     return 0
 
 
@@ -59,6 +77,8 @@ def cmd_ans(args) -> int:
         a["qid"] = args.qid
     inbox.append_command(cfg.home, args.key, "ans", a)
     _print(f"answer queued for {args.key}")
+    if not args.no_nudge and cfg.nudge_on_human_input:
+        _nudge(cfg)
     return 0
 
 
@@ -78,7 +98,7 @@ def cmd_answer(args) -> int:
     waiting_phases = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}
 
     queue: list[tuple[str, str, str]] = []  # (key, qid, question_text)
-    for key in sorted(keys):
+    for key in sorted(keys, key=disp.split_key):
         s = snap_mod.load(cfg.home, key)
         if s.phase in waiting_phases and s.open_questions:
             for qid, text in s.open_questions.items():
@@ -114,6 +134,8 @@ def cmd_cmd(args) -> int:
     inbox.append_command(cfg.home, args.key, args.command,
                          {"text": " ".join(args.rest)} if args.rest else {})
     _print(f"command '{args.command}' queued for {args.key}")
+    if not args.no_nudge and cfg.nudge_on_human_input:
+        _nudge(cfg)
     return 0
 
 
@@ -277,6 +299,115 @@ def cmd_release(args) -> int:
     return 0
 
 
+def _render_stream_jsonl(path: Path) -> None:
+    """Print a human-readable view of a stream-jsonl session log."""
+    seen_msg_ids: dict[str, dict] = {}
+    with path.open(encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "assistant":
+                mid = obj["message"]["id"]
+                seen_msg_ids[mid] = obj
+            elif obj.get("type") == "result":
+                # Flush collected assistant messages in order, then show result
+                for _, msg_obj in seen_msg_ids.items():
+                    _print_assistant_message(msg_obj)
+                seen_msg_ids.clear()
+                sub = obj.get("subtype", "")
+                dur = obj.get("duration_ms")
+                suffix = f" ({dur}ms)" if dur else ""
+                print(f"[result:{sub}]{suffix}")
+    # Flush any remaining (live/incomplete session)
+    for _, msg_obj in seen_msg_ids.items():
+        _print_assistant_message(msg_obj)
+
+
+def _print_assistant_message(obj: dict) -> None:
+    for block in obj["message"].get("content", []):
+        btype = block.get("type")
+        if btype == "text":
+            print(block["text"])
+        elif btype == "tool_use":
+            inp = block.get("input", {})
+            inp_preview = json.dumps(inp)[:120]
+            print(f"[tool_use:{block['name']}] {inp_preview}")
+
+
+def cmd_logs(args) -> int:
+    cfg = _cfg(args)
+    sessions = list_sessions(cfg.home, args.key)
+
+    if args.list:
+        _print(sessions)
+        return 0
+
+    if not sessions:
+        print(f"No session logs found for {args.key}.", file=sys.stderr)
+        return 1
+
+    if args.session:
+        matches = [s for s in sessions if s["session_id"] == args.session]
+        if not matches:
+            print(f"Session {args.session!r} not found.", file=sys.stderr)
+            return 1
+        sess = matches[0]
+    else:
+        sess = sessions[0]  # newest
+
+    log_path = Path(sess["path"])
+    is_stream = sess["format"] == "stream-json"
+
+    if args.follow:
+        # Tail the file; stop when the session process is gone
+        claim = claims.read_claim(cfg.home, args.key)
+        live_pid = claim.get("pid") if claim else None
+        with log_path.open(encoding="utf-8", errors="replace") as f:
+            buf = ""
+            while True:
+                chunk = f.read(4096)
+                if chunk:
+                    buf += chunk
+                    if is_stream and not args.json:
+                        # Emit complete lines only, rendered human-readable
+                        while "\n" in buf:
+                            line, buf = buf.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if obj.get("type") == "assistant":
+                                _print_assistant_message(obj)
+                            elif obj.get("type") == "result":
+                                sub = obj.get("subtype", "")
+                                print(f"[result:{sub}]")
+                    else:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                else:
+                    if live_pid and not claims.pid_alive(live_pid):
+                        break
+                    if not live_pid:
+                        break
+                    time.sleep(0.25)
+        return 0
+
+    if args.json or not is_stream:
+        with log_path.open(encoding="utf-8", errors="replace") as f:
+            sys.stdout.write(f.read())
+    else:
+        _render_stream_jsonl(log_path)
+    return 0
+
+
 def cmd_tui(args) -> int:
     try:
         from .tui import main as tui_main
@@ -316,19 +447,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("title")
     sp.add_argument("--key"); sp.add_argument("--tier", type=int, default=1)
     sp.add_argument("--priority", type=int, default=3); sp.add_argument("--intent")
+    sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
+                    help="skip in-process dispatch nudge after queuing")
 
     sp = add("ans", cmd_ans, "answer a ticket's open question")
     sp.add_argument("key"); sp.add_argument("text"); sp.add_argument("--qid")
+    sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
+                    help="skip in-process dispatch nudge after answering")
 
     sp = add("answer", cmd_answer, "interactive walkthrough of all open questions")
     sp.add_argument("key", nargs="?", default=None, help="scope to one ticket (default: all)")
 
     sp = add("cmd", cmd_cmd, "send an arbitrary command (retry/discard/...)")
     sp.add_argument("key"); sp.add_argument("command"); sp.add_argument("rest", nargs="*")
+    sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
+                    help="skip in-process dispatch nudge after sending command")
 
     add("status", cmd_status, "summary of all tickets")
     sp = add("show", cmd_show, "snapshot + events for one ticket")
     sp.add_argument("key"); sp.add_argument("--tail", type=int, default=12)
+    sp = add("logs", cmd_logs, "view captured session logs for a ticket")
+    sp.add_argument("key")
+    sp.add_argument("--list", action="store_true", help="list sessions newest-first")
+    sp.add_argument("--session", help="select a specific session_id")
+    sp.add_argument("--follow", action="store_true", help="tail the live session log")
+    sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
     add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters)")
 
     sp = add("dispatch", cmd_dispatch, "one dispatcher sweep (launchd calls this)")
