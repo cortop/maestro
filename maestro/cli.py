@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, store
+from . import claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -58,13 +58,131 @@ def cmd_init(args) -> int:
     return 0
 
 
+_SEED_SPEC_TEMPLATE = """\
+# {title}
+
+<!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->
+
+approval_tier: {tier}
+priority: {priority}
+dependsOn: []
+
+## Intent
+{intent}
+
+## Acceptance criteria
+- [ ] \
+"""
+
+
+def _prompt(prompt_text: str, default: str = "") -> str:
+    """Prompt user with optional default; return stripped input or default on empty."""
+    display = f"{prompt_text} [{default}]: " if default else f"{prompt_text}: "
+    raw = input(display).strip()
+    return raw if raw else default
+
+
+def _editor_intent(title: str, tier: int, priority: int) -> str | None:
+    """Open $EDITOR with a pre-filled seed spec; return intent text on save."""
+    import os
+    import tempfile
+    editor = os.environ.get("EDITOR", "").strip()
+    if not editor:
+        return None
+    seed = _SEED_SPEC_TEMPLATE.format(title=title, tier=tier, priority=priority, intent="")
+    with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
+        f.write(seed)
+        tmp = f.name
+    os.system(f"{editor} {tmp}")
+    with open(tmp) as f:
+        content = f.read()
+    os.unlink(tmp)
+    intent_lines = []
+    in_intent = False
+    for line in content.splitlines():
+        if line.strip() == "## Intent":
+            in_intent = True
+            continue
+        if in_intent:
+            if line.startswith("## "):
+                break
+            intent_lines.append(line)
+    return "\n".join(intent_lines).strip() or None
+
+
+def _stdin_intent() -> str | None:
+    """Fallback: read multi-line intent from stdin (end with a blank line)."""
+    print("Intent (blank line to finish):")
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line == "":
+            break
+        lines.append(line)
+    return "\n".join(lines).strip() or None
+
+
 def cmd_create(args) -> int:
     cfg = _cfg(args)
+    title = args.title
+
+    if title is None:
+        if not sys.stdin.isatty():
+            print(
+                "error: the following arguments are required: title\n"
+                "To create interactively, run 'maestro create' from a terminal.",
+                file=sys.stderr,
+            )
+            return 2
+        # Interactive guided flow
+        try:
+            title = _prompt("Title")
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return 0
+        if not title:
+            print("Aborted (empty title).")
+            return 0
+        try:
+            tier_str = _prompt("Approval tier", str(args.tier))
+            priority_str = _prompt("Priority", str(args.priority))
+            key_str = _prompt("Key (blank = auto)", "")
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return 0
+        try:
+            tier = int(tier_str)
+        except ValueError:
+            tier = args.tier
+        try:
+            priority = int(priority_str)
+        except ValueError:
+            priority = args.priority
+        key = key_str.strip() or None
+        try:
+            intent = _editor_intent(title, tier, priority)
+            if intent is None:
+                intent = _stdin_intent()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return 0
+        a: dict = {"approval_tier": tier, "priority": priority}
+        if intent:
+            a["intent"] = intent
+        inbox.append_new(cfg.home, title, key=key, args=a)
+        _print(f"queued create: {key or '(auto-key)'} — {title}")
+        if not args.no_nudge and cfg.nudge_on_human_input:
+            _nudge(cfg)
+        return 0
+
     a = {"approval_tier": args.tier, "priority": args.priority}
     if args.intent:
         a["intent"] = args.intent
-    inbox.append_new(cfg.home, args.title, key=args.key, args=a)
-    _print(f"queued create: {args.key or '(auto-key)'} — {args.title}")
+    inbox.append_new(cfg.home, title, key=args.key, args=a)
+    _print(f"queued create: {args.key or '(auto-key)'} — {title}")
     if not args.no_nudge and cfg.nudge_on_human_input:
         _nudge(cfg)
     return 0
@@ -309,6 +427,17 @@ def cmd_release(args) -> int:
     return 0
 
 
+def cmd_fold_steps(args) -> int:
+    """Fold notable stream steps from a session log into IMPL_STEP events."""
+    cfg = _cfg(args)
+    if args.log:
+        n = steplog.fold_stream(cfg.home, args.key, Path(args.log))
+    else:
+        n = steplog.fold_current_session(cfg.home, args.key)
+    _print({"folded_steps": n})
+    return 0
+
+
 def _render_stream_jsonl(path: Path) -> None:
     """Print a human-readable view of a stream-jsonl session log."""
     seen_msg_ids: dict[str, dict] = {}
@@ -453,8 +582,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("init", cmd_init, "scaffold a maestro home + config")
 
-    sp = add("create", cmd_create, "queue a new ticket")
-    sp.add_argument("title")
+    sp = add("create", cmd_create, "queue a new ticket (no args = interactive)")
+    sp.add_argument("title", nargs="?", default=None,
+                    help="ticket title; omit for guided interactive flow")
     sp.add_argument("--key"); sp.add_argument("--tier", type=int, default=1)
     sp.add_argument("--priority", type=int, default=3); sp.add_argument("--intent")
     sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
@@ -528,6 +658,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("pr_number", type=int)
     sp.add_argument("state", help="mergeable state from gh (CONFLICTING|MERGEABLE|UNKNOWN)")
     sp.add_argument("--actor", default="reconciler")
+
+    sp = add("fold-steps", cmd_fold_steps, "[agent] fold stream steps into IMPL_STEP events")
+    sp.add_argument("key")
+    sp.add_argument("--log", default=None, help="path to a specific stream.jsonl (default: current claim log)")
 
     add("tui", cmd_tui, "launch the interactive TUI (requires [tui] extra)")
     return p

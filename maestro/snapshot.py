@@ -34,6 +34,7 @@ class Snapshot:
     next_requeue_at: float | None = None
     open_questions: dict[str, str] = field(default_factory=dict)
     impl_turns: int = 0
+    last_step: str | None = None
     updated_ts: str | None = None
 
     @property
@@ -95,6 +96,10 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.ci_state = p.get("state", s.ci_state)
         elif t == E.IMPL_TURN:
             s.impl_turns = max(s.impl_turns, int(p.get("turn", s.impl_turns)))
+        elif t == E.IMPL_STEP:
+            s.impl_turns = max(s.impl_turns, int(p.get("turn", s.impl_turns)))
+            if p.get("summary"):
+                s.last_step = p["summary"]
         elif t == E.REQUEUE_SCHEDULED:
             s.next_requeue_at = p.get("at")
         elif t == E.FAILED:
