@@ -480,14 +480,18 @@ def _print_assistant_message(obj: dict) -> None:
 
 def cmd_logs(args) -> int:
     cfg = _cfg(args)
-    sessions = list_sessions(cfg.home, args.key)
+    key = getattr(args, "key_flag", None) or args.key
+    if not key:
+        print("error: a ticket key is required (positional or --key)", file=sys.stderr)
+        return 2
+    sessions = list_sessions(cfg.home, key)
 
     if args.list:
         _print(sessions)
         return 0
 
     if not sessions:
-        print(f"No session logs found for {args.key}.", file=sys.stderr)
+        print(f"No session logs found for {key}.", file=sys.stderr)
         return 1
 
     if args.session:
@@ -504,7 +508,7 @@ def cmd_logs(args) -> int:
 
     if args.follow:
         # Tail the file; stop when the session process is gone
-        claim = claims.read_claim(cfg.home, args.key)
+        claim = claims.read_claim(cfg.home, key)
         live_pid = claim.get("pid") if claim else None
         with log_path.open(encoding="utf-8", errors="replace") as f:
             buf = ""
@@ -607,7 +611,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("show", cmd_show, "snapshot + events for one ticket")
     sp.add_argument("key"); sp.add_argument("--tail", type=int, default=12)
     sp = add("logs", cmd_logs, "view captured session logs for a ticket")
-    sp.add_argument("key")
+    sp.add_argument("key", nargs="?", default=None)
+    sp.add_argument("--key", dest="key_flag", default=None, help="ticket key (alternative to positional)")
     sp.add_argument("--list", action="store_true", help="list sessions newest-first")
     sp.add_argument("--session", help="select a specific session_id")
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
