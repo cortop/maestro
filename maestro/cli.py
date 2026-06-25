@@ -30,6 +30,21 @@ def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str) if not isinstance(obj, str) else obj)
 
 
+def _nudge(cfg: Config) -> None:
+    """In-process dispatch sweep after a human-input verb (ans/cmd/create).
+
+    Spawns are detached Popen so this returns quickly. The existing per-key
+    claim dedup prevents double-spawning if a reconciler is already live.
+    """
+    sessions = ClaudeCliSessions(
+        cfg.home, model=cfg.reconcile_model,
+        permission_mode=cfg.permission_mode,
+        capture_session_logs=cfg.capture_session_logs,
+        session_log_format=cfg.session_log_format,
+    )
+    disp.dispatch(cfg, sessions, now=store.now_epoch())
+
+
 # --- lifecycle / human verbs -------------------------------------------------
 def cmd_init(args) -> int:
     cfg = _cfg(args)
@@ -49,6 +64,8 @@ def cmd_create(args) -> int:
         a["intent"] = args.intent
     inbox.append_new(cfg.home, args.title, key=args.key, args=a)
     _print(f"queued create: {args.key or '(auto-key)'} — {args.title}")
+    if not args.no_nudge and cfg.nudge_on_human_input:
+        _nudge(cfg)
     return 0
 
 
@@ -59,6 +76,8 @@ def cmd_ans(args) -> int:
         a["qid"] = args.qid
     inbox.append_command(cfg.home, args.key, "ans", a)
     _print(f"answer queued for {args.key}")
+    if not args.no_nudge and cfg.nudge_on_human_input:
+        _nudge(cfg)
     return 0
 
 
@@ -114,6 +133,8 @@ def cmd_cmd(args) -> int:
     inbox.append_command(cfg.home, args.key, args.command,
                          {"text": " ".join(args.rest)} if args.rest else {})
     _print(f"command '{args.command}' queued for {args.key}")
+    if not args.no_nudge and cfg.nudge_on_human_input:
+        _nudge(cfg)
     return 0
 
 
@@ -316,15 +337,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("title")
     sp.add_argument("--key"); sp.add_argument("--tier", type=int, default=1)
     sp.add_argument("--priority", type=int, default=3); sp.add_argument("--intent")
+    sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
+                    help="skip in-process dispatch nudge after queuing")
 
     sp = add("ans", cmd_ans, "answer a ticket's open question")
     sp.add_argument("key"); sp.add_argument("text"); sp.add_argument("--qid")
+    sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
+                    help="skip in-process dispatch nudge after answering")
 
     sp = add("answer", cmd_answer, "interactive walkthrough of all open questions")
     sp.add_argument("key", nargs="?", default=None, help="scope to one ticket (default: all)")
 
     sp = add("cmd", cmd_cmd, "send an arbitrary command (retry/discard/...)")
     sp.add_argument("key"); sp.add_argument("command"); sp.add_argument("rest", nargs="*")
+    sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
+                    help="skip in-process dispatch nudge after sending command")
 
     add("status", cmd_status, "summary of all tickets")
     sp = add("show", cmd_show, "snapshot + events for one ticket")
