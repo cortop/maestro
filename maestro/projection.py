@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import snapshot as snap_mod, store
-from .dispatcher import list_keys
+from .dispatcher import list_keys, split_key
 from .statemachine import Phase
 
 _BANNER = (
@@ -45,7 +45,7 @@ def ticket_rows(home: Path) -> list[tuple[str, ...]]:
     where row_key == key and is the last element for DataTable keying.
     """
     snaps = [snap_mod.load(home, k) for k in list_keys(home)]
-    snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), s.key))
+    snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), split_key(s.key)))
     return [
         (s.key, s.phase, (s.title or "")[:48], _pr_cell(s),
          s.ci_state or "—", s.tier or "—", str(s.failure_count), s.key)
@@ -69,7 +69,7 @@ def render(home: Path) -> dict[str, str]:
     lines.append("\n| Key | Phase | Title | PR | CI | Tier | Fails |")
     lines.append("|-----|-------|-------|----|----|------|-------|")
     for p in order:
-        for s in sorted(by_phase.get(p.value, []), key=lambda x: x.key):
+        for s in sorted(by_phase.get(p.value, []), key=lambda x: split_key(x.key)):
             lines.append(
                 f"| {s.key} | {s.phase} | {(s.title or '')[:48]} | {_link(s)} "
                 f"| {s.ci_state or '—'} | {s.tier or '—'} | {s.failure_count} |"
@@ -84,13 +84,13 @@ def render(home: Path) -> dict[str, str]:
         nlines.append("\nNothing is waiting on you. 🎉\n")
     if awaiting:
         nlines.append("\n## Questions\n")
-        for s in sorted(awaiting, key=lambda x: x.key):
+        for s in sorted(awaiting, key=lambda x: split_key(x.key)):
             for qid, text in s.open_questions.items():
                 nlines.append(f"- **{s.key}** — {text}")
                 nlines.append(f"  - answer: `maestro ans {s.key} \"...\"`  (qid: {qid})")
     if degraded:
         nlines.append("\n## Dead-lettered (need a decision)\n")
-        for s in sorted(degraded, key=lambda x: x.key):
+        for s in sorted(degraded, key=lambda x: split_key(x.key)):
             nlines.append(f"- **{s.key}** — {s.last_error or 'stalled'} "
                           f"(failures: {s.failure_count})")
             nlines.append(f"  - revive: `maestro cmd {s.key} retry` · "

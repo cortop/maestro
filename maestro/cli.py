@@ -78,7 +78,7 @@ def cmd_answer(args) -> int:
     waiting_phases = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}
 
     queue: list[tuple[str, str, str]] = []  # (key, qid, question_text)
-    for key in sorted(keys):
+    for key in sorted(keys, key=disp.split_key):
         s = snap_mod.load(cfg.home, key)
         if s.phase in waiting_phases and s.open_questions:
             for qid, text in s.open_questions.items():

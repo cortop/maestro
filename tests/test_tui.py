@@ -446,6 +446,247 @@ def test_answer_no_questions_notifies_warning(home):
     assert kwargs.get("severity") == "warning"
 
 
+# --- fleet panel (unit-level, no Textual event loop) --------------------------
+
+from maestro.tui import FleetScreen, _IntervalModal, _fmt_age, _render_badge, _render_fleet  # noqa: E402
+
+
+def test_render_badge_up_shows_interval_and_heartbeat():
+    out = _render_badge({"loaded": True, "interval": 300, "heartbeat_age_s": 12})
+    assert "up" in out
+    assert "green" in out
+    assert "300s" in out
+    assert "12s ago" in out
+
+
+def test_render_badge_down_shows_dashes():
+    out = _render_badge({"loaded": False, "interval": None, "heartbeat_age_s": None})
+    assert "down" in out
+    assert "red" in out
+    assert "—" in out
+    assert "never" in out
+
+
+def test_fmt_age_none_returns_never():
+    assert _fmt_age(None) == "never"
+
+
+def test_fmt_age_seconds():
+    assert _fmt_age(45) == "45s ago"
+
+
+def test_fmt_age_minutes():
+    assert _fmt_age(125) == "2m ago"
+
+
+def test_fmt_age_hours():
+    assert _fmt_age(7200) == "2h ago"
+
+
+def test_render_fleet_loaded_shows_green(home):
+    status = {"loaded": True, "heartbeat_age_s": 30, "interval": 300,
+               "label": "com.maestro.dispatcher"}
+    doctor = {"dead_letters": [], "stale": False}
+    out = _render_fleet(status, doctor)
+    assert "green" in out
+    assert "300s" in out
+    assert "com.maestro.dispatcher" in out
+    assert "30s ago" in out
+
+
+def test_render_fleet_not_loaded_shows_red(home):
+    status = {"loaded": False, "heartbeat_age_s": None, "interval": None, "label": "x"}
+    doctor = {"dead_letters": [], "stale": False}
+    out = _render_fleet(status, doctor)
+    assert "red" in out
+    assert "never" in out
+
+
+def test_render_fleet_stale_shows_yellow(home):
+    status = {"loaded": True, "heartbeat_age_s": 9000, "interval": 300, "label": "x"}
+    doctor = {"dead_letters": ["DEAD-1"], "stale": True}
+    out = _render_fleet(status, doctor)
+    assert "yellow" in out
+    assert "DEAD-1" in out
+
+
+def test_render_fleet_no_dead_letters_shows_emdash(home):
+    status = {"loaded": False, "heartbeat_age_s": None, "interval": None, "label": "x"}
+    doctor = {"dead_letters": [], "stale": False}
+    out = _render_fleet(status, doctor)
+    assert "—" in out
+
+
+def test_fleet_screen_constructs(home):
+    """FleetScreen can be instantiated without crashing."""
+    screen = FleetScreen(home)
+    assert screen._home == home
+
+
+def test_maestro_tui_has_fleet_binding(home):
+    """MaestroTUI exposes the 'f' → fleet_panel binding."""
+    from maestro.tui import MaestroTUI
+    app = MaestroTUI(home=str(home))
+    keys = [b[0] for b in app.BINDINGS]
+    assert "f" in keys
+
+
+def test_fleet_screen_load_status_returns_status_and_doctor(home):
+    """_load_status() returns (status_dict, doctor_dict) without launchctl."""
+    screen = FleetScreen(home)
+
+    def fake_launchctl(cmd, **kw):
+        class P:
+            returncode = 0
+            stdout = ""
+        return P()
+
+    with mock.patch("subprocess.run", fake_launchctl):
+        status, doctor = screen._load_status()
+
+    assert "loaded" in status
+    assert "dead_letters" in doctor
+    assert isinstance(doctor["dead_letters"], list)
+
+
+def test_fleet_screen_load_status_detects_dead_letters(home):
+    """_load_status reports dead-letter tickets found in _deadletter/."""
+    dl_dir = home / "tickets" / "_deadletter"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    (dl_dir / "DEAD-1.md").write_text("# DEAD-1")
+
+    screen = FleetScreen(home)
+
+    def fake_launchctl(cmd, **kw):
+        class P:
+            returncode = 0
+            stdout = ""
+        return P()
+
+    with mock.patch("subprocess.run", fake_launchctl):
+        _status, doctor = screen._load_status()
+
+    assert "DEAD-1" in doctor["dead_letters"]
+
+
+def test_fleet_screen_stale_when_old_heartbeat(home):
+    """_load_status marks stale=True when heartbeat is older than 1800s."""
+    store.write_json(home / "derived" / ".heartbeat.json",
+                     {"epoch": store.now_epoch() - 2000})
+
+    screen = FleetScreen(home)
+
+    def fake_launchctl(cmd, **kw):
+        class P:
+            returncode = 0
+            stdout = ""
+        return P()
+
+    with mock.patch("subprocess.run", fake_launchctl):
+        _status, doctor = screen._load_status()
+
+    assert doctor["stale"] is True
+
+
+def test_fleet_screen_not_stale_with_recent_heartbeat(home):
+    """_load_status marks stale=False when heartbeat is recent."""
+    store.write_json(home / "derived" / ".heartbeat.json",
+                     {"epoch": store.now_epoch() - 60})
+
+    screen = FleetScreen(home)
+
+    def fake_launchctl(cmd, **kw):
+        class P:
+            returncode = 0
+            stdout = ""
+        return P()
+
+    with mock.patch("subprocess.run", fake_launchctl):
+        _status, doctor = screen._load_status()
+
+    assert doctor["stale"] is False
+
+
+# --- event timeline rendering -------------------------------------------------
+
+from maestro.tui_events import render_event, render_log  # noqa: E402
+from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
+
+
+def test_render_event_includes_seq_ts_type_actor():
+    """render_event includes seq, truncated ts, type, and actor."""
+    ev = {
+        "seq": 3,
+        "ts": "2026-06-25T10:00:00+00:00",
+        "type": "PhaseChanged",
+        "actor": "reconciler",
+        "payload": {"phase": "implementing"},
+    }
+    line = render_event(ev)
+    assert "3" in line
+    assert "2026-06-25T10:00:00" in line
+    assert "PhaseChanged" in line
+    assert "reconciler" in line
+
+
+def test_render_event_payload_summary_limited_to_three_keys():
+    """Payload summary includes at most 3 key=value pairs."""
+    ev = {
+        "seq": 1,
+        "ts": "2026-06-25T00:00:00+00:00",
+        "type": "X",
+        "actor": "a",
+        "payload": {"a": 1, "b": 2, "c": 3, "d": 4},
+    }
+    line = render_event(ev)
+    # Only first 3 keys from payload
+    assert line.count("=") <= 3
+
+
+def test_render_event_empty_payload():
+    """Empty payload renders without crashing."""
+    ev = {"seq": 1, "ts": "2026-06-25T00:00:00", "type": "T", "actor": "a", "payload": {}}
+    line = render_event(ev)
+    assert "T" in line
+
+
+def test_render_log_order_oldest_first(home):
+    """render_log returns events oldest-first (seq ascending)."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "x"}, actor="d", step_id="tc-1")
+    event_log.append(home, "T-1", "PhaseChanged", {"phase": "triaging"}, actor="r", step_id="pc-1")
+    from maestro import event_log as el
+    evs = el.read(home, "T-1")
+    lines = render_log(evs)
+    assert len(lines) == 2
+    # seq 1 before seq 2
+    assert "1" in lines[0]
+    assert "2" in lines[1]
+
+
+def test_render_log_tail_limits_to_last_n(home):
+    """tail=True limits output to the last _TAIL_N events."""
+    from maestro.tui_events import _TAIL_N
+    from maestro import event_log as el
+    # Write more than _TAIL_N events
+    for i in range(_TAIL_N + 5):
+        el.append(home, "T-1", "Ping", {}, actor="t", step_id=f"ping-{i}")
+    evs = el.read(home, "T-1")
+    lines_full = render_log(evs, tail=False)
+    lines_tail = render_log(evs, tail=True)
+    assert len(lines_full) == _TAIL_N + 5
+    assert len(lines_tail) == _TAIL_N
+
+
+def test_render_log_tail_false_shows_all(home):
+    """tail=False shows every event regardless of count."""
+    from maestro import event_log as el
+    for i in range(5):
+        el.append(home, "T-1", "Ping", {}, actor="t", step_id=f"p-{i}")
+    evs = el.read(home, "T-1")
+    lines = render_log(evs, tail=False)
+    assert len(lines) == 5
+
+
 # --- cursor preservation across _populate ------------------------------------
 
 def _make_tickets(home, keys):
