@@ -6,20 +6,26 @@ from . import snapshot as snap_mod
 _EM = "—"  # em-dash for missing values
 
 
+def _esc(s: str) -> str:
+    """Escape dynamic values so a literal '[' in user/agent data (e.g. a bracketed
+    error message) can't be mis-parsed as a Textual markup tag and crash the pane."""
+    return s.replace("\\", "\\\\").replace("[", "\\[")
+
+
 def render(snap: snap_mod.Snapshot) -> str:
     """Build Rich markup string for the snapshot detail pane."""
     def v(val: object) -> str:
-        return str(val) if val is not None and val != "" else _EM
+        return _esc(str(val)) if val is not None and val != "" else _EM
 
     pr_info = _EM
     if snap.pr_url and snap.pr_number:
         draft = " [dim](draft)[/dim]" if snap.pr_draft else ""
-        pr_info = f"[link={snap.pr_url}]#{snap.pr_number}[/link]{draft} ({v(snap.pr_state)})"
+        pr_info = f'[link="{snap.pr_url}"]#{snap.pr_number}[/link]{draft} ({v(snap.pr_state)})'
 
     questions = _EM
     if snap.open_questions:
         questions = "\n  ".join(
-            f"[yellow]{qid}[/yellow]: {text}"
+            f"[yellow]{_esc(qid)}[/yellow]: {_esc(text)}"
             for qid, text in snap.open_questions.items()
         )
 

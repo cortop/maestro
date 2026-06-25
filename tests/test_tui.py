@@ -228,6 +228,65 @@ def test_render_detail_no_open_questions_shows_emdash():
     assert any("—" in l for l in lines)
 
 
+# --- detail markup is valid for every phase (regression: awaiting-ci crashed) ----
+
+import pytest  # noqa: E402
+from textual.content import Content  # noqa: E402
+
+
+def _assert_valid_markup(markup: str) -> None:
+    """Mirror Static.update(): malformed markup raises here, as it did in the UI."""
+    Content.from_markup(markup)
+
+
+@pytest.mark.parametrize("phase", [p.value for p in Phase])
+def test_render_detail_valid_markup_with_pr_every_phase(phase):
+    """Every phase renders parseable markup when a PR is present.
+
+    awaiting-ci tickets always carry a pr_url; the unquoted [link=URL] markup used
+    to crash the detail pane the moment the cursor landed on such a ticket.
+    """
+    snap = snap_mod.Snapshot(
+        key="T-1",
+        phase=phase,
+        title="My feature",
+        tier="1",
+        source="inbox/_new",
+        pr_number=15,
+        pr_url="https://github.com/cortop/maestro/pull/15",
+        pr_state="open",
+        pr_draft=True,
+        ci_state="passing",
+        failure_count=1,
+        last_error="boom",
+        open_questions={"q1": "Is this OK?"},
+        updated_ts="2026-06-25T00:00:00+00:00",
+    )
+    _assert_valid_markup(_render_detail(snap))
+
+
+@pytest.mark.parametrize("phase", [p.value for p in Phase])
+def test_render_detail_valid_markup_minimal_every_phase(phase):
+    """A bare snapshot (no PR, no questions) also yields parseable markup per phase."""
+    _assert_valid_markup(_render_detail(snap_mod.Snapshot(key="T-2", phase=phase)))
+
+
+def test_render_detail_escapes_brackets_in_dynamic_fields():
+    """Bracketed content in title/last_error/questions must not break the markup."""
+    snap = snap_mod.Snapshot(
+        key="T-3",
+        phase="degraded",
+        title="fix [urgent] thing",
+        last_error="Traceback: KeyError['nope'] at [line 5]",
+        open_questions={"q1": "use [a] or [b]?"},
+    )
+    out = _render_detail(snap)
+    _assert_valid_markup(out)
+    # content survives (sans the escaping backslash)
+    assert "[urgent]" in out.replace("\\", "")
+    assert "KeyError['nope']" in out.replace("\\", "")
+
+
 # --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
 
 from maestro.tui import MaestroTUI, _AnswerModal  # noqa: E402

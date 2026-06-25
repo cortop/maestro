@@ -45,6 +45,11 @@ class _AnswerModal(ModalScreen):
 
 
 class MaestroTUI(App):
+    CSS = """
+    #tickets { width: 2fr; height: 1fr; }
+    #detail  { width: 1fr; height: 1fr; padding: 0 1; }
+    """
+
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
@@ -65,6 +70,7 @@ class MaestroTUI(App):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
+        table.cursor_type = "row"
         table.add_columns("Key", "Phase", "Title", "PR", "CI", "Tier", "Fails")
         self._populate()
         self.set_interval(3.0, self._populate)
