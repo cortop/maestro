@@ -4,7 +4,7 @@ export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
 
 PY := .venv/bin/python
 
-.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down
+.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down autocomplete
 
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
@@ -16,6 +16,7 @@ help:
 	@echo "make doctor      fleet health (heartbeat, dead-letters)"
 	@echo "make reconcile KEY=M-1   run ONE reconcile in the foreground (for testing)"
 	@echo "make fleet-up / fleet-down   install / remove the launchd dispatcher"
+	@echo "make autocomplete            install zsh completion script"
 	@echo "make run-tui-dev"
 
 install:
@@ -55,6 +56,17 @@ fleet-up:
 
 fleet-down:
 	daemon/install.sh down
+
+COMPLETION_SCRIPT := completions/_maestro
+COMPLETION_DIR := $(HOME)/.zsh/completions
+
+autocomplete:
+	@mkdir -p $(COMPLETION_DIR)
+	@cp $(COMPLETION_SCRIPT) $(COMPLETION_DIR)/_maestro
+	@if ! grep -qF 'fpath=($$HOME/.zsh/completions' $(HOME)/.zshrc 2>/dev/null; then \
+		printf '\n# maestro zsh completion\nfpath=($$HOME/.zsh/completions $$fpath)\nautoload -Uz compinit && compinit\n' >> $(HOME)/.zshrc; \
+	fi
+	@echo "maestro completion installed — restart your shell or: source ~/.zshrc"
 
 run-tui-dev:
 	.venv/bin/maestro --home ${MAESTRO_HOME} tui
