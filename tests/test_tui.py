@@ -230,7 +230,7 @@ def test_render_detail_no_open_questions_shows_emdash():
 
 # --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
 
-from maestro.tui import MaestroTUI, _AnswerModal  # noqa: E402
+from maestro.tui import MaestroTUI, _AnswerModal, _CmdModal  # noqa: E402
 
 
 def _make_ticket_with_questions(home, key, questions: dict):
@@ -354,3 +354,166 @@ def test_answer_no_questions_notifies_warning(home):
     app.notify.assert_called_once()
     _, kwargs = app.notify.call_args
     assert kwargs.get("severity") == "warning"
+
+
+# --- 'c' / cmd modal (action_cmd, action_retry, action_discard) ---------------
+
+def _make_degraded_ticket(home, key):
+    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 1\n")
+    event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+    event_log.append(home, key, "Stalled", {"reason": "too many failures"}, actor="r")
+    snap_mod.rebuild(home, key)
+    assert snap_mod.load(home, key).phase == Phase.DEGRADED.value
+
+
+def test_cmd_action_opens_modal(home):
+    """action_cmd pushes a _CmdModal for the selected ticket."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_cmd()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, _CmdModal)
+
+
+def test_cmd_action_no_selection_warns(home):
+    """action_cmd with no selected ticket shows a warning and pushes no modal."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+
+    app.action_cmd()
+
+    assert not push_calls
+    app.notify.assert_called_once()
+    _, kwargs = app.notify.call_args
+    assert kwargs.get("severity") == "warning"
+
+
+def test_cmd_modal_submit_appends_command(home):
+    """Submitting the modal with a command appends it to the ticket inbox."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_cmd()
+    _, callback = push_calls[0]
+    callback(("my-cmd", "some args"))  # simulate modal dismiss with (command, args_text)
+
+    pending = inbox.pending(home, "T-1")
+    assert len(pending) == 1
+    assert pending[0]["command"] == "my-cmd"
+    assert pending[0]["args"]["text"] == "some args"
+
+
+def test_cmd_modal_submit_no_args_sends_empty_args(home):
+    """Submitting without args text passes an empty args dict."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_cmd()
+    _, callback = push_calls[0]
+    callback(("retry", ""))  # empty args text
+
+    pending = inbox.pending(home, "T-1")
+    assert pending[0]["command"] == "retry"
+    assert pending[0]["args"] == {}
+
+
+def test_cmd_modal_cancel_appends_nothing(home):
+    """Dismissing the modal with None (cancel) does not touch the inbox."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_cmd()
+    _, callback = push_calls[0]
+    callback(None)
+
+    assert not inbox.pending(home, "T-1")
+
+
+def test_retry_degraded_appends_retry_command(home):
+    """action_retry on a degraded ticket appends 'retry' to the inbox."""
+    _make_degraded_ticket(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_retry()
+
+    assert not push_calls  # no modal — direct send
+    pending = inbox.pending(home, "T-1")
+    assert len(pending) == 1
+    assert pending[0]["command"] == "retry"
+
+
+def test_discard_degraded_appends_discard_command(home):
+    """action_discard on a degraded ticket appends 'discard' to the inbox."""
+    _make_degraded_ticket(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_discard()
+
+    pending = inbox.pending(home, "T-1")
+    assert len(pending) == 1
+    assert pending[0]["command"] == "discard"
+
+
+def test_retry_non_degraded_shows_warning(home):
+    """action_retry on a non-degraded ticket shows a warning and sends nothing."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_retry()
+
+    assert not inbox.pending(home, "T-1")
+    app.notify.assert_called_once()
+    _, kwargs = app.notify.call_args
+    assert kwargs.get("severity") == "warning"
+
+
+def test_discard_non_degraded_shows_warning(home):
+    """action_discard on a non-degraded ticket shows a warning and sends nothing."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_discard()
+
+    assert not inbox.pending(home, "T-1")
+    app.notify.assert_called_once()
+    _, kwargs = app.notify.call_args
+    assert kwargs.get("severity") == "warning"
+
+
+def test_cmd_modal_degraded_phase_is_stored(home):
+    """_CmdModal is created with the ticket's current phase."""
+    _make_degraded_ticket(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_cmd()
+
+    screen, _ = push_calls[0]
+    assert isinstance(screen, _CmdModal)
+    assert screen._phase == Phase.DEGRADED.value
