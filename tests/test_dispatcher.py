@@ -173,3 +173,45 @@ def test_list_keys_natural_order(home):
     well_formed = [k for k in keys if k != "NOID"]
     assert well_formed == ["L-1", "M-2", "M-10", "TUI-2", "TUI-10"]
     assert keys[-1] == "NOID"  # malformed sorts last
+
+
+# --- prefix-based key minting ---
+
+def test_auto_key_default_prefix(home):
+    assert disp._auto_key(home) == "T-1"
+
+
+def test_auto_key_custom_prefix(home):
+    assert disp._auto_key(home, prefix="FEAT") == "FEAT-1"
+
+
+def test_auto_key_skips_existing(home):
+    (home / "tickets" / "FEAT-1").mkdir(parents=True)
+    (home / "tickets" / "FEAT-2").mkdir(parents=True)
+    assert disp._auto_key(home, prefix="FEAT") == "FEAT-3"
+
+
+def test_existing_prefixes_empty(home):
+    assert disp.existing_prefixes(home) == []
+
+
+def test_existing_prefixes_sorted(home):
+    for key in ["TUI-1", "T-3", "T-1", "FEAT-2"]:
+        store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+        event_log.append(home, key, "TicketCreated",
+                         {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    assert disp.existing_prefixes(home) == ["FEAT", "T", "TUI"]
+
+
+def test_mint_ticket_with_prefix(home, cfg):
+    inbox.append_new(home, "new feature", prefix="FEAT")
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert "FEAT-1" in report.minted
+    assert store.spec_path(home, "FEAT-1").exists()
+
+
+def test_mint_ticket_prefix_skips_existing(home, cfg):
+    (home / "tickets" / "FEAT-1").mkdir(parents=True)
+    inbox.append_new(home, "another feature", prefix="FEAT")
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert "FEAT-2" in report.minted

@@ -11,12 +11,13 @@ from textual.app import App, ComposeResult
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, RichLog, Static, TextArea
+from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, RichLog, Select, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
 from . import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
 from .config import Config
+from .dispatcher import existing_prefixes
 from .sessions import list_sessions
 from .statemachine import Phase, ACTIVE_PHASES
 from .tui_detail import render as _render_detail, render_pending as _render_pending
@@ -340,13 +341,21 @@ class _CreateModal(ModalScreen):
         ("ctrl+enter", "submit", "Submit"),
     ]
 
+    _NEW_PREFIX = "(new)"
+
+    def __init__(self, existing_prefixes: list[str] | None = None) -> None:
+        super().__init__()
+        self._prefixes = existing_prefixes or []
+
     def compose(self) -> ComposeResult:
+        options = [(p, p) for p in self._prefixes] + [(self._NEW_PREFIX, self._NEW_PREFIX)]
         with Vertical(id="create-dialog"):
             yield Label("[bold]New Ticket[/bold]")
             yield Label("Title [bold red]*[/bold red]")
             yield Input(placeholder="required", id="create-title")
-            yield Label("Key")
-            yield Input(placeholder="optional, e.g. FEAT-99", id="create-key")
+            yield Label("Prefix [bold red]*[/bold red]")
+            yield Select(options=options, id="create-prefix", allow_blank=False)
+            yield Input(placeholder="new prefix, e.g. FEAT", id="create-prefix-new")
             yield Label("Tier")
             yield Input(value="1", id="create-tier")
             yield Label("Priority")
@@ -357,12 +366,24 @@ class _CreateModal(ModalScreen):
 
     def on_mount(self) -> None:
         self.query_one("#create-title", Input).focus()
+        # show new-prefix input only when (new) is the sole/initial selection
+        self.query_one("#create-prefix-new", Input).display = not bool(self._prefixes)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "create-prefix":
+            is_new = (event.value == self._NEW_PREFIX)
+            new_inp = self.query_one("#create-prefix-new", Input)
+            new_inp.display = is_new
+            if is_new:
+                new_inp.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        inputs = list(self.query(Input))
-        idx = inputs.index(event.input)
-        if idx < len(inputs) - 1:
-            inputs[idx + 1].focus()
+        visible = [w for w in self.query(Input) if w.display]
+        if event.input not in visible:
+            return
+        idx = visible.index(event.input)
+        if idx < len(visible) - 1:
+            visible[idx + 1].focus()
         else:
             self.query_one("#create-intent", TextArea).focus()
 
@@ -378,7 +399,19 @@ class _CreateModal(ModalScreen):
             self.notify("Title is required", severity="warning")
             self.query_one("#create-title", Input).focus()
             return
-        key_val = self.query_one("#create-key", Input).value.strip() or None
+        select = self.query_one("#create-prefix", Select)
+        selected = select.value
+        if selected is Select.BLANK:
+            self.notify("Select a prefix", severity="warning")
+            return
+        if selected == self._NEW_PREFIX:
+            prefix = self.query_one("#create-prefix-new", Input).value.strip().upper()
+            if not prefix:
+                self.notify("Prefix name is required", severity="warning")
+                self.query_one("#create-prefix-new", Input).focus()
+                return
+        else:
+            prefix = str(selected)
         tier_str = self.query_one("#create-tier", Input).value.strip() or "1"
         priority_str = self.query_one("#create-priority", Input).value.strip() or "3"
         intent_val = self.query_one("#create-intent", TextArea).text.strip() or None
@@ -390,7 +423,7 @@ class _CreateModal(ModalScreen):
             return
         self.dismiss({
             "title": title,
-            "key": key_val,
+            "prefix": prefix,
             "tier": tier,
             "priority": priority,
             "intent": intent_val,
@@ -846,22 +879,25 @@ class MaestroTUI(App):
         self.push_screen(EnvScreen(self._home))
 
     def action_create(self) -> None:
+        prefixes = existing_prefixes(self._home)
+
         def _on_dismiss(result: dict | None) -> None:
             if result is None:
                 return
             inbox.append_new(
                 self._home,
                 result["title"],
-                result.get("key"),
-                {
+                key=None,
+                args={
                     "approval_tier": result["tier"],
                     "priority": result["priority"],
                     "intent": result.get("intent"),
                 },
+                prefix=result.get("prefix"),
             )
             self.notify("queued; dispatcher will mint the key")
 
-        self.push_screen(_CreateModal(), _on_dismiss)
+        self.push_screen(_CreateModal(prefixes), _on_dismiss)
 
     def action_answer(self) -> None:
         key = self._selected_key
