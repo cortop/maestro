@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, RichLog, Select, Static, TextArea
@@ -894,24 +894,25 @@ class MaestroTUI(App):
     """
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("r", "refresh", "Refresh"),
-        ("a", "answer", "Answer"),
-        ("c", "cmd", "Command"),
-        ("ctrl+r", "retry", "Retry"),
-        ("ctrl+d", "discard", "Discard"),
-        ("f", "cycle_filter", "Filter"),
-        ("F", "fleet_panel", "Fleet"),
-        ("e", "env_panel", "Env"),
-        ("n", "create", "New"),
-        ("s", "show_spec", "Spec"),
-        ("t", "toggle_tail", "Tail/Full"),
-        ("enter", "focus_detail", "Detail"),
-        ("x", "compact", "Compact"),
-        ("z", "release", "Release"),
-        ("p", "project_rebuild", "Project"),
-        ("l", "view_logs", "Logs"),
-        ("i", "inbox_message", "Inbox"),
+        Binding("q", "quit", "Quit"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("a", "answer", "Answer"),
+        Binding("c", "cmd", "Command"),
+        Binding("f", "cycle_filter", "Filter"),
+        Binding("n", "create", "New"),
+        Binding("enter", "focus_detail", "Detail"),
+        Binding("i", "inbox_message", "Inbox"),
+        # Less-used actions: keys work but hidden from footer to reduce clutter
+        Binding("ctrl+r", "retry", "Retry", show=False),
+        Binding("ctrl+d", "discard", "Discard", show=False),
+        Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("e", "env_panel", "Env", show=False),
+        Binding("s", "show_spec", "Spec", show=False),
+        Binding("t", "toggle_tail", "Tail/Full", show=False),
+        Binding("x", "compact", "Compact", show=False),
+        Binding("z", "release", "Release", show=False),
+        Binding("p", "project_rebuild", "Project", show=False),
+        Binding("l", "view_logs", "Logs", show=False),
     ]
 
     _selected_key: str | None = None
