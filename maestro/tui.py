@@ -201,8 +201,42 @@ class _AnswerModal(ModalScreen):
         self.dismiss(None)
 
 
+# Phase-aware command reference shown in _CmdModal.
+_PHASE_COMMANDS: dict[str, list[tuple[str, str]]] = {
+    Phase.DEGRADED.value: [
+        ("retry", "re-enter implementing"),
+        ("discard", "drop this ticket permanently"),
+    ],
+    Phase.AWAITING_HUMAN.value: [
+        ("ans <qid> <text>", "answer the open question"),
+        ("approve", "approve and advance"),
+        ("yes", "shorthand approve"),
+        ("no", "reject the plan"),
+        ("reject", "reject and discard"),
+        ("discard", "drop this ticket permanently"),
+    ],
+}
+_DEFAULT_COMMANDS: list[tuple[str, str]] = [
+    ("retry", "re-enter implementing"),
+    ("discard", "drop this ticket permanently"),
+    ("requeue <secs>", "delay next reconcile by N seconds"),
+]
+
+
 class _CmdModal(ModalScreen):
     """Command palette modal; dismisses with (command, args_text) or None on cancel."""
+
+    DEFAULT_CSS = """
+    _CmdModal {
+        align: center middle;
+    }
+    #cmd-dialog {
+        width: 70%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
@@ -212,14 +246,15 @@ class _CmdModal(ModalScreen):
         self._phase = phase
 
     def compose(self) -> ComposeResult:
-        is_degraded = self._phase == Phase.DEGRADED.value
         header = f"[bold]{self._key}[/bold] — {self._phase}"
+        commands = _PHASE_COMMANDS.get(self._phase, _DEFAULT_COMMANDS)
         with Vertical(id="cmd-dialog"):
             yield Label(header)
-            if is_degraded:
+            yield Label("[dim]── Commands ──[/dim]")
+            for cmd, desc in commands:
                 yield Label(
-                    "[dim]degraded:[/dim] type [bold]retry[/bold] or [bold]discard[/bold]",
-                    id="cmd-hint",
+                    f"  [bold]{cmd}[/bold]  [dim]{desc}[/dim]",
+                    classes="cmd-row",
                 )
             yield Input(
                 placeholder="command (e.g. retry, discard)  [Enter to send, Esc to cancel]",
