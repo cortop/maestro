@@ -101,12 +101,23 @@ def list_keys(home: Path) -> list[str]:
     return sorted(keys, key=split_key)
 
 
+def existing_prefixes(home: Path) -> list[str]:
+    """Return sorted unique prefixes from all existing well-formed ticket keys."""
+    seen: set[str] = set()
+    for key in list_keys(home):
+        m = _KEY_RE.match(key)
+        if m:
+            seen.add(m.group(1))
+    return sorted(seen)
+
+
 def mint_new_tickets(cfg: Config) -> list[str]:
     """Drain the keyless ``_new`` inbox into real ticket dirs + TicketCreated events."""
     home = cfg.home
     minted: list[str] = []
     for _idx, entry in inbox.pending_new(home):
-        key = entry.get("key") or _auto_key(home)
+        prefix = entry.get("prefix") or None
+        key = entry.get("key") or _auto_key(home, prefix=prefix or "T")
         try:
             store.validate_key(key)
         except store.MaestroError:
@@ -127,11 +138,11 @@ def mint_new_tickets(cfg: Config) -> list[str]:
     return minted
 
 
-def _auto_key(home: Path) -> str:
+def _auto_key(home: Path, prefix: str = "T") -> str:
     n = 1
-    while (home / "tickets" / f"T-{n}").exists():
+    while (home / "tickets" / f"{prefix}-{n}").exists():
         n += 1
-    return f"T-{n}"
+    return f"{prefix}-{n}"
 
 
 def _seed_spec(key: str, title: str, args: dict) -> str:
