@@ -26,10 +26,11 @@ def append_command(home: Path, key: str, command: str, args: dict | None = None)
     return entry
 
 
-def append_new(home: Path, title: str, key: str | None = None, args: dict | None = None) -> dict:
-    """Queue a keyless 'create ticket' request; the dispatcher mints the key."""
+def append_new(home: Path, title: str, key: str | None = None, args: dict | None = None,
+               prefix: str | None = None) -> dict:
+    """Queue a create-ticket request; the dispatcher mints the key from prefix or falls back to T-N."""
     path = store.new_inbox_path(home)
-    entry = {"ts": store.iso_now(), "title": title, "key": key, "args": args or {}}
+    entry = {"ts": store.iso_now(), "title": title, "key": key, "prefix": prefix, "args": args or {}}
     with store.file_lock(path):
         store.append_line(path, json.dumps(entry, separators=(",", ":")))
     return entry

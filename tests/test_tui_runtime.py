@@ -29,8 +29,9 @@ import pytest
 pytest.importorskip("textual", reason="requires the [tui] extra (textual)")
 
 import textual.app as _txapp  # noqa: E402
-from textual.widgets import DataTable, Static  # noqa: E402
+from textual.widgets import DataTable, Input, Select, Static  # noqa: E402
 
+from maestro import store  # noqa: E402
 from maestro.tui import (  # noqa: E402
     EventsScreen,
     FleetScreen,
@@ -312,6 +313,81 @@ def test_create_modal_intent_is_textarea_and_accepts_multiline(seeded_home):
             assert app._exception is None
             await pilot.press("escape")
 
+    asyncio.run(_inner())
+
+
+def test_create_modal_submits_prefix_to_inbox(seeded_home):
+    """Fill in title + existing prefix via Select, submit, verify _new inbox entry."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _CreateModal)
+            modal = app.screen_stack[-1]
+            # Fill in title
+            modal.query_one("#create-title", Input).value = "My new feature"
+            # Select the "T" prefix (seeded_home has T-1..T-5)
+            modal.query_one("#create-prefix", Select).value = "T"
+            await pilot.pause()
+            # Enter on last visible Input moves focus to TextArea; use Ctrl+Enter to submit
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1  # modal dismissed
+
+        # Verify the inbox entry has the right prefix
+        import json
+        new_path = store.new_inbox_path(seeded_home)
+        entries = [json.loads(line) for line in new_path.read_text().splitlines() if line.strip()]
+        assert entries, "no entry written to _new inbox"
+        last = entries[-1]
+        assert last["title"] == "My new feature"
+        assert last["prefix"] == "T"
+
+    asyncio.run(_inner())
+
+
+def test_create_modal_prefix_select_has_options(seeded_home):
+    """_CreateModal shows existing prefix T (from seeded_home) + (new) in the Select;
+    the new-prefix Input is hidden when an existing prefix is pre-selected."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _CreateModal)
+            modal = app.screen_stack[-1]
+            sel = modal.query_one("#create-prefix", Select)
+            option_values = {v for _, v in sel._options}
+            assert "T" in option_values, f"expected T in options: {option_values}"
+            assert "(new)" in option_values
+            new_inp = modal.query_one("#create-prefix-new", Input)
+            assert not new_inp.display, "new-prefix input should start hidden"
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_create_modal_new_prefix_reveals_input(seeded_home):
+    """Selecting (new) in the prefix Select reveals the new-prefix Input."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            sel = modal.query_one("#create-prefix", Select)
+            new_inp = modal.query_one("#create-prefix-new", Input)
+            assert not new_inp.display, "new-prefix input starts hidden"
+            # drive on_select_changed directly — setting .value programmatically
+            # does not emit Select.Changed in Textual 8
+            modal.on_select_changed(Select.Changed(select=sel, value="(new)"))
+            await pilot.pause()
+            assert new_inp.display, "new-prefix input should be visible after (new)"
+            assert app._exception is None
     asyncio.run(_inner())
 
 

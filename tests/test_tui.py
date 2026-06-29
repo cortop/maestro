@@ -1091,7 +1091,7 @@ def test_create_appends_new_entry(home):
     _, callback = push_calls[0]
     callback({
         "title": "My new ticket",
-        "key": "FEAT-1",
+        "prefix": "FEAT",
         "tier": 2,
         "priority": 1,
         "intent": "Do the thing",
@@ -1101,7 +1101,8 @@ def test_create_appends_new_entry(home):
     assert len(pending) == 1
     _, entry = pending[0]
     assert entry["title"] == "My new ticket"
-    assert entry["key"] == "FEAT-1"
+    assert entry["prefix"] == "FEAT"
+    assert entry["key"] is None
     assert entry["args"]["approval_tier"] == 2
     assert entry["args"]["priority"] == 1
     assert entry["args"]["intent"] == "Do the thing"
