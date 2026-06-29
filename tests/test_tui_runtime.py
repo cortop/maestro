@@ -44,6 +44,7 @@ from maestro.tui import (  # noqa: E402
     _CmdModal,
     _CreateModal,
     _FILTERS,
+    _InboxModal,
     _IntervalModal,
     _styled_row,
 )
@@ -180,7 +181,7 @@ def test_quit_binding_exits_clean(seeded_home):
 
 _BINDING_CLASSES = [
     MaestroTUI, DetailScreen, EventsScreen, LogsScreen, FleetScreen,
-    _AnswerModal, _CmdModal, _IntervalModal, _CreateModal,
+    _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
 ]
 
 
@@ -529,5 +530,68 @@ def test_notification_fires_on_phase_transition(seeded_home):
                 "Expected a warning notification after T-5 entered awaiting-human"
             )
             assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# (e) TUI-18: inbox-compose action works at any phase                          #
+# --------------------------------------------------------------------------- #
+
+def test_inbox_modal_open_and_escape(seeded_home):
+    """'i' key opens _InboxModal on a selected ticket; escape dismisses it."""
+    _run_modal_test(seeded_home, "T-3", "inbox_message", _InboxModal)
+
+
+def test_inbox_message_writes_to_inbox(seeded_home):
+    """Submitting _InboxModal appends a 'msg' command to the ticket inbox."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("inbox_message")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _InboxModal), "inbox modal did not open"
+            modal = app.screen_stack[-1]
+            inp = modal.query_one("#inbox-input", Input)
+            inp.value = "hello from TUI-18 test"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(app.screen_stack) == 1, "modal should have dismissed after submit"
+            assert app._exception is None
+
+        # Verify the inbox entry was written
+        from maestro import inbox
+        entries = inbox.pending(seeded_home, "T-3")
+        assert entries, "no entry written to T-3 inbox"
+        last = entries[-1]
+        assert last["command"] == "msg"
+        assert last["args"]["text"] == "hello from TUI-18 test"
+
+    asyncio.run(_inner())
+
+
+def test_inbox_action_works_for_any_phase(seeded_home):
+    """inbox_message action is accessible regardless of the ticket's current phase."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            for r in range(table.row_count):
+                table.move_cursor(row=r)
+                await pilot.pause()
+                await app.run_action("inbox_message")
+                await pilot.pause()
+                assert isinstance(app.screen_stack[-1], _InboxModal), (
+                    f"row {r}: expected _InboxModal, got {type(app.screen_stack[-1]).__name__}"
+                )
+                await pilot.press("escape")
+                await pilot.pause()
+                assert len(app.screen_stack) == 1, f"row {r}: modal did not dismiss"
+                assert app._exception is None
 
     asyncio.run(_inner())
