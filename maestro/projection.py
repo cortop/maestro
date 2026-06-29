@@ -51,7 +51,7 @@ def ticket_rows(home: Path, phases: frozenset | None = None) -> list[tuple[str, 
         snaps = [s for s in snaps if s.phase in phase_values]
     snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), split_key(s.key)))
     return [
-        (s.key, s.phase, (s.title or "")[:48], _pr_cell(s),
+        (s.key, s.phase, (s.title or "")[:64], _pr_cell(s),
          s.ci_state or "—", s.tier or "—", str(s.failure_count), s.key)
         for s in snaps
     ]
@@ -75,7 +75,7 @@ def render(home: Path) -> dict[str, str]:
     for p in order:
         for s in sorted(by_phase.get(p.value, []), key=lambda x: split_key(x.key)):
             lines.append(
-                f"| {s.key} | {s.phase} | {(s.title or '')[:48]} | {_link(s)} "
+                f"| {s.key} | {s.phase} | {(s.title or '')[:64]} | {_link(s)} "
                 f"| {s.ci_state or '—'} | {s.tier or '—'} | {s.failure_count} |"
             )
     workstate = "\n".join(lines) + "\n"
