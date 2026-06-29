@@ -59,6 +59,14 @@ def _filter_idx(name: str) -> int:
     return next(i for i, (n, _) in enumerate(_FILTERS) if n == name)
 
 
+# BINDINGS entries can be plain tuples or Binding dataclass instances.
+def _bkey(b) -> str:
+    return b.key if hasattr(b, "key") else b[0]
+
+def _baction(b) -> str:
+    return b.action if hasattr(b, "action") else b[1]
+
+
 # --------------------------------------------------------------------------- #
 # (a) the app actually mounts                                                  #
 # --------------------------------------------------------------------------- #
@@ -107,7 +115,7 @@ def test_row_highlight_renders_every_seeded_phase(seeded_home):
 # MaestroTUI are swept automatically the day they appear.
 
 # 'q' quits the app cleanly (not a crash) — exercised separately below.
-_SWEEP_KEYS = [b[0] for b in MaestroTUI.BINDINGS if b[1] != "quit"]
+_SWEEP_KEYS = [_bkey(b) for b in MaestroTUI.BINDINGS if _baction(b) != "quit"]
 
 # Keys that are a genuine, captured crash → xfail so the rest still run.
 _KNOWN_CRASH: dict[str, str] = {}
@@ -199,12 +207,12 @@ def _action_resolves(owner_cls, action: str) -> bool:
 
 @pytest.mark.parametrize(
     "owner_cls,key,action",
-    [(c, b[0], b[1]) for c in _BINDING_CLASSES for b in c.BINDINGS],
+    [(c, _bkey(b), _baction(b)) for c in _BINDING_CLASSES for b in c.BINDINGS],
     ids=lambda v: getattr(v, "__name__", v),
 )
 def test_every_binding_action_resolves(owner_cls, key, action):
     assert _action_resolves(owner_cls, action), (
-        f"{owner_cls.__name__} binds {key!r} -> action_{action} which does not exist"
+        f"{owner_cls.__name__} binds {key!r} -> action_{action!r} which does not exist"
     )
 
 
@@ -535,6 +543,51 @@ def test_no_notification_on_first_populate(seeded_home):
             assert app._exception is None
 
     asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# (e) TUI-19: bottom bar shows a reduced set of shortcuts                     #
+# --------------------------------------------------------------------------- #
+
+def test_footer_binding_count_is_reduced():
+    """show=False hides low-priority shortcuts; at most 8 visible in the footer."""
+    from textual.binding import Binding
+    visible = [
+        b for b in MaestroTUI.BINDINGS
+        if not isinstance(b, Binding) or b.show
+    ]
+    assert len(visible) <= 8, (
+        f"Too many visible footer bindings ({len(visible)}): "
+        + ", ".join(_bkey(b) for b in visible)
+    )
+
+
+def test_hidden_binding_keys_still_work(seeded_home):
+    """show=False shortcuts (e.g. 's', 'l') still fire their actions without crashing."""
+    from textual.binding import Binding
+    hidden_keys = [_bkey(b) for b in MaestroTUI.BINDINGS
+                   if isinstance(b, Binding) and not b.show and _baction(b) != "quit"]
+
+    async def _inner():
+        crashes: dict[str, str] = {}
+        for key in hidden_keys:
+            app = _make_app(seeded_home)
+            try:
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    app._selected_key = "T-3"
+                    await pilot.press(key)
+                    await pilot.pause()
+                    await pilot.press("escape")
+                    await pilot.pause()
+                    if app._exception is not None:
+                        crashes[key] = repr(app._exception)
+            except Exception as exc:
+                crashes[key] = repr(exc)
+        return crashes
+
+    crashes = asyncio.run(_inner())
+    assert not crashes, f"hidden-binding keys crashed: {crashes}"
 
 
 def test_notification_fires_on_phase_transition(seeded_home):

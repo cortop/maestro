@@ -799,7 +799,7 @@ def test_maestro_tui_has_fleet_binding(home):
     """MaestroTUI binds 'F' -> fleet_panel (capital), and 'f' -> cycle_filter."""
     from maestro.tui import MaestroTUI
     app = MaestroTUI(home=str(home))
-    actions = {b[0]: b[1] for b in app.BINDINGS}
+    actions = {(b.key if hasattr(b, "key") else b[0]): (b.action if hasattr(b, "action") else b[1]) for b in app.BINDINGS}
     assert actions.get("F") == "fleet_panel"
     assert actions.get("f") == "cycle_filter"
 
@@ -1314,7 +1314,7 @@ def test_project_rebuild_worker_calls_projection(home):
 
 def test_maestro_tui_has_compact_release_project_bindings(home):
     """MaestroTUI exposes x/z/p bindings for compact, release, and project."""
-    binding_keys = {b[0] for b in MaestroTUI.BINDINGS}
+    binding_keys = {(b.key if hasattr(b, "key") else b[0]) for b in MaestroTUI.BINDINGS}
     assert "x" in binding_keys
     assert "z" in binding_keys
     assert "p" in binding_keys
@@ -1416,7 +1416,7 @@ def test_env_screen_constructs(home):
 def test_maestro_tui_has_env_binding():
     """MaestroTUI exposes the 'e' → env_panel binding."""
     app = MaestroTUI(home="/tmp")
-    keys = [b[0] for b in app.BINDINGS]
+    keys = [(b.key if hasattr(b, "key") else b[0]) for b in app.BINDINGS]
     assert "e" in keys
 
 
@@ -1594,7 +1594,7 @@ def test_spec_screen_has_edit_binding():
 def test_maestro_tui_has_spec_binding(home):
     """MaestroTUI exposes the 's' → show_spec binding."""
     app = MaestroTUI(home=str(home))
-    keys = [b[0] for b in app.BINDINGS]
+    keys = [(b.key if hasattr(b, "key") else b[0]) for b in app.BINDINGS]
     assert "s" in keys
 
 
@@ -1684,7 +1684,7 @@ def test_render_pending_valid_markup_with_commands():
 def test_maestro_tui_has_logs_binding(home):
     """MaestroTUI exposes the 'l' → view_logs binding."""
     app = MaestroTUI(home=str(home))
-    keys = [b[0] for b in app.BINDINGS]
+    keys = [(b.key if hasattr(b, "key") else b[0]) for b in app.BINDINGS]
     assert "l" in keys
 
 
