@@ -40,10 +40,44 @@ the snapshot — it persists across crashes, so it's reliable even if `observed_
 advanced past the `QuestionAnswered` events:
 ```bash
 SNAP=$(maestro snapshot "$KEY")
+KIND=$(echo "$SNAP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('kind','implementation'))")
 ```
 Inspect each qid key in `answered_questions`:
 - **any qid starts with `conflict-`** → the human resolved a merge conflict; go back to check CI:
   `maestro set-phase "$KEY" awaiting-ci --requeue 60`
+
+**If `KIND == research`** (research approval question — qid starts with `research-approval-`):
+Read the proposal at `$HOME/tickets/$KEY/proposal.md`. Inspect the answer:
+- **"needs more"** → go back to researching:
+  `maestro set-phase "$KEY" researching --reason "needs more research per human"`
+- **"alternative N"** (e.g. "alternative 2") → extract the Nth alternative's section from proposal.md
+- **any other approval** (yes/ok/approve/recommended) → use the `## Recommended` section from proposal.md
+
+Then mint the implementation ticket using the chosen approach as intent:
+```bash
+maestro create --tier 0 --kind implementation \
+  --title "Implement: <research-title-without-Research-prefix>" \
+  --intent "<chosen approach text>" \
+  --notes "Seeded from $KEY proposal. See tickets/$KEY/proposal.md for full context." \
+  --depends-on "$KEY" --no-nudge
+```
+The new ticket key is auto-assigned (T-N). Append a breadcrumb linking the two, then finalize:
+```bash
+# Derive the impl key: last entry in the _new inbox
+IMPL_KEY=$(python3 -c "
+import json, pathlib
+home = pathlib.Path('$HOME')
+entries = [json.loads(l) for l in (home/'inbox/_new.jsonl').read_text().splitlines() if l.strip()]
+print(entries[-1].get('key') or 'unknown')
+" 2>/dev/null || echo "unknown")
+maestro append "$KEY" --type Note \
+  --payload "{\"text\":\"Created implementation ticket $IMPL_KEY from approved proposal\"}" \
+  --step-id "note-impl-created-$KEY"
+maestro finalize "$KEY"
+```
+**Then** `maestro inbox-ack "$KEY"` (LAST — so a crash before this re-reads the answer).
+
+**If `KIND != research`** (standard implementation ticket):
 - **approved** (answer is affirmative and qid is not a conflict-) → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
 - **rejected/`discard`** → `maestro set-phase "$KEY" terminating`
 - **modified scope** → note it, then `maestro set-phase "$KEY" ready`
@@ -51,13 +85,57 @@ Inspect each qid key in `answered_questions`:
 
 ### `ready`
 Honor `dependsOn` in the spec: if any listed ticket isn't `done`, sleep
-`maestro requeue "$KEY" 300` and exit. Otherwise create the worktree and begin:
+`maestro requeue "$KEY" 300` and exit. Otherwise check the ticket kind:
+
+**If `kind == research`** (no worktree needed):
+```bash
+maestro set-phase "$KEY" researching --reason "research ticket: beginning exploration"
+```
+
+**If `kind != research`** (implementation — create worktree):
 ```bash
 git -C "$REPO" fetch -q origin main
 git -C "$REPO" worktree add "$HOME/worktrees/$KEY" -b "${PREFIX}${KEY}" origin/main 2>/dev/null \
   || git -C "$REPO" worktree add "$HOME/worktrees/$KEY" "${PREFIX}${KEY}"   # adopt if branch exists
 maestro set-phase "$KEY" implementing --reason "worktree ready"
 ```
+
+### `researching`
+You are exploring to produce a research proposal. Do **not** create a git worktree.
+
+1. **Explore the codebase** (Read/Grep/Glob/Agent) — understand relevant code, patterns, and
+   constraints. Focus on the spec's Intent to know what to research.
+2. **Search the web** — use WebSearch/WebFetch or the `/deep-research` skill to find
+   state-of-the-art approaches, libraries, prior art, and relevant citations.
+   (If web tools are unavailable in this session, note that and fall back to codebase-only.)
+3. **Write the proposal** at `$HOME/tickets/$KEY/proposal.md`:
+   ```markdown
+   # Proposal: <title>
+
+   ## Recommended
+   <concise description of the best approach and rationale>
+
+   ## Alternative 1
+   <description of first alternative>
+
+   ## Alternative 2
+   <description of second alternative (add more as needed)>
+
+   ## Sources
+   - <file:line> — <why relevant>
+   - <https://url> — <why relevant>
+   ```
+4. **Record and ask**:
+   ```bash
+   PROP_PATH="tickets/$KEY/proposal.md"
+   maestro append "$KEY" --type ResearchProposed \
+     --payload "{\"proposal_path\":\"$PROP_PATH\",\"alternatives\":[\"Alternative 1\",\"Alternative 2\"]}" \
+     --step-id "research-proposed-$KEY"
+   maestro ask "$KEY" \
+     "Proposal for $KEY is ready at $PROP_PATH. Approve the recommended approach, reply 'alternative N' to select an alternative, or 'needs more' to continue." \
+     --qid "research-approval-$KEY"
+   ```
+Then exit — the dispatcher re-wakes you when the human answers.
 
 ### `implementing`
 You are (or the dispatcher cd'd you) in `$HOME/worktrees/$KEY`. Implement the spec's
