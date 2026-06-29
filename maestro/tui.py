@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -64,6 +65,25 @@ _FILTERS: list[tuple[str, frozenset | None]] = [
     ("active", ACTIVE_PHASES),
     ("all", None),
 ]
+
+# Phase → Rich style string for row coloring
+_PHASE_STYLE: dict[str, str] = {
+    Phase.IMPLEMENTING.value:   "green",
+    Phase.AWAITING_CI.value:    "cyan",
+    Phase.IN_REVIEW.value:      "cyan",
+    Phase.AWAITING_HUMAN.value: "yellow bold",
+    Phase.DEGRADED.value:       "red bold",
+    Phase.DONE.value:           "dim",
+    Phase.TERMINATING.value:    "dim",
+}
+
+
+def _styled_row(*cells: str) -> tuple:
+    """Return cells styled uniformly by the phase (cells[1])."""
+    style = _PHASE_STYLE.get(cells[1], "")
+    if not style:
+        return cells
+    return tuple(Text(str(c), style=style) for c in cells)
 
 
 class LogsScreen(Screen):
@@ -716,6 +736,7 @@ class MaestroTUI(App):
         self._home = Path(home)
         self._selected_key: str | None = None
         self._filter_idx: int = 0
+        self._prev_phases: dict[str, str] | None = None  # None = first poll (no notifications)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -934,6 +955,15 @@ class MaestroTUI(App):
         # Load all rows once for counting and filtering
         all_rows = ticket_rows(self._home)
 
+        # Detect tickets newly entering awaiting-human / degraded and toast once.
+        new_phases = {row[-1]: row[1] for row in all_rows}  # row_key (last) -> phase (index 1)
+        if self._prev_phases is not None:
+            _notify_phases = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}
+            for key, phase in new_phases.items():
+                if phase in _notify_phases and self._prev_phases.get(key) != phase:
+                    self.notify(f"{key}: {phase}", severity="warning", timeout=6)
+        self._prev_phases = new_phases
+
         # Build filter bar: show counts per filter, bold the active one
         parts = []
         for i, (fname, fphases) in enumerate(_FILTERS):
@@ -968,7 +998,7 @@ class MaestroTUI(App):
         table.clear()
         row_keys: list[str] = []
         for *cells, row_key in visible:
-            table.add_row(*cells, key=row_key)
+            table.add_row(*_styled_row(*cells), key=row_key)
             row_keys.append(row_key)
         if not row_keys:
             return
