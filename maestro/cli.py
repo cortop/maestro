@@ -411,12 +411,12 @@ def cmd_fail(args) -> int:
 
 
 def cmd_check_conflicts(args) -> int:
-    """Ask a conflict-resolution question if the PR is CONFLICTING and none is open yet."""
+    """Route a CONFLICTING PR back to implementing for auto-resolution (idempotent)."""
     if args.state != "CONFLICTING":
         _print({"conflict": False, "reason": f"mergeable={args.state}"})
         return 0
-    asked = ops.ask_conflict(_cfg(args), args.key, args.pr_number, actor=args.actor)
-    _print({"conflict": True, "asked": asked})
+    routed = ops.route_conflict(_cfg(args), args.key, args.pr_number, actor=args.actor)
+    _print({"conflict": True, "routed_to": "implementing", "moved": routed})
     return 0
 
 
@@ -683,7 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
 
     sp = add("check-conflicts", cmd_check_conflicts,
-             "[agent] ask conflict question if PR is CONFLICTING (idempotent)")
+             "[agent] route to implementing for auto-resolution if PR is CONFLICTING (idempotent)")
     sp.add_argument("key")
     sp.add_argument("pr_number", type=int)
     sp.add_argument("state", help="mergeable state from gh (CONFLICTING|MERGEABLE|UNKNOWN)")

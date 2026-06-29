@@ -59,12 +59,18 @@ even if `observed_seq` has already advanced past the `QuestionAnswered` events:
 SNAP=$(maestro snapshot "$KEY")
 ```
 Inspect each qid in `answered_questions`:
-- **any qid starts with `conflict-`** → the human resolved (or acknowledged) a merge conflict.
-  Go back to CI polling: `maestro set-phase "$KEY" awaiting-ci --requeue 60`
+- **any qid starts with `conflict-`** → an escalated merge conflict the agent could not auto-resolve;
+  the human gave guidance. Re-enter the worktree to apply it and retry the resolution:
+  `maestro set-phase "$KEY" implementing --reason "retry conflict resolution: <verbatim>"`
 - **approval** (answer text is affirmative / qid is not conflict-) → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
 - **rejected/discard** → `maestro set-phase "$KEY" terminating`
 - **modified scope** → note it, then `set-phase ready`
 Finally: `maestro inbox-ack "$KEY"`  ← **last**, so a crash before this re-reads the answer.
+
+If `answered_questions` AND `open_questions` are **both empty**, you were woken as `stranded`
+(awaiting-human with nothing to wait on — the dispatcher wakes these so they can't sleep
+forever). Recover so you make progress this step: if `pr_number` is set →
+`maestro set-phase "$KEY" awaiting-ci --requeue 60`, else `maestro set-phase "$KEY" triaging --reason "stranded recovery"`.
 
 ### `ready`
 Check `dependsOn` in the spec. If any dependency ticket is not yet `done`, sleep:
@@ -75,7 +81,14 @@ maestro set-phase "$KEY" implementing --reason "worktree ready"
 ```
 
 ### `implementing`
-Run the decoupled Implementer↔QA loop (reuse your existing `orch-implement` logic) using
+**If you landed here to resolve a conflict** (snapshot `reason` mentions a merge conflict, and
+a PR is already open — `pr_number` set), do ONLY that: in the worktree, `git fetch origin main`,
+`git rebase origin/main`, resolve the conflicts, run the tests, push the rebased branch (never
+force-push onto someone else's work without care), then `maestro set-phase "$KEY" awaiting-ci
+--requeue 300`. Do not re-implement the feature. If you cannot resolve it, escalate with
+`maestro ask "$KEY" "PR #<n> conflict I couldn't auto-resolve: <detail>" --qid "conflict-$KEY-<n>"`.
+
+Otherwise run the decoupled Implementer↔QA loop (reuse your existing `orch-implement` logic) using
 the `Agent` tool — Implementer (Sonnet) writes code/tests/PR, QA (Opus) verifies ACs
 against real proof. **"Real proof" = the feature demonstrated against the real app, not mocks
 of the component under test:** drive the real `maestro` CLI / a real dispatcher sweep
@@ -105,7 +118,8 @@ if [ -n "$PR_NUM" ]; then
   fi
   MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
   maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
-  # If conflicting, the above transitions to awaiting-human; exit so dispatch re-picks after human fixes.
+  # If CONFLICTING, check-conflicts routes to implementing so the agent rebases & pushes
+  # (auto-resolution); exit so the implementing reconcile picks it up.
   [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
 fi
 ```

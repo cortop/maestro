@@ -19,8 +19,15 @@ def test_active_phase_is_due(home):
     assert res.due and res.reason == "active"
 
 
+def _ask(home, key, qid="q1", text="ok?"):
+    """Give an awaiting-human ticket a real open question (the production state)."""
+    event_log.append(home, key, "QuestionAsked", {"qid": qid, "text": text}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
 def test_sleeping_phase_not_due_until_signal(home):
     _seed(home, "T-1", Phase.AWAITING_HUMAN)
+    _ask(home, "T-1")  # an open question is what makes awaiting-human legitimately sleep
     snap = snap_mod.load(home, "T-1")
     assert not disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000).due
     # inbox arrival wakes it
@@ -29,9 +36,23 @@ def test_sleeping_phase_not_due_until_signal(home):
 
 def test_spec_edit_wakes_sleeping_ticket(home):
     _seed(home, "T-1", Phase.AWAITING_HUMAN)
+    _ask(home, "T-1")
     snap = snap_mod.load(home, "T-1")
     res = disp.is_due(snap, inbox_pending=False, current_spec_hash="DIFFERENT", now=1000)
     assert res.due and res.reason == "spec-changed"
+
+
+def test_stranded_awaiting_human_is_due(home, cfg):
+    """awaiting-human with no open question, no answered question, and no timer is
+    stranded — the dispatcher must wake it so it can never sleep forever."""
+    _seed(home, "T-1", Phase.AWAITING_HUMAN)  # bare phase set, never asked
+    snap = snap_mod.load(home, "T-1")
+    assert not snap.open_questions and not snap.answered_questions
+    res = disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000)
+    assert res.due and res.reason == "stranded"
+    # A real sweep spawns a reconciler for the stranded ticket (recovery happens there).
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert "T-1" in report.spawned
 
 
 def test_requeue_timer_wakes_awaiting_ci(home, cfg):

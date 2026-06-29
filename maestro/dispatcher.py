@@ -92,6 +92,11 @@ def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
     # populated but inbox already acked. Wake the ticket so it can finish the transition.
     if phase == Phase.AWAITING_HUMAN and snap.answered_questions:
         return DueResult(True, "answered-pending")
+    # Safety net: awaiting-human with no open question, no pending answer, and no timer
+    # has nothing left to wait on — it is stranded (e.g. a direct set-phase that never
+    # asked). Wake it so the reconciler can recover instead of sleeping forever.
+    if phase == Phase.AWAITING_HUMAN and not snap.open_questions and not snap.answered_questions:
+        return DueResult(True, "stranded")
     if current_spec_hash is not None and current_spec_hash != snap.spec_hash:
         return DueResult(True, "spec-changed")
     if phase == Phase.READY and blocked_dep:

@@ -1,4 +1,6 @@
-"""PR merge-conflict detection: ask_conflict is idempotent and skips if already open."""
+"""PR merge-conflict handling: a CONFLICTING PR routes back to implementing so the
+agent rebases/resolves/pushes (auto-resolution); ask_conflict is the human-escalation
+fallback used only when the agent cannot resolve it itself."""
 import time
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.statemachine import Phase
@@ -69,14 +71,30 @@ def test_check_conflicts_cli_non_conflicting(cfg, tmp_path):
 
 
 def test_check_conflicts_cli_conflicting(cfg):
-    """check-conflicts emits a question when state == CONFLICTING."""
+    """check-conflicts routes the ticket to implementing for auto-resolution — no human
+    question on the happy path, so the PR can actually be updated by the agent."""
     from maestro.cli import main
     _create(cfg, "T-5")
     rc = main(["--home", str(cfg.home), "check-conflicts", "T-5", "42", "CONFLICTING"])
     assert rc == 0
     snap = snap_mod.load(cfg.home, "T-5")
-    assert snap.phase == Phase.AWAITING_HUMAN.value
-    assert "conflict-T-5-42" in snap.open_questions
+    assert snap.phase == Phase.IMPLEMENTING.value
+    assert "conflict-T-5-42" not in snap.open_questions
+    # the reason is carried on the PhaseChanged so the implementing reconcile knows why
+    changed = [e for e in event_log.read(cfg.home, "T-5") if e["type"] == "PhaseChanged"
+               and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+    assert changed and "PR #42" in changed[-1]["payload"].get("reason", "")
+
+
+def test_route_conflict_idempotent(cfg):
+    """route_conflict moves awaiting-ci -> implementing once; a second call is a no-op."""
+    _create(cfg, "T-5")  # starts in awaiting-ci
+    assert ops.route_conflict(cfg, "T-5", 42) is True
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IMPLEMENTING.value
+    assert ops.route_conflict(cfg, "T-5", 42) is False  # already implementing
+    impl_changes = [e for e in event_log.read(cfg.home, "T-5") if e["type"] == "PhaseChanged"
+                    and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+    assert len(impl_changes) == 1
 
 
 def test_answered_questions_populated_after_fold(cfg):
@@ -108,27 +126,43 @@ def test_answered_questions_cleared_on_phase_change(cfg):
 
 
 def test_conflict_resolution_full_flow(cfg):
-    """Answering a conflict question leaves answered_questions with the conflict qid,
-    allowing the reconciler to call set-phase awaiting-ci idempotently."""
-    _create(cfg, "T-5")
-    # Conflict detected from awaiting-ci
-    ops.ask_conflict(cfg, "T-5", 42)
-    snap = snap_mod.load(cfg.home, "T-5")
-    assert snap.phase == Phase.AWAITING_HUMAN.value
-    # Human answers
-    inbox.append_command(cfg.home, "T-5", "ans",
-                         {"text": "rebased", "qid": "conflict-T-5-42"})
-    ops.fold_inbox(cfg, "T-5")
-    snap = snap_mod.load(cfg.home, "T-5")
-    # answered_questions lets the reconciler detect this is a conflict answer
-    conflict_answers = [q for q in snap.answered_questions if q.startswith("conflict-")]
-    assert conflict_answers == ["conflict-T-5-42"]
-    # Reconciler transitions back to awaiting-ci (now a valid transition)
-    ops.set_phase(cfg, "T-5", Phase.AWAITING_CI)
-    inbox.ack(cfg.home, "T-5")
+    """Auto-resolution flow: CONFLICTING -> implementing (agent rebases & pushes) ->
+    awaiting-ci. No human round-trip, and the PR-bearing branch gets updated."""
+    from maestro.cli import main
+    _create(cfg, "T-5")  # awaiting-ci with a PR open
+    # Conflict detected from awaiting-ci → routed straight to implementing
+    main(["--home", str(cfg.home), "check-conflicts", "T-5", "42", "CONFLICTING"])
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IMPLEMENTING.value
+    # The implementing reconcile rebases/resolves/pushes (real git work mocked here),
+    # then returns to awaiting-ci to re-poll — no question was ever asked of the human.
+    ops.set_phase(cfg, "T-5", Phase.AWAITING_CI, requeue_in=300)
     snap = snap_mod.load(cfg.home, "T-5")
     assert snap.phase == Phase.AWAITING_CI.value
-    assert snap.answered_questions == {}  # cleared after transition
+    assert not any(q.startswith("conflict-") for q in snap.open_questions)
+
+
+def test_escalated_conflict_answer_retries_in_implementing(cfg):
+    """When the agent escalates an unresolvable conflict (ask_conflict) and the human
+    answers, the reconciler re-enters implementing to apply the guidance — not a bounce
+    back to awaiting-ci that would just re-detect the same conflict."""
+    _create(cfg, "T-5")
+    ops.ask_conflict(cfg, "T-5", 42)  # escalation -> awaiting-human with a conflict- qid
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.AWAITING_HUMAN.value
+    inbox.append_command(cfg.home, "T-5", "ans",
+                         {"text": "use theirs for that hunk", "qid": "conflict-T-5-42"})
+    ops.fold_inbox(cfg, "T-5")
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert [q for q in snap.answered_questions if q.startswith("conflict-")] == ["conflict-T-5-42"]
+    # awaiting-human -> implementing is a valid transition (no 'unusual' note)
+    seq_before = snap.observed_seq
+    ops.set_phase(cfg, "T-5", Phase.IMPLEMENTING)
+    inbox.ack(cfg.home, "T-5")
+    evs = event_log.read(cfg.home, "T-5", since=seq_before)
+    assert not [e for e in evs if e["type"] == "Note"
+                and "unusual" in e.get("payload", {}).get("text", "")]
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.IMPLEMENTING.value
+    assert snap.answered_questions == {}  # cleared on transition
 
 
 def test_is_due_answered_pending_wakes_stuck_ticket(cfg):

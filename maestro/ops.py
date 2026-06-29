@@ -51,14 +51,30 @@ def ask(cfg: Config, key: str, text: str, *, qid: str | None = None, actor: str 
     return qid
 
 
+def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:
+    """Route a CONFLICTING PR back into `implementing` so the agent rebases onto
+    the base branch, resolves the conflicts, and pushes — auto-resolution that
+    actually updates the PR. Idempotent: a no-op if already implementing. Returns
+    True if it moved the ticket. The agent escalates to a human (plain `maestro
+    ask`) only when it cannot resolve the conflict itself."""
+    snap = snap_mod.load(cfg.home, key)
+    if snap.phase == Phase.IMPLEMENTING.value:
+        return False
+    set_phase(cfg, key, Phase.IMPLEMENTING,
+              reason=f"resolve merge conflict for PR #{pr_number}", actor=actor)
+    return True
+
+
 def ask_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:
-    """Ask the human to resolve a PR merge conflict (idempotent — skips if already open)."""
+    """Escalate an unresolvable PR merge conflict to the human (idempotent — skips
+    if already open). Used only when the agent's own rebase in `implementing`
+    cannot resolve the conflict; the normal path is `route_conflict`."""
     snap = snap_mod.load(cfg.home, key)
     qid = f"conflict-{key}-{pr_number}"
     if qid in snap.open_questions:
         return False
-    text = (f"PR #{pr_number} has a merge conflict with the base branch. "
-            f"Please rebase, resolve the conflicts, and push again.")
+    text = (f"PR #{pr_number} has a merge conflict the agent could not auto-resolve. "
+            f"Please rebase, resolve the conflicts, and push — or answer with guidance.")
     ask(cfg, key, text, qid=qid, actor=actor)
     return True
 

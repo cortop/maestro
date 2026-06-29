@@ -37,8 +37,8 @@ ACTIVE_PHASES = frozenset(
 # Allowed transitions — used to validate a PhaseChanged and to document the flow.
 TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.TRIAGING: {Phase.AWAITING_HUMAN, Phase.READY, Phase.DEGRADED, Phase.TERMINATING},
-    Phase.AWAITING_HUMAN: {Phase.READY, Phase.AWAITING_CI, Phase.TRIAGING, Phase.RESEARCHING,
-                           Phase.DEGRADED, Phase.TERMINATING},
+    Phase.AWAITING_HUMAN: {Phase.READY, Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.TRIAGING,
+                           Phase.RESEARCHING, Phase.DEGRADED, Phase.TERMINATING},
     Phase.READY: {Phase.IMPLEMENTING, Phase.RESEARCHING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
     Phase.IMPLEMENTING: {Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DEGRADED,
                          Phase.AWAITING_HUMAN, Phase.TERMINATING, Phase.DONE},

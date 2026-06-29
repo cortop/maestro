@@ -42,12 +42,19 @@ advanced past the `QuestionAnswered` events:
 SNAP=$(maestro snapshot "$KEY")
 ```
 Inspect each qid key in `answered_questions`:
-- **any qid starts with `conflict-`** → the human resolved a merge conflict; go back to check CI:
-  `maestro set-phase "$KEY" awaiting-ci --requeue 60`
+- **any qid starts with `conflict-`** → an escalated merge conflict the agent could not auto-resolve;
+  the human answered with guidance. Re-enter the worktree to apply it and retry the resolution:
+  `maestro set-phase "$KEY" implementing --reason "retry conflict resolution: <verbatim>"`
 - **approved** (answer is affirmative and qid is not a conflict-) → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
 - **rejected/`discard`** → `maestro set-phase "$KEY" terminating`
 - **modified scope** → note it, then `maestro set-phase "$KEY" ready`
 **Then** `maestro inbox-ack "$KEY"` (LAST — so a crash before this re-reads the answer).
+
+If `answered_questions` AND `open_questions` are **both empty**, you were woken as `stranded`
+(a phase set to awaiting-human with nothing to wait on — the dispatcher wakes these so they
+can't sleep forever). Recover by re-deriving the phase so you make progress this step: if
+`pr_number` is set → `maestro set-phase "$KEY" awaiting-ci --requeue 60`, otherwise
+`maestro set-phase "$KEY" triaging --reason "stranded recovery"`.
 
 ### `ready`
 Honor `dependsOn` in the spec: if any listed ticket isn't `done`, sleep
@@ -60,8 +67,25 @@ maestro set-phase "$KEY" implementing --reason "worktree ready"
 ```
 
 ### `implementing`
-You are (or the dispatcher cd'd you) in `$HOME/worktrees/$KEY`. Implement the spec's
-Acceptance criteria:
+You are (or the dispatcher cd'd you) in `$HOME/worktrees/$KEY` (if the worktree is missing,
+recreate it as in `ready` — `worktree add` adopts the existing `${PREFIX}${KEY}` branch).
+
+**Step 0 — sync with the base branch (also how conflicts get resolved).** You may have landed
+here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` says so). Always
+rebase onto the latest base first, then resolve any conflicts:
+```bash
+WT="$HOME/worktrees/$KEY"
+git -C "$REPO" fetch -q origin main
+git -C "$WT" rebase origin/main || true   # resolve conflicts, then: git -C "$WT" rebase --continue
+```
+If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteria are already
+implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
+step 3 (push the rebased branch + `set-phase awaiting-ci`); do NOT re-do the feature. If you
+truly cannot resolve the conflict yourself, escalate:
+`maestro ask "$KEY" "PR #<n> conflict I couldn't auto-resolve: <detail>" --qid "conflict-$KEY-<n>"`
+and exit.
+
+Otherwise implement the spec's Acceptance criteria:
 1. Read the spec's Intent + AC and the relevant code. Make the change.
 2. **Tests are the proof — QA against the real app, not mocks.** Every change ships with a test
    that exercises the actual surface and shows the feature working end-to-end: drive the real
@@ -92,13 +116,14 @@ Acceptance criteria:
    Rules: never force-push, never skip hooks, never mock real behavior in tests.
 
 ### `awaiting-ci`
-You woke on the timer. **First** check for merge conflicts (idempotent — skips if question already open):
+You woke on the timer. **First** check for merge conflicts (idempotent — no-op once routed):
 ```bash
 PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pr_number') or '')")
 if [ -n "$PR_NUM" ]; then
   MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
   maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
-  # If CONFLICTING, check-conflicts transitions to awaiting-human — exit now.
+  # If CONFLICTING, check-conflicts routes to implementing so the agent rebases &
+  # pushes (auto-resolution). Exit now — the implementing reconcile picks it up.
   [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
 fi
 ```
@@ -113,7 +138,8 @@ maestro append "$KEY" --type CiObserved --payload "{\"state\":\"$STATE\"}" --ste
 - still pending → `maestro requeue "$KEY" 300`
 
 ### `in-review`
-**First** check for merge conflicts (guard against conflicts introduced during review):
+**First** check for merge conflicts (guard against conflicts introduced during review — routes
+back to implementing for auto-resolution):
 ```bash
 PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pr_number') or '')")
 if [ -n "$PR_NUM" ]; then
