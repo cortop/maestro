@@ -11,13 +11,20 @@ from maestro.cli import cmd_create
 
 class _Args:
     def __init__(self, title=None, key=None, tier=1, priority=3, intent=None,
-                 home=None, no_nudge=True):
+                 home=None, no_nudge=True, kind=None, model=None, effort=None,
+                 notes=None, depends_on=None, prefix=None):
         self.title = title
         self.key = key
         self.tier = tier
         self.priority = priority
         self.intent = intent
         self.home = home
+        self.kind = kind
+        self.model = model
+        self.effort = effort
+        self.notes = notes
+        self.depends_on = depends_on
+        self.prefix = prefix
         self.no_nudge = no_nudge
 
 
@@ -172,3 +179,101 @@ def test_non_tty_no_title_returns_error(cfg):
     finally:
         sys.stdin = old_stdin
     assert rc != 0
+
+
+# --- RT-1: new flags (kind/model/effort/notes/depends-on) ---
+
+def _run_create_with_flags(cfg, **kwargs):
+    """Run cmd_create with non-interactive flags; return (rc, inbox_entry)."""
+    args = _Args(home=cfg.home, **kwargs)
+    rc = cmd_create(args)
+    entries = inbox.pending_new(cfg.home)
+    entry = entries[-1][1] if entries else None
+    return rc, entry
+
+
+def test_flag_kind_stored_in_args(cfg):
+    rc, entry = _run_create_with_flags(cfg, title="Research thing", kind="research")
+    assert rc == 0
+    assert entry["args"]["kind"] == "research"
+
+
+def test_flag_model_stored_in_args(cfg):
+    rc, entry = _run_create_with_flags(cfg, title="Big task", model="opus")
+    assert rc == 0
+    assert entry["args"]["model"] == "opus"
+
+
+def test_flag_effort_stored_in_args(cfg):
+    rc, entry = _run_create_with_flags(cfg, title="Intensive task", effort="high")
+    assert rc == 0
+    assert entry["args"]["effort"] == "high"
+
+
+def test_flag_notes_stored_in_args(cfg):
+    rc, entry = _run_create_with_flags(cfg, title="Task with notes", notes="Use web search")
+    assert rc == 0
+    assert entry["args"]["notes"] == "Use web search"
+
+
+def test_flag_depends_on_stored_in_args(cfg):
+    rc, entry = _run_create_with_flags(cfg, title="Dependent task", depends_on=["T-1", "T-2"])
+    assert rc == 0
+    assert entry["args"]["depends_on"] == ["T-1", "T-2"]
+
+
+def test_create_all_new_flags_together(cfg):
+    """AC3: create with all new flags writes correct front-matter via dispatch."""
+    from maestro import dispatcher as disp, store
+    from maestro.sessions import DryRunSessions
+
+    rc, entry = _run_create_with_flags(
+        cfg, title="Research task", key="R-1",
+        kind="research", model="opus", effort="high",
+        notes="Use web search.", depends_on=["T-5"],
+    )
+    assert rc == 0
+    assert entry["args"]["kind"] == "research"
+    assert entry["args"]["model"] == "opus"
+    assert entry["args"]["effort"] == "high"
+    assert entry["args"]["notes"] == "Use web search."
+    assert entry["args"]["depends_on"] == ["T-5"]
+
+    # Mint the ticket through a real dispatch sweep and assert the written spec.
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    spec_text = store.spec_path(cfg.home, "R-1").read_text()
+    assert "kind: research" in spec_text
+    assert "model: opus" in spec_text
+    assert "effort: high" in spec_text
+    assert "dependsOn: [T-5]" in spec_text
+    assert "## Notes" in spec_text
+    assert "Use web search." in spec_text
+
+
+def test_create_cli_main_with_all_flags(cfg):
+    """AC3 via cli.main([...]) to exercise the full parser pipeline."""
+    from maestro.cli import main
+    from maestro import dispatcher as disp, store
+    from maestro.sessions import DryRunSessions
+
+    rc = main([
+        "--home", str(cfg.home),
+        "create", "Research via CLI",
+        "--key", "R-2",
+        "--kind", "research",
+        "--model", "opus",
+        "--effort", "high",
+        "--notes", "CLI-driven note",
+        "--depends-on", "T-1", "T-2",
+        "--no-nudge",
+    ])
+    assert rc == 0
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    spec_text = store.spec_path(cfg.home, "R-2").read_text()
+    assert "kind: research" in spec_text
+    assert "model: opus" in spec_text
+    assert "effort: high" in spec_text
+    assert "dependsOn: [T-1, T-2]" in spec_text
+    assert "## Notes" in spec_text
+    assert "CLI-driven note" in spec_text

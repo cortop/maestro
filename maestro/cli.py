@@ -181,7 +181,19 @@ def cmd_create(args) -> int:
     a = {"approval_tier": args.tier, "priority": args.priority}
     if args.intent:
         a["intent"] = args.intent
-    inbox.append_new(cfg.home, title, key=args.key, args=a)
+    if getattr(args, "kind", None):
+        a["kind"] = args.kind
+    if getattr(args, "model", None):
+        a["model"] = args.model
+    if getattr(args, "effort", None):
+        a["effort"] = args.effort
+    if getattr(args, "notes", None):
+        a["notes"] = args.notes
+    depends_on = getattr(args, "depends_on", None) or []
+    if depends_on:
+        a["depends_on"] = depends_on
+    inbox.append_new(cfg.home, title, key=args.key, args=a,
+                     prefix=getattr(args, "prefix", None))
     _print(f"queued create: {args.key or '(auto-key)'} — {title}")
     if not args.no_nudge and cfg.nudge_on_human_input:
         _nudge(cfg)
@@ -598,6 +610,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ticket title; omit for guided interactive flow")
     sp.add_argument("--key"); sp.add_argument("--tier", type=int, default=1)
     sp.add_argument("--priority", type=int, default=3); sp.add_argument("--intent")
+    sp.add_argument("--kind", default=None, help="ticket kind (e.g. research, implementation)")
+    sp.add_argument("--model", default=None, help="model override for this ticket's reconciler")
+    sp.add_argument("--effort", default=None, help="effort override (low/medium/high/xhigh/max)")
+    sp.add_argument("--notes", default=None, help="text for the ## Notes section")
+    sp.add_argument("--depends-on", dest="depends_on", nargs="+", default=None,
+                    metavar="KEY", help="ticket keys this ticket depends on")
     sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
                     help="skip in-process dispatch nudge after queuing")
 

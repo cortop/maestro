@@ -50,7 +50,7 @@ def test_dispatch_sweep_then_tui_reflects_board(home, cfg):
     # and NEVER launched a real `claude` — DryRunSessions only records tuples.
     assert "T-9" in report.minted
     assert "T-1" in report.spawned
-    assert all(isinstance(s, tuple) and len(s) == 3 for s in sessions.spawned)
+    assert all(isinstance(s, tuple) and len(s) == 5 for s in sessions.spawned)
     assert {k for k, *_ in sessions.spawned} == set(report.spawned)
 
     # Now mount the REAL TUI over that same home and confirm it renders the board.

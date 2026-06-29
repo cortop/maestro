@@ -94,3 +94,75 @@ def test_popen_receives_devnull_when_capture_disabled(home):
         sess.spawn("T-1", "p", cwd=home)
     assert captured_kwargs.get("stdout") is subprocess.DEVNULL
     assert captured_kwargs.get("stderr") is subprocess.DEVNULL
+
+
+# --- RT-1: per-ticket model & effort overrides ---
+
+def _capture_cmd(home, key="T-1", model=None, effort=None, clock_val=1_000_000.0):
+    """Spawn and capture the exact command list passed to Popen."""
+    sess = ClaudeCliSessions(
+        home=home, capture_session_logs=False, clock=lambda: clock_val
+    )
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    captured_cmd = []
+    def capture_popen(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return fake_proc
+    with patch("subprocess.Popen", side_effect=capture_popen):
+        sess.spawn(key, "prompt", cwd=home, model=model, effort=effort)
+    return captured_cmd
+
+
+def test_spawn_uses_instance_model_by_default(home):
+    sess = ClaudeCliSessions(home=home, model="haiku", capture_session_logs=False)
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    captured_cmd = []
+    def capture_popen(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return fake_proc
+    with patch("subprocess.Popen", side_effect=capture_popen):
+        sess.spawn("T-1", "p", cwd=home)
+    idx = captured_cmd.index("--model")
+    assert captured_cmd[idx + 1] == "haiku"
+
+
+def test_spawn_model_override_replaces_instance_model(home):
+    cmd = _capture_cmd(home, model="opus")
+    idx = cmd.index("--model")
+    assert cmd[idx + 1] == "opus"
+
+
+def test_spawn_no_effort_flag_when_effort_is_none(home):
+    cmd = _capture_cmd(home, effort=None)
+    assert "--effort" not in cmd
+
+
+def test_spawn_effort_flag_appended_before_permission_mode(home):
+    cmd = _capture_cmd(home, effort="high")
+    assert "--effort" in cmd
+    effort_pos = cmd.index("--effort")
+    assert cmd[effort_pos + 1] == "high"
+    # effort must come before --permission-mode (which follows model+effort)
+    assert "--permission-mode" not in cmd or effort_pos < cmd.index("--permission-mode")
+
+
+def test_dryrun_records_model_and_effort():
+    from maestro.sessions import DryRunSessions
+    from pathlib import Path
+    s = DryRunSessions()
+    s.spawn("T-1", "prompt", Path("/tmp"), model="opus", effort="high")
+    key, prompt, cwd, model, effort = s.spawned[0]
+    assert key == "T-1"
+    assert model == "opus"
+    assert effort == "high"
+
+
+def test_dryrun_records_none_when_not_provided():
+    from maestro.sessions import DryRunSessions
+    from pathlib import Path
+    s = DryRunSessions()
+    s.spawn("T-1", "prompt", Path("/tmp"))
+    assert s.spawned[0][3] is None  # model
+    assert s.spawned[0][4] is None  # effort
