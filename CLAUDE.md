@@ -66,9 +66,26 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
 ## Conventions
 
 - Each module starts with a one-line docstring stating its single responsibility — preserve that.
+- **QA proves the feature with the real app — every change, not just tests that pass.** A change
+  isn't done until a test exercises the actual surface a human or agent touches and demonstrates
+  the expected behavior end-to-end: invoke the real CLI (`cli.main([...])` or the `maestro` verb)
+  over a temp `MAESTRO_HOME` and assert the resulting events / snapshot / projection / exit code;
+  for a flow, run a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`); for the TUI,
+  mount the real app (next bullet). Mock ONLY the genuinely external boundary — the `claude -p`
+  spawn (`DryRunSessions`), network, `launchctl` — never the component under test. `make reconcile
+  KEY=…` and `make dry` run the real thing in the foreground when you want to watch a step.
 - Correctness invariants (idempotency, fencing, crash safety, single-writer) are all tested in
   `tests/`. If you touch the log, dispatcher, claims, or fold, add/adjust a test proving the
   invariant still holds.
+- **The TUI instance of that rule: mount the real app.** If you touch `tui.py`, `tui_detail.py`,
+  or `tui_events.py`, prove it by mounting `MaestroTUI` through Textual: add/extend
+  `tests/test_tui_runtime.py` with `async with app.run_test() as pilot:`, drive real keys
+  (`await pilot.press(...)`), and assert `app._exception is None`. Mocking `query_one` /
+  `push_screen` / `notify` does NOT count as QA — that is exactly what lets a forgotten widget id,
+  an `on_mount` exception, or a binding to a missing action ship uncaught. Any new binding, screen,
+  or modal must be covered by the binding sweep and `test_every_binding_action_resolves` (a missing
+  action is a silent no-op at runtime, so the static check is what catches it). `make test` must
+  stay green; the runtime tests need the `tui` extra, so install `.[dev,tui]`.
 - Reconciler behavior lives in the `/maestro-reconcile` skill (`.claude/commands/maestro-reconcile.md`,
   mirrored in `skills/`; tracked so every worktree inherits it). Agents drive state exclusively
   via `maestro` verbs.

@@ -8,7 +8,7 @@ from unittest import mock
 from maestro import event_log, inbox, snapshot as snap_mod, store
 from maestro.cli import main
 from maestro.projection import ticket_rows
-from maestro.statemachine import Phase
+from maestro.statemachine import Phase, ACTIVE_PHASES
 
 
 def test_tui_missing_package_exits_2(tmp_path, capsys):
@@ -156,6 +156,81 @@ def test_ticket_rows_phase_order(home):
     assert keys.index("B-1") < keys.index("A-1"), "implementing should sort before triaging"
 
 
+# --- TUI-8: filtered views / needs-you queue ---------------------------------
+
+_NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
+
+
+def _make_ticket_at_phase(home, key, title, phase):
+    """Create a ticket and set it to the given phase."""
+    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 1\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": title, "source": "test", "spec_hash": "x"}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase, "reason": ""}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def test_ticket_rows_filter_needs_you(home):
+    """needs-you filter returns only awaiting-human and degraded tickets."""
+    _make_ticket_at_phase(home, "A-1", "awaiting", "awaiting-human")
+    _make_ticket_at_phase(home, "A-2", "degraded", "degraded")
+    _make_ticket_at_phase(home, "A-3", "implementing", "implementing")
+    _make_ticket_at_phase(home, "A-4", "ready", "ready")
+
+    rows = ticket_rows(home, _NEEDS_YOU_PHASES)
+    keys = {r[0] for r in rows}
+    assert keys == {"A-1", "A-2"}
+
+
+def test_ticket_rows_filter_needs_you_matches_cmd_status(home):
+    """Needs-you TUI filter uses the same phase set that cmd_status uses for needs_you."""
+    cmd_status_phases = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}
+    tui_phases = {p.value for p in _NEEDS_YOU_PHASES}
+    assert cmd_status_phases == tui_phases, (
+        "TUI needs-you filter must match cmd_status needs_you phase set"
+    )
+
+    _make_ticket_at_phase(home, "A-1", "awaiting", "awaiting-human")
+    _make_ticket_at_phase(home, "A-2", "implementing", "implementing")
+
+    rows = ticket_rows(home, _NEEDS_YOU_PHASES)
+    assert len(rows) == 1
+    assert rows[0][0] == "A-1"
+
+
+def test_ticket_rows_filter_active(home):
+    """active filter excludes sleeping (awaiting-human, awaiting-ci) and done tickets."""
+    _make_ticket_at_phase(home, "A-1", "implementing", "implementing")
+    _make_ticket_at_phase(home, "A-2", "awaiting-human", "awaiting-human")
+    _make_ticket_at_phase(home, "A-3", "awaiting-ci", "awaiting-ci")
+    _make_ticket_at_phase(home, "A-4", "done", "done")
+
+    rows = ticket_rows(home, ACTIVE_PHASES)
+    keys = {r[0] for r in rows}
+    assert "A-1" in keys
+    assert "A-2" not in keys
+    assert "A-3" not in keys
+    assert "A-4" not in keys
+
+
+def test_ticket_rows_filter_none_returns_all(home):
+    """ticket_rows with phases=None returns all tickets regardless of phase."""
+    _make_ticket_at_phase(home, "A-1", "awaiting", "awaiting-human")
+    _make_ticket_at_phase(home, "A-2", "implementing", "implementing")
+    _make_ticket_at_phase(home, "A-3", "done", "done")
+
+    rows = ticket_rows(home)
+    assert len(rows) == 3
+
+
+def test_ticket_rows_filter_empty_phases(home):
+    """ticket_rows with an empty frozenset returns no rows."""
+    _make_ticket_at_phase(home, "A-1", "implementing", "implementing")
+
+    rows = ticket_rows(home, frozenset())
+    assert rows == []
+
+
 # --- detail pane rendering ---------------------------------------------------
 
 from maestro.tui_detail import render as _render_detail  # noqa: E402
@@ -290,7 +365,7 @@ def test_render_detail_escapes_brackets_in_dynamic_fields():
 
 # --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
 
-from maestro.tui import MaestroTUI, _AnswerModal, _CmdModal, _CreateModal  # noqa: E402
+from maestro.tui import MaestroTUI, _AnswerModal, _CmdModal, _CreateModal, _FILTERS  # noqa: E402
 
 
 def _make_ticket_with_questions(home, key, questions: dict):
@@ -397,6 +472,38 @@ def test_answer_cancel_mid_walk_stops_at_that_question(home):
     pending = inbox.pending(home, "T-1")
     assert len(pending) == 1
     assert pending[0]["args"]["qid"] == "q1"
+
+
+def test_tui_default_filter_is_needs_you():
+    """MaestroTUI starts with filter index 0 which is 'needs-you'."""
+    app = MaestroTUI(home="/tmp")
+    assert app._filter_idx == 0
+    name, phases = _FILTERS[0]
+    assert name == "needs-you"
+
+
+def test_tui_cycle_filter_advances_and_wraps():
+    """action_cycle_filter increments the index and wraps back to 0."""
+    app = MaestroTUI(home="/tmp")
+    app._populate = mock.Mock()
+
+    assert app._filter_idx == 0
+    app.action_cycle_filter()
+    assert app._filter_idx == 1
+    app.action_cycle_filter()
+    assert app._filter_idx == 2
+    app.action_cycle_filter()
+    assert app._filter_idx == 0  # wraps around
+
+
+def test_tui_cycle_filter_calls_populate():
+    """action_cycle_filter always triggers a repopulate."""
+    app = MaestroTUI(home="/tmp")
+    populate_mock = mock.Mock()
+    app._populate = populate_mock
+
+    app.action_cycle_filter()
+    populate_mock.assert_called_once()
 
 
 def test_answer_modal_receives_home(home):
@@ -688,11 +795,12 @@ def test_fleet_screen_constructs(home):
 
 
 def test_maestro_tui_has_fleet_binding(home):
-    """MaestroTUI exposes the 'f' → fleet_panel binding."""
+    """MaestroTUI binds 'F' -> fleet_panel (capital), and 'f' -> cycle_filter."""
     from maestro.tui import MaestroTUI
     app = MaestroTUI(home=str(home))
-    keys = [b[0] for b in app.BINDINGS]
-    assert "f" in keys
+    actions = {b[0]: b[1] for b in app.BINDINGS}
+    assert actions.get("F") == "fleet_panel"
+    assert actions.get("f") == "cycle_filter"
 
 
 def test_fleet_screen_load_status_returns_status_and_doctor(home):
@@ -773,7 +881,7 @@ def test_fleet_screen_not_stale_with_recent_heartbeat(home):
 
 # --- event timeline rendering -------------------------------------------------
 
-from maestro.tui_events import render_event, render_log  # noqa: E402
+from maestro.tui_events import render_event, render_log, render_log_line  # noqa: E402
 from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
 
 
@@ -895,10 +1003,17 @@ class _FakeDataTable:
         self.cursor_row = max(0, min(row, len(self._rows) - 1))
         self._cursor_key = self._rows[self.cursor_row] if self._rows else None
 
+    def update(self, *args, **kwargs):
+        # Stand-in for the Static filter-bar widget that _populate also updates.
+        pass
+
 
 def _make_app_with_fake_table(home, table):
     app = MaestroTUI(home=str(home))
     app.query_one = mock.Mock(return_value=table)
+    # Use the "all" filter so freshly-created (triaging) tickets are visible;
+    # these tests exercise cursor preservation, not the needs-you filter.
+    app._filter_idx = _FILTERS.index(next(f for f in _FILTERS if f[0] == "all"))
     return app
 
 
@@ -1045,6 +1160,161 @@ def test_spec_screen_constructs(home):
     assert screen._key == "T-1"
 
 
+# --- IMPL_STEP timeline rendering --------------------------------------------
+
+def test_render_event_impl_step_shows_kind_badge():
+    """ImplStepRecorded events render a kind badge instead of the raw type name."""
+    ev = {
+        "seq": 5,
+        "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded",
+        "actor": "reconciler",
+        "payload": {"kind": "edit", "tool": "Edit", "summary": "maestro/tui.py"},
+    }
+    line = render_event(ev)
+    assert "edit" in line
+    assert "maestro/tui.py" in line
+    # The raw event type should not appear (replaced by kind badge)
+    assert "ImplStepRecorded" not in line
+
+
+def test_render_event_impl_step_command_badge():
+    """kind=command renders a 'cmd' badge."""
+    ev = {
+        "seq": 6, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "command", "tool": "Bash", "summary": "make test"},
+    }
+    line = render_event(ev)
+    assert "cmd" in line
+    assert "make test" in line
+
+
+def test_render_event_impl_step_subagent_badge():
+    """kind=subagent renders an 'agent' badge."""
+    ev = {
+        "seq": 7, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "subagent", "tool": "Agent", "summary": "Code review"},
+    }
+    line = render_event(ev)
+    assert "agent" in line
+    assert "Code review" in line
+
+
+def test_render_event_impl_step_unknown_kind_still_renders():
+    """An unrecognised kind still produces a line with the summary."""
+    ev = {
+        "seq": 8, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "future-kind", "tool": "X", "summary": "something"},
+    }
+    line = render_event(ev)
+    assert "something" in line
+
+
+def test_render_event_phase_changed_styled():
+    """PhaseChanged uses a milestone color (contains 'blue' for styling)."""
+    ev = {
+        "seq": 1, "ts": "2026-06-25T00:00:00+00:00",
+        "type": "PhaseChanged", "actor": "reconciler",
+        "payload": {"phase": "implementing", "reason": "worktree ready"},
+    }
+    line = render_event(ev)
+    assert "blue" in line
+    assert "PhaseChanged" in line
+
+
+def test_render_event_failed_styled_red():
+    """Failed events use red milestone color."""
+    ev = {
+        "seq": 9, "ts": "2026-06-25T00:00:00+00:00",
+        "type": "Failed", "actor": "reconciler",
+        "payload": {"error": "timeout"},
+    }
+    line = render_event(ev)
+    assert "red" in line
+    assert "Failed" in line
+
+
+# --- render_log_line (stream-json → Rich markup) -----------------------------
+
+def test_render_log_line_assistant_text():
+    """Text blocks in assistant messages are returned as escaped lines."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "text", "text": "Hello world"}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert lines == ["Hello world"]
+
+
+def test_render_log_line_assistant_tool_use():
+    """tool_use blocks render with tool name badge."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "Bash" in lines[0]
+    assert "ls" in lines[0]
+
+
+def test_render_log_line_result_success():
+    """Result success renders green with duration."""
+    obj = {"type": "result", "subtype": "success", "duration_ms": 1234}
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "green" in lines[0]
+    assert "1234ms" in lines[0]
+
+
+def test_render_log_line_result_error():
+    """Result error renders red."""
+    obj = {"type": "result", "subtype": "error_during_execution"}
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "red" in lines[0]
+
+
+def test_render_log_line_unknown_type_returns_empty():
+    """Unknown event types produce no lines (safe no-op)."""
+    obj = {"type": "system", "session_id": "abc123"}
+    lines = render_log_line(obj)
+    assert lines == []
+
+
+def test_render_log_line_escapes_brackets_in_text():
+    """Rich markup chars in text content are escaped so they don't break rendering."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "text", "text": "use [bold] or [dim]?"}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    # The literal '[' should be escaped
+    assert "\\[" in lines[0]
+
+
+# --- LogsScreen construction and action_view_logs ----------------------------
+
+from maestro.tui import LogsScreen  # noqa: E402
+
+
+def test_logs_screen_constructs(home):
+    """LogsScreen can be instantiated with home and key."""
+    screen = LogsScreen(home, "T-1")
+    assert screen._home == home
+    assert screen._key == "T-1"
+
+
 def test_spec_screen_has_edit_binding():
     """SpecScreen exposes the 'e' → edit_spec binding."""
     screen = SpecScreen(Path("/tmp"), "T-1")
@@ -1140,3 +1410,33 @@ def test_render_pending_valid_markup_with_commands():
     """Non-empty pending list yields valid markup."""
     cmds = [{"ts": "2026-06-25T00:00:00", "command": "retry", "args": {}}]
     _assert_valid_markup(render_pending(cmds))
+
+
+def test_maestro_tui_has_logs_binding(home):
+    """MaestroTUI exposes the 'l' → view_logs binding."""
+    app = MaestroTUI(home=str(home))
+    keys = [b[0] for b in app.BINDINGS]
+    assert "l" in keys
+
+
+def test_action_view_logs_pushes_logs_screen(home):
+    """action_view_logs pushes a LogsScreen for the selected ticket."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_view_logs()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, LogsScreen)
+    assert screen._key == "T-1"
+
+
+def test_action_view_logs_no_selection_does_nothing(home):
+    """action_view_logs with no selected ticket pushes nothing."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+
+    app.action_view_logs()
+
+    assert not push_calls

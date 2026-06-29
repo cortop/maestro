@@ -53,7 +53,9 @@ Read the spec + (if configured) the tracker. Classify the approval tier from `sp
 
 ### `awaiting-human`
 You only run here because an answer arrived (you already folded it in Step 0).
-Read the answer. Apply it, then advance and ack:
+Read the answered `QuestionAnswered` event(s) and inspect the `qid`:
+- **`qid` starts with `conflict-`** → the human resolved (or acknowledged) a merge conflict.
+  Go back to CI polling: `maestro set-phase "$KEY" awaiting-ci --requeue 60`
 - approved → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
 - rejected/discard → `maestro cmd`-driven discard → `maestro set-phase "$KEY" terminating`
 - modified scope → update your plan, then `set-phase ready`
@@ -70,7 +72,13 @@ maestro set-phase "$KEY" implementing --reason "worktree ready"
 ### `implementing`
 Run the decoupled Implementer↔QA loop (reuse your existing `orch-implement` logic) using
 the `Agent` tool — Implementer (Sonnet) writes code/tests/PR, QA (Opus) verifies ACs
-against real proof. Record each hand-off:
+against real proof. **"Real proof" = the feature demonstrated against the real app, not mocks
+of the component under test:** drive the real `maestro` CLI / a real dispatcher sweep
+(`DryRunSessions`) over a temp home and assert observable state. For TUI changes (`tui*.py`)
+that means mounting `MaestroTUI` via `async with app.run_test() as pilot:` in
+`tests/test_tui_runtime.py` (drive keys, assert `app._exception is None`, extend the binding
+sweep). Mocking the runtime/CLI under test does not count, and QA must reject it. Install
+`.[dev,tui]` so those tests run rather than skip. Record each hand-off:
 `maestro append "$KEY" --type ImplTurnRecorded --payload '{"turn":N,"role":"qa"}' --step-id qa-$KEY-N`
 On the first PR push:
 `maestro append "$KEY" --type PrOpened --payload '{"number":N,"url":"…","draft":true}' --step-id pr-$KEY`
@@ -80,7 +88,17 @@ If the loop exceeds `max_impl_turns` or stops converging: `maestro fail "$KEY" "
 (auto-backs-off, or dead-letters after the threshold).
 
 ### `awaiting-ci`
-You woke on the requeue timer. Check CI once:
+You woke on the requeue timer. **First** check for merge conflicts (idempotent):
+```bash
+PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pr_number') or '')")
+if [ -n "$PR_NUM" ]; then
+  MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
+  maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
+  # If conflicting, the above transitions to awaiting-human; exit so dispatch re-picks after human fixes.
+  [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
+fi
+```
+Then check CI once:
 ```bash
 maestro append "$KEY" --type CiObserved --payload '{"state":"passing|failing|pending"}' --step-id ci-$KEY-<run>
 ```
@@ -89,6 +107,15 @@ maestro append "$KEY" --type CiObserved --payload '{"state":"passing|failing|pen
 - pending → `maestro requeue "$KEY" 300` and exit
 
 ### `in-review`
+**First** check for merge conflicts (a merged PR won't be conflicting, but guard anyway):
+```bash
+PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pr_number') or '')")
+if [ -n "$PR_NUM" ]; then
+  MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
+  maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
+  [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
+fi
+```
 If the PR merged: run finalizers (transition tracker to Done for your own/unassigned
 ticket only, clean the worktree), then `maestro finalize "$KEY"`. Else sleep:
 `maestro requeue "$KEY" 900`.
