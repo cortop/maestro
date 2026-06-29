@@ -72,7 +72,13 @@ maestro set-phase "$KEY" implementing --reason "worktree ready"
 ### `implementing`
 Run the decoupled Implementer↔QA loop (reuse your existing `orch-implement` logic) using
 the `Agent` tool — Implementer (Sonnet) writes code/tests/PR, QA (Opus) verifies ACs
-against real proof. Record each hand-off:
+against real proof. **"Real proof" = the feature demonstrated against the real app, not mocks
+of the component under test:** drive the real `maestro` CLI / a real dispatcher sweep
+(`DryRunSessions`) over a temp home and assert observable state. For TUI changes (`tui*.py`)
+that means mounting `MaestroTUI` via `async with app.run_test() as pilot:` in
+`tests/test_tui_runtime.py` (drive keys, assert `app._exception is None`, extend the binding
+sweep). Mocking the runtime/CLI under test does not count, and QA must reject it. Install
+`.[dev,tui]` so those tests run rather than skip. Record each hand-off:
 `maestro append "$KEY" --type ImplTurnRecorded --payload '{"turn":N,"role":"qa"}' --step-id qa-$KEY-N`
 On the first PR push:
 `maestro append "$KEY" --type PrOpened --payload '{"number":N,"url":"…","draft":true}' --step-id pr-$KEY`

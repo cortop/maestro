@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (with dev + tui extras)
+        # The [tui] extra (textual) is needed so the TUI runtime tests run for
+        # real instead of skipping; [dev] brings pytest.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,tui]"
+
+      - name: Run tests
+        # Textual runs headless; no TERM / tty required.
+        run: python -m pytest -q
