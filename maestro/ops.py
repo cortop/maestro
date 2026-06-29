@@ -51,6 +51,18 @@ def ask(cfg: Config, key: str, text: str, *, qid: str | None = None, actor: str 
     return qid
 
 
+def ask_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:
+    """Ask the human to resolve a PR merge conflict (idempotent — skips if already open)."""
+    snap = snap_mod.load(cfg.home, key)
+    qid = f"conflict-{key}-{pr_number}"
+    if qid in snap.open_questions:
+        return False
+    text = (f"PR #{pr_number} has a merge conflict with the base branch. "
+            f"Please rebase, resolve the conflicts, and push again.")
+    ask(cfg, key, text, qid=qid, actor=actor)
+    return True
+
+
 def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | None:
     h = spec_hash_on_disk(cfg.home, key)
     if h is None:
