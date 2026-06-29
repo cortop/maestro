@@ -70,6 +70,7 @@ _FILTERS: list[tuple[str, frozenset | None]] = [
 # Phase → Rich style string for row coloring
 _PHASE_STYLE: dict[str, str] = {
     Phase.IMPLEMENTING.value:   "green",
+    Phase.RESEARCHING.value:    "magenta",
     Phase.AWAITING_CI.value:    "cyan",
     Phase.IN_REVIEW.value:      "cyan",
     Phase.AWAITING_HUMAN.value: "yellow bold",
@@ -356,6 +357,12 @@ class _CreateModal(ModalScreen):
             yield Label("Prefix [bold red]*[/bold red]")
             yield Select(options=options, id="create-prefix", allow_blank=False)
             yield Input(placeholder="new prefix, e.g. FEAT", id="create-prefix-new")
+            yield Label("Kind")
+            yield Select(options=[("implementation", "implementation"), ("research", "research")], id="create-kind", allow_blank=False, value="implementation")
+            yield Label("Model")
+            yield Input(placeholder="e.g. opus, sonnet (empty = config default)", id="create-model")
+            yield Label("Effort")
+            yield Input(placeholder="e.g. high, medium, low (empty = config default)", id="create-effort")
             yield Label("Tier")
             yield Input(value="1", id="create-tier")
             yield Label("Priority")
@@ -376,6 +383,15 @@ class _CreateModal(ModalScreen):
             new_inp.display = is_new
             if is_new:
                 new_inp.focus()
+        elif event.select.id == "create-kind":
+            model_inp = self.query_one("#create-model", Input)
+            effort_inp = self.query_one("#create-effort", Input)
+            if event.value == "research":
+                model_inp.value = "opus"
+                effort_inp.value = "high"
+            else:
+                model_inp.value = ""
+                effort_inp.value = ""
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         visible = [w for w in self.query(Input) if w.display]
@@ -421,12 +437,19 @@ class _CreateModal(ModalScreen):
         except ValueError:
             self.notify("Tier and priority must be integers", severity="warning")
             return
+        kind_sel = self.query_one("#create-kind", Select)
+        kind_val = str(kind_sel.value) if kind_sel.value is not Select.BLANK else "implementation"
+        model_val = self.query_one("#create-model", Input).value.strip() or None
+        effort_val = self.query_one("#create-effort", Input).value.strip() or None
         self.dismiss({
             "title": title,
             "prefix": prefix,
             "tier": tier,
             "priority": priority,
             "intent": intent_val,
+            "kind": kind_val,
+            "model": model_val,
+            "effort": effort_val,
         })
 
 
@@ -720,6 +743,40 @@ class SpecScreen(Screen):
         self._refresh()
 
 
+class ProposalScreen(Screen):
+    """Read-only viewer for a ticket's proposal.md."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("r", "refresh_proposal", "Refresh"),
+    ]
+
+    CSS = "ProposalScreen #proposal-body { height: 1fr; }"
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll(id="proposal-body"):
+            yield Markdown("", id="proposal-md")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Proposal: {self._key}"
+        self._refresh()
+
+    def action_refresh_proposal(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        path = self._home / "tickets" / self._key / "proposal.md"
+        text = path.read_text() if path.exists() else "(no proposal.md)"
+        self.query_one("#proposal-md", Markdown).update(text)
+
+
 class DetailScreen(Screen):
     """Full-screen right panel: ticket detail summary + event log."""
 
@@ -727,6 +784,7 @@ class DetailScreen(Screen):
         ("escape", "app.pop_screen", "Back"),
         ("t", "toggle_tail", "Tail/Full"),
         ("r", "refresh", "Refresh"),
+        ("p", "view_proposal", "Proposal"),
     ]
 
     CSS = """
@@ -757,6 +815,13 @@ class DetailScreen(Screen):
 
     def action_refresh(self) -> None:
         self._refresh()
+
+    def action_view_proposal(self) -> None:
+        path = self._home / "tickets" / self._key / "proposal.md"
+        if not path.exists():
+            self.notify("No proposal.md for this ticket", severity="warning")
+            return
+        self.app.push_screen(ProposalScreen(self._home, self._key))
 
     def _refresh(self) -> None:
         snap = snap_mod.load(self._home, self._key)
@@ -986,15 +1051,22 @@ class MaestroTUI(App):
         def _on_dismiss(result: dict | None) -> None:
             if result is None:
                 return
+            create_args: dict = {
+                "approval_tier": result["tier"],
+                "priority": result["priority"],
+                "intent": result.get("intent"),
+            }
+            if result.get("kind"):
+                create_args["kind"] = result["kind"]
+            if result.get("model"):
+                create_args["model"] = result["model"]
+            if result.get("effort"):
+                create_args["effort"] = result["effort"]
             inbox.append_new(
                 self._home,
                 result["title"],
                 key=None,
-                args={
-                    "approval_tier": result["tier"],
-                    "priority": result["priority"],
-                    "intent": result.get("intent"),
-                },
+                args=create_args,
                 prefix=result.get("prefix"),
             )
             self.notify("queued; dispatcher will mint the key")
