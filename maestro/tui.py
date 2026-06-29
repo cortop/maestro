@@ -430,6 +430,45 @@ class _CreateModal(ModalScreen):
         })
 
 
+class _InboxModal(ModalScreen):
+    """Free-form inbox message compose modal; dismisses with the message string or None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    _InboxModal {
+        align: center middle;
+    }
+    #inbox-dialog {
+        width: 70%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    """
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="inbox-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] — send to inbox")
+            yield Label("[dim]Message will be queued for the next reconciler sweep.[/dim]")
+            yield Input(placeholder="Message (Enter to send, Esc to cancel)", id="inbox-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#inbox-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if text:
+            self.dismiss(text)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _ConfirmModal(ModalScreen):
     """Simple yes/no confirmation modal; dismisses with True on confirm, False on cancel."""
 
@@ -807,6 +846,7 @@ class MaestroTUI(App):
         ("z", "release", "Release"),
         ("p", "project_rebuild", "Project"),
         ("l", "view_logs", "Logs"),
+        ("i", "inbox_message", "Inbox"),
     ]
 
     _selected_key: str | None = None
@@ -1038,6 +1078,20 @@ class MaestroTUI(App):
     def action_view_events(self) -> None:
         if self._selected_key:
             self.push_screen(EventsScreen(self._home, self._selected_key))
+
+    def action_inbox_message(self) -> None:
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+
+        def _on_dismiss(text: str | None) -> None:
+            if text is None:
+                return
+            inbox.append_command(self._home, key, "msg", {"text": text})
+            self.notify(f"Message queued for {key}")
+
+        self.push_screen(_InboxModal(key), _on_dismiss)
 
     def action_view_logs(self) -> None:
         if self._selected_key:
