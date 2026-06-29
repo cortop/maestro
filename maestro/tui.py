@@ -14,7 +14,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, St
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
-from . import claims, event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
+from . import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
 from .sessions import list_sessions
 from .statemachine import Phase, ACTIVE_PHASES
 from .tui_detail import render as _render_detail
@@ -501,6 +501,51 @@ class FleetScreen(Screen):
         self.query_one("#fleet-log", Static).update("\n".join(self._log_lines))
 
 
+def _render_env(cfg: config_mod.Config) -> str:
+    toml_path = config_mod.config_path(cfg.home)
+    toml_exists = "[dim](exists)[/dim]" if toml_path.exists() else "[dim](not found)[/dim]"
+    providers = cfg.providers
+    lines = [
+        "[bold]Config / Environment[/bold]",
+        "",
+        f"  home:               {cfg.home}",
+        f"  config.toml:        {toml_path}  {toml_exists}",
+        f"  repo_path:          {cfg.repo_path or '—'}",
+        f"  branch_prefix:      {cfg.branch_prefix}",
+        f"  reconcile_command:  {cfg.reconcile_command}",
+        f"  max_concurrency:    {cfg.max_concurrency}",
+        f"  max_impl_turns:     {cfg.max_impl_turns}",
+        "",
+        "[bold]Providers[/bold]",
+        "",
+    ]
+    for k, v in providers.items():
+        lines.append(f"  {k + ':':20} {v}")
+    return "\n".join(lines)
+
+
+class EnvScreen(Screen):
+    """Read-only panel showing resolved config — same values as `maestro env`."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back")]
+
+    CSS = "EnvScreen #env-panel { padding: 1 2; height: 1fr; }"
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("[dim]Loading…[/dim]", id="env-panel")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Env"
+        cfg = config_mod.load(str(self._home))
+        self.query_one("#env-panel", Static).update(_render_env(cfg))
+
+
 class MaestroTUI(App):
     CSS = """
     Screen { layers: base topbar; }
@@ -525,6 +570,7 @@ class MaestroTUI(App):
         ("ctrl+d", "discard", "Discard"),
         ("f", "cycle_filter", "Filter"),
         ("F", "fleet_panel", "Fleet"),
+        ("e", "env_panel", "Env"),
         ("n", "create", "New"),
         ("t", "toggle_tail", "Tail/Full"),
         ("enter", "view_events", "Events"),
@@ -624,6 +670,9 @@ class MaestroTUI(App):
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_env_panel(self) -> None:
+        self.push_screen(EnvScreen(self._home))
 
     def action_create(self) -> None:
         def _on_dismiss(result: dict | None) -> None:

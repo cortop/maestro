@@ -1146,6 +1146,102 @@ def test_create_shows_queued_toast(home):
     assert "queued" in msg
 
 
+# --- TUI-11: env / config viewer panel ----------------------------------------
+
+from maestro.tui import EnvScreen, _render_env  # noqa: E402
+from maestro.config import Config  # noqa: E402
+
+
+def _make_cfg(home, repo_path="/repo", branch_prefix="m/", reconcile_command="/rec",
+               max_concurrency=8, max_impl_turns=15,
+               providers=None):
+    cfg = Config(home=home)
+    cfg.repo_path = repo_path
+    cfg.branch_prefix = branch_prefix
+    cfg.reconcile_command = reconcile_command
+    cfg.max_concurrency = max_concurrency
+    cfg.max_impl_turns = max_impl_turns
+    if providers is not None:
+        cfg.providers = providers
+    return cfg
+
+
+def test_render_env_shows_all_maestro_env_fields(home):
+    """_render_env shows home, repo_path, branch_prefix, reconcile_command, max_concurrency, max_impl_turns, providers."""
+    cfg = _make_cfg(home, providers={"tracker": "jira_cli", "vcs": "github_cli"})
+    out = _render_env(cfg)
+    assert str(home) in out
+    assert "/repo" in out
+    assert "m/" in out
+    assert "/rec" in out
+    assert "8" in out
+    assert "15" in out
+    assert "jira_cli" in out
+    assert "github_cli" in out
+
+
+def test_render_env_shows_config_toml_path(home):
+    """_render_env includes the config.toml path."""
+    cfg = _make_cfg(home)
+    out = _render_env(cfg)
+    assert "config.toml" in out
+
+
+def test_render_env_marks_missing_config_toml(home):
+    """_render_env marks config.toml as not found when it doesn't exist."""
+    cfg = _make_cfg(home)
+    out = _render_env(cfg)
+    assert "not found" in out
+
+
+def test_render_env_marks_existing_config_toml(home):
+    """_render_env marks config.toml as exists when the file is present."""
+    cfg = _make_cfg(home)
+    (home / "config.toml").write_text("[maestro]\n")
+    out = _render_env(cfg)
+    assert "exists" in out
+    assert "not found" not in out
+
+
+def test_render_env_missing_repo_path_shows_emdash(home):
+    """_render_env shows — when repo_path is None."""
+    cfg = _make_cfg(home, repo_path=None)
+    out = _render_env(cfg)
+    assert "—" in out
+
+
+def test_render_env_matches_maestro_env_fields(tmp_path):
+    """_render_env includes exactly the fields that `maestro env` outputs."""
+    cfg = Config(home=tmp_path)
+    cfg.repo_path = "/some/repo"
+    out = _render_env(cfg)
+    for field in ("home", "repo_path", "branch_prefix", "reconcile_command",
+                   "max_concurrency", "max_impl_turns"):
+        assert field in out, f"Expected field '{field}' in env panel output"
+
+
+def test_env_screen_constructs(home):
+    """EnvScreen can be instantiated without crashing."""
+    screen = EnvScreen(home)
+    assert screen._home == home
+
+
+def test_maestro_tui_has_env_binding():
+    """MaestroTUI exposes the 'e' → env_panel binding."""
+    app = MaestroTUI(home="/tmp")
+    keys = [b[0] for b in app.BINDINGS]
+    assert "e" in keys
+
+
+def test_action_env_panel_pushes_env_screen(home):
+    """action_env_panel pushes an EnvScreen onto the screen stack."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_env_panel()
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, EnvScreen)
+
+
 # --- IMPL_STEP timeline rendering --------------------------------------------
 
 def test_render_event_impl_step_shows_kind_badge():
