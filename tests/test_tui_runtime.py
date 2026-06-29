@@ -35,6 +35,7 @@ from rich.text import Text  # noqa: E402
 
 from maestro import store  # noqa: E402
 from maestro.tui import (  # noqa: E402
+    DetailScreen,
     EventsScreen,
     FleetScreen,
     LogsScreen,
@@ -178,7 +179,7 @@ def test_quit_binding_exits_clean(seeded_home):
 # False, no exception) — the press-sweep above cannot see that, so guard it here.
 
 _BINDING_CLASSES = [
-    MaestroTUI, EventsScreen, LogsScreen, FleetScreen,
+    MaestroTUI, DetailScreen, EventsScreen, LogsScreen, FleetScreen,
     _AnswerModal, _CmdModal, _IntervalModal, _CreateModal,
 ]
 
@@ -396,6 +397,31 @@ def test_create_modal_new_prefix_reveals_input(seeded_home):
 
 def test_fleet_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, None, "fleet_panel", FleetScreen)
+
+
+def test_detail_screen_open_and_escape(seeded_home):
+    """Enter on a selected row opens DetailScreen (fullscreen right panel); Escape closes it."""
+    _run_modal_test(seeded_home, "T-3", "focus_detail", DetailScreen)
+
+
+def test_detail_screen_shows_detail_and_events(seeded_home):
+    """DetailScreen mounts, populates #ds-detail and #ds-events without error."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("focus_detail")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            screen = app.screen_stack[-1]
+            screen.query_one("#ds-detail", Static)  # widget must exist
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+        assert app._exception is None
+
+    asyncio.run(_inner())
 
 
 def test_events_screen_open_and_escape(seeded_home):

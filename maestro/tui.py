@@ -681,6 +681,54 @@ class SpecScreen(Screen):
         self._refresh()
 
 
+class DetailScreen(Screen):
+    """Full-screen right panel: ticket detail summary + event log."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("t", "toggle_tail", "Tail/Full"),
+        ("r", "refresh", "Refresh"),
+    ]
+
+    CSS = """
+    DetailScreen #ds-detail { height: auto; max-height: 14; padding: 0 1;
+                               border-bottom: solid $primary; }
+    DetailScreen #ds-events { height: 1fr; }
+    """
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+        self._tail_mode = True
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("", id="ds-detail", markup=True)
+        yield RichLog(id="ds-events", highlight=True, markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = self._key
+        self._refresh()
+
+    def action_toggle_tail(self) -> None:
+        self._tail_mode = not self._tail_mode
+        self._refresh()
+
+    def action_refresh(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        snap = snap_mod.load(self._home, self._key)
+        self.query_one("#ds-detail", Static).update(_render_detail(snap))
+        events = event_log.read(self._home, self._key)
+        log = self.query_one("#ds-events", RichLog)
+        log.clear()
+        for line in render_log(events, tail=self._tail_mode):
+            log.write(line)
+
+
 def _render_env(cfg: config_mod.Config) -> str:
     toml_path = config_mod.config_path(cfg.home)
     toml_exists = "[dim](exists)[/dim]" if toml_path.exists() else "[dim](not found)[/dim]"
@@ -754,7 +802,7 @@ class MaestroTUI(App):
         ("n", "create", "New"),
         ("s", "show_spec", "Spec"),
         ("t", "toggle_tail", "Tail/Full"),
-        ("enter", "view_events", "Events"),
+        ("enter", "focus_detail", "Detail"),
         ("x", "compact", "Compact"),
         ("z", "release", "Release"),
         ("p", "project_rebuild", "Project"),
@@ -976,6 +1024,10 @@ class MaestroTUI(App):
     def action_toggle_tail(self) -> None:
         self._tail_mode = not self._tail_mode
         self._refresh_events()
+
+    def action_focus_detail(self) -> None:
+        if self._selected_key:
+            self.push_screen(DetailScreen(self._home, self._selected_key))
 
     def action_view_events(self) -> None:
         if self._selected_key:
