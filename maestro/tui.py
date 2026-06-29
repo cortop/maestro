@@ -878,6 +878,14 @@ class MaestroTUI(App):
         detail.update(_render_detail(snap))
         self._refresh_events()
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # Enter on a focused DataTable emits RowSelected and consumes the key, so
+        # the app-level `enter` binding never fires — open the detail view here.
+        key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
+        if key is not None:
+            self._selected_key = key
+            self.push_screen(DetailScreen(self._home, key))
+
     def action_refresh(self) -> None:
         self._populate()
 
