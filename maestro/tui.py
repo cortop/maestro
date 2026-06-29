@@ -10,7 +10,7 @@ from textual.app import App, ComposeResult
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, RichLog, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
@@ -280,7 +280,10 @@ class _IntervalModal(ModalScreen):
 class _CreateModal(ModalScreen):
     """Multi-field form to queue a new ticket; dismisses with a result dict or None on cancel."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+enter", "submit", "Submit"),
+    ]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="create-dialog"):
@@ -294,8 +297,8 @@ class _CreateModal(ModalScreen):
             yield Label("Priority")
             yield Input(value="3", id="create-priority")
             yield Label("Intent")
-            yield Input(placeholder="optional", id="create-intent")
-            yield Label("[dim]Tab/Enter → next · Enter on last → submit · Esc → cancel[/dim]")
+            yield TextArea(id="create-intent")
+            yield Label("[dim]Tab/Enter → next · Ctrl+Enter → submit · Esc → cancel[/dim]")
 
     def on_mount(self) -> None:
         self.query_one("#create-title", Input).focus()
@@ -306,7 +309,10 @@ class _CreateModal(ModalScreen):
         if idx < len(inputs) - 1:
             inputs[idx + 1].focus()
         else:
-            self._submit()
+            self.query_one("#create-intent", TextArea).focus()
+
+    def action_submit(self) -> None:
+        self._submit()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -320,7 +326,7 @@ class _CreateModal(ModalScreen):
         key_val = self.query_one("#create-key", Input).value.strip() or None
         tier_str = self.query_one("#create-tier", Input).value.strip() or "1"
         priority_str = self.query_one("#create-priority", Input).value.strip() or "3"
-        intent_val = self.query_one("#create-intent", Input).value.strip() or None
+        intent_val = self.query_one("#create-intent", TextArea).text.strip() or None
         try:
             tier = int(tier_str)
             priority = int(priority_str)
