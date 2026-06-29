@@ -69,6 +69,10 @@ def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
         return DueResult(False, "terminal")
     if inbox_pending:
         return DueResult(True, "inbox")
+    # A reconciler that crashed between fold-inbox and set-phase leaves answered_questions
+    # populated but inbox already acked. Wake the ticket so it can finish the transition.
+    if phase == Phase.AWAITING_HUMAN and snap.answered_questions:
+        return DueResult(True, "answered-pending")
     if current_spec_hash is not None and current_spec_hash != snap.spec_hash:
         return DueResult(True, "spec-changed")
     if phase == Phase.READY and blocked_dep:

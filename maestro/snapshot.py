@@ -33,6 +33,10 @@ class Snapshot:
     last_error: str | None = None
     next_requeue_at: float | None = None
     open_questions: dict[str, str] = field(default_factory=dict)
+    # qid → answer text for questions answered since the last phase change.
+    # Survives crash-and-respawn so the reconciler can act on a folded answer
+    # even when observed_seq has already advanced past the QuestionAnswered event.
+    answered_questions: dict[str, str] = field(default_factory=dict)
     impl_turns: int = 0
     last_step: str | None = None
     updated_ts: str | None = None
@@ -78,10 +82,14 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.phase = Phase(p["phase"]).value
             s.failure_count = 0
             s.next_requeue_at = None
+            s.answered_questions = {}
         elif t == E.QUESTION_ASKED:
             s.open_questions[p.get("qid", str(seq))] = p.get("text", "")
         elif t == E.QUESTION_ANSWERED:
-            s.open_questions.pop(p.get("qid"), None)
+            qid = p.get("qid")
+            s.open_questions.pop(qid, None)
+            if qid:
+                s.answered_questions[qid] = p.get("answer", "")
         elif t == E.PR_OPENED:
             s.pr_number = p.get("number", s.pr_number)
             s.pr_url = p.get("url", s.pr_url)

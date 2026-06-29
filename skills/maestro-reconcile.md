@@ -53,12 +53,17 @@ Read the spec + (if configured) the tracker. Classify the approval tier from `sp
 
 ### `awaiting-human`
 You only run here because an answer arrived (you already folded it in Step 0).
-Read the answered `QuestionAnswered` event(s) and inspect the `qid`:
-- **`qid` starts with `conflict-`** → the human resolved (or acknowledged) a merge conflict.
+Read `answered_questions` from the snapshot — it persists across crashes, so it's reliable
+even if `observed_seq` has already advanced past the `QuestionAnswered` events:
+```bash
+SNAP=$(maestro snapshot "$KEY")
+```
+Inspect each qid in `answered_questions`:
+- **any qid starts with `conflict-`** → the human resolved (or acknowledged) a merge conflict.
   Go back to CI polling: `maestro set-phase "$KEY" awaiting-ci --requeue 60`
-- approved → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
-- rejected/discard → `maestro cmd`-driven discard → `maestro set-phase "$KEY" terminating`
-- modified scope → update your plan, then `set-phase ready`
+- **approval** (answer text is affirmative / qid is not conflict-) → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
+- **rejected/discard** → `maestro set-phase "$KEY" terminating`
+- **modified scope** → note it, then `set-phase ready`
 Finally: `maestro inbox-ack "$KEY"`  ← **last**, so a crash before this re-reads the answer.
 
 ### `ready`
