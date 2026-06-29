@@ -40,6 +40,7 @@ from maestro.tui import (  # noqa: E402
     FleetScreen,
     LogsScreen,
     MaestroTUI,
+    ProposalScreen,
     _AnswerModal,
     _CmdModal,
     _CreateModal,
@@ -180,7 +181,7 @@ def test_quit_binding_exits_clean(seeded_home):
 # False, no exception) — the press-sweep above cannot see that, so guard it here.
 
 _BINDING_CLASSES = [
-    MaestroTUI, DetailScreen, EventsScreen, LogsScreen, FleetScreen,
+    MaestroTUI, DetailScreen, EventsScreen, LogsScreen, FleetScreen, ProposalScreen,
     _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
 ]
 
@@ -622,5 +623,165 @@ def test_inbox_action_works_for_any_phase(seeded_home):
                 await pilot.pause()
                 assert len(app.screen_stack) == 1, f"row {r}: modal did not dismiss"
                 assert app._exception is None
+
+    asyncio.run(_inner())
+
+# --------------------------------------------------------------------------- #
+# (f) RT-4: kind/model/effort selectors, researching style, proposal viewer   #
+# --------------------------------------------------------------------------- #
+
+def test_researching_phase_in_phase_style():
+    """_PHASE_STYLE must contain 'researching' with a non-empty style."""
+    from maestro.tui import _PHASE_STYLE
+    assert "researching" in _PHASE_STYLE, "researching phase not in _PHASE_STYLE"
+    assert _PHASE_STYLE["researching"], "researching style must be non-empty"
+
+
+def test_researching_rows_render_without_crash(seeded_home):
+    """DataTable with a researching-phase ticket mounts and renders without error."""
+    from maestro import event_log, snapshot as snap_mod
+
+    event_log.append(seeded_home, "T-5", "PhaseChanged",
+                     {"phase": "researching", "reason": "test"}, actor="test")
+    snap_mod.rebuild(seeded_home, "T-5")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_create_modal_has_kind_model_effort_fields(seeded_home):
+    """_CreateModal exposes kind Select, model Input, and effort Input widgets."""
+    from textual.widgets import Select
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _CreateModal)
+            modal.query_one("#create-kind", Select)
+            modal.query_one("#create-model", Input)
+            modal.query_one("#create-effort", Input)
+            assert app._exception is None
+            await pilot.press("escape")
+
+    asyncio.run(_inner())
+
+
+def test_create_modal_research_kind_fills_defaults(seeded_home):
+    """Selecting research kind auto-fills model=opus and effort=high."""
+    from textual.widgets import Select
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            kind_sel = modal.query_one("#create-kind", Select)
+            model_inp = modal.query_one("#create-model", Input)
+            effort_inp = modal.query_one("#create-effort", Input)
+            modal.on_select_changed(Select.Changed(select=kind_sel, value="research"))
+            await pilot.pause()
+            assert model_inp.value == "opus", f"expected opus, got {model_inp.value!r}"
+            assert effort_inp.value == "high", f"expected high, got {effort_inp.value!r}"
+            assert app._exception is None
+            await pilot.press("escape")
+
+    asyncio.run(_inner())
+
+
+def test_create_modal_submits_kind_model_effort(seeded_home):
+    """Submit with kind=research writes kind/model/effort to the _new inbox."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            from textual.widgets import Select as TSelect
+            modal.query_one("#create-title", Input).value = "Research feature"
+            modal.query_one("#create-prefix", TSelect).value = "T"
+            kind_sel = modal.query_one("#create-kind", TSelect)
+            kind_sel.value = "research"
+            modal.on_select_changed(TSelect.Changed(select=kind_sel, value="research"))
+            await pilot.pause()
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1
+
+        import json
+        new_path = store.new_inbox_path(seeded_home)
+        entries = [json.loads(line) for line in new_path.read_text().splitlines() if line.strip()]
+        last = entries[-1]
+        assert last["title"] == "Research feature"
+        assert last.get("args", {}).get("kind") == "research"
+        assert last.get("args", {}).get("model") == "opus"
+        assert last.get("args", {}).get("effort") == "high"
+
+    asyncio.run(_inner())
+
+
+def test_proposal_screen_no_proposal_notifies(seeded_home):
+    """action_view_proposal on DetailScreen notifies when no proposal.md exists."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("focus_detail")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            screen = app.screen_stack[-1]
+            notifs_before = len(app._notifications)
+            await screen.run_action("view_proposal")
+            await pilot.pause()
+            assert len(app._notifications) > notifs_before, "expected a notification when no proposal.md"
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_screen_opens_with_proposal(seeded_home):
+    """action_view_proposal opens ProposalScreen when proposal.md exists."""
+    proposal_path = seeded_home / "tickets" / "T-3" / "proposal.md"
+    proposal_path.write_text("# Proposal\n\nThis is a test proposal.")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("focus_detail")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            screen = app.screen_stack[-1]
+            await screen.run_action("view_proposal")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ProposalScreen), (
+                f"expected ProposalScreen, got {type(app.screen_stack[-1]).__name__}"
+            )
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+        assert app._exception is None
 
     asyncio.run(_inner())

@@ -153,10 +153,17 @@ def mint_new_tickets(cfg: Config) -> list[str]:
         spec = store.spec_path(home, key)
         if not spec.exists():
             store.atomic_write(spec, _seed_spec(key, entry.get("title", key), entry.get("args", {})))
+        ticket_args = entry.get("args", {})
+        ticket_payload: dict = {
+            "title": entry.get("title", key),
+            "source": "inbox/_new",
+            "spec_hash": spec_hash_on_disk(home, key),
+        }
+        if ticket_args.get("kind"):
+            ticket_payload["kind"] = ticket_args["kind"]
         event_log.append(
             home, key, E.TICKET_CREATED,
-            {"title": entry.get("title", key), "source": "inbox/_new",
-             "spec_hash": spec_hash_on_disk(home, key)},
+            ticket_payload,
             actor="dispatcher",
             step_id=f"create-{key}",
         )
