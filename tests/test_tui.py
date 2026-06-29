@@ -794,11 +794,12 @@ def test_fleet_screen_constructs(home):
 
 
 def test_maestro_tui_has_fleet_binding(home):
-    """MaestroTUI exposes the 'f' → fleet_panel binding."""
+    """MaestroTUI binds 'F' -> fleet_panel (capital), and 'f' -> cycle_filter."""
     from maestro.tui import MaestroTUI
     app = MaestroTUI(home=str(home))
-    keys = [b[0] for b in app.BINDINGS]
-    assert "f" in keys
+    actions = {b[0]: b[1] for b in app.BINDINGS}
+    assert actions.get("F") == "fleet_panel"
+    assert actions.get("f") == "cycle_filter"
 
 
 def test_fleet_screen_load_status_returns_status_and_doctor(home):
