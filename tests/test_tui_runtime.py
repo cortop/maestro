@@ -31,6 +31,8 @@ pytest.importorskip("textual", reason="requires the [tui] extra (textual)")
 import textual.app as _txapp  # noqa: E402
 from textual.widgets import DataTable, Input, Select, Static  # noqa: E402
 
+from rich.text import Text  # noqa: E402
+
 from maestro import store  # noqa: E402
 from maestro.tui import (  # noqa: E402
     EventsScreen,
@@ -42,6 +44,7 @@ from maestro.tui import (  # noqa: E402
     _CreateModal,
     _FILTERS,
     _IntervalModal,
+    _styled_row,
 )
 
 
@@ -420,6 +423,85 @@ def test_interval_modal_inside_fleet_screen(seeded_home):
             await pilot.press("escape")
             await pilot.pause()
             assert isinstance(app.screen_stack[-1], FleetScreen)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# (d) TUI-13: phase styling and live notifications                             #
+# --------------------------------------------------------------------------- #
+
+def test_styled_row_returns_rich_text_for_attention_phases():
+    """_styled_row wraps cells in styled Text for awaiting-human and degraded."""
+    for phase in ("awaiting-human", "degraded"):
+        row = _styled_row("T-1", phase, "title", "—", "—", "1", "0")
+        assert all(isinstance(c, Text) for c in row), (
+            f"phase={phase!r}: expected all Text cells, got {[type(c).__name__ for c in row]}"
+        )
+    # Triaging / ready — no style wrapping, cells pass through as-is
+    plain = _styled_row("T-2", "triaging", "title", "—", "—", "1", "0")
+    assert not any(isinstance(c, Text) for c in plain), (
+        f"triaging: expected no Text wrapping, got {[type(c).__name__ for c in plain]}"
+    )
+
+
+def test_phase_styled_rows_render_without_crash(seeded_home):
+    """DataTable populated with styled Text cells mounts and renders without error."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one(DataTable)
+            assert table.row_count >= 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_no_notification_on_first_populate(seeded_home):
+    """First _populate() sets the baseline; tickets already in awaiting-human/degraded
+    do not fire notifications (would be noisy on startup)."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        # _prev_phases is None before the app is mounted
+        assert app._prev_phases is None
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()  # first _populate() runs via on_mount
+            # Baseline captured — no notification for pre-existing phases
+            assert isinstance(app._prev_phases, dict)
+            assert len(app._notifications) == 0, (
+                f"Expected no notifications on startup, got {list(app._notifications)}"
+            )
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_notification_fires_on_phase_transition(seeded_home):
+    """Second _populate() fires a warning notification when a ticket newly enters
+    awaiting-human or degraded (phase change detected vs prev snapshot)."""
+    from maestro import event_log as elog, snapshot as snap_mod
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()  # first populate; sets baseline
+            assert app._prev_phases is not None
+
+            # Simulate T-5 (was "ready") transitioning to "awaiting-human"
+            elog.append(seeded_home, "T-5", "PhaseChanged",
+                        {"phase": "awaiting-human", "reason": "test"}, actor="test")
+            snap_mod.rebuild(seeded_home, "T-5")
+
+            notifications_before = len(app._notifications)
+            app._populate()
+            await pilot.pause()
+            assert len(app._notifications) > notifications_before, (
+                "Expected a warning notification after T-5 entered awaiting-human"
+            )
             assert app._exception is None
 
     asyncio.run(_inner())
