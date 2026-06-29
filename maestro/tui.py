@@ -1,22 +1,25 @@
 """Interactive TUI for maestro — requires the `tui` extra (textual)."""
 from __future__ import annotations
 
+import json
 import subprocess
+import time
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
-from . import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
+from . import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
 from .config import Config
+from .sessions import list_sessions
 from .statemachine import Phase, ACTIVE_PHASES
-from .tui_detail import render as _render_detail
-from .tui_events import render_log
+from .tui_detail import render as _render_detail, render_pending as _render_pending
+from .tui_events import render_log, render_log_line
 
 
 class EventsScreen(Screen):
@@ -61,6 +64,79 @@ _FILTERS: list[tuple[str, frozenset | None]] = [
     ("active", ACTIVE_PHASES),
     ("all", None),
 ]
+
+
+class LogsScreen(Screen):
+    """Screen that tails the live session log for one ticket."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back")]
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+        self._stop = False
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield RichLog(id="logs-view", highlight=False, markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Logs: {self._key}"
+        self.run_worker(self._tail, thread=True, name="tail-logs")
+
+    def on_unmount(self) -> None:
+        self._stop = True
+
+    def _tail(self) -> None:
+        log_widget = self.query_one("#logs-view", RichLog)
+
+        claim = claims.read_claim(self._home, self._key)
+        live_pid = claim.get("pid") if claim else None
+        log_path_str = claim.get("log_path") if claim else None
+
+        if log_path_str:
+            log_path = Path(log_path_str)
+        else:
+            sessions_list = list_sessions(self._home, self._key)
+            if not sessions_list:
+                self.app.call_from_thread(log_widget.write, "(no session logs found)")
+                return
+            log_path = Path(sessions_list[0]["path"])
+
+        if not log_path.exists():
+            self.app.call_from_thread(log_widget.write, f"(log not found: {log_path.name})")
+            return
+
+        is_stream = log_path.name.endswith(".stream.jsonl")
+
+        with log_path.open(encoding="utf-8", errors="replace") as f:
+            buf = ""
+            while not self._stop:
+                chunk = f.read(4096)
+                if chunk:
+                    buf += chunk
+                    if is_stream:
+                        while "\n" in buf:
+                            line, buf = buf.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            for rendered in render_log_line(obj):
+                                self.app.call_from_thread(log_widget.write, rendered)
+                    else:
+                        self.app.call_from_thread(log_widget.write, chunk)
+                else:
+                    if live_pid and not claims.pid_alive(live_pid):
+                        break
+                    if not live_pid:
+                        break
+                    time.sleep(0.25)
 
 
 class _AnswerModal(ModalScreen):
@@ -458,6 +534,104 @@ class FleetScreen(Screen):
         self.query_one("#fleet-log", Static).update("\n".join(self._log_lines))
 
 
+class SpecScreen(Screen):
+    """Full-screen spec viewer + pending inbox for one ticket."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("e", "edit_spec", "Edit"),
+        ("r", "refresh_spec", "Refresh"),
+    ]
+
+    CSS = """
+    SpecScreen #spec-body   { height: 1fr; }
+    SpecScreen #spec-pending { height: auto; max-height: 8;
+                               border-top: solid $primary; padding: 0 1; }
+    """
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll(id="spec-body"):
+            yield Markdown("", id="spec-md")
+        yield Static("", id="spec-pending", markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Spec: {self._key}"
+        self._refresh()
+
+    def _refresh(self) -> None:
+        spec_path = self._home / "tickets" / self._key / "spec.md"
+        spec_text = spec_path.read_text() if spec_path.exists() else "(no spec)"
+        pending_cmds = inbox.pending(self._home, self._key)
+        self.query_one("#spec-md", Markdown).update(spec_text)
+        pending_markup = _render_pending(pending_cmds)
+        self.query_one("#spec-pending", Static).update(
+            f"[bold]Pending inbox[/bold]  {pending_markup}"
+        )
+
+    def action_edit_spec(self) -> None:
+        import os
+        spec_path = self._home / "tickets" / self._key / "spec.md"
+        editor = os.environ.get("EDITOR", "vi")
+        with self.app.suspend():
+            subprocess.run([editor, str(spec_path)])
+        self._refresh()
+
+    def action_refresh_spec(self) -> None:
+        self._refresh()
+
+
+def _render_env(cfg: config_mod.Config) -> str:
+    toml_path = config_mod.config_path(cfg.home)
+    toml_exists = "[dim](exists)[/dim]" if toml_path.exists() else "[dim](not found)[/dim]"
+    providers = cfg.providers
+    lines = [
+        "[bold]Config / Environment[/bold]",
+        "",
+        f"  home:               {cfg.home}",
+        f"  config.toml:        {toml_path}  {toml_exists}",
+        f"  repo_path:          {cfg.repo_path or '—'}",
+        f"  branch_prefix:      {cfg.branch_prefix}",
+        f"  reconcile_command:  {cfg.reconcile_command}",
+        f"  max_concurrency:    {cfg.max_concurrency}",
+        f"  max_impl_turns:     {cfg.max_impl_turns}",
+        "",
+        "[bold]Providers[/bold]",
+        "",
+    ]
+    for k, v in providers.items():
+        lines.append(f"  {k + ':':20} {v}")
+    return "\n".join(lines)
+
+
+class EnvScreen(Screen):
+    """Read-only panel showing resolved config — same values as `maestro env`."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back")]
+
+    CSS = "EnvScreen #env-panel { padding: 1 2; height: 1fr; }"
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("[dim]Loading…[/dim]", id="env-panel")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Env"
+        cfg = config_mod.load(str(self._home))
+        self.query_one("#env-panel", Static).update(_render_env(cfg))
+
+
 class MaestroTUI(App):
     CSS = """
     Screen { layers: base topbar; }
@@ -482,12 +656,15 @@ class MaestroTUI(App):
         ("ctrl+d", "discard", "Discard"),
         ("f", "cycle_filter", "Filter"),
         ("F", "fleet_panel", "Fleet"),
+        ("e", "env_panel", "Env"),
         ("n", "create", "New"),
+        ("s", "show_spec", "Spec"),
         ("t", "toggle_tail", "Tail/Full"),
         ("enter", "view_events", "Events"),
         ("x", "compact", "Compact"),
         ("z", "release", "Release"),
         ("p", "project_rebuild", "Project"),
+        ("l", "view_logs", "Logs"),
     ]
 
     _selected_key: str | None = None
@@ -597,6 +774,15 @@ class MaestroTUI(App):
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
 
+    def action_show_spec(self) -> None:
+        if self._selected_key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(SpecScreen(self._home, self._selected_key))
+
+    def action_env_panel(self) -> None:
+        self.push_screen(EnvScreen(self._home))
+
     def action_create(self) -> None:
         def _on_dismiss(result: dict | None) -> None:
             if result is None:
@@ -696,6 +882,10 @@ class MaestroTUI(App):
     def action_view_events(self) -> None:
         if self._selected_key:
             self.push_screen(EventsScreen(self._home, self._selected_key))
+
+    def action_view_logs(self) -> None:
+        if self._selected_key:
+            self.push_screen(LogsScreen(self._home, self._selected_key))
 
     def _populate(self) -> None:
         _name, phases = _FILTERS[self._filter_idx]

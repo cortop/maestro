@@ -5,6 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from maestro import event_log, snapshot as snap_mod, store  # noqa: E402
 from maestro.config import Config  # noqa: E402
 
 
@@ -18,3 +19,38 @@ def home(tmp_path):
 @pytest.fixture
 def cfg(home):
     return Config(home=home, max_concurrency=3, backoff_base=10, max_failures=3)
+
+
+def seed_ticket(home, key, title, *, phase=None, questions=None, pr=None, tier=1):
+    """Append events for one ticket and fold its snapshot, mimicking the real flow.
+
+    Drives state only through event_log + the fold, exactly as a reconciler would,
+    so the resulting home is indistinguishable from one a live run produced.
+    """
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: {tier}\n\n## Intent\n{title}\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": title, "source": "test", "spec_hash": "x"}, actor="d")
+    if pr is not None:
+        event_log.append(home, key, "PrOpened",
+                         {"number": pr, "url": f"https://github.com/cortop/maestro/pull/{pr}",
+                          "draft": True}, actor="r")
+    for qid, text in (questions or {}).items():
+        event_log.append(home, key, "QuestionAsked", {"qid": qid, "text": text}, actor="d")
+    if phase is not None:
+        event_log.append(home, key, "PhaseChanged", {"phase": phase, "reason": ""}, actor="r")
+    return snap_mod.rebuild(home, key)
+
+
+@pytest.fixture
+def seeded_home(home):
+    """A home with tickets spanning the phases that historically broke the TUI."""
+    seed_ticket(home, "T-1", "awaiting human with questions",
+                phase="awaiting-human",
+                questions={"q1": "Shall I proceed [now]?", "q2": "Use [a] or [b]?"})
+    seed_ticket(home, "T-2", "stalled/degraded ticket", phase="degraded")
+    seed_ticket(home, "T-3", "implementing with PR", phase="implementing", pr=15)
+    # awaiting-ci historically crashed the detail pane (unquoted [link=URL] markup)
+    seed_ticket(home, "T-4", "awaiting ci with PR", phase="awaiting-ci", pr=16)
+    seed_ticket(home, "T-5", "ready ticket", phase="ready")
+    return home

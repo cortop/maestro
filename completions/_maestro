@@ -1,0 +1,179 @@
+#compdef maestro
+# zsh completion for maestro — dynamically lists ticket keys from MAESTRO_HOME.
+
+_maestro_keys() {
+  local home="${MAESTRO_HOME:-$HOME/.maestro}"
+  local -a keys
+  keys=("${(@f)$(command ls "$home/tickets" 2>/dev/null | command grep -v '^_')}")
+  _describe 'ticket key' keys
+}
+
+_maestro() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  _arguments -C \
+    '(-h --help)'{-h,--help}'[show help and exit]' \
+    '--home=[MAESTRO_HOME path]:path:_files -/' \
+    '1:subcommand:->subcmd' \
+    '*::args:->args'
+
+  case $state in
+    subcmd)
+      local -a subcmds
+      subcmds=(
+        'init:scaffold a maestro home + config'
+        'create:queue a new ticket (no args = interactive)'
+        'ans:answer a ticket'\''s open question'
+        'answer:interactive walkthrough of all open questions'
+        'cmd:send an arbitrary command (retry/discard/...)'
+        'status:summary of all tickets'
+        'show:snapshot + events for one ticket'
+        'logs:view captured session logs for a ticket'
+        'doctor:fleet health (heartbeat, dead-letters)'
+        'dispatch:one dispatcher sweep (launchd calls this)'
+        'project:regenerate dashboards'
+        'env:resolved config (home, repo_path, ...)'
+        'fleet:manage the launchd dispatcher (up/down/status)'
+        'snapshot:[agent] folded snapshot'
+        'events:[agent] event log'
+        'append:[agent] append a raw event'
+        'set-phase:[agent] advance phase'
+        'ask:[agent] ask the human, go to awaiting-human'
+        'fold-inbox:[agent] fold pending human commands into events'
+        'inbox-ack:[agent] advance inbox cursor'
+        'observe-spec:[agent] record current spec hash'
+        'requeue:[agent] schedule a re-wake'
+        'fail:[agent] record failure (backoff or dead-letter)'
+        'finalize:[agent] tombstone a finished ticket'
+        'compact:fold pre-snapshot events into archive'
+        'release:[agent] drop this ticket'\''s claim on exit'
+        'check-conflicts:[agent] ask conflict question if PR is CONFLICTING'
+        'fold-steps:[agent] fold stream steps into IMPL_STEP events'
+        'tui:launch the interactive TUI (requires [tui] extra)'
+      )
+      _describe 'subcommand' subcmds
+      ;;
+    args)
+      case $line[1] in
+        create)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--key=[ticket key]:key:_maestro_keys' \
+            '--tier=[approval tier (0=auto-approve)]:tier:(0 1 2)' \
+            '--priority=[priority (1=highest)]:priority:(1 2 3 4 5)' \
+            '--intent=[intent text]:intent:' \
+            '--no-nudge[skip in-process dispatch nudge after queuing]' \
+            '1:title:'
+          ;;
+        logs)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--key=[ticket key (alternative to positional)]:key:_maestro_keys' \
+            '--list[list sessions newest-first]' \
+            '--session=[specific session ID]:session:' \
+            '(-f --follow)--follow[tail the live session log]' \
+            '--json[emit raw stream-jsonl lines]' \
+            '1:key:_maestro_keys'
+          ;;
+        tui)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]'
+          ;;
+        ans)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--qid=[question ID to answer]:qid:' \
+            '--no-nudge[skip in-process dispatch nudge]' \
+            '1:key:_maestro_keys' \
+            '2:text:'
+          ;;
+        answer)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '1:key:_maestro_keys'
+          ;;
+        cmd)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--no-nudge[skip in-process dispatch nudge]' \
+            '1:key:_maestro_keys' \
+            '2:command:(retry discard)' \
+            '*:args:'
+          ;;
+        show)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--tail=[number of tail events to show]:n:' \
+            '1:key:_maestro_keys'
+          ;;
+        set-phase)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--reason=[reason for phase transition]:reason:' \
+            '--requeue=[seconds until re-wake]:seconds:' \
+            '--actor=[actor name]:actor:' \
+            '1:key:_maestro_keys' \
+            '2:phase:(triaging awaiting-human ready implementing awaiting-ci in-review degraded terminating done)'
+          ;;
+        fleet)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--interval=[dispatch cadence in seconds]:interval:' \
+            '1:action:(up down status)'
+          ;;
+        dispatch)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--dry-run[dry run — no sessions launched]' \
+            '--model=[override reconcile_model from config]:model:'
+          ;;
+        snapshot|events|fold-inbox|inbox-ack|observe-spec|compact|release)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '1:key:_maestro_keys'
+          ;;
+        requeue)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--actor=[actor name]:actor:' \
+            '1:key:_maestro_keys' \
+            '2:seconds:'
+          ;;
+        ask)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--qid=[question ID]:qid:' \
+            '--actor=[actor name]:actor:' \
+            '1:key:_maestro_keys' \
+            '2:text:'
+          ;;
+        append)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--type=[event type]:type:' \
+            '--payload=[JSON payload]:payload:' \
+            '--step-id=[step ID for idempotency]:step_id:' \
+            '--expect=[expected sequence number]:expect:' \
+            '--actor=[actor name]:actor:' \
+            '1:key:_maestro_keys'
+          ;;
+        fail)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--actor=[actor name]:actor:' \
+            '1:key:_maestro_keys' \
+            '2:error:'
+          ;;
+        finalize|check-conflicts|fold-steps)
+          _arguments \
+            '(-h --help)'{-h,--help}'[show help]' \
+            '--actor=[actor name]:actor:' \
+            '1:key:_maestro_keys'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_maestro "$@"

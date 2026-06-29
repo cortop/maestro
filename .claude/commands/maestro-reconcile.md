@@ -35,8 +35,10 @@ Read the spec. Take `approval_tier` from its frontmatter.
   `maestro ask "$KEY" "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?"`
 
 ### `awaiting-human`
-You only ran because an answer arrived (already folded above). Read it from the events:
-`maestro events "$KEY" --since <observed_seq>`. Then:
+You only ran because an answer arrived (already folded above). Read the answered event(s):
+`maestro events "$KEY" --since <observed_seq>`. Check the `qid` of the `QuestionAnswered` event:
+- **`qid` starts with `conflict-`** → the human resolved a merge conflict; go back to check CI:
+  `maestro set-phase "$KEY" awaiting-ci --requeue 60`
 - approved → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
 - rejected/`discard` → `maestro set-phase "$KEY" terminating`
 - modified scope → note it, then `maestro set-phase "$KEY" ready`
@@ -56,9 +58,16 @@ maestro set-phase "$KEY" implementing --reason "worktree ready"
 You are (or the dispatcher cd'd you) in `$HOME/worktrees/$KEY`. Implement the spec's
 Acceptance criteria:
 1. Read the spec's Intent + AC and the relevant code. Make the change.
-2. **Tests are the proof.** Add/extend tests under `tests/`. Then:
+2. **Tests are the proof — QA against the real app, not mocks.** Every change ships with a test
+   that exercises the actual surface and shows the feature working end-to-end: drive the real
+   `maestro` CLI / a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`) over a temp
+   home and assert the resulting events/snapshot/output. For the TUI (`tui*.py`) the proof must
+   **mount the real app** — extend `tests/test_tui_runtime.py` (`async with app.run_test() as
+   pilot:` + the binding sweep / `test_every_binding_action_resolves`). Mock ONLY the external
+   `claude -p` / network / `launchctl` boundary, never the thing under test. Then (install the
+   `tui` extra too, so TUI runtime tests run instead of skipping):
    ```bash
-   cd "$HOME/worktrees/$KEY" && python3 -m venv .venv 2>/dev/null; .venv/bin/pip -q install -e ".[dev]" >/dev/null 2>&1
+   cd "$HOME/worktrees/$KEY" && python3 -m venv .venv 2>/dev/null; .venv/bin/pip -q install -e ".[dev,tui]" >/dev/null 2>&1
    .venv/bin/python -m pytest -q
    ```
    If red, fix and re-run. Do not proceed until green. If you exceed ~`max_impl_turns`
@@ -78,7 +87,17 @@ Acceptance criteria:
    Rules: never force-push, never skip hooks, never mock real behavior in tests.
 
 ### `awaiting-ci`
-You woke on the timer. Check CI once and record it:
+You woke on the timer. **First** check for merge conflicts (idempotent — skips if question already open):
+```bash
+PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pr_number') or '')")
+if [ -n "$PR_NUM" ]; then
+  MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
+  maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
+  # If CONFLICTING, check-conflicts transitions to awaiting-human — exit now.
+  [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
+fi
+```
+Then check CI once and record it:
 ```bash
 STATE=$(gh pr checks "$(gh pr view ${PREFIX}${KEY} --repo cortop/maestro --json number -q .number)" --repo cortop/maestro 2>/dev/null \
         | awk '{print $2}' | sort -u | paste -sd, - | grep -q fail && echo failing || echo passing)
@@ -89,6 +108,15 @@ maestro append "$KEY" --type CiObserved --payload "{\"state\":\"$STATE\"}" --ste
 - still pending → `maestro requeue "$KEY" 300`
 
 ### `in-review`
+**First** check for merge conflicts (guard against conflicts introduced during review):
+```bash
+PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pr_number') or '')")
+if [ -n "$PR_NUM" ]; then
+  MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
+  maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
+  [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
+fi
+```
 If the PR is merged (`gh pr view ... --json state`), clean up and finish:
 ```bash
 git -C "$REPO" worktree remove "$HOME/worktrees/$KEY" --force 2>/dev/null || true

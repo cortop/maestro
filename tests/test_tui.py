@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from unittest import mock
 
 from maestro import claims, event_log, inbox, snapshot as snap_mod, store
@@ -795,11 +796,12 @@ def test_fleet_screen_constructs(home):
 
 
 def test_maestro_tui_has_fleet_binding(home):
-    """MaestroTUI exposes the 'f' → fleet_panel binding."""
+    """MaestroTUI binds 'F' -> fleet_panel (capital), and 'f' -> cycle_filter."""
     from maestro.tui import MaestroTUI
     app = MaestroTUI(home=str(home))
-    keys = [b[0] for b in app.BINDINGS]
-    assert "f" in keys
+    actions = {b[0]: b[1] for b in app.BINDINGS}
+    assert actions.get("F") == "fleet_panel"
+    assert actions.get("f") == "cycle_filter"
 
 
 def test_fleet_screen_load_status_returns_status_and_doctor(home):
@@ -880,7 +882,7 @@ def test_fleet_screen_not_stale_with_recent_heartbeat(home):
 
 # --- event timeline rendering -------------------------------------------------
 
-from maestro.tui_events import render_event, render_log  # noqa: E402
+from maestro.tui_events import render_event, render_log, render_log_line  # noqa: E402
 from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
 
 
@@ -1315,3 +1317,394 @@ def test_maestro_tui_has_compact_release_project_bindings(home):
     assert "x" in binding_keys
     assert "z" in binding_keys
     assert "p" in binding_keys
+
+
+# --- 's' / spec screen (TUI-10) -----------------------------------------------
+
+from maestro.tui import SpecScreen  # noqa: E402
+from maestro.tui_detail import render_pending  # noqa: E402
+
+
+def test_spec_screen_constructs(home):
+    """SpecScreen can be instantiated with home and key."""
+    screen = SpecScreen(home, "T-1")
+    assert screen._home == home
+    assert screen._key == "T-1"
+
+
+# --- TUI-11: env / config viewer panel ----------------------------------------
+
+from maestro.tui import EnvScreen, _render_env  # noqa: E402
+from maestro.config import Config  # noqa: E402
+
+
+def _make_cfg(home, repo_path="/repo", branch_prefix="m/", reconcile_command="/rec",
+               max_concurrency=8, max_impl_turns=15,
+               providers=None):
+    cfg = Config(home=home)
+    cfg.repo_path = repo_path
+    cfg.branch_prefix = branch_prefix
+    cfg.reconcile_command = reconcile_command
+    cfg.max_concurrency = max_concurrency
+    cfg.max_impl_turns = max_impl_turns
+    if providers is not None:
+        cfg.providers = providers
+    return cfg
+
+
+def test_render_env_shows_all_maestro_env_fields(home):
+    """_render_env shows home, repo_path, branch_prefix, reconcile_command, max_concurrency, max_impl_turns, providers."""
+    cfg = _make_cfg(home, providers={"tracker": "jira_cli", "vcs": "github_cli"})
+    out = _render_env(cfg)
+    assert str(home) in out
+    assert "/repo" in out
+    assert "m/" in out
+    assert "/rec" in out
+    assert "8" in out
+    assert "15" in out
+    assert "jira_cli" in out
+    assert "github_cli" in out
+
+
+def test_render_env_shows_config_toml_path(home):
+    """_render_env includes the config.toml path."""
+    cfg = _make_cfg(home)
+    out = _render_env(cfg)
+    assert "config.toml" in out
+
+
+def test_render_env_marks_missing_config_toml(home):
+    """_render_env marks config.toml as not found when it doesn't exist."""
+    cfg = _make_cfg(home)
+    out = _render_env(cfg)
+    assert "not found" in out
+
+
+def test_render_env_marks_existing_config_toml(home):
+    """_render_env marks config.toml as exists when the file is present."""
+    cfg = _make_cfg(home)
+    (home / "config.toml").write_text("[maestro]\n")
+    out = _render_env(cfg)
+    assert "exists" in out
+    assert "not found" not in out
+
+
+def test_render_env_missing_repo_path_shows_emdash(home):
+    """_render_env shows — when repo_path is None."""
+    cfg = _make_cfg(home, repo_path=None)
+    out = _render_env(cfg)
+    assert "—" in out
+
+
+def test_render_env_matches_maestro_env_fields(tmp_path):
+    """_render_env includes exactly the fields that `maestro env` outputs."""
+    cfg = Config(home=tmp_path)
+    cfg.repo_path = "/some/repo"
+    out = _render_env(cfg)
+    for field in ("home", "repo_path", "branch_prefix", "reconcile_command",
+                   "max_concurrency", "max_impl_turns"):
+        assert field in out, f"Expected field '{field}' in env panel output"
+
+
+def test_env_screen_constructs(home):
+    """EnvScreen can be instantiated without crashing."""
+    screen = EnvScreen(home)
+    assert screen._home == home
+
+
+def test_maestro_tui_has_env_binding():
+    """MaestroTUI exposes the 'e' → env_panel binding."""
+    app = MaestroTUI(home="/tmp")
+    keys = [b[0] for b in app.BINDINGS]
+    assert "e" in keys
+
+
+def test_action_env_panel_pushes_env_screen(home):
+    """action_env_panel pushes an EnvScreen onto the screen stack."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app.action_env_panel()
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, EnvScreen)
+
+
+# --- IMPL_STEP timeline rendering --------------------------------------------
+
+def test_render_event_impl_step_shows_kind_badge():
+    """ImplStepRecorded events render a kind badge instead of the raw type name."""
+    ev = {
+        "seq": 5,
+        "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded",
+        "actor": "reconciler",
+        "payload": {"kind": "edit", "tool": "Edit", "summary": "maestro/tui.py"},
+    }
+    line = render_event(ev)
+    assert "edit" in line
+    assert "maestro/tui.py" in line
+    # The raw event type should not appear (replaced by kind badge)
+    assert "ImplStepRecorded" not in line
+
+
+def test_render_event_impl_step_command_badge():
+    """kind=command renders a 'cmd' badge."""
+    ev = {
+        "seq": 6, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "command", "tool": "Bash", "summary": "make test"},
+    }
+    line = render_event(ev)
+    assert "cmd" in line
+    assert "make test" in line
+
+
+def test_render_event_impl_step_subagent_badge():
+    """kind=subagent renders an 'agent' badge."""
+    ev = {
+        "seq": 7, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "subagent", "tool": "Agent", "summary": "Code review"},
+    }
+    line = render_event(ev)
+    assert "agent" in line
+    assert "Code review" in line
+
+
+def test_render_event_impl_step_unknown_kind_still_renders():
+    """An unrecognised kind still produces a line with the summary."""
+    ev = {
+        "seq": 8, "ts": "2026-06-25T10:00:00+00:00",
+        "type": "ImplStepRecorded", "actor": "reconciler",
+        "payload": {"kind": "future-kind", "tool": "X", "summary": "something"},
+    }
+    line = render_event(ev)
+    assert "something" in line
+
+
+def test_render_event_phase_changed_styled():
+    """PhaseChanged uses a milestone color (contains 'blue' for styling)."""
+    ev = {
+        "seq": 1, "ts": "2026-06-25T00:00:00+00:00",
+        "type": "PhaseChanged", "actor": "reconciler",
+        "payload": {"phase": "implementing", "reason": "worktree ready"},
+    }
+    line = render_event(ev)
+    assert "blue" in line
+    assert "PhaseChanged" in line
+
+
+def test_render_event_failed_styled_red():
+    """Failed events use red milestone color."""
+    ev = {
+        "seq": 9, "ts": "2026-06-25T00:00:00+00:00",
+        "type": "Failed", "actor": "reconciler",
+        "payload": {"error": "timeout"},
+    }
+    line = render_event(ev)
+    assert "red" in line
+    assert "Failed" in line
+
+
+# --- render_log_line (stream-json → Rich markup) -----------------------------
+
+def test_render_log_line_assistant_text():
+    """Text blocks in assistant messages are returned as escaped lines."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "text", "text": "Hello world"}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert lines == ["Hello world"]
+
+
+def test_render_log_line_assistant_tool_use():
+    """tool_use blocks render with tool name badge."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "Bash" in lines[0]
+    assert "ls" in lines[0]
+
+
+def test_render_log_line_result_success():
+    """Result success renders green with duration."""
+    obj = {"type": "result", "subtype": "success", "duration_ms": 1234}
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "green" in lines[0]
+    assert "1234ms" in lines[0]
+
+
+def test_render_log_line_result_error():
+    """Result error renders red."""
+    obj = {"type": "result", "subtype": "error_during_execution"}
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "red" in lines[0]
+
+
+def test_render_log_line_unknown_type_returns_empty():
+    """Unknown event types produce no lines (safe no-op)."""
+    obj = {"type": "system", "session_id": "abc123"}
+    lines = render_log_line(obj)
+    assert lines == []
+
+
+def test_render_log_line_escapes_brackets_in_text():
+    """Rich markup chars in text content are escaped so they don't break rendering."""
+    obj = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "text", "text": "use [bold] or [dim]?"}]
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    # The literal '[' should be escaped
+    assert "\\[" in lines[0]
+
+
+# --- LogsScreen construction and action_view_logs ----------------------------
+
+from maestro.tui import LogsScreen  # noqa: E402
+
+
+def test_logs_screen_constructs(home):
+    """LogsScreen can be instantiated with home and key."""
+    screen = LogsScreen(home, "T-1")
+    assert screen._home == home
+    assert screen._key == "T-1"
+
+
+def test_spec_screen_has_edit_binding():
+    """SpecScreen exposes the 'e' → edit_spec binding."""
+    screen = SpecScreen(Path("/tmp"), "T-1")
+    keys = [b[0] for b in screen.BINDINGS]
+    assert "e" in keys
+
+
+def test_maestro_tui_has_spec_binding(home):
+    """MaestroTUI exposes the 's' → show_spec binding."""
+    app = MaestroTUI(home=str(home))
+    keys = [b[0] for b in app.BINDINGS]
+    assert "s" in keys
+
+
+def test_action_show_spec_pushes_spec_screen(home):
+    """action_show_spec pushes a SpecScreen with the correct home/key."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
+    snap_mod.rebuild(home, "T-1")
+
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+    app.action_show_spec()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, SpecScreen)
+    assert screen._key == "T-1"
+    assert screen._home == home
+
+
+def test_action_show_spec_no_selection_warns(home):
+    """action_show_spec with no selected ticket shows a warning and pushes nothing."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+    app.action_show_spec()
+
+    assert not push_calls
+    app.notify.assert_called_once()
+    _, kwargs = app.notify.call_args
+    assert kwargs.get("severity") == "warning"
+
+
+# --- render_pending -----------------------------------------------------------
+
+def test_render_pending_empty_returns_emdash():
+    """Empty command list renders as em-dash."""
+    out = render_pending([])
+    assert "—" in out
+
+
+def test_render_pending_shows_command_name():
+    """A pending command includes the command name."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "retry", "args": {}}]
+    out = render_pending(cmds)
+    assert "retry" in out
+
+
+def test_render_pending_shows_args():
+    """A command with args includes arg key and value."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "ans", "args": {"qid": "q1", "text": "yes"}}]
+    out = render_pending(cmds)
+    assert "qid" in out
+    assert "q1" in out
+    assert "text" in out
+    assert "yes" in out
+
+
+def test_render_pending_multiple_commands():
+    """All commands appear when multiple are pending."""
+    cmds = [
+        {"ts": "2026-06-25T00:00:00", "command": "retry", "args": {}},
+        {"ts": "2026-06-25T00:00:01", "command": "ans", "args": {"qid": "q1"}},
+    ]
+    out = render_pending(cmds)
+    assert "retry" in out
+    assert "ans" in out
+
+
+def test_render_pending_escapes_brackets():
+    """Brackets in args are escaped so the markup stays valid."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "ans", "args": {"text": "use [a] or [b]"}}]
+    out = render_pending(cmds)
+    _assert_valid_markup(out)
+    assert "[a]" in out.replace("\\", "")
+
+
+def test_render_pending_valid_markup_empty():
+    """Empty pending list yields valid markup."""
+    _assert_valid_markup(render_pending([]))
+
+
+def test_render_pending_valid_markup_with_commands():
+    """Non-empty pending list yields valid markup."""
+    cmds = [{"ts": "2026-06-25T00:00:00", "command": "retry", "args": {}}]
+    _assert_valid_markup(render_pending(cmds))
+
+
+def test_maestro_tui_has_logs_binding(home):
+    """MaestroTUI exposes the 'l' → view_logs binding."""
+    app = MaestroTUI(home=str(home))
+    keys = [b[0] for b in app.BINDINGS]
+    assert "l" in keys
+
+
+def test_action_view_logs_pushes_logs_screen(home):
+    """action_view_logs pushes a LogsScreen for the selected ticket."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = "T-1"
+
+    app.action_view_logs()
+
+    assert len(push_calls) == 1
+    screen, _ = push_calls[0]
+    assert isinstance(screen, LogsScreen)
+    assert screen._key == "T-1"
+
+
+def test_action_view_logs_no_selection_does_nothing(home):
+    """action_view_logs with no selected ticket pushes nothing."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    app._selected_key = None
+
+    app.action_view_logs()
+
+    assert not push_calls
