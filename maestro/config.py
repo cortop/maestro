@@ -44,6 +44,9 @@ class Config:
     session_log_retention_days: int | None = None  # prune logs older than N days; None = keep all
     session_log_max_per_ticket: int | None = None  # keep at most N logs per ticket; None = unlimited
     nudge_on_human_input: bool = True  # trigger in-process dispatch after ans/cmd/create
+    research_model: str = "opus"       # model for kind=research tickets
+    research_effort: str = "high"      # effort for kind=research tickets
+    default_effort: str | None = None  # global effort default; None = omit --effort entirely
     raw: dict = field(default_factory=dict)
 
 
@@ -78,6 +81,9 @@ def load(home_arg: str | None = None) -> Config:
         raw_max = m.get("session_log_max_per_ticket", cfg.session_log_max_per_ticket)
         cfg.session_log_max_per_ticket = int(raw_max) if raw_max is not None else None
         cfg.nudge_on_human_input = bool(m.get("nudge_on_human_input", cfg.nudge_on_human_input))
+        cfg.research_model = m.get("research_model", cfg.research_model)
+        cfg.research_effort = m.get("research_effort", cfg.research_effort)
+        cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {

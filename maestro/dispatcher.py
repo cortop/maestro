@@ -42,6 +42,7 @@ def spec_hash_on_disk(home: Path, key: str) -> str | None:
 
 _DEPENDS_ON_RE = re.compile(r"^\s*dependsOn\s*:\s*\[([^\]]*)\]", re.MULTILINE)
 _KEY_RE = re.compile(r"^([A-Za-z]+)-(\d+)$")
+_FRONTMATTER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
 
 
 def split_key(key: str) -> tuple:
@@ -59,6 +60,24 @@ def parse_depends_on(spec_text: str) -> list[str]:
         return []
     raw = m.group(1)
     return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+def parse_spec_overrides(spec_text: str) -> dict:
+    """Extract optional kind/model/effort from a spec's loose frontmatter.
+
+    Stops at the first ## section header. Returns only keys that are present.
+    """
+    result: dict = {}
+    for line in spec_text.splitlines():
+        if line.startswith("##"):
+            break
+        m = _FRONTMATTER_FIELD_RE.match(line)
+        if not m:
+            continue
+        field, val = m.group(1), m.group(2).strip()
+        if field in ("kind", "model", "effort"):
+            result[field] = val
+    return result
 
 
 def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
@@ -151,15 +170,34 @@ def _auto_key(home: Path, prefix: str = "T") -> str:
 
 def _seed_spec(key: str, title: str, args: dict) -> str:
     tier = args.get("approval_tier", 1)
-    return (
-        f"# {key}: {title}\n\n"
-        f"<!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->\n\n"
-        f"approval_tier: {tier}\n"
-        f"priority: {args.get('priority', 3)}\n"
-        f"dependsOn: []\n\n"
-        f"## Intent\n{args.get('intent', '(describe what done looks like)')}\n\n"
-        f"## Acceptance criteria\n- \n"
-    )
+    depends_on = args.get("depends_on", [])
+    deps_str = ", ".join(depends_on) if depends_on else ""
+    lines = [
+        f"# {key}: {title}",
+        "",
+        "<!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->",
+        "",
+        f"approval_tier: {tier}",
+        f"priority: {args.get('priority', 3)}",
+    ]
+    if args.get("kind"):
+        lines.append(f"kind: {args['kind']}")
+    if args.get("model"):
+        lines.append(f"model: {args['model']}")
+    if args.get("effort"):
+        lines.append(f"effort: {args['effort']}")
+    lines.append(f"dependsOn: [{deps_str}]")
+    lines.append("")
+    lines.append("## Intent")
+    lines.append(args.get("intent", "(describe what done looks like)"))
+    if args.get("notes"):
+        lines.append("")
+        lines.append("## Notes")
+        lines.append(args["notes"])
+    lines.append("")
+    lines.append("## Acceptance criteria")
+    lines.append("- ")
+    return "\n".join(lines) + "\n"
 
 
 def _has_unmet_deps(home: Path, key: str) -> bool:
@@ -225,7 +263,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     for key, _reason in to_spawn:
         cwd = _worker_cwd(cfg, key)
         prompt = f"{cfg.reconcile_command} {key}"
-        sessions.spawn(key, prompt, cwd)
+        model, effort = _resolve_model_effort(cfg, key)
+        sessions.spawn(key, prompt, cwd, model=model, effort=effort)
         spawned.append(key)
 
     _write_heartbeat(home, now, len(spawned), len(active))
@@ -233,6 +272,30 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
     )
+
+
+def _resolve_model_effort(cfg: Config, key: str) -> tuple[str, str | None]:
+    """Resolve the model and effort for spawning *key*'s reconciler.
+
+    Precedence: spec front-matter → kind default (research) → config defaults.
+    Returns (model, effort) where effort may be None.
+    """
+    spec_file = store.spec_path(cfg.home, key)
+    overrides: dict = {}
+    if spec_file.exists():
+        overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
+
+    kind = overrides.get("kind", "implementation")
+    if kind == "research":
+        default_model = cfg.research_model
+        default_effort: str | None = cfg.research_effort
+    else:
+        default_model = cfg.reconcile_model
+        default_effort = cfg.default_effort
+
+    model = overrides.get("model", default_model)
+    effort = overrides.get("effort") or default_effort
+    return model, effort
 
 
 def _worker_cwd(cfg: Config, key: str) -> Path:

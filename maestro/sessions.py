@@ -67,8 +67,12 @@ class SessionManager(Protocol):
     def list_active(self) -> set[str]:
         """Keys with a live reconciler (the 'already claimed' set)."""
 
-    def spawn(self, key: str, prompt: str, cwd: Path) -> int | None:
-        """Launch a detached reconciler for ``key``; return its pid (or None)."""
+    def spawn(self, key: str, prompt: str, cwd: Path,
+              model: str | None = None, effort: str | None = None) -> int | None:
+        """Launch a detached reconciler for ``key``; return its pid (or None).
+
+        *model* and *effort* override instance defaults when provided.
+        """
 
 
 class ClaudeCliSessions:
@@ -91,9 +95,13 @@ class ClaudeCliSessions:
     def list_active(self) -> set[str]:
         return claims.active_keys(self.home)
 
-    def spawn(self, key: str, prompt: str, cwd: Path) -> int | None:
+    def spawn(self, key: str, prompt: str, cwd: Path,
+              model: str | None = None, effort: str | None = None) -> int | None:
         session_id = f"{session_name(key)}-{self._clock():.6f}"
-        cmd = ["claude", "-p", prompt, "--model", self.model, "-n", session_name(key)]
+        effective_model = model or self.model
+        cmd = ["claude", "-p", prompt, "--model", effective_model, "-n", session_name(key)]
+        if effort:
+            cmd += ["--effort", effort]
         if self.permission_mode:
             cmd += ["--permission-mode", self.permission_mode]
         cmd += self.extra_args
@@ -135,12 +143,13 @@ class DryRunSessions:
 
     def __init__(self, active: set[str] | None = None):
         self._active = set(active or set())   # KEYS
-        self.spawned: list[tuple[str, str, str]] = []
+        self.spawned: list[tuple[str, str, str, str | None, str | None]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
 
-    def spawn(self, key: str, prompt: str, cwd: Path) -> int | None:
-        self.spawned.append((key, prompt, str(cwd)))
+    def spawn(self, key: str, prompt: str, cwd: Path,
+              model: str | None = None, effort: str | None = None) -> int | None:
+        self.spawned.append((key, prompt, str(cwd), model, effort))
         self._active.add(key)
         return None
