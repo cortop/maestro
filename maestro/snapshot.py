@@ -39,6 +39,8 @@ class Snapshot:
     answered_questions: dict[str, str] = field(default_factory=dict)
     impl_turns: int = 0
     last_step: str | None = None
+    kind: str = "implementation"
+    proposal_path: str | None = None
     updated_ts: str | None = None
 
     @property
@@ -71,6 +73,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.title = p.get("title", s.title)
             s.source = p.get("source", s.source)
             s.spec_hash = p.get("spec_hash", s.spec_hash)
+            s.kind = p.get("kind", "implementation")
             s.phase = Phase.TRIAGING.value
         elif t == E.SPEC_OBSERVED:
             s.spec_hash = p.get("spec_hash", s.spec_hash)
@@ -108,6 +111,8 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.impl_turns = max(s.impl_turns, int(p.get("turn", s.impl_turns)))
             if p.get("summary"):
                 s.last_step = p["summary"]
+        elif t == E.RESEARCH_PROPOSED:
+            s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.REQUEUE_SCHEDULED:
             s.next_requeue_at = p.get("at")
         elif t == E.FAILED:

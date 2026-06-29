@@ -13,6 +13,7 @@ class Phase(str, Enum):
     AWAITING_HUMAN = "awaiting-human"  # blocked on an answer/approval (SLEEPING)
     READY = "ready"                  # approved + unblocked; waiting for a worker slot
     IMPLEMENTING = "implementing"    # ralph-loop running in a worktree
+    RESEARCHING = "researching"      # research agent active in a worktree
     AWAITING_CI = "awaiting-ci"      # PR open; polling checks on a timer (SLEEPING)
     IN_REVIEW = "in-review"          # checks green; waiting on human/merge
     DEGRADED = "degraded"            # dead-lettered: repeated failure / non-convergence
@@ -36,10 +37,12 @@ ACTIVE_PHASES = frozenset(
 # Allowed transitions — used to validate a PhaseChanged and to document the flow.
 TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.TRIAGING: {Phase.AWAITING_HUMAN, Phase.READY, Phase.DEGRADED, Phase.TERMINATING},
-    Phase.AWAITING_HUMAN: {Phase.READY, Phase.AWAITING_CI, Phase.TRIAGING, Phase.DEGRADED, Phase.TERMINATING},
-    Phase.READY: {Phase.IMPLEMENTING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
+    Phase.AWAITING_HUMAN: {Phase.READY, Phase.AWAITING_CI, Phase.TRIAGING, Phase.RESEARCHING,
+                           Phase.DEGRADED, Phase.TERMINATING},
+    Phase.READY: {Phase.IMPLEMENTING, Phase.RESEARCHING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
     Phase.IMPLEMENTING: {Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DEGRADED,
                          Phase.AWAITING_HUMAN, Phase.TERMINATING, Phase.DONE},
+    Phase.RESEARCHING: {Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING, Phase.DONE},
     Phase.AWAITING_CI: {Phase.IMPLEMENTING, Phase.IN_REVIEW, Phase.AWAITING_HUMAN,
                         Phase.DEGRADED, Phase.TERMINATING, Phase.DONE},
     Phase.IN_REVIEW: {Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.AWAITING_HUMAN,
