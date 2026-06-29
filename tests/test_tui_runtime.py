@@ -236,6 +236,44 @@ def test_cmd_modal_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-2", "cmd", _CmdModal)  # degraded -> hint branch
 
 
+def test_cmd_modal_shows_phase_commands(seeded_home):
+    """_CmdModal renders phase-specific command rows for degraded, awaiting-human, and generic phases."""
+    from maestro.tui import _PHASE_COMMANDS, _DEFAULT_COMMANDS
+
+    cases = [
+        ("degraded", _PHASE_COMMANDS["degraded"]),
+        ("awaiting-human", _PHASE_COMMANDS["awaiting-human"]),
+        ("ready", _DEFAULT_COMMANDS),
+    ]
+
+    def _check(phase, expected_commands):
+        async def _inner():
+            app = _make_app(seeded_home)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                modal = _CmdModal("T-x", phase)
+                app.push_screen(modal, lambda _: None)
+                await pilot.pause()
+                rows = list(app.screen.query("Label.cmd-row"))
+                assert len(rows) == len(expected_commands), (
+                    f"phase={phase!r}: expected {len(expected_commands)} rows, got {len(rows)}"
+                )
+                row_texts = [str(lbl.content) for lbl in rows]
+                for cmd, _desc in expected_commands:
+                    assert any(cmd in t for t in row_texts), (
+                        f"phase={phase!r}: cmd {cmd!r} not found in rows {row_texts}"
+                    )
+                assert app._exception is None
+                await pilot.press("escape")
+                await pilot.pause()
+            assert app._exception is None
+
+        asyncio.run(_inner())
+
+    for phase, cmds in cases:
+        _check(phase, cmds)
+
+
 def test_answer_modal_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-1", "answer", _AnswerModal)  # has open questions
 
