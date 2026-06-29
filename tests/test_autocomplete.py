@@ -1,6 +1,7 @@
 """Tests for zsh autocompletion (T-3)."""
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -74,6 +75,8 @@ def test_completion_script_set_phase_lists_phases():
 
 def test_completion_script_zsh_syntax(tmp_path):
     """zsh -n validates syntax without executing."""
+    if shutil.which("zsh") is None:
+        pytest.skip("zsh not installed")
     zsh = subprocess.run(
         ["zsh", "-n", str(COMPLETION_SCRIPT)],
         capture_output=True, text=True,
