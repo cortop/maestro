@@ -35,13 +35,18 @@ Read the spec. Take `approval_tier` from its frontmatter.
   `maestro ask "$KEY" "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?"`
 
 ### `awaiting-human`
-You only ran because an answer arrived (already folded above). Read the answered event(s):
-`maestro events "$KEY" --since <observed_seq>`. Check the `qid` of the `QuestionAnswered` event:
-- **`qid` starts with `conflict-`** → the human resolved a merge conflict; go back to check CI:
+You only ran because an answer arrived (already folded above). Read `answered_questions` from
+the snapshot — it persists across crashes, so it's reliable even if `observed_seq` has already
+advanced past the `QuestionAnswered` events:
+```bash
+SNAP=$(maestro snapshot "$KEY")
+```
+Inspect each qid key in `answered_questions`:
+- **any qid starts with `conflict-`** → the human resolved a merge conflict; go back to check CI:
   `maestro set-phase "$KEY" awaiting-ci --requeue 60`
-- approved → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
-- rejected/`discard` → `maestro set-phase "$KEY" terminating`
-- modified scope → note it, then `maestro set-phase "$KEY" ready`
+- **approved** (answer is affirmative and qid is not a conflict-) → `maestro set-phase "$KEY" ready --reason "approved: <verbatim>"`
+- **rejected/`discard`** → `maestro set-phase "$KEY" terminating`
+- **modified scope** → note it, then `maestro set-phase "$KEY" ready`
 **Then** `maestro inbox-ack "$KEY"` (LAST — so a crash before this re-reads the answer).
 
 ### `ready`
