@@ -39,8 +39,8 @@ TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.AWAITING_HUMAN: {Phase.READY, Phase.TRIAGING, Phase.DEGRADED, Phase.TERMINATING},
     Phase.READY: {Phase.IMPLEMENTING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
     Phase.IMPLEMENTING: {Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DEGRADED,
-                         Phase.AWAITING_HUMAN, Phase.TERMINATING},
-    Phase.AWAITING_CI: {Phase.IMPLEMENTING, Phase.IN_REVIEW, Phase.DEGRADED, Phase.TERMINATING},
+                         Phase.AWAITING_HUMAN, Phase.TERMINATING, Phase.DONE},
+    Phase.AWAITING_CI: {Phase.IMPLEMENTING, Phase.IN_REVIEW, Phase.DEGRADED, Phase.TERMINATING, Phase.DONE},
     Phase.IN_REVIEW: {Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.AWAITING_HUMAN,
                       Phase.TERMINATING, Phase.DONE},
     Phase.DEGRADED: {Phase.READY, Phase.TRIAGING, Phase.TERMINATING},  # human can revive
