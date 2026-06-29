@@ -415,6 +415,13 @@ def cmd_finalize(args) -> int:
     return 0
 
 
+def cmd_check_merged(args) -> int:
+    """Finalize if the GitHub PR state is MERGED; no-op otherwise."""
+    finalized = ops.check_merged(_cfg(args), args.key, args.state, actor=args.actor)
+    _print({"finalized": finalized})
+    return 0
+
+
 def cmd_compact(args) -> int:
     _print(ops.compact(_cfg(args), args.key))
     return 0
@@ -662,6 +669,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key")
     sp.add_argument("pr_number", type=int)
     sp.add_argument("state", help="mergeable state from gh (CONFLICTING|MERGEABLE|UNKNOWN)")
+    sp.add_argument("--actor", default="reconciler")
+
+    sp = add("check-merged", cmd_check_merged,
+             "[agent] finalize if PR state is MERGED — callable from any phase (idempotent)")
+    sp.add_argument("key")
+    sp.add_argument("state", help="GitHub PR state (MERGED|OPEN|CLOSED)")
     sp.add_argument("--actor", default="reconciler")
 
     sp = add("fold-steps", cmd_fold_steps, "[agent] fold stream steps into IMPL_STEP events")

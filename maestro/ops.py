@@ -63,6 +63,23 @@ def ask_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconci
     return True
 
 
+def check_merged(cfg: Config, key: str, pr_state: str, *, actor: str = "reconciler") -> bool:
+    """Finalize if the PR is merged — callable from any phase (idempotent).
+
+    Records PrUpdated(merged=True) then Finalized. Returns True if finalized,
+    False if the state isn't MERGED or the ticket is already done.
+    """
+    if pr_state.upper() != "MERGED":
+        return False
+    snap = snap_mod.load(cfg.home, key)
+    if snap.phase == Phase.DONE.value:
+        return False
+    _append(cfg, key, E.PR_UPDATED, {"merged": True},
+            actor=actor, sid=f"pr-merged-{key}")
+    finalize(cfg, key, actor=actor)
+    return True
+
+
 def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | None:
     h = spec_hash_on_disk(cfg.home, key)
     if h is None:

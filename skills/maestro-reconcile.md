@@ -88,10 +88,16 @@ If the loop exceeds `max_impl_turns` or stops converging: `maestro fail "$KEY" "
 (auto-backs-off, or dead-letters after the threshold).
 
 ### `awaiting-ci`
-You woke on the requeue timer. **First** check for merge conflicts (idempotent):
+You woke on the requeue timer. **First** check if the PR is already merged or has conflicts:
 ```bash
 PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pr_number') or '')")
 if [ -n "$PR_NUM" ]; then
+  PR_STATE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json state -q .state 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "UNKNOWN")
+  if [ "$PR_STATE" = "MERGED" ]; then
+    git -C "$REPO" worktree remove "$HOME/worktrees/$KEY" --force 2>/dev/null || true
+    maestro check-merged "$KEY" "MERGED"
+    maestro release "$KEY" && exit 0
+  fi
   MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
   maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
   # If conflicting, the above transitions to awaiting-human; exit so dispatch re-picks after human fixes.
