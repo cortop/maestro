@@ -405,6 +405,35 @@ def test_detail_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-3", "focus_detail", DetailScreen)
 
 
+def test_enter_key_on_focused_table_opens_detail(seeded_home):
+    """Pressing the real Enter key on the focused DataTable opens DetailScreen.
+
+    A focused DataTable consumes Enter (emitting RowSelected), so the app-level
+    `enter` binding never fires — only on_data_table_row_selected reaches the
+    detail view. run_action('focus_detail') would mask this, so press the key.
+    """
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            before = len(app.screen_stack)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(app.screen_stack) == before + 1, "Enter did not open a screen"
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+            assert len(app.screen_stack) == before
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_detail_screen_shows_detail_and_events(seeded_home):
     """DetailScreen mounts, populates #ds-detail and #ds-events without error."""
     async def _inner():
