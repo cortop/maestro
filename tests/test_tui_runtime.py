@@ -282,6 +282,39 @@ def test_create_modal_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, None, "create", _CreateModal)
 
 
+def test_create_modal_intent_is_textarea_and_accepts_multiline(seeded_home):
+    """Intent field must be a TextArea (not an Input) and must accept newlines."""
+    from textual.widgets import Input, TextArea
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _CreateModal), "create modal did not open"
+            modal = app.screen_stack[-1]
+            # Intent widget must be a TextArea, not a single-line Input
+            intent_widget = modal.query_one("#create-intent")
+            assert isinstance(intent_widget, TextArea), (
+                f"Intent field should be TextArea, got {type(intent_widget).__name__}"
+            )
+            # Focus and type a two-line intent
+            intent_widget.focus()
+            await pilot.pause()
+            await pilot.press("h", "e", "l", "l", "o")
+            await pilot.press("enter")  # newline inside TextArea
+            await pilot.press("w", "o", "r", "l", "d")
+            await pilot.pause()
+            text = intent_widget.text
+            assert "\n" in text, f"TextArea should contain newline, got: {text!r}"
+            assert "hello" in text and "world" in text
+            assert app._exception is None
+            await pilot.press("escape")
+
+    asyncio.run(_inner())
+
+
 def test_fleet_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, None, "fleet_panel", FleetScreen)
 
