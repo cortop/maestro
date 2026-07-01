@@ -31,6 +31,11 @@ def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str) if not isinstance(obj, str) else obj)
 
 
+def _web_tools_extra_args(cfg: Config) -> list[str]:
+    """--allowedTools flag granting spawned reconcilers WebSearch/WebFetch, if enabled."""
+    return ["--allowedTools", "WebSearch,WebFetch"] if cfg.reconcile_web_tools else []
+
+
 def _nudge(cfg: Config) -> None:
     """In-process dispatch sweep after a human-input verb (ans/cmd/create).
 
@@ -40,6 +45,7 @@ def _nudge(cfg: Config) -> None:
     sessions = ClaudeCliSessions(
         cfg.home, model=cfg.reconcile_model,
         permission_mode=cfg.permission_mode,
+        extra_args=_web_tools_extra_args(cfg),
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
     )
@@ -316,6 +322,7 @@ def cmd_dispatch(args) -> int:
         sessions = ClaudeCliSessions(
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
+            extra_args=_web_tools_extra_args(cfg),
             session_log_format=cfg.session_log_format)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     projection.write(cfg.home)
