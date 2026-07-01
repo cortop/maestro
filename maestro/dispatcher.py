@@ -151,11 +151,12 @@ def mint_new_tickets(cfg: Config) -> list[str]:
         except store.MaestroError:
             continue
         spec = store.spec_path(home, key)
+        title = entry.get("title") or key
         if not spec.exists():
-            store.atomic_write(spec, _seed_spec(key, entry.get("title", key), entry.get("args", {})))
-        ticket_args = entry.get("args", {})
+            store.atomic_write(spec, _seed_spec(key, title, entry.get("args") or {}))
+        ticket_args = entry.get("args") or {}
         ticket_payload: dict = {
-            "title": entry.get("title", key),
+            "title": title,
             "source": "inbox/_new",
             "spec_hash": spec_hash_on_disk(home, key),
         }
@@ -181,8 +182,13 @@ def _auto_key(home: Path, prefix: str = "T") -> str:
 
 
 def _seed_spec(key: str, title: str, args: dict) -> str:
-    tier = args.get("approval_tier", 1)
-    depends_on = args.get("depends_on", [])
+    # A create-request may carry explicit ``null`` for any field (JSON), so ``dict.get``
+    # with a default is not enough — coerce None to the fallback for every field that
+    # is rendered into the spec, or a null intent/title/deps would crash the sweep.
+    title = title or key
+    tier = args.get("approval_tier") or 1
+    priority = args.get("priority") or 3
+    depends_on = args.get("depends_on") or []
     deps_str = ", ".join(depends_on) if depends_on else ""
     lines = [
         f"# {key}: {title}",
@@ -190,7 +196,7 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
         "<!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->",
         "",
         f"approval_tier: {tier}",
-        f"priority: {args.get('priority', 3)}",
+        f"priority: {priority}",
     ]
     if args.get("kind"):
         lines.append(f"kind: {args['kind']}")
@@ -201,7 +207,7 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
     lines.append(f"dependsOn: [{deps_str}]")
     lines.append("")
     lines.append("## Intent")
-    lines.append(args.get("intent", "(describe what done looks like)"))
+    lines.append(args.get("intent") or "(describe what done looks like)")
     if args.get("notes"):
         lines.append("")
         lines.append("## Notes")

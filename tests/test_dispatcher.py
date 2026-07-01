@@ -382,3 +382,24 @@ def test_seed_spec_no_extra_fields_by_default(home, cfg):
     assert "model:" not in spec_text
     assert "effort:" not in spec_text
     assert "dependsOn: []" in spec_text
+
+
+def test_mint_tolerates_explicit_null_fields(home, cfg):
+    """A create-request carrying explicit JSON ``null`` for intent/args must not
+    crash the whole sweep (regression: null intent made ``_seed_spec`` join a None)."""
+    inbox.append_new(home, "Nullable ticket", prefix="M",
+                     args={"approval_tier": 1, "priority": 3,
+                           "intent": None, "kind": "implementation"})
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.minted == ["M-1"]
+    spec_text = store.spec_path(home, "M-1").read_text()
+    assert "(describe what done looks like)" in spec_text
+    assert "kind: implementation" in spec_text
+
+
+def test_mint_tolerates_null_title(home, cfg):
+    """A create-request with a null title falls back to the key, not a crash."""
+    inbox.append_new(home, None, key="T-77", args={"intent": "do it"})
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.minted == ["T-77"]
+    assert "# T-77: T-77" in store.spec_path(home, "T-77").read_text()
