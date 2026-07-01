@@ -1146,7 +1146,7 @@ def test_create_defaults_tier_and_priority(home):
     assert entry["args"]["approval_tier"] == 1
     assert entry["args"]["priority"] == 3
     assert entry["key"] is None
-    assert entry["args"]["intent"] is None
+    assert "intent" not in entry["args"]
 
 
 def test_create_shows_queued_toast(home):

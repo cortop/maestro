@@ -363,6 +363,38 @@ def test_create_modal_submits_prefix_to_inbox(seeded_home):
     asyncio.run(_inner())
 
 
+def test_create_modal_empty_intent_omitted_from_args(seeded_home):
+    """Leaving intent blank must omit the "intent" key from args entirely
+    (not write an explicit null) — matches the CLI's create-args convention."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _CreateModal)
+            modal = app.screen_stack[-1]
+            modal.query_one("#create-title", Input).value = "No intent here"
+            modal.query_one("#create-prefix", Select).value = "T"
+            await pilot.pause()
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1  # modal dismissed
+
+        import json
+        new_path = store.new_inbox_path(seeded_home)
+        entries = [json.loads(line) for line in new_path.read_text().splitlines() if line.strip()]
+        assert entries, "no entry written to _new inbox"
+        last = entries[-1]
+        assert last["title"] == "No intent here"
+        assert "intent" not in last.get("args", {}), (
+            f"intent should be omitted when empty, got args: {last.get('args')}"
+        )
+
+    asyncio.run(_inner())
+
+
 def test_create_modal_prefix_select_has_options(seeded_home):
     """_CreateModal shows existing prefix T (from seeded_home) + (new) in the Select;
     the new-prefix Input is hidden when an existing prefix is pre-selected."""

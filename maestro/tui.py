@@ -1055,8 +1055,9 @@ class MaestroTUI(App):
             create_args: dict = {
                 "approval_tier": result["tier"],
                 "priority": result["priority"],
-                "intent": result.get("intent"),
             }
+            if result.get("intent"):
+                create_args["intent"] = result["intent"]
             if result.get("kind"):
                 create_args["kind"] = result["kind"]
             if result.get("model"):
