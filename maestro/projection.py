@@ -7,6 +7,7 @@ reconciler (avoids a projection write race).
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from . import snapshot as snap_mod, store
@@ -38,6 +39,17 @@ def _pr_cell(snap: snap_mod.Snapshot) -> str:
     return "—"
 
 
+def _sort_secondary(s: snap_mod.Snapshot):
+    """Within the done group, newest-updated first; otherwise by key."""
+    if s.phase == Phase.DONE.value:
+        try:
+            epoch = datetime.fromisoformat(s.updated_ts).timestamp()
+        except (TypeError, ValueError):
+            epoch = 0.0
+        return -epoch
+    return split_key(s.key)
+
+
 def ticket_rows(home: Path, phases: frozenset | None = None) -> list[tuple[str, ...]]:
     """Sorted rows for the live ticket table.
 
@@ -49,7 +61,7 @@ def ticket_rows(home: Path, phases: frozenset | None = None) -> list[tuple[str, 
     if phases is not None:
         phase_values = {p.value for p in phases}
         snaps = [s for s in snaps if s.phase in phase_values]
-    snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), split_key(s.key)))
+    snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), _sort_secondary(s)))
     return [
         (s.key, s.phase, (s.title or "")[:64], _pr_cell(s),
          s.ci_state or "—", s.tier or "—", str(s.failure_count), s.key)
