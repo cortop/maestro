@@ -162,6 +162,10 @@ def mint_new_tickets(cfg: Config) -> list[str]:
         }
         if ticket_args.get("kind"):
             ticket_payload["kind"] = ticket_args["kind"]
+        if ticket_args.get("external_source"):
+            ticket_payload["external_source"] = ticket_args["external_source"]
+        if ticket_args.get("external_id"):
+            ticket_payload["external_id"] = ticket_args["external_id"]
         event_log.append(
             home, key, E.TICKET_CREATED,
             ticket_payload,
@@ -218,6 +222,51 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def sync_external_sources(cfg: Config, now: float) -> dict:
+    """Opt-in external-tracker sync tick (e.g. Jira). No-op unless a tracker other
+    than "none" is configured, and gated to run at most once per that provider's
+    ``sync_interval`` seconds via a persisted cursor (level-triggered, idempotent —
+    matches ``mint_new_tickets``). Imports new work via ``import_new`` (which itself
+    funnels through the audited ``_new`` inbox) and refreshes every tracked,
+    not-done ticket sourced from that tracker.
+    """
+    home = cfg.home
+    tracker_name = cfg.providers.get("tracker", "none")
+    if tracker_name in (None, "", "none"):
+        return {"imported": 0, "refreshed": 0}
+
+    settings = cfg.provider_config.get("tracker", {}).get(tracker_name, {})
+    interval = int(settings.get("sync_interval", 900))
+    cursor_path = home / "derived" / ".sync_cursor.json"
+    cursor = store.read_json(cursor_path, {}) or {}
+    last_sync = cursor.get(tracker_name, 0)
+    if now - last_sync < interval:
+        return {"imported": 0, "refreshed": 0}
+
+    # Import lazily to avoid a hard dependency from the core onto any one adapter.
+    from . import providers
+
+    tracker = providers.get_tracker(cfg)
+    imported = tracker.import_new(home)
+
+    refreshed = 0
+    for key in list_keys(home):
+        snap = snap_mod.load(home, key)
+        if snap.external_source != tracker_name:
+            continue
+        if Phase(snap.phase) in TERMINAL_PHASES:
+            continue
+        if not snap.external_id:
+            continue
+        refreshed += tracker.refresh(home, key, snap.external_id)
+        if event_log.last_seq(home, key) > snap.observed_seq:
+            snap_mod.rebuild(home, key)
+
+    cursor[tracker_name] = now
+    store.write_json(cursor_path, cursor)
+    return {"imported": imported, "refreshed": refreshed}
+
+
 def _has_unmet_deps(home: Path, key: str) -> bool:
     """Return True if any dependsOn entry for *key* is not yet done."""
     spec_file = store.spec_path(home, key)
@@ -248,6 +297,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     """
     home = cfg.home
     minted = mint_new_tickets(cfg)
+    sync_external_sources(cfg, now)
 
     active = sessions.list_active()
     due: list[tuple[str, str]] = []

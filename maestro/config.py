@@ -109,7 +109,7 @@ max_impl_turns = 20
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
 
 [providers]
-tracker = "none"          # "none" | "jira_cli" | "github_issues" | custom
+tracker = "none"          # "none" | "jira" | "jira_cli" | "github_issues" | custom
 vcs = "none"              # "none" | "github_cli" | custom
 fetcher = "none"          # "none" | "command" (runs a shell command to import tickets)
 implementer = "claude_skill"
@@ -118,6 +118,14 @@ implementer = "claude_skill"
 # [tracker.jira_cli]
 # project_key = "PROJ"
 # user = "you@example.com"
+#
+# [tracker.jira]              # REST adapter; opt-in ticket import + tracking sync
+# base_url = "https://acme.atlassian.net"
+# email = "you@acme.com"
+# token_env = "JIRA_API_TOKEN"   # token read from env, never stored in config
+# import_jql = "(reporter = currentUser() OR assignee = currentUser()) AND statusCategory = 'To Do'"
+# import_fields = ["summary", "description", "status", "issuetype"]
+# sync_interval = 900            # seconds between dispatcher sync ticks
 #
 # [vcs.github_cli]
 # repos = ["owner/repo"]

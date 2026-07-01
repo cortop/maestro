@@ -42,6 +42,10 @@ class Snapshot:
     kind: str = "implementation"
     proposal_path: str | None = None
     updated_ts: str | None = None
+    # Set when a ticket originated from an external tracker (e.g. Jira) so the
+    # dispatcher's sync tick knows which tickets to `refresh`.
+    external_source: str | None = None
+    external_id: str | None = None
 
     @property
     def question_open(self) -> bool:
@@ -74,6 +78,8 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.source = p.get("source", s.source)
             s.spec_hash = p.get("spec_hash", s.spec_hash)
             s.kind = p.get("kind", "implementation")
+            s.external_source = p.get("external_source", s.external_source)
+            s.external_id = p.get("external_id", s.external_id)
             s.phase = Phase.TRIAGING.value
         elif t == E.SPEC_OBSERVED:
             s.spec_hash = p.get("spec_hash", s.spec_hash)

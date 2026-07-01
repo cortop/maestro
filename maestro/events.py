@@ -27,6 +27,9 @@ IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent
 
+# External sync (opt-in trackers, e.g. Jira)
+JIRA_SYNCED = "JiraSynced"              # {jira_updated_ts, status, last_comment_id}
+
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket
 FAILED = "Failed"                       # {error}  increments failure_count
