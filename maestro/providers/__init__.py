@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from ..config import Config
 from . import base, cli
+from . import jira as jira_mod
 
 
 def get_tracker(cfg: Config) -> base.Tracker:
@@ -14,6 +15,8 @@ def get_tracker(cfg: Config) -> base.Tracker:
     settings = cfg.provider_config.get("tracker", {}).get(name, {})
     if name == "jira_cli":
         return cli.JiraCliTracker(settings)
+    if name == "jira":
+        return jira_mod.JiraTracker(settings)
     return base.NullTracker()
 
 

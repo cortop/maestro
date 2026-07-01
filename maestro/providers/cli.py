@@ -40,6 +40,12 @@ class JiraCliTracker:
         except (KeyError, TypeError):
             return None
 
+    def import_new(self, home) -> int:
+        return 0  # sync via the `jira` CLI is out of scope; see JiraTracker for REST-based sync
+
+    def refresh(self, home, key: str, external_id: str) -> int:
+        return 0
+
 
 class GitHubCliVCS:
     def __init__(self, settings: dict):
