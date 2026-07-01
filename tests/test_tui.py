@@ -171,6 +171,19 @@ def _make_ticket_at_phase(home, key, title, phase):
     snap_mod.rebuild(home, key)
 
 
+def test_ticket_rows_done_phase_ordered_by_updated_ts_desc(home):
+    """Within the done group, most-recently-updated tickets sort first."""
+    for key, ts in (("A-1", "2026-07-01T08:00:00+00:00"),
+                    ("A-2", "2026-07-01T10:00:00+00:00"),
+                    ("A-3", "2026-07-01T09:00:00+00:00")):
+        snap = snap_mod.Snapshot(key=key, phase=Phase.DONE.value, title=key, updated_ts=ts)
+        store.write_json(store.snapshot_path(home, key), snap.to_dict())
+
+    rows = ticket_rows(home)
+    keys = [r[0] for r in rows]
+    assert keys == ["A-2", "A-3", "A-1"], "done rows must be newest-updated-first"
+
+
 def test_ticket_rows_filter_needs_you(home):
     """needs-you filter returns only awaiting-human and degraded tickets."""
     _make_ticket_at_phase(home, "A-1", "awaiting", "awaiting-human")
