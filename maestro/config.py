@@ -47,6 +47,7 @@ class Config:
     research_model: str = "opus"       # model for kind=research tickets
     research_effort: str = "high"      # effort for kind=research tickets
     default_effort: str | None = None  # global effort default; None = omit --effort entirely
+    reconcile_web_tools: bool = True   # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
     raw: dict = field(default_factory=dict)
 
 
@@ -84,6 +85,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.research_model = m.get("research_model", cfg.research_model)
         cfg.research_effort = m.get("research_effort", cfg.research_effort)
         cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
+        cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {
@@ -104,6 +106,7 @@ backoff_base = 30
 max_failures = 4
 max_impl_turns = 20
 # daily_token_ceiling = 5000000   # advisory cost guardrail
+# reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
 
 [providers]
 tracker = "none"          # "none" | "jira_cli" | "github_issues" | custom
