@@ -267,6 +267,61 @@ def sync_external_sources(cfg: Config, now: float) -> dict:
     return {"imported": imported, "refreshed": refreshed}
 
 
+def sync_worktrees(cfg: Config) -> dict:
+    """Keep other tickets' worktrees from drifting behind a just-merged main.
+
+    Refreshes ``origin/main`` in the primary repo (fast-forwarding the local
+    ``main`` branch there too, when that's the checked-out branch), then for
+    every ticket sitting in ``awaiting-ci``/``in-review`` with a worktree that
+    is now behind, routes it back into ``implementing`` so the reconciler
+    rebases and resolves any conflict exactly as it already does for a
+    GitHub-reported CONFLICTING PR (see ``ops.route_conflict``). A ticket that's
+    already ``implementing`` needs no nudge — it re-syncs with ``origin/main``
+    on every turn on its own. Level-triggered and idempotent: no-op when nothing
+    is behind, and a no-op repo/network problem never raises.
+    """
+    import subprocess
+
+    from . import ops
+
+    home = cfg.home
+    repo = cfg.repo_path
+    routed: list[str] = []
+    if not repo or not Path(repo).exists():
+        return {"fetched": False, "routed": routed}
+
+    fetch = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", "main"],
+                           capture_output=True, text=True)
+    if fetch.returncode != 0:
+        return {"fetched": False, "routed": routed}
+    subprocess.run(["git", "-C", repo, "merge", "-q", "--ff-only", "origin/main"],
+                   capture_output=True, text=True)  # best-effort; no-op if main isn't checked out here
+
+    for key in list_keys(home):
+        wt = home / "worktrees" / key
+        if not wt.exists():
+            continue
+        snap = snap_mod.load(home, key)
+        if Phase(snap.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
+            continue
+        behind = subprocess.run(
+            ["git", "-C", str(wt), "rev-list", "--count", "HEAD..origin/main"],
+            capture_output=True, text=True,
+        )
+        if behind.returncode != 0:
+            continue
+        try:
+            count = int((behind.stdout or "0").strip())
+        except ValueError:
+            count = 0
+        if count == 0:
+            continue
+        if ops.route_stale(cfg, key):
+            routed.append(key)
+
+    return {"fetched": True, "routed": routed}
+
+
 def _has_unmet_deps(home: Path, key: str) -> bool:
     """Return True if any dependsOn entry for *key* is not yet done."""
     spec_file = store.spec_path(home, key)
@@ -298,6 +353,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     home = cfg.home
     minted = mint_new_tickets(cfg)
     sync_external_sources(cfg, now)
+    sync_worktrees(cfg)
 
     active = sessions.list_active()
     due: list[tuple[str, str]] = []

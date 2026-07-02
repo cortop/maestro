@@ -65,6 +65,21 @@ def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "recon
     return True
 
 
+def route_stale(cfg: Config, key: str, *, actor: str = "dispatcher") -> bool:
+    """Route a ticket whose worktree has drifted behind origin/main back into
+    `implementing` so the reconciler rebases (idempotent — a no-op if already
+    implementing). Mirrors `route_conflict`'s auto-resolution path, but fires
+    from the dispatcher's proactive drift check (`dispatcher.sync_worktrees`)
+    rather than a GitHub-reported CONFLICTING PR. Returns True if it moved the
+    ticket."""
+    snap = snap_mod.load(cfg.home, key)
+    if snap.phase == Phase.IMPLEMENTING.value:
+        return False
+    set_phase(cfg, key, Phase.IMPLEMENTING,
+              reason="origin/main advanced — rebase worktree onto latest main", actor=actor)
+    return True
+
+
 def ask_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:
     """Escalate an unresolvable PR merge conflict to the human (idempotent — skips
     if already open). Used only when the agent's own rebase in `implementing`
