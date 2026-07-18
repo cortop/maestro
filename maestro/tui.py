@@ -81,11 +81,15 @@ _PHASE_STYLE: dict[str, str] = {
 
 
 def _styled_row(*cells: str) -> tuple:
-    """Return cells styled uniformly by the phase (cells[1])."""
+    """Return cells styled uniformly by the phase (cells[1]).
+
+    Uses from_markup (not a literal Text()) so embedded markup — e.g. the PR
+    cell's `[link=...]` — still renders/clicks correctly once phase-styled.
+    """
     style = _PHASE_STYLE.get(cells[1], "")
     if not style:
         return cells
-    return tuple(Text(str(c), style=style) for c in cells)
+    return tuple(Text.from_markup(str(c), style=style) for c in cells)
 
 
 class LogsScreen(Screen):
