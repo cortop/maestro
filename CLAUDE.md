@@ -79,7 +79,11 @@ how the dogfood board was lost once (2026-07-18). Guard against it:
 - `inbox.py` — per-key append-only human inbox. `projection.py` — snapshots → dashboards.
 - `config.py` — project-agnostic config (`config.toml`). `fleet.py` — launchd LaunchAgent mgmt.
 - `providers/` — pluggable tracker / VCS / fetcher / implementer (selected in config).
-- `tui.py`, `tui_detail.py` — Textual TUI (`maestro tui`, needs the `tui` extra).
+- `tui/` — Textual TUI package (`maestro tui`, needs the `tui` extra): `app.py` (MaestroTUI +
+  entrypoint), `screens.py` (full-screen views), `modals.py` (input dialogs), `render.py`
+  (markup helpers), `detail.py`/`events.py` (textual-free renderers). External code imports
+  only via `maestro.tui` (`__init__.py` re-exports); new screens go in `screens.py`, new
+  modals in `modals.py`.
 
 Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-owned),
 `events/<KEY>.jsonl` (+ `.archive.jsonl`), `inbox/<KEY>.jsonl`, `derived/snapshots/`,
@@ -106,8 +110,8 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
 - Correctness invariants (idempotency, fencing, crash safety, single-writer) are all tested in
   `tests/`. If you touch the log, dispatcher, claims, or fold, add/adjust a test proving the
   invariant still holds.
-- **The TUI instance of that rule: mount the real app.** If you touch `tui.py`, `tui_detail.py`,
-  or `tui_events.py`, prove it by mounting `MaestroTUI` through Textual: add/extend
+- **The TUI instance of that rule: mount the real app.** If you touch anything under
+  `maestro/tui/`, prove it by mounting `MaestroTUI` through Textual: add/extend
   `tests/test_tui_runtime.py` with `async with app.run_test() as pilot:`, drive real keys
   (`await pilot.press(...)`), and assert `app._exception is None`. Mocking `query_one` /
   `push_screen` / `notify` does NOT count as QA — that is exactly what lets a forgotten widget id,

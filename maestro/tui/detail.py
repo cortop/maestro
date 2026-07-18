@@ -1,7 +1,7 @@
 """Detail-pane rendering — no textual dependency, importable in tests."""
 from __future__ import annotations
 
-from . import snapshot as snap_mod
+from .. import snapshot as snap_mod
 
 _EM = "—"  # em-dash for missing values
 
