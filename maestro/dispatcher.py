@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import events as E
-from . import event_log, inbox, schedule, snapshot as snap_mod, store
+from . import event_log, inbox, notify, schedule, snapshot as snap_mod, store
 from .config import Config
 from .idempotency import content_hash
 from .sessions import SessionManager
@@ -449,6 +449,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     scheduled_fired = run_scheduled_tasks(cfg, now)["fired"]
     sync_worktrees(cfg)
     backup.maybe_backup(cfg, now)
+    notify.maybe_notify(cfg, now)
 
     active = sessions.list_active()
     due: list[tuple[str, str]] = []
