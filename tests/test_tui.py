@@ -247,7 +247,7 @@ def test_ticket_rows_filter_empty_phases(home):
 
 # --- detail pane rendering ---------------------------------------------------
 
-from maestro.tui_detail import render as _render_detail  # noqa: E402
+from maestro.tui.detail import render as _render_detail  # noqa: E402
 
 
 def test_render_detail_all_fields_present():
@@ -895,7 +895,7 @@ def test_fleet_screen_not_stale_with_recent_heartbeat(home):
 
 # --- event timeline rendering -------------------------------------------------
 
-from maestro.tui_events import render_event, render_log, render_log_line  # noqa: E402
+from maestro.tui.events import render_event, render_log, render_log_line  # noqa: E402
 from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
 
 
@@ -951,7 +951,7 @@ def test_render_log_order_oldest_first(home):
 
 def test_render_log_tail_limits_to_last_n(home):
     """tail=True limits output to the last _TAIL_N events."""
-    from maestro.tui_events import _TAIL_N
+    from maestro.tui.events import _TAIL_N
     from maestro import event_log as el
     # Write more than _TAIL_N events
     for i in range(_TAIL_N + 5):
@@ -1063,7 +1063,7 @@ def test_populate_clamps_cursor_when_ticket_removed(home):
 
     # Remove B-3 from the store by patching ticket_rows
     remaining = ["B-1", "B-2"]
-    with mock.patch("maestro.tui.ticket_rows") as mock_rows:
+    with mock.patch("maestro.tui.app.ticket_rows") as mock_rows:
         # ticket_rows returns (key, phase, title, pr, ci, tier, fails, row_key)
         mock_rows.return_value = [
             (k, "triaging", k, "—", "—", "—", 0, k) for k in remaining
@@ -1336,7 +1336,7 @@ def test_maestro_tui_has_compact_release_project_bindings(home):
 # --- 's' / spec screen (TUI-10) -----------------------------------------------
 
 from maestro.tui import SpecScreen  # noqa: E402
-from maestro.tui_detail import render_pending  # noqa: E402
+from maestro.tui.detail import render_pending  # noqa: E402
 
 
 def test_spec_screen_constructs(home):
