@@ -23,6 +23,7 @@ The whole module is skipped when the optional ``tui`` extra (textual) is absent.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -86,6 +87,54 @@ def test_app_mounts_clean(seeded_home):
             app.query_one("#detail", Static)
             assert app._exception is None
         assert app.return_code in (None, 0)
+
+    asyncio.run(_inner())
+
+
+def test_filter_bar_renders_on_its_own_visible_row(seeded_home):
+    """Regression: the filter bar was invisible because #filter-bar landed on the
+    same top row as the docked Header (which, being pinned to a named layer, never
+    reserved a flow row) and was painted over. Assert on the RENDERED region — not
+    just markup content — so a re-collapse is caught: the bar must own a non-zero
+    row of its own, strictly below the header and not overlapping it."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            bar = app.query_one("#filter-bar", Static)
+            header = app.query_one("Header")
+            table = app.query_one("#tickets", DataTable)
+
+            assert bar.region.height >= 1, "filter bar collapsed to zero height"
+            assert bar.region.y > header.region.y, "filter bar not below the header"
+            # no vertical overlap with the header row, and above the table
+            assert bar.region.y >= header.region.y + header.region.height
+            assert table.region.y >= bar.region.y + bar.region.height
+
+    asyncio.run(_inner())
+
+
+def test_filter_bar_marks_active_filter_unambiguously(seeded_home):
+    """The active filter must be distinguishable beyond bold alone (reverse-video
+    chip) since bold-only styling was reported as not visibly showing up — the
+    inactive entries are dimmed for contrast. Drives the real 'f' binding."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            bar = app.query_one("#filter-bar", Static)
+
+            for expected_idx, (fname, _phases) in enumerate(_FILTERS):
+                assert app._filter_idx == expected_idx
+                content = str(bar.content)
+                assert f"[reverse bold] {fname}(" in content
+                for other_name, _ in _FILTERS:
+                    if other_name != fname:
+                        assert f"[dim]{other_name}(" in content
+                await pilot.press("f")
+                await pilot.pause()
+
+            assert app._exception is None
 
     asyncio.run(_inner())
 
@@ -578,6 +627,33 @@ def test_styled_row_returns_rich_text_for_attention_phases():
     assert not any(isinstance(c, Text) for c in plain), (
         f"triaging: expected no Text wrapping, got {[type(c).__name__ for c in plain]}"
     )
+
+
+def test_styled_row_preserves_pr_link_markup():
+    """L-11: the PR cell's [link=...] markup must survive phase styling so the
+    main-view table cell stays clickable (a literal Text() would show the raw
+    markup text instead of a link, since it isn't markup-parsed).
+
+    Asserts the *rendered* OSC 8 URI, not just that a link span exists: an
+    earlier version quoted the URL (`[link="..."]`) and Rich carried the quotes
+    into the hyperlink target, so the terminal received `"https://…"` — a
+    malformed URL that would not open. Checking the emitted URI catches that.
+    """
+    from rich.console import Console
+    from textual.strip import Strip
+
+    url = "https://github.com/x/y/pull/42"
+    pr_cell = f"[link={url}]#42[/link]"
+    row = _styled_row("T-1", "awaiting-ci", "title", pr_cell, "passing", "1", "0")
+    pr_text = row[3]
+    assert isinstance(pr_text, Text)
+    assert pr_text.plain == "#42"
+
+    console = Console()
+    rendered = Strip(list(pr_text.render(console))).render(console)
+    m = re.search(r"\x1b]8;[^;]*;([^\x1b]*)", rendered)
+    assert m, f"expected an OSC 8 hyperlink in rendered output: {rendered!r}"
+    assert m.group(1) == url, f"link URI must be the bare URL, got {m.group(1)!r}"
 
 
 def test_phase_styled_rows_render_without_crash(seeded_home):

@@ -81,11 +81,15 @@ _PHASE_STYLE: dict[str, str] = {
 
 
 def _styled_row(*cells: str) -> tuple:
-    """Return cells styled uniformly by the phase (cells[1])."""
+    """Return cells styled uniformly by the phase (cells[1]).
+
+    Uses from_markup (not a literal Text()) so embedded markup — e.g. the PR
+    cell's `[link=...]` — still renders/clicks correctly once phase-styled.
+    """
     style = _PHASE_STYLE.get(cells[1], "")
     if not style:
         return cells
-    return tuple(Text(str(c), style=style) for c in cells)
+    return tuple(Text.from_markup(str(c), style=style) for c in cells)
 
 
 class LogsScreen(Screen):
@@ -1085,7 +1089,12 @@ def _fmt_epoch(ts: float | None) -> str:
 class MaestroTUI(App):
     CSS = """
     Screen { layers: base topbar; }
-    Header { layer: base; }
+    /* NB: do not put Header on a named layer — that stops its dock from
+       reserving a flow row, which collapses #filter-bar underneath it. */
+    #filter-bar {
+        height: 1;
+        background: $panel;
+    }
     #fleet-badge {
         layer: topbar;
         dock: top;
@@ -1412,7 +1421,9 @@ class MaestroTUI(App):
                 count = sum(1 for r in all_rows if r[1] in fvals)
             label = f"{fname}({count})"
             if i == self._filter_idx:
-                label = f"[bold]{label}[/bold]"
+                label = f"[reverse bold] {label} [/reverse bold]"
+            else:
+                label = f"[dim]{label}[/dim]"
             parts.append(label)
         self.query_one("#filter-bar", Static).update("  " + "  |  ".join(parts))
 

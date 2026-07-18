@@ -81,3 +81,21 @@ ls ~/.maestro/maestro-dev/worktrees/   # per-ticket worktrees
   that changes engine code only takes effect after its PR merges — so maestro improving
   itself is gated by your review, by construction.
 - Start with `max_concurrency = 4`; raise it in `config.toml` once you trust the loop.
+
+## Backups (the event logs are the sole source of truth — protect them)
+
+The dispatcher auto-snapshots the irreplaceable state (`events/` + `tickets/` + `inbox/` +
+`config.toml`) on a timer — `backup_interval = 3600` by default (0 disables). Snapshots land
+in a **sibling** of the home (`~/.maestro/maestro-dev-backups/` by default, overridable with
+`backup_dir`), so a `rm -rf` of the home leaves them intact. Only the most-recent
+`backup_retention` (24) tarballs are kept.
+
+```bash
+maestro backup            # snapshot now
+maestro backup --list     # where they live + what exists
+maestro restore           # restore the latest into the home (refolds snapshots + dashboards)
+maestro restore <tarball> --force   # a specific one; --force overwrites a non-empty board
+```
+
+`restore` refuses to clobber a non-empty `events/`/`tickets/` unless `--force`, so a mistaken
+restore can't wipe a live board.

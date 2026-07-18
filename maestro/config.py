@@ -52,6 +52,9 @@ class Config:
     # Declarative recurring triggers: [[scheduled]] array-of-tables, each a dict with
     # name/prompt/every (+ optional approval_tier/kind/priority/prefix/enabled).
     scheduled: list = field(default_factory=list)
+    backup_interval: int = 3600        # seconds between dispatcher auto-backups (0 disables)
+    backup_retention: int | None = 24  # keep most-recent N snapshots; 0/None = keep all
+    backup_dir: str | None = None      # where snapshots live; None = sibling of the home
     raw: dict = field(default_factory=dict)
 
 
@@ -92,6 +95,10 @@ def load(home_arg: str | None = None) -> Config:
         cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
         raw_scheduled = data.get("scheduled", [])
         cfg.scheduled = raw_scheduled if isinstance(raw_scheduled, list) else []
+        cfg.backup_interval = int(m.get("backup_interval", cfg.backup_interval))
+        raw_ret = m.get("backup_retention", cfg.backup_retention)
+        cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
+        cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {
@@ -113,6 +120,9 @@ max_failures = 4
 max_impl_turns = 20
 # daily_token_ceiling = 5000000   # advisory cost guardrail
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
+# backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
+# backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
+# backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "github_issues" | custom
