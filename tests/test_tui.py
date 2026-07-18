@@ -130,14 +130,14 @@ def test_ticket_rows_lists_ticket_columns(home):
 
 
 def test_ticket_rows_pr_label(home):
-    """A ticket with a PR shows '#<number>', one without shows '—'."""
+    """A ticket with a PR shows a clickable link to it, one without shows '—'."""
     event_log.append(home, "T-1", "PrOpened",
                      {"number": 42, "url": "https://github.com/x/y/pull/42", "draft": True},
                      actor="r", step_id="pr-T-1")
     snap_mod.rebuild(home, "T-1")
 
     rows = ticket_rows(home)
-    assert rows[0][3] == "#42"
+    assert rows[0][3] == '[link="https://github.com/x/y/pull/42"]#42[/link]'
 
 
 def test_ticket_rows_phase_order(home):

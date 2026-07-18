@@ -35,7 +35,7 @@ def _link(snap: snap_mod.Snapshot) -> str:
 
 def _pr_cell(snap: snap_mod.Snapshot) -> str:
     if snap.pr_url and snap.pr_number:
-        return f"#{snap.pr_number}"
+        return f'[link="{snap.pr_url}"]#{snap.pr_number}[/link]'
     return "—"
 
 

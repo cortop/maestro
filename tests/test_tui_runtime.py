@@ -577,6 +577,20 @@ def test_styled_row_returns_rich_text_for_attention_phases():
     )
 
 
+def test_styled_row_preserves_pr_link_markup():
+    """L-11: the PR cell's [link=...] markup must survive phase styling so the
+    main-view table cell stays clickable (a literal Text() would show the raw
+    markup text instead of a link, since it isn't markup-parsed)."""
+    pr_cell = '[link="https://github.com/x/y/pull/42"]#42[/link]'
+    row = _styled_row("T-1", "awaiting-ci", "title", pr_cell, "passing", "1", "0")
+    pr_text = row[3]
+    assert isinstance(pr_text, Text)
+    assert pr_text.plain == "#42"
+    assert any(
+        span.style and "link" in str(span.style) for span in pr_text.spans
+    ), f"expected a link span, got spans={pr_text.spans!r}"
+
+
 def test_phase_styled_rows_render_without_crash(seeded_home):
     """DataTable populated with styled Text cells mounts and renders without error."""
     async def _inner():
