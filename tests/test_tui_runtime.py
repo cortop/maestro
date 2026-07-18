@@ -33,6 +33,7 @@ from textual.widgets import DataTable, Input, Select, Static  # noqa: E402
 
 from rich.text import Text  # noqa: E402
 
+from conftest import seed_ticket  # noqa: E402
 from maestro import store  # noqa: E402
 from maestro.tui import (  # noqa: E402
     DetailScreen,
@@ -412,6 +413,39 @@ def test_create_modal_prefix_select_has_options(seeded_home):
             assert "(new)" in option_values
             new_inp = modal.query_one("#create-prefix-new", Input)
             assert not new_inp.display, "new-prefix input should start hidden"
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_create_modal_defaults_prefix_to_m_when_present(home):
+    """When M is among existing prefixes, the Select should pre-select it."""
+    seed_ticket(home, "T-1", "ticket", phase="ready")
+    seed_ticket(home, "M-1", "ticket", phase="ready")
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            sel = modal.query_one("#create-prefix", Select)
+            assert sel.value == "M"
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_create_modal_falls_back_to_first_prefix_when_m_absent(seeded_home):
+    """seeded_home only has prefix T (no M) — Select should fall back to the
+    first-option behavior, unchanged from before this default was added."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            sel = modal.query_one("#create-prefix", Select)
+            assert sel.value == "T"
             assert app._exception is None
     asyncio.run(_inner())
 

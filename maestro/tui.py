@@ -350,12 +350,13 @@ class _CreateModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         options = [(p, p) for p in self._prefixes] + [(self._NEW_PREFIX, self._NEW_PREFIX)]
+        default_prefix = "M" if "M" in self._prefixes else Select.NULL
         with Vertical(id="create-dialog"):
             yield Label("[bold]New Ticket[/bold]")
             yield Label("Title [bold red]*[/bold red]")
             yield Input(placeholder="required", id="create-title")
             yield Label("Prefix [bold red]*[/bold red]")
-            yield Select(options=options, id="create-prefix", allow_blank=False)
+            yield Select(options=options, id="create-prefix", allow_blank=False, value=default_prefix)
             yield Input(placeholder="new prefix, e.g. FEAT", id="create-prefix-new")
             yield Label("Kind")
             yield Select(options=[("implementation", "implementation"), ("research", "research")], id="create-kind", allow_blank=False, value="implementation")
