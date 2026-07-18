@@ -35,6 +35,35 @@ so `make` targets are correct — but a raw `maestro <cmd>` in the shell will hi
 Always `export MAESTRO_HOME=~/.maestro/maestro-dev` (or use a `make` target) when inspecting or
 mutating the self-dev board. `maestro env` prints the resolved paths. See `DOGFOOD.md`.
 
+## ⚠️ NEVER delete the state home / event logs
+
+**Do not run `rm -rf` (or any delete/move/`git clean`) against a MAESTRO_HOME, its `events/`,
+`tickets/`, `inbox/`, or `config.toml` — not the dogfood/dev home (`~/.maestro/maestro-dev`),
+not any home.** The event logs are the sole source of truth and have no other copy; deleting them
+is unrecoverable. "It's only the dev/dogfood board" is **not** a reason to delete it — that board
+is real work-in-progress (this is exactly how it was lost on 2026-07-18). If a home genuinely
+needs resetting, `maestro backup` first, then delete only with the human's explicit, in-the-moment
+go-ahead. Tests must operate on a `tmp_path`, never on a real home (see `tests/conftest.py`).
+
+## ⚠️ Backups — the event logs are the sole source of truth
+
+There is **no other copy** of a ticket's history. An external `rm` (a stray shell command, a
+`--dangerously-skip-permissions` agent) that deletes `events/` is unrecoverable — this is exactly
+how the dogfood board was lost once (2026-07-18). Guard against it:
+
+- The dispatcher **auto-snapshots** `events/` + `tickets/` + `inbox/` + `config.toml` on a timer
+  (`backup_interval`, default 3600s; `0` disables). Snapshots are `.tar.gz` tarballs in a
+  **sibling** of the home (`backup_dir`, default `<home>-backups/`), so they survive a
+  `rm -rf <home>`. Only the most-recent `backup_retention` (default 24) are kept. Logic lives in
+  `maestro/backup.py` (stdlib-only: `tarfile` + `datetime`); it is wired into `dispatch()` via
+  `backup.maybe_backup(cfg, now)`, cursor-gated exactly like `sync_external_sources`.
+- Verbs: `maestro backup` (snapshot now), `maestro backup --list`, `maestro restore [<tarball>]`
+  (default: latest; refolds snapshots + dashboards after extracting). `make backup` / `make restore`
+  (`FORCE=1` to overwrite). `restore` refuses to clobber a non-empty `events/`/`tickets/` without
+  `--force`, so a mistaken restore can't wipe a live board.
+- If you touch `backup.py`, the dispatcher hook, or the config knobs, keep `tests/test_backup.py`
+  green — it drives the real CLI over a temp home through a backup → wipe → restore round-trip.
+
 ## Architecture (package layout)
 
 `maestro/` (the correctness-critical core):

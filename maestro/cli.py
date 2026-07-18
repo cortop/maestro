@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -590,6 +590,26 @@ def cmd_tui(args) -> int:
     return tui_main(args)
 
 
+def cmd_backup(args) -> int:
+    """Snapshot the irreplaceable state (events/tickets/inbox/config) to a tarball."""
+    cfg = _cfg(args)
+    if args.list:
+        _print({"backup_dir": str(backup.resolve_backup_dir(cfg)),
+                "backups": [str(p) for p in backup.list_backups(cfg)]})
+        return 0
+    path = backup.create_backup(cfg, store.now_epoch())
+    _print({"created": str(path)})
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """Restore a backup tarball into the home, then refold snapshots + dashboards."""
+    cfg = _cfg(args)
+    archive = Path(args.archive) if args.archive else None
+    _print(backup.restore_backup(cfg, archive, force=args.force))
+    return 0
+
+
 def cmd_env(args) -> int:
     """Resolved config essentials — used by the reconcile skill to find the repo."""
     cfg = _cfg(args)
@@ -656,6 +676,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model", default=None, help="override reconcile_model from config")
     add("project", cmd_project, "regenerate dashboards")
     add("env", cmd_env, "resolved config (home, repo_path, ...)")
+
+    sp = add("backup", cmd_backup, "snapshot events/tickets/inbox/config to a tarball")
+    sp.add_argument("--list", action="store_true",
+                    help="list existing backups instead of creating one")
+    sp = add("restore", cmd_restore, "restore a backup tarball into the home")
+    sp.add_argument("archive", nargs="?", default=None,
+                    help="tarball path to restore (default: latest)")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite a non-empty events/ or tickets/")
 
     sp = add("fleet", cmd_fleet, "manage the launchd dispatcher (up/down/status)")
     sp.add_argument("action", choices=["up", "down", "status"])

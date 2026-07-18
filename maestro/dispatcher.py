@@ -351,9 +351,12 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     run on a timer — minting and folding are no-ops when nothing changed.
     """
     home = cfg.home
+    from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
+
     minted = mint_new_tickets(cfg)
     sync_external_sources(cfg, now)
     sync_worktrees(cfg)
+    backup.maybe_backup(cfg, now)
 
     active = sessions.list_active()
     due: list[tuple[str, str]] = []
