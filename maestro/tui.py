@@ -1205,7 +1205,9 @@ class MaestroTUI(App):
                 count = sum(1 for r in all_rows if r[1] in fvals)
             label = f"{fname}({count})"
             if i == self._filter_idx:
-                label = f"[bold]{label}[/bold]"
+                label = f"[reverse bold] {label} [/reverse bold]"
+            else:
+                label = f"[dim]{label}[/dim]"
             parts.append(label)
         self.query_one("#filter-bar", Static).update("  " + "  |  ".join(parts))
 
