@@ -4,7 +4,7 @@ export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
 
 PY := .venv/bin/python
 
-.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down autocomplete
+.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down autocomplete backup restore
 
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
@@ -16,6 +16,8 @@ help:
 	@echo "make doctor      fleet health (heartbeat, dead-letters)"
 	@echo "make reconcile KEY=M-1   run ONE reconcile in the foreground (for testing)"
 	@echo "make fleet-up / fleet-down   install / remove the launchd dispatcher"
+	@echo "make backup                  snapshot events/tickets/inbox/config to a tarball"
+	@echo "make restore                 restore the latest backup (refuses to clobber; use FORCE=1)"
 	@echo "make autocomplete            install zsh completion script"
 	@echo "make run-tui-dev"
 
@@ -50,6 +52,14 @@ project:
 reconcile:
 	@test -n "$(KEY)" || (echo "usage: make reconcile KEY=M-1" && exit 1)
 	claude -p "/maestro-reconcile $(KEY)" --permission-mode acceptEdits
+
+backup:
+	maestro backup
+
+# Restore the latest snapshot into MAESTRO_HOME. Refuses to overwrite a non-empty
+# board unless FORCE=1 (e.g. `make restore FORCE=1`).
+restore:
+	maestro restore $(if $(FORCE),--force,)
 
 fleet-up:
 	daemon/install.sh up
