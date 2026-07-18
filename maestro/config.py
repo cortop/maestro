@@ -7,6 +7,7 @@ or a pure-local todo list.
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +49,9 @@ class Config:
     research_effort: str = "high"      # effort for kind=research tickets
     default_effort: str | None = None  # global effort default; None = omit --effort entirely
     reconcile_web_tools: bool = True   # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
+    # Declarative recurring triggers: [[scheduled]] array-of-tables, each a dict with
+    # name/prompt/every (+ optional approval_tier/kind/priority/prefix/enabled).
+    scheduled: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -86,6 +90,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.research_effort = m.get("research_effort", cfg.research_effort)
         cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
         cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
+        raw_scheduled = data.get("scheduled", [])
+        cfg.scheduled = raw_scheduled if isinstance(raw_scheduled, list) else []
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {
@@ -133,4 +139,54 @@ implementer = "claude_skill"
 #
 # [fetcher.command]
 # cmd = "~/bin/import-tickets.sh"   # writes create-requests to the _new inbox
+
+# [[scheduled]]                    # recurring, prompt-defined triggers (optional, repeatable)
+# name = "morning-pr-digest"       # stable id -> cursor key + dedup token
+# prompt = "Summarize PRs merged to main in the last 24h and open a note ticket."
+# every = "24h"                    # "30m" | "6h" | "24h" | a bare integer of seconds
+# approval_tier = 1
+# kind = "implementation"          # or "research"
+# priority = 3
+# prefix = "S"                     # minted keys become S-1, S-2, ...
+# enabled = true
 """
+
+# Field order used when serializing a task back to config.toml (see write_scheduled).
+_SCHEDULED_FIELDS = ("name", "prompt", "every", "approval_tier", "kind", "priority",
+                     "prefix", "enabled")
+_SCHEDULED_BLOCK_RE = re.compile(r"(?ms)^\[\[scheduled\]\]\n(?:(?!^\[).)*")
+
+
+def _toml_scalar(v) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    s = str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{s}"'
+
+
+def _serialize_task(task: dict) -> str:
+    lines = ["[[scheduled]]"]
+    for f in _SCHEDULED_FIELDS:
+        val = _toml_scalar(task.get(f))
+        if val is None:
+            continue
+        lines.append(f"{f} = {val}")
+    return "\n".join(lines) + "\n"
+
+
+def write_scheduled(home: Path, tasks: list[dict]) -> None:
+    """Rewrite the `[[scheduled]]` array-of-tables in config.toml, leaving every
+    other section untouched. The TUI schedule panel's only write path — humans
+    editing config.toml by hand still works, this just re-derives the same blocks.
+    """
+    path = config_path(home)
+    text = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_CONFIG_TOML
+    text = _SCHEDULED_BLOCK_RE.sub("", text)
+    text = text.rstrip("\n") + "\n"
+    if tasks:
+        text += "\n" + "\n".join(_serialize_task(t) for t in tasks)
+    store.atomic_write(path, text if text.endswith("\n") else text + "\n")

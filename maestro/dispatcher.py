@@ -16,11 +16,11 @@ No global lock, no wave barrier. Different keys are wholly independent.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import events as E
-from . import event_log, inbox, snapshot as snap_mod, store
+from . import event_log, inbox, schedule, snapshot as snap_mod, store
 from .config import Config
 from .idempotency import content_hash
 from .sessions import SessionManager
@@ -140,10 +140,24 @@ def existing_prefixes(home: Path) -> list[str]:
 
 
 def mint_new_tickets(cfg: Config) -> list[str]:
-    """Drain the keyless ``_new`` inbox into real ticket dirs + TicketCreated events."""
+    """Drain the keyless ``_new`` inbox into real ticket dirs + TicketCreated events.
+
+    A create-request may carry a period-bucket ``dedup`` token (scheduled tasks do —
+    see ``run_scheduled_tasks``) to close the window between that tick's ``_new``
+    append and its cursor write: if a crash there causes the same period to be
+    re-fired, the re-fired request carries the same token and is skipped here,
+    making the re-fire a guaranteed no-op instead of a duplicate ticket.
+    """
     home = cfg.home
     minted: list[str] = []
+    minted_path = home / "derived" / ".schedule_minted.json"
+    minted_dedup = store.read_json(minted_path, {}) or {}
+    dedup_changed = False
     for _idx, entry in inbox.pending_new(home):
+        ticket_args = entry.get("args") or {}
+        dedup = ticket_args.get("dedup")
+        if dedup and dedup in minted_dedup:
+            continue  # already minted this period — guaranteed no-op
         prefix = entry.get("prefix") or None
         key = entry.get("key") or _auto_key(home, prefix=prefix or "T")
         try:
@@ -153,8 +167,7 @@ def mint_new_tickets(cfg: Config) -> list[str]:
         spec = store.spec_path(home, key)
         title = entry.get("title") or key
         if not spec.exists():
-            store.atomic_write(spec, _seed_spec(key, title, entry.get("args") or {}))
-        ticket_args = entry.get("args") or {}
+            store.atomic_write(spec, _seed_spec(key, title, ticket_args))
         ticket_payload: dict = {
             "title": title,
             "source": "inbox/_new",
@@ -166,6 +179,8 @@ def mint_new_tickets(cfg: Config) -> list[str]:
             ticket_payload["external_source"] = ticket_args["external_source"]
         if ticket_args.get("external_id"):
             ticket_payload["external_id"] = ticket_args["external_id"]
+        if ticket_args.get("scheduled_by"):
+            ticket_payload["scheduled_by"] = ticket_args["scheduled_by"]
         event_log.append(
             home, key, E.TICKET_CREATED,
             ticket_payload,
@@ -174,7 +189,12 @@ def mint_new_tickets(cfg: Config) -> list[str]:
         )
         snap_mod.rebuild(home, key)
         minted.append(key)
+        if dedup:
+            minted_dedup[dedup] = key
+            dedup_changed = True
     inbox.ack_new(home)
+    if dedup_changed:
+        store.write_json(minted_path, minted_dedup)
     return minted
 
 
@@ -267,6 +287,76 @@ def sync_external_sources(cfg: Config, now: float) -> dict:
     return {"imported": imported, "refreshed": refreshed}
 
 
+def _schedule_cursor_path(home: Path) -> Path:
+    return home / "derived" / ".schedule_cursor.json"
+
+
+def run_scheduled_tasks(cfg: Config, now: float) -> dict:
+    """Config-declared recurring-trigger tick, mirroring ``sync_external_sources``:
+    for each enabled+due ``[[scheduled]]`` task, mint one create-request into the
+    ``_new`` inbox and advance a single ``derived/.schedule_cursor.json``
+    ({name: last_fired_ts}). Level-triggered, not edge-accumulating: a task fires
+    ONCE on the next sweep after a long downtime, resetting its cursor to ``now``
+    rather than catching up.
+    """
+    home = cfg.home
+    cursor_path = _schedule_cursor_path(home)
+    cursor = store.read_json(cursor_path, {}) or {}
+    fired: list[str] = []
+    for task in cfg.scheduled:
+        if not task.get("enabled", True):
+            continue
+        name = task.get("name")
+        if not name or not task.get("prompt") or not task.get("every"):
+            continue
+        last = cursor.get(name, 0)
+        if not schedule.is_due(task, last, now):
+            continue
+        bucket = int(now // schedule.period(task))
+        inbox.append_new(
+            home,
+            title=task.get("title") or name,
+            prefix=task.get("prefix"),
+            args={
+                "intent": task["prompt"],
+                "kind": task.get("kind", "implementation"),
+                "approval_tier": task.get("approval_tier", 1),
+                "priority": task.get("priority", 3),
+                "scheduled_by": name,
+                "dedup": f"{name}:{bucket}",
+            },
+        )
+        cursor[name] = now
+        fired.append(name)
+    if fired:
+        store.write_json(cursor_path, cursor)
+    return {"fired": fired}
+
+
+def schedule_status(cfg: Config, now: float) -> list[dict]:
+    """Read-only view of every configured task's cadence + cursor state, for
+    ``maestro schedule list`` and the TUI schedule panel."""
+    cursor = store.read_json(_schedule_cursor_path(cfg.home), {}) or {}
+    rows: list[dict] = []
+    for task in cfg.scheduled:
+        name = task.get("name")
+        last = cursor.get(name, 0) or None
+        enabled = task.get("enabled", True)
+        rows.append({
+            "name": name,
+            "prompt": task.get("prompt"),
+            "every": task.get("every"),
+            "kind": task.get("kind", "implementation"),
+            "approval_tier": task.get("approval_tier", 1),
+            "priority": task.get("priority", 3),
+            "prefix": task.get("prefix"),
+            "enabled": enabled,
+            "last_fired": last,
+            "next_due": schedule.next_due(task, last or 0) if enabled and task.get("every") else None,
+        })
+    return rows
+
+
 def sync_worktrees(cfg: Config) -> dict:
     """Keep other tickets' worktrees from drifting behind a just-merged main.
 
@@ -343,6 +433,7 @@ class DispatchReport:
     spawned: list[str]
     capacity_skipped: list[str]     # due + free but over the concurrency cap
     active_sessions: int
+    scheduled_fired: list[str] = field(default_factory=list)
 
 
 def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchReport:
@@ -353,6 +444,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     home = cfg.home
     minted = mint_new_tickets(cfg)
     sync_external_sources(cfg, now)
+    scheduled_fired = run_scheduled_tasks(cfg, now)["fired"]
     sync_worktrees(cfg)
 
     active = sessions.list_active()
@@ -395,6 +487,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
+        scheduled_fired=scheduled_fired,
     )
 
 
