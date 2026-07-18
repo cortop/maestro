@@ -64,20 +64,66 @@ class GitHubCliVCS:
                     return rows[0]
         return None
 
-    def ci_state(self, pr_number: int) -> str:
+    def pr_status(self, pr_number: int) -> dict:
         repo = self.repos[0] if self.repos else None
-        cmd = ["gh", "pr", "checks", str(pr_number), "--json", "state"]
+        cmd = ["gh", "pr", "view", str(pr_number), "--json",
+               "state,mergeable,headRefOid,statusCheckRollup"]
         if repo:
             cmd += ["--repo", repo]
         rc, out, _ = _run(cmd)
         if rc != 0 or not out.strip():
-            return "unknown"
-        states = [r.get("state", "") for r in json.loads(out)]
-        if any(s in {"FAILURE", "ERROR"} for s in states):
-            return "failing"
-        if any(s in {"PENDING", "IN_PROGRESS", "QUEUED"} for s in states):
-            return "pending"
-        return "passing" if states else "unknown"
+            return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
+                    "ci_state": "unknown", "failing_checks": []}
+        data = json.loads(out)
+        checks = data.get("statusCheckRollup") or []
+        failing, pending = [], False
+        for c in checks:
+            name = c.get("name") or c.get("context") or "check"
+            conclusion = (c.get("conclusion") or c.get("state") or "").upper()
+            status = (c.get("status") or "").upper()
+            if conclusion in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"}:
+                failing.append(name)
+            elif not conclusion and status in {"IN_PROGRESS", "QUEUED", "PENDING"}:
+                pending = True
+            elif conclusion == "PENDING":
+                pending = True
+        if failing:
+            ci_state = "failing"
+        elif pending:
+            ci_state = "pending"
+        elif checks:
+            ci_state = "passing"
+        else:
+            ci_state = "unknown"
+        return {
+            "state": data.get("state", "unknown"),
+            "mergeable": data.get("mergeable", "UNKNOWN"),
+            "head_sha": data.get("headRefOid"),
+            "ci_state": ci_state,
+            "failing_checks": failing,
+        }
+
+    def review_feedback(self, pr_number: int) -> list[dict]:
+        repo = self.repos[0] if self.repos else None
+        cmd = ["gh", "pr", "view", str(pr_number), "--json", "reviews"]
+        if repo:
+            cmd += ["--repo", repo]
+        rc, out, _ = _run(cmd)
+        if rc != 0 or not out.strip():
+            return []
+        reviews = json.loads(out).get("reviews") or []
+        result = []
+        for r in reviews:
+            rid = r.get("id")
+            if not rid:
+                continue
+            result.append({
+                "id": str(rid),
+                "state": r.get("state"),
+                "body": r.get("body", ""),
+                "author": (r.get("author") or {}).get("login"),
+            })
+        return result
 
 
 class CommandFetcher:

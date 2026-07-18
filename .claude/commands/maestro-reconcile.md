@@ -193,45 +193,18 @@ Otherwise implement the spec's Acceptance criteria:
    Then exit (do NOT poll CI in-session).
    Rules: never force-push, never skip hooks, never mock real behavior in tests.
 
-### `awaiting-ci`
-You woke on the timer. **First** check for merge conflicts (idempotent — no-op once routed):
+### `awaiting-ci` / `in-review`
+Both are dispatcher-owned, sleeping phases now: the dispatcher's `sync_vcs` tick (see
+`maestro/dispatcher.py`) polls PR state, CI checks, and review comments directly every
+sweep via the configured `vcs` provider and advances the phase itself — merged finalizes
+(+ removes the worktree), a CONFLICTING PR routes to `implementing` for auto-resolution,
+failing CI routes to `implementing` with the failing check names in the reason, passing CI
+moves `awaiting-ci` → `in-review`, and a CHANGES_REQUESTED review routes back to
+`implementing` with the verbatim comment body. You should essentially never be spawned into
+either phase. If you land here anyway (a stray signal), there is nothing to do:
 ```bash
-PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pr_number') or '')")
-if [ -n "$PR_NUM" ]; then
-  MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
-  maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
-  # If CONFLICTING, check-conflicts routes to implementing so the agent rebases &
-  # pushes (auto-resolution). Exit now — the implementing reconcile picks it up.
-  [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
-fi
+maestro release "$KEY"
 ```
-Then check CI once and record it:
-```bash
-STATE=$(gh pr checks "$(gh pr view ${PREFIX}${KEY} --repo cortop/maestro --json number -q .number)" --repo cortop/maestro 2>/dev/null \
-        | awk '{print $2}' | sort -u | paste -sd, - | grep -q fail && echo failing || echo passing)
-maestro append "$KEY" --type CiObserved --payload "{\"state\":\"$STATE\"}" --step-id "ci-$KEY-$(date +%s)"
-```
-- passing → `maestro set-phase "$KEY" in-review`
-- failing → `maestro set-phase "$KEY" implementing`
-- still pending → `maestro requeue "$KEY" 300`
-
-### `in-review`
-**First** check for merge conflicts (guard against conflicts introduced during review — routes
-back to implementing for auto-resolution):
-```bash
-PR_NUM=$(maestro snapshot "$KEY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pr_number') or '')")
-if [ -n "$PR_NUM" ]; then
-  MERGEABLE=$(gh pr view "$PR_NUM" --repo cortop/maestro --json mergeable -q .mergeable 2>/dev/null || echo "UNKNOWN")
-  maestro check-conflicts "$KEY" "$PR_NUM" "$MERGEABLE"
-  [ "$MERGEABLE" = "CONFLICTING" ] && maestro release "$KEY" && exit 0
-fi
-```
-If the PR is merged (`gh pr view ... --json state`), clean up and finish:
-```bash
-git -C "$REPO" worktree remove "$HOME/worktrees/$KEY" --force 2>/dev/null || true
-maestro finalize "$KEY"
-```
-Else sleep: `maestro requeue "$KEY" 900`.
 
 ### `degraded`
 Do nothing automated — wait for `maestro cmd "$KEY" retry`. Exit.

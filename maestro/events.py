@@ -20,7 +20,8 @@ COMMAND_RECEIVED = "CommandReceived"    # {command, args}  folded from the inbox
 # Implementation / VCS
 PR_OPENED = "PrOpened"                  # {number, url, draft}
 PR_UPDATED = "PrUpdated"                # {number, draft, merged}
-CI_OBSERVED = "CiObserved"              # {state}  e.g. "passing" | "failing" | "pending"
+CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail}  state: "passing"|"failing"|"pending"|"unknown"
+REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body, author}  one PR review; idempotent per comment_id
 IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-off
 IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
 
