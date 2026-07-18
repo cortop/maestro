@@ -30,12 +30,12 @@ import pytest
 pytest.importorskip("textual", reason="requires the [tui] extra (textual)")
 
 import textual.app as _txapp  # noqa: E402
-from textual.widgets import DataTable, Input, Select, Static  # noqa: E402
+from textual.widgets import DataTable, Input, Select, Static, TextArea  # noqa: E402
 
 from rich.text import Text  # noqa: E402
 
 from conftest import seed_ticket  # noqa: E402
-from maestro import store  # noqa: E402
+from maestro import config as config_mod, store  # noqa: E402
 from maestro.tui import (  # noqa: E402
     DetailScreen,
     EventsScreen,
@@ -43,12 +43,14 @@ from maestro.tui import (  # noqa: E402
     LogsScreen,
     MaestroTUI,
     ProposalScreen,
+    ScheduleScreen,
     _AnswerModal,
     _CmdModal,
     _CreateModal,
     _FILTERS,
     _InboxModal,
     _IntervalModal,
+    _ScheduleModal,
     _styled_row,
 )
 
@@ -240,7 +242,8 @@ def test_quit_binding_exits_clean(seeded_home):
 
 _BINDING_CLASSES = [
     MaestroTUI, DetailScreen, EventsScreen, LogsScreen, FleetScreen, ProposalScreen,
-    _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
+    ScheduleScreen, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
+    _ScheduleModal,
 ]
 
 
@@ -980,3 +983,114 @@ def test_proposal_screen_opens_with_proposal(seeded_home):
         assert app._exception is None
 
     asyncio.run(_inner())
+
+
+# --- T-10: scheduled tasks TUI surface ---------------------------------------
+
+def _write_scheduled_config(home, **overrides):
+    task = {
+        "name": "digest", "prompt": "Summarize things", "every": "1h",
+        "approval_tier": 1, "kind": "implementation", "priority": 3,
+        "prefix": "S", "enabled": True,
+    }
+    task.update(overrides)
+    config_mod.write_scheduled(home, [task])
+    return task
+
+
+def test_schedule_screen_open_and_escape(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _open_via_action(app, pilot, "schedule_panel", ScheduleScreen)
+
+    asyncio.run(_inner())
+
+
+def test_schedule_screen_shows_configured_tasks(seeded_home):
+    _write_scheduled_config(seeded_home)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("schedule_panel")
+            await pilot.pause()
+            screen = app.screen_stack[-1]
+            assert isinstance(screen, ScheduleScreen)
+            table = screen.query_one("#schedule-table", DataTable)
+            assert table.row_count == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_schedule_modal_open_and_escape(seeded_home):
+    _write_scheduled_config(seeded_home)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("schedule_panel")
+            await pilot.pause()
+            schedule_screen = app.screen_stack[-1]
+            before = len(app.screen_stack)
+            await schedule_screen.run_action("add_task")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _ScheduleModal)
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+            assert len(app.screen_stack) == before
+
+    asyncio.run(_inner())
+
+
+def test_schedule_modal_add_task_writes_config(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("schedule_panel")
+            await pilot.pause()
+            schedule_screen = app.screen_stack[-1]
+            await schedule_screen.run_action("add_task")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ScheduleModal)
+            modal.query_one("#sched-name", Input).value = "new-task"
+            modal.query_one("#sched-prompt", TextArea).text = "Do the thing"
+            modal.query_one("#sched-every", Input).value = "6h"
+            await modal.run_action("submit")
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    cfg = config_mod.load(str(seeded_home))
+    assert len(cfg.scheduled) == 1
+    assert cfg.scheduled[0]["name"] == "new-task"
+    assert cfg.scheduled[0]["every"] == "6h"
+
+
+def test_schedule_toggle_task_flips_enabled(seeded_home):
+    _write_scheduled_config(seeded_home, enabled=True)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("schedule_panel")
+            await pilot.pause()
+            screen = app.screen_stack[-1]
+            table = screen.query_one("#schedule-table", DataTable)
+            table.move_cursor(row=0)
+            await pilot.pause()
+            await screen.run_action("toggle_task")
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    cfg = config_mod.load(str(seeded_home))
+    assert cfg.scheduled[0]["enabled"] is False

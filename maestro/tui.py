@@ -15,9 +15,9 @@ from textual.widgets import DataTable, Footer, Header, Input, Label, Markdown, R
 from textual.worker import Worker, WorkerState
 
 from .projection import ticket_rows
-from . import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
+from . import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, ops as ops_mod, schedule, snapshot as snap_mod, store
 from .config import Config
-from .dispatcher import existing_prefixes
+from .dispatcher import existing_prefixes, schedule_status
 from .sessions import list_sessions
 from .statemachine import Phase, ACTIVE_PHASES
 from .tui_detail import render as _render_detail, render_pending as _render_pending
@@ -883,6 +883,209 @@ class EnvScreen(Screen):
         self.query_one("#env-panel", Static).update(_render_env(cfg))
 
 
+class _ScheduleModal(ModalScreen):
+    """Add/edit form for one `[[scheduled]]` task; dismisses with a result dict or None."""
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+enter", "submit", "Submit"),
+    ]
+
+    def __init__(self, existing: dict | None = None) -> None:
+        super().__init__()
+        self._existing = existing or {}
+
+    def compose(self) -> ComposeResult:
+        t = self._existing
+        with Vertical(id="schedule-dialog"):
+            yield Label("[bold]Scheduled task[/bold]")
+            yield Label("Name [bold red]*[/bold red]")
+            yield Input(value=t.get("name", ""), placeholder="required, stable id", id="sched-name")
+            yield Label("Prompt [bold red]*[/bold red]")
+            yield TextArea(t.get("prompt", ""), id="sched-prompt")
+            yield Label("Every (e.g. 30m / 6h / 24h / seconds) [bold red]*[/bold red]")
+            yield Input(value=str(t.get("every", "")), placeholder="30m", id="sched-every")
+            yield Label("Kind")
+            yield Select(options=[("implementation", "implementation"), ("research", "research")],
+                        id="sched-kind", allow_blank=False, value=t.get("kind", "implementation"))
+            yield Label("Approval tier")
+            yield Input(value=str(t.get("approval_tier", 1)), id="sched-tier")
+            yield Label("Priority")
+            yield Input(value=str(t.get("priority", 3)), id="sched-priority")
+            yield Label("Prefix (minted keys become PREFIX-1, PREFIX-2, …)")
+            yield Input(value=t.get("prefix") or "", placeholder="e.g. S", id="sched-prefix")
+            yield Label("Enabled")
+            yield Select(options=[("true", "true"), ("false", "false")],
+                        id="sched-enabled", allow_blank=False,
+                        value="true" if t.get("enabled", True) else "false")
+            yield Label("[dim]Tab/Enter → next · Ctrl+Enter → submit · Esc → cancel[/dim]")
+
+    def on_mount(self) -> None:
+        self.query_one("#sched-name", Input).focus()
+
+    def action_submit(self) -> None:
+        self._submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _submit(self) -> None:
+        name = self.query_one("#sched-name", Input).value.strip()
+        if not name:
+            self.notify("Name is required", severity="warning")
+            self.query_one("#sched-name", Input).focus()
+            return
+        prompt = self.query_one("#sched-prompt", TextArea).text.strip()
+        if not prompt:
+            self.notify("Prompt is required", severity="warning")
+            return
+        every = self.query_one("#sched-every", Input).value.strip()
+        if not every:
+            self.notify("Every is required", severity="warning")
+            return
+        try:
+            schedule.parse_every(every)
+        except ValueError:
+            self.notify("Every must look like 30m / 6h / 24h / seconds", severity="warning")
+            return
+        try:
+            tier = int(self.query_one("#sched-tier", Input).value.strip() or "1")
+            priority = int(self.query_one("#sched-priority", Input).value.strip() or "3")
+        except ValueError:
+            self.notify("Tier and priority must be integers", severity="warning")
+            return
+        kind_sel = self.query_one("#sched-kind", Select)
+        kind = str(kind_sel.value) if kind_sel.value is not Select.BLANK else "implementation"
+        prefix = self.query_one("#sched-prefix", Input).value.strip() or None
+        enabled_sel = self.query_one("#sched-enabled", Select)
+        enabled = str(enabled_sel.value) == "true"
+        self.dismiss({
+            "name": name, "prompt": prompt, "every": every, "kind": kind,
+            "approval_tier": tier, "priority": priority, "prefix": prefix,
+            "enabled": enabled,
+        })
+
+
+class ScheduleScreen(Screen):
+    """View/add/edit/enable-disable config-declared `[[scheduled]]` tasks."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("n", "add_task", "Add"),
+        ("e", "edit_task", "Edit"),
+        ("t", "toggle_task", "Enable/Disable"),
+        ("r", "refresh", "Refresh"),
+    ]
+
+    CSS = "ScheduleScreen #schedule-table { height: 1fr; }"
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+        self._selected_name: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield DataTable(id="schedule-table")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Scheduled tasks"
+        table = self.query_one("#schedule-table", DataTable)
+        table.cursor_type = "row"
+        table.add_column("Name")
+        table.add_column("Every")
+        table.add_column("Kind")
+        table.add_column("Tier")
+        table.add_column("Enabled")
+        table.add_column("Last fired")
+        table.add_column("Next due")
+        self._refresh()
+
+    def action_refresh(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        cfg = config_mod.load(str(self._home))
+        rows = schedule_status(cfg, store.now_epoch())
+        table = self.query_one("#schedule-table", DataTable)
+        table.clear()
+        for row in rows:
+            table.add_row(
+                row["name"], str(row["every"]), row["kind"], str(row["approval_tier"]),
+                "yes" if row["enabled"] else "no",
+                _fmt_epoch(row["last_fired"]), _fmt_epoch(row["next_due"]),
+                key=row["name"],
+            )
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self._selected_name = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
+
+    def _tasks(self, cfg: config_mod.Config) -> list[dict]:
+        return list(cfg.scheduled)
+
+    def action_add_task(self) -> None:
+        def _on_dismiss(result: dict | None) -> None:
+            if result is None:
+                return
+            cfg = config_mod.load(str(self._home))
+            tasks = self._tasks(cfg)
+            if any(t.get("name") == result["name"] for t in tasks):
+                self.notify(f"A task named {result['name']!r} already exists", severity="warning")
+                return
+            tasks.append(result)
+            config_mod.write_scheduled(self._home, tasks)
+            self.notify(f"Added scheduled task {result['name']!r}")
+            self._refresh()
+
+        self.app.push_screen(_ScheduleModal(), _on_dismiss)
+
+    def action_edit_task(self) -> None:
+        if self._selected_name is None:
+            self.notify("Select a task first", severity="warning")
+            return
+        cfg = config_mod.load(str(self._home))
+        tasks = self._tasks(cfg)
+        existing = next((t for t in tasks if t.get("name") == self._selected_name), None)
+        if existing is None:
+            self.notify("Task not found (config may have changed)", severity="warning")
+            return
+
+        def _on_dismiss(result: dict | None) -> None:
+            if result is None:
+                return
+            new_tasks = [result if t.get("name") == existing.get("name") else t for t in tasks]
+            config_mod.write_scheduled(self._home, new_tasks)
+            self.notify(f"Updated scheduled task {result['name']!r}")
+            self._refresh()
+
+        self.app.push_screen(_ScheduleModal(existing), _on_dismiss)
+
+    def action_toggle_task(self) -> None:
+        if self._selected_name is None:
+            self.notify("Select a task first", severity="warning")
+            return
+        cfg = config_mod.load(str(self._home))
+        tasks = self._tasks(cfg)
+        found = False
+        for t in tasks:
+            if t.get("name") == self._selected_name:
+                t["enabled"] = not t.get("enabled", True)
+                found = True
+        if not found:
+            self.notify("Task not found (config may have changed)", severity="warning")
+            return
+        config_mod.write_scheduled(self._home, tasks)
+        self.notify(f"Toggled {self._selected_name}")
+        self._refresh()
+
+
+def _fmt_epoch(ts: float | None) -> str:
+    if ts is None:
+        return "—"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
 class MaestroTUI(App):
     CSS = """
     Screen { layers: base topbar; }
@@ -917,6 +1120,7 @@ class MaestroTUI(App):
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
         Binding("e", "env_panel", "Env", show=False),
+        Binding("S", "schedule_panel", "Schedule", show=False),
         Binding("s", "show_spec", "Spec", show=False),
         Binding("t", "toggle_tail", "Tail/Full", show=False),
         Binding("x", "compact", "Compact", show=False),
@@ -1055,6 +1259,9 @@ class MaestroTUI(App):
 
     def action_env_panel(self) -> None:
         self.push_screen(EnvScreen(self._home))
+
+    def action_schedule_panel(self) -> None:
+        self.push_screen(ScheduleScreen(self._home))
 
     def action_create(self) -> None:
         prefixes = existing_prefixes(self._home)

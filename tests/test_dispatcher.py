@@ -1,3 +1,6 @@
+import io
+import sys
+
 from maestro import dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.config import Config
@@ -403,3 +406,166 @@ def test_mint_tolerates_null_title(home, cfg):
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert report.minted == ["T-77"]
     assert "# T-77: T-77" in store.spec_path(home, "T-77").read_text()
+
+
+# --- T-10: scheduled tasks ----------------------------------------------------
+
+def _sched_cfg(cfg, **overrides):
+    task = {
+        "name": "digest", "prompt": "Summarize things", "every": "1h",
+        "approval_tier": 0, "kind": "implementation", "priority": 3, "prefix": "S",
+        "enabled": True,
+    }
+    task.update(overrides)
+    cfg.scheduled = [task]
+    return cfg
+
+
+def test_run_scheduled_tasks_fires_when_due(home, cfg):
+    _sched_cfg(cfg)
+    result = disp.run_scheduled_tasks(cfg, now=1_000_000)
+    assert result["fired"] == ["digest"]
+    pending = inbox.pending_new(home)
+    assert len(pending) == 1
+    args = pending[0][1]["args"]
+    assert args["intent"] == "Summarize things"
+    assert args["scheduled_by"] == "digest"
+    assert "dedup" in args
+    cursor = store.read_json(home / "derived" / ".schedule_cursor.json", {})
+    assert cursor["digest"] == 1_000_000
+
+
+def test_run_scheduled_tasks_disabled_never_fires(home, cfg):
+    _sched_cfg(cfg, enabled=False)
+    result = disp.run_scheduled_tasks(cfg, now=1_000_000)
+    assert result["fired"] == []
+    assert inbox.pending_new(home) == []
+
+
+def test_dispatch_mints_scheduled_ticket_exactly_once_per_interval(home, cfg):
+    """The QA scenario from the T-10 spec: drive dispatch() over a temp home with a
+    [[scheduled]] config, advance now past the interval, and assert a ticket mints
+    exactly once — not again before the next interval, not N times after a gap."""
+    _sched_cfg(cfg)
+    now = 1_000_000
+
+    r1 = disp.dispatch(cfg, DryRunSessions(), now=now)
+    assert r1.scheduled_fired == ["digest"]
+    assert r1.minted == []  # the fire only queues a _new entry; mint happens next sweep
+
+    r2 = disp.dispatch(cfg, DryRunSessions(), now=now + 5)
+    assert r2.scheduled_fired == []  # not due again so soon
+    assert r2.minted == ["S-1"]  # queued entry from sweep 1 mints here
+
+    # not due again before the interval elapses
+    r3 = disp.dispatch(cfg, DryRunSessions(), now=now + 1800)
+    assert r3.scheduled_fired == []
+    assert r3.minted == []
+
+    # due again once the interval elapses
+    r4 = disp.dispatch(cfg, DryRunSessions(), now=now + 3600)
+    assert r4.scheduled_fired == ["digest"]
+    r5 = disp.dispatch(cfg, DryRunSessions(), now=now + 3600)
+    assert r5.minted == ["S-2"]
+
+    # a long downtime fires once on the next sweep, never N times to "catch up"
+    r6 = disp.dispatch(cfg, DryRunSessions(), now=now + 3600 + 100_000)
+    assert r6.scheduled_fired == ["digest"]
+    r7 = disp.dispatch(cfg, DryRunSessions(), now=now + 3600 + 100_000)
+    assert r7.minted == ["S-3"]
+    r8 = disp.dispatch(cfg, DryRunSessions(), now=now + 3600 + 100_000)
+    assert r8.scheduled_fired == []
+    assert r8.minted == []
+
+    minted_tickets = sorted(p.name for p in (home / "tickets").iterdir())
+    assert minted_tickets == ["S-1", "S-2", "S-3"]
+
+
+def test_mint_new_tickets_dedup_closes_cursor_crash_window(home, cfg):
+    """If run_scheduled_tasks appends to _new but crashes before persisting the
+    cursor, the next sweep re-fires the same period-bucket dedup token — that
+    re-fire must mint zero extra tickets, not a duplicate."""
+    _sched_cfg(cfg)
+    now = 1_000_000
+    fired1 = disp.run_scheduled_tasks(cfg, now)
+    assert fired1["fired"] == ["digest"]
+    # simulate the cursor write crashing (delete what was just persisted)
+    (home / "derived" / ".schedule_cursor.json").unlink()
+    fired2 = disp.run_scheduled_tasks(cfg, now + 5)  # same period bucket
+    assert fired2["fired"] == ["digest"]
+
+    pending = inbox.pending_new(home)
+    assert len(pending) == 2
+    assert pending[0][1]["args"]["dedup"] == pending[1][1]["args"]["dedup"]
+
+    minted = disp.mint_new_tickets(cfg)
+    assert minted == ["S-1"]  # only one real ticket, despite two queued fires
+    assert sorted(p.name for p in (home / "tickets").iterdir()) == ["S-1"]
+
+
+def test_schedule_status_reports_cadence_and_cursor(home, cfg):
+    _sched_cfg(cfg)
+    now = 1_000_000
+    disp.run_scheduled_tasks(cfg, now)
+    rows = disp.schedule_status(cfg, now + 10)
+    assert rows == [{
+        "name": "digest", "prompt": "Summarize things", "every": "1h",
+        "kind": "implementation", "approval_tier": 0, "priority": 3,
+        "prefix": "S", "enabled": True, "last_fired": now, "next_due": now + 3600,
+    }]
+
+
+def test_schedule_status_never_fired_has_no_last_fired(home, cfg):
+    _sched_cfg(cfg)
+    rows = disp.schedule_status(cfg, now=1_000_000)
+    assert rows[0]["last_fired"] is None
+    assert rows[0]["next_due"] == 3600  # one period from the epoch
+
+
+def test_dispatch_cli_reports_scheduled_fired(home):
+    """Real 'maestro dispatch --dry-run' CLI surfaces scheduled_fired in the report."""
+    import json
+
+    from maestro import cli
+
+    (home / "config.toml").write_text(
+        "[maestro]\nmax_concurrency = 3\n\n"
+        "[[scheduled]]\n"
+        'name = "digest"\n'
+        'prompt = "Summarize things"\n'
+        'every = "24h"\n'
+    )
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "dispatch", "--dry-run"])
+    finally:
+        sys.stdout = old_stdout
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["scheduled_fired"] == ["digest"]
+
+
+def test_schedule_list_cli(home):
+    import json
+
+    from maestro import cli
+
+    (home / "config.toml").write_text(
+        "[[scheduled]]\n"
+        'name = "digest"\n'
+        'prompt = "Summarize things"\n'
+        'every = "24h"\n'
+    )
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "schedule", "list"])
+    finally:
+        sys.stdout = old_stdout
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["scheduled"][0]["name"] == "digest"
+    assert out["scheduled"][0]["last_fired"] is None

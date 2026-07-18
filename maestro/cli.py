@@ -330,8 +330,16 @@ def cmd_dispatch(args) -> int:
            "spawned" if not args.dry_run else "would_spawn": report.spawned,
            "claimed": report.claimed, "capacity_skipped": report.capacity_skipped,
            "active_sessions": report.active_sessions,
+           "scheduled_fired": report.scheduled_fired,
            "due": [{"key": k, "reason": r} for k, r in report.due]}
     _print(out)
+    return 0
+
+
+def cmd_schedule(args) -> int:
+    cfg = _cfg(args)
+    rows = disp.schedule_status(cfg, store.now_epoch())
+    _print({"scheduled": rows})
     return 0
 
 
@@ -676,6 +684,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model", default=None, help="override reconcile_model from config")
     add("project", cmd_project, "regenerate dashboards")
     add("env", cmd_env, "resolved config (home, repo_path, ...)")
+
+    sp = add("schedule", cmd_schedule, "list config-declared scheduled tasks (name/cadence/last_fired/next_due)")
+    sp.add_argument("action", choices=["list"], nargs="?", default="list")
 
     sp = add("backup", cmd_backup, "snapshot events/tickets/inbox/config to a tarball")
     sp.add_argument("--list", action="store_true",
