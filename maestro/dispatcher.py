@@ -164,6 +164,16 @@ def mint_new_tickets(cfg: Config) -> list[str]:
             store.validate_key(key)
         except store.MaestroError:
             continue
+        if event_log.last_seq(home, key) > 0:
+            # Key already has events -- it was triaged (or otherwise advanced)
+            # before this mint sweep drained the matching inbox/_new entry.
+            # Appending another TicketCreated here would clobber snapshot.fold's
+            # phase back to triaging, silently orphaning any progress since.
+            # Treat the request as a no-op: the ticket already exists.
+            if dedup:
+                minted_dedup[dedup] = key
+                dedup_changed = True
+            continue
         spec = store.spec_path(home, key)
         title = entry.get("title") or key
         if not spec.exists():
