@@ -62,12 +62,12 @@ restore:
 	maestro restore $(if $(FORCE),--force,)
 
 fleet-up:
-	daemon/install.sh up
+	maestro/_assets/daemon/install.sh up
 
 fleet-down:
-	daemon/install.sh down
+	maestro/_assets/daemon/install.sh down
 
-COMPLETION_SCRIPT := completions/_maestro
+COMPLETION_SCRIPT := maestro/_assets/completions/_maestro
 COMPLETION_DIR := $(HOME)/.zsh/completions
 
 autocomplete:
