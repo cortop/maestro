@@ -88,6 +88,29 @@ def test_app_mounts_clean(seeded_home):
     asyncio.run(_inner())
 
 
+def test_filter_bar_renders_on_its_own_visible_row(seeded_home):
+    """Regression: the filter bar was invisible because #filter-bar landed on the
+    same top row as the docked Header (which, being pinned to a named layer, never
+    reserved a flow row) and was painted over. Assert on the RENDERED region — not
+    just markup content — so a re-collapse is caught: the bar must own a non-zero
+    row of its own, strictly below the header and not overlapping it."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            bar = app.query_one("#filter-bar", Static)
+            header = app.query_one("Header")
+            table = app.query_one("#tickets", DataTable)
+
+            assert bar.region.height >= 1, "filter bar collapsed to zero height"
+            assert bar.region.y > header.region.y, "filter bar not below the header"
+            # no vertical overlap with the header row, and above the table
+            assert bar.region.y >= header.region.y + header.region.height
+            assert table.region.y >= bar.region.y + bar.region.height
+
+    asyncio.run(_inner())
+
+
 def test_filter_bar_marks_active_filter_unambiguously(seeded_home):
     """The active filter must be distinguishable beyond bold alone (reverse-video
     chip) since bold-only styling was reported as not visibly showing up — the
