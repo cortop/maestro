@@ -137,7 +137,7 @@ def test_ticket_rows_pr_label(home):
     snap_mod.rebuild(home, "T-1")
 
     rows = ticket_rows(home)
-    assert rows[0][3] == '[link="https://github.com/x/y/pull/42"]#42[/link]'
+    assert rows[0][3] == "[link=https://github.com/x/y/pull/42]#42[/link]"
 
 
 def test_ticket_rows_phase_order(home):

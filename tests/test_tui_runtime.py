@@ -23,6 +23,7 @@ The whole module is skipped when the optional ``tui`` extra (textual) is absent.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -580,15 +581,28 @@ def test_styled_row_returns_rich_text_for_attention_phases():
 def test_styled_row_preserves_pr_link_markup():
     """L-11: the PR cell's [link=...] markup must survive phase styling so the
     main-view table cell stays clickable (a literal Text() would show the raw
-    markup text instead of a link, since it isn't markup-parsed)."""
-    pr_cell = '[link="https://github.com/x/y/pull/42"]#42[/link]'
+    markup text instead of a link, since it isn't markup-parsed).
+
+    Asserts the *rendered* OSC 8 URI, not just that a link span exists: an
+    earlier version quoted the URL (`[link="..."]`) and Rich carried the quotes
+    into the hyperlink target, so the terminal received `"https://…"` — a
+    malformed URL that would not open. Checking the emitted URI catches that.
+    """
+    from rich.console import Console
+    from textual.strip import Strip
+
+    url = "https://github.com/x/y/pull/42"
+    pr_cell = f"[link={url}]#42[/link]"
     row = _styled_row("T-1", "awaiting-ci", "title", pr_cell, "passing", "1", "0")
     pr_text = row[3]
     assert isinstance(pr_text, Text)
     assert pr_text.plain == "#42"
-    assert any(
-        span.style and "link" in str(span.style) for span in pr_text.spans
-    ), f"expected a link span, got spans={pr_text.spans!r}"
+
+    console = Console()
+    rendered = Strip(list(pr_text.render(console))).render(console)
+    m = re.search(r"\x1b]8;[^;]*;([^\x1b]*)", rendered)
+    assert m, f"expected an OSC 8 hyperlink in rendered output: {rendered!r}"
+    assert m.group(1) == url, f"link URI must be the bare URL, got {m.group(1)!r}"
 
 
 def test_phase_styled_rows_render_without_crash(seeded_home):
