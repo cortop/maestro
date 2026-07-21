@@ -9,6 +9,15 @@ ACTION="${1:-up}"
 INTERVAL=300
 [[ "${2:-}" == "--interval" ]] && INTERVAL="${3:-300}"
 
+# Floor the cadence. A too-small interval is how the fleet burned 21,731 no-op
+# reconciler sessions on 2026-07-19: it ran at ~10s instead of 300s, and nothing
+# anywhere rejected the value. Keep this in sync with fleet.MIN_INTERVAL.
+MIN_INTERVAL=60
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || (( INTERVAL < MIN_INTERVAL )); then
+  echo "warning: interval '${INTERVAL}' below the ${MIN_INTERVAL}s floor — using ${MIN_INTERVAL}." >&2
+  INTERVAL=$MIN_INTERVAL
+fi
+
 LABEL="com.maestro.dispatcher"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 HERE="$(cd "$(dirname "$0")" && pwd)"

@@ -1,6 +1,8 @@
 import io
 import sys
 
+import pytest
+
 from maestro import dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.config import Config
@@ -65,6 +67,141 @@ def test_requeue_timer_wakes_awaiting_ci(home, cfg):
     base = snap.next_requeue_at
     assert not disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base - 1).due
     assert disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base + 1).due
+
+
+# --- runaway regression (2026-07-19): a requeue must hold an ACTIVE phase too -----
+
+
+class _EphemeralSessions(DryRunSessions):
+    """A worker that is already gone by the next sweep — the incident's regime.
+
+    Rate-limit-rejected reconcilers exited in well under a second against an ~11s
+    sweep, so their claim was always released before the dispatcher looked again.
+    Plain DryRunSessions keeps every spawned key "active" forever, which hides
+    exactly the behaviour under test.
+    """
+
+    def list_active(self) -> set[str]:
+        return set()
+
+
+@pytest.mark.parametrize("phase", [Phase.IN_REVIEW, Phase.IMPLEMENTING,
+                                   Phase.TRIAGING, Phase.READY, Phase.DEGRADED])
+def test_requeue_timer_holds_any_non_terminal_phase(home, cfg, phase):
+    """A reconciler that asks to sleep is obeyed from EVERY phase, not just the
+    two in SLEEPING_PHASES. The in-review case is the 2026-07-19 runaway: the
+    handler ends in `maestro requeue $KEY 900` and the dispatcher ignored it."""
+    _seed(home, "T-1", phase)
+    ops.requeue(cfg, "T-1", 900)
+    snap = snap_mod.load(home, "T-1")
+    base = snap.next_requeue_at
+
+    held = disp.is_due(snap, inbox_pending=False,
+                       current_spec_hash=snap.spec_hash, now=base - 1)
+    assert not held.due and held.reason == "backoff"
+
+    woke = disp.is_due(snap, inbox_pending=False,
+                       current_spec_hash=snap.spec_hash, now=base + 1)
+    assert woke.due and woke.reason == "timer"
+
+
+def test_dispatch_does_not_respawn_in_review_ticket_under_its_requeue(home, cfg):
+    """Real sweeps: an in-review ticket that asked for 900s of sleep is not
+    re-spawned during those 900s, even when its worker dies instantly."""
+    _seed(home, "T-1", Phase.IN_REVIEW)
+    ops.requeue(cfg, "T-1", 900)
+    base = snap_mod.load(home, "T-1").next_requeue_at
+    sessions = _EphemeralSessions()
+
+    for i in range(60):  # ~11 minutes of 11s sweeps, all inside the 900s window
+        report = disp.dispatch(cfg, sessions, now=base - 900 + i * 11)
+        assert report.spawned == []
+    assert sessions.spawned == []
+
+    report = disp.dispatch(cfg, sessions, now=base + 1)
+    assert report.spawned == ["T-1"]
+
+
+def test_spawn_floor_bounds_a_runaway_dispatcher(home, cfg):
+    """The incident in miniature. A dispatcher fired every 11s at four tickets that
+    never advance and whose workers die instantly used to spawn 4 sessions per
+    sweep — 21,731 of them over 35 hours. The per-key floor bounds that to
+    elapsed/floor regardless of how often dispatch() is called."""
+    keys = ["T-1", "T-2", "T-3", "T-4"]
+    for k in keys:
+        _seed(home, k, Phase.IN_REVIEW)   # active phase, no timer -> due "active"
+    cfg.max_concurrency = 4
+    cfg.min_spawn_interval = 300
+    sessions = _EphemeralSessions()
+
+    t0, sweeps, step = 1_000_000, 300, 11
+    for i in range(sweeps):
+        disp.dispatch(cfg, sessions, now=t0 + i * step)
+
+    elapsed = (sweeps - 1) * step               # 3289s
+    ceiling = elapsed // cfg.min_spawn_interval + 1   # 11 per key
+    spawned = [k for k, *_ in sessions.spawned]
+    for k in keys:
+        assert spawned.count(k) <= ceiling
+    # Without the floor this is sweeps * len(keys) == 1200.
+    assert len(sessions.spawned) <= ceiling * len(keys)
+
+
+def test_human_signal_bypasses_the_spawn_floor(home, cfg):
+    """A person answering a question must get an immediate reconcile — their own
+    hands are the rate limit. Only machine-driven due-reasons are throttled."""
+    _seed(home, "T-1", Phase.READY)
+    cfg.min_spawn_interval = 300
+    sessions = _EphemeralSessions()
+
+    assert disp.dispatch(cfg, sessions, now=1000).spawned == ["T-1"]
+    # Same second, no human signal: throttled.
+    r = disp.dispatch(cfg, sessions, now=1001)
+    assert r.spawned == [] and r.throttled == ["T-1"]
+    # Same second, human command waiting: spawns anyway.
+    inbox.append_command(home, "T-1", "ans", {"qid": "q1", "text": "go"})
+    r = disp.dispatch(cfg, sessions, now=1002)
+    assert r.spawned == ["T-1"] and r.throttled == []
+
+
+def test_spawn_floor_of_zero_disables_throttling(home, cfg):
+    _seed(home, "T-1", Phase.READY)
+    cfg.min_spawn_interval = 0
+    sessions = _EphemeralSessions()
+    for i in range(5):
+        assert disp.dispatch(cfg, sessions, now=1000 + i).spawned == ["T-1"]
+
+
+def test_spawn_floor_defaults_to_reconcile_steady_interval(home):
+    cfg = Config(home=home, reconcile_steady_interval=420)
+    assert disp.spawn_floor(cfg) == 420
+    cfg.min_spawn_interval = 90
+    assert disp.spawn_floor(cfg) == 90
+
+
+def test_dispatch_cli_reports_throttled(home):
+    """Real `maestro dispatch --dry-run` twice in a row surfaces the throttle."""
+    import json
+
+    from maestro import cli
+
+    (home / "config.toml").write_text(
+        "[maestro]\nmax_concurrency = 3\nmin_spawn_interval = 300\n")
+    _seed(home, "T-1", Phase.READY)
+
+    def _sweep():
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            assert cli.main(["--home", str(home), "dispatch", "--dry-run"]) == 0
+        finally:
+            sys.stdout = old
+        return json.loads(buf.getvalue())
+
+    assert _sweep()["would_spawn"] == ["T-1"]
+    second = _sweep()
+    assert second["would_spawn"] == [] and second["throttled"] == ["T-1"]
 
 
 def test_dispatch_respects_concurrency_cap(home, cfg):
