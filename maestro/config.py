@@ -20,6 +20,12 @@ class Config:
     home: Path
     max_concurrency: int = 12
     reconcile_steady_interval: int = 300   # seconds between awaiting-ci re-checks
+    # Hard floor on how often ONE key may be re-spawned, regardless of why it is due.
+    # Independent of claim liveness (a session that dies in <1s frees its claim
+    # instantly) and of the launchd cadence, so it still bounds the fleet when the
+    # dispatcher is invoked faster than intended. None = fall back to
+    # reconcile_steady_interval. Human signals (inbox/spec edit) bypass it.
+    min_spawn_interval: int | None = None
     backoff_base: int = 30                 # seconds; exp backoff on transient failure
     backoff_cap: int = 3600
     max_failures: int = 4                  # -> dead-letter (DEGRADED)
@@ -72,6 +78,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.max_concurrency = int(m.get("max_concurrency", cfg.max_concurrency))
         cfg.reconcile_steady_interval = int(
             m.get("reconcile_steady_interval", cfg.reconcile_steady_interval))
+        raw_floor = m.get("min_spawn_interval", cfg.min_spawn_interval)
+        cfg.min_spawn_interval = int(raw_floor) if raw_floor is not None else None
         cfg.backoff_base = int(m.get("backoff_base", cfg.backoff_base))
         cfg.backoff_cap = int(m.get("backoff_cap", cfg.backoff_cap))
         cfg.max_failures = int(m.get("max_failures", cfg.max_failures))
@@ -115,6 +123,9 @@ DEFAULT_CONFIG_TOML = """\
 [maestro]
 max_concurrency = 12
 reconcile_steady_interval = 300
+# min_spawn_interval = 300        # hard floor between two spawns of the SAME key
+                                  # (default: reconcile_steady_interval). Bounds the
+                                  # fleet even if the dispatcher is fired too often.
 backoff_base = 30
 max_failures = 4
 max_impl_turns = 20

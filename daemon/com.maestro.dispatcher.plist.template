@@ -5,7 +5,13 @@
   launchd fires `maestro dispatch` every StartInterval seconds. Each run does ONE
   sweep (mint new tickets, find due tickets, spawn reconcilers up to the cap,
   regenerate dashboards) and exits. There is no long-running process to crash, and
-  RunAtLoad + KeepAlive(crashed-only) means it survives reboot and login.
+  RunAtLoad means it survives reboot and login.
+
+  KeepAlive is explicitly FALSE. It must stay that way: a crashed-only KeepAlive
+  turns a dispatcher that dies on startup (a broken import, a half-finished merge in
+  the repo it runs out of) into a hot restart loop. ThrottleInterval is pinned to the
+  same value as StartInterval rather than left to launchd's undeclared 10s default,
+  so the floor on the sweep rate is written down instead of inherited.
 
   Install: copy to ~/Library/LaunchAgents/, substitute the @PLACEHOLDERS@, then
     launchctl load ~/Library/LaunchAgents/com.maestro.dispatcher.plist
@@ -36,8 +42,14 @@
   <key>StartInterval</key>
   <integer>300</integer>
 
+  <key>ThrottleInterval</key>
+  <integer>300</integer>
+
   <key>RunAtLoad</key>
   <true/>
+
+  <key>KeepAlive</key>
+  <false/>
 
   <key>StandardOutPath</key>
   <string>@MAESTRO_HOME@/agent-logs/dispatch.out.log</string>

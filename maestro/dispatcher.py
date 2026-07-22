@@ -101,9 +101,21 @@ def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
         return DueResult(True, "spec-changed")
     if phase == Phase.READY and blocked_dep:
         return DueResult(False, "blocked-dep")
+    # A pending requeue timer holds the ticket in EVERY non-terminal phase, not only
+    # the sleeping ones. This check used to live inside the SLEEPING_PHASES branch,
+    # so a reconciler that asked to sleep from an *active* phase (`maestro requeue`,
+    # which is exactly what the in-review handler does) was ignored and the ticket
+    # came back due on the very next sweep — the 2026-07-19 runaway, 21,731 no-op
+    # sessions with 5,522 discarded RequeueScheduled events behind them.
+    if snap.next_requeue_at is not None:
+        if snap.next_requeue_at > now:
+            return DueResult(False, "backoff")
+        return DueResult(True, "timer")
+    # No timer pending. A sleeping phase waits for a signal; anything else has work.
+    # NOTE: in-review deliberately stays active-when-untimed — nothing else on main
+    # polls a PR, so a null timer must not strand the ticket forever. The spawn-rate
+    # floor in dispatch() is what bounds it.
     if phase in SLEEPING_PHASES:
-        if snap.next_requeue_at is not None and snap.next_requeue_at <= now:
-            return DueResult(True, "timer")
         return DueResult(False, "sleeping")
     return DueResult(True, "active")
 
@@ -434,6 +446,25 @@ class DispatchReport:
     capacity_skipped: list[str]     # due + free but over the concurrency cap
     active_sessions: int
     scheduled_fired: list[str] = field(default_factory=list)
+    throttled: list[str] = field(default_factory=list)  # due + free but under the spawn floor
+
+
+# Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
+# floor: a person who answers a question or edits a spec must get an immediate
+# reconcile, and their own hands are the rate limit. Everything else is throttled.
+_UNTHROTTLED_REASONS = frozenset({"inbox", "spec-changed", "answered-pending"})
+
+
+def _spawn_ledger_path(home: Path) -> Path:
+    return home / "derived" / ".spawn_ledger.json"
+
+
+def spawn_floor(cfg: Config) -> int:
+    """Minimum seconds between two spawns of the same key (0 disables)."""
+    floor = cfg.min_spawn_interval
+    if floor is None:
+        floor = cfg.reconcile_steady_interval
+    return max(0, int(floor))
 
 
 def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchReport:
@@ -474,9 +505,30 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             continue
         due.append((key, res.reason))
 
+    # Spawn-rate floor. The claim file is the ONLY other per-key spawn memory and it
+    # is unlinked the moment the worker dies — so a session that exits in under a
+    # second (a rate-limit rejection, a crash) leaves nothing behind and the key is
+    # instantly re-spawnable. This ledger outlives the process and bounds the rate no
+    # matter how often the dispatcher itself is fired.
+    floor = spawn_floor(cfg)
+    ledger_path = _spawn_ledger_path(home)
+    ledger = store.read_json(ledger_path, {}) or {}
+    throttled: list[str] = []
+    if floor:
+        eligible: list[tuple[str, str]] = []
+        for key, reason in due:
+            last = ledger.get(key)
+            if (reason not in _UNTHROTTLED_REASONS
+                    and isinstance(last, (int, float)) and now - last < floor):
+                throttled.append(key)
+                continue
+            eligible.append((key, reason))
+    else:
+        eligible = due
+
     slots = max(0, cfg.max_concurrency - len(active))
-    to_spawn = due[:slots]
-    capacity_skipped = [k for k, _ in due[slots:]]
+    to_spawn = eligible[:slots]
+    capacity_skipped = [k for k, _ in eligible[slots:]]
 
     spawned: list[str] = []
     for key, _reason in to_spawn:
@@ -485,12 +537,19 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         model, effort = _resolve_model_effort(cfg, key)
         sessions.spawn(key, prompt, cwd, model=model, effort=effort)
         spawned.append(key)
+        ledger[key] = now
+
+    if spawned:
+        # Keep the ledger from growing without bound as keys come and go.
+        known = set(list_keys(home))
+        store.write_json(ledger_path,
+                         {k: v for k, v in ledger.items() if k in known})
 
     _write_heartbeat(home, now, len(spawned), len(active))
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
-        scheduled_fired=scheduled_fired,
+        scheduled_fired=scheduled_fired, throttled=throttled,
     )
 
 

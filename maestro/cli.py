@@ -329,6 +329,7 @@ def cmd_dispatch(args) -> int:
     out = {"minted": report.minted,
            "spawned" if not args.dry_run else "would_spawn": report.spawned,
            "claimed": report.claimed, "capacity_skipped": report.capacity_skipped,
+           "throttled": report.throttled,
            "active_sessions": report.active_sessions,
            "scheduled_fired": report.scheduled_fired,
            "due": [{"key": k, "reason": r} for k, r in report.due]}
