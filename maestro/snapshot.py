@@ -29,6 +29,8 @@ class Snapshot:
     pr_state: str | None = None
     pr_draft: bool | None = None
     ci_state: str | None = None
+    failing_checks: list[str] = field(default_factory=list)
+    unresolved_reviews: int = 0
     failure_count: int = 0
     last_error: str | None = None
     next_requeue_at: float | None = None
@@ -92,6 +94,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.failure_count = 0
             s.next_requeue_at = None
             s.answered_questions = {}
+            s.unresolved_reviews = 0
         elif t == E.QUESTION_ASKED:
             s.open_questions[p.get("qid", str(seq))] = p.get("text", "")
         elif t == E.QUESTION_ANSWERED:
@@ -111,6 +114,10 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 s.pr_draft = p["draft"]
         elif t == E.CI_OBSERVED:
             s.ci_state = p.get("state", s.ci_state)
+            s.failing_checks = p.get("failing_checks", [])
+        elif t == E.REVIEW_FEEDBACK_RECEIVED:
+            if p.get("state") == "CHANGES_REQUESTED":
+                s.unresolved_reviews += 1
         elif t == E.IMPL_TURN:
             s.impl_turns = max(s.impl_turns, int(p.get("turn", s.impl_turns)))
         elif t == E.IMPL_STEP:

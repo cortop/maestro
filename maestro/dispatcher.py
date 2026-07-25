@@ -434,6 +434,122 @@ def sync_worktrees(cfg: Config) -> dict:
     return {"fetched": True, "routed": routed}
 
 
+def _vcs_cursor_path(home: Path) -> Path:
+    return home / "derived" / ".vcs_cursor.json"
+
+
+def sync_vcs(cfg: Config, now: float) -> dict:
+    """Cursor-gated PR-observation tick, patterned on ``sync_external_sources``:
+    for every awaiting-ci / in-review ticket carrying a ``pr_number``, polls PR
+    state, CI checks, and review comments via ``get_vcs(cfg)`` (opt-in — a no-op
+    unless a vcs provider other than "none" is configured) and advances the
+    ticket directly, so neither phase needs a reconciler spawn to make progress:
+
+    - merged -> ``ops.check_merged`` (finalizes) + the worktree is removed
+    - CONFLICTING -> ``ops.route_conflict`` (rebase/resolve in implementing)
+    - failing CI -> implementing, with the failing check names in the reason
+    - passing CI (from awaiting-ci) -> in-review
+    - a CHANGES_REQUESTED review -> implementing, with the verbatim comment body
+
+    Replaces the reconciler's own ``gh pr checks`` shelling: CI/PR/review
+    observation is now dispatcher-owned, pure-Python, and idempotent per
+    PR-head-SHA/check-set (CI) or comment-id (reviews).
+    """
+    home = cfg.home
+    vcs_name = cfg.providers.get("vcs", "none")
+    if vcs_name in (None, "", "none"):
+        return {"checked": 0}
+
+    settings = cfg.provider_config.get("vcs", {}).get(vcs_name, {})
+    interval = int(settings.get("sync_interval", 120))
+    cursor_path = _vcs_cursor_path(home)
+    cursor = store.read_json(cursor_path, {}) or {}
+    last_sync = cursor.get(vcs_name, 0)
+    if now - last_sync < interval:
+        return {"checked": 0}
+
+    from . import providers  # lazy: avoid a hard import-time dependency
+
+    vcs = providers.get_vcs(cfg)
+    checked = 0
+    for key in list_keys(home):
+        snap = snap_mod.load(home, key)
+        phase = Phase(snap.phase)
+        if phase not in (Phase.AWAITING_CI, Phase.IN_REVIEW) or not snap.pr_number:
+            continue
+        checked += 1
+        status = vcs.pr_status(snap.pr_number)
+
+        if _route_if_merged(cfg, key, status):
+            continue
+        if status.get("mergeable") == "CONFLICTING":
+            from . import ops
+            ops.route_conflict(cfg, key, snap.pr_number, actor="dispatcher")
+            continue
+
+        _observe_ci(cfg, key, status, phase)
+        _observe_reviews(cfg, key, snap.pr_number, vcs)
+
+    cursor[vcs_name] = now
+    store.write_json(cursor_path, cursor)
+    return {"checked": checked}
+
+
+def _route_if_merged(cfg: Config, key: str, status: dict) -> bool:
+    from . import ops
+    if not ops.check_merged(cfg, key, status.get("state", ""), actor="dispatcher"):
+        return False
+    import subprocess
+    wt = cfg.home / "worktrees" / key
+    if wt.exists() and cfg.repo_path:
+        subprocess.run(["git", "-C", cfg.repo_path, "worktree", "remove", str(wt), "--force"],
+                       capture_output=True, text=True)
+    return True
+
+
+def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase) -> None:
+    ci_state = status.get("ci_state", "unknown")
+    failing = sorted(status.get("failing_checks") or [])
+    head_sha = status.get("head_sha") or "unknown"
+    check_key = content_hash(ci_state + ":" + ",".join(failing))
+    sid = f"ci-{key}-{head_sha}-{check_key}"
+    detail = f"{len(failing)} check(s) failing: {', '.join(failing)}" if failing else ""
+    ev = event_log.append(cfg.home, key, E.CI_OBSERVED,
+                          {"state": ci_state, "failing_checks": failing, "detail": detail},
+                          actor="dispatcher", step_id=sid)
+    if ev is None:
+        return  # unchanged since the last poll — nothing to route
+    snap_mod.rebuild(cfg.home, key)
+    from . import ops
+    if ci_state == "failing":
+        ops.set_phase(cfg, key, Phase.IMPLEMENTING,
+                      reason=f"CI failing: {', '.join(failing)}", actor="dispatcher")
+    elif ci_state == "passing" and phase == Phase.AWAITING_CI:
+        ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher")
+
+
+def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs) -> None:
+    changes_requested_body: str | None = None
+    for r in vcs.review_feedback(pr_number):
+        cid = r.get("id")
+        if not cid:
+            continue
+        ev = event_log.append(
+            cfg.home, key, E.REVIEW_FEEDBACK_RECEIVED,
+            {"comment_id": cid, "state": r.get("state"), "body": r.get("body", ""),
+             "author": r.get("author")},
+            actor="dispatcher", step_id=f"review-{key}-{cid}",
+        )
+        if ev is not None and r.get("state") == "CHANGES_REQUESTED":
+            changes_requested_body = r.get("body", "")
+    if changes_requested_body is None:
+        return
+    snap_mod.rebuild(cfg.home, key)
+    from . import ops
+    ops.set_phase(cfg, key, Phase.IMPLEMENTING,
+                 reason=f"changes requested: {changes_requested_body}", actor="dispatcher")
+
+
 def _has_unmet_deps(home: Path, key: str) -> bool:
     """Return True if any dependsOn entry for *key* is not yet done."""
     spec_file = store.spec_path(home, key)
@@ -489,6 +605,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     sync_external_sources(cfg, now)
     scheduled_fired = run_scheduled_tasks(cfg, now)["fired"]
     sync_worktrees(cfg)
+    sync_vcs(cfg, now)
     backup.maybe_backup(cfg, now)
     notify.maybe_notify(cfg, now)
 

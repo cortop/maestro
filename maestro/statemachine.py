@@ -23,7 +23,9 @@ class Phase(str, Enum):
 
 # Phases where NO process is held: the reconciler exits and the dispatcher only
 # re-wakes the ticket on a signal (inbox command, requeue timer, or spec edit).
-SLEEPING_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.AWAITING_CI})
+# IN_REVIEW is sleeping too: the dispatcher's `sync_vcs` tick polls PR state, CI,
+# and reviews directly and advances the phase itself — no reconciler needed.
+SLEEPING_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.AWAITING_CI, Phase.IN_REVIEW})
 
 # Terminal phases are swept out of the active scan entirely.
 TERMINAL_PHASES = frozenset({Phase.DONE})

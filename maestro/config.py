@@ -164,6 +164,7 @@ implementer = "claude_skill"
 # [vcs.github_cli]
 # repos = ["owner/repo"]
 # branch_prefix = "you/"
+# sync_interval = 120            # seconds between dispatcher PR/CI/review polls
 #
 # [fetcher.command]
 # cmd = "~/bin/import-tickets.sh"   # writes create-requests to the _new inbox
