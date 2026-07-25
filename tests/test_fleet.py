@@ -97,7 +97,7 @@ def _render_plist(tmp_path, interval):
     import subprocess
     from pathlib import Path
 
-    script = Path(__file__).resolve().parents[1] / "daemon" / "install.sh"
+    script = Path(__file__).resolve().parents[1] / "maestro" / "_assets" / "daemon" / "install.sh"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(parents=True, exist_ok=True)
     for name in ("launchctl", "maestro", "claude"):

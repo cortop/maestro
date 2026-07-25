@@ -1,11 +1,13 @@
 """`maestro fleet` — manage the launchd dispatcher LaunchAgent.
 
-Thin, testable wrapper over ``daemon/install.sh`` plus a status probe. Each function
-accepts an injectable ``run`` (defaults to ``subprocess.run``) so the behaviour can be
-tested against a fake ``launchctl`` / install script without touching the real system.
+Thin, testable wrapper over the packaged ``install.sh`` plus a status probe. Each
+function accepts an injectable ``run`` (defaults to ``subprocess.run``) so the behaviour
+can be tested against a fake ``launchctl`` / install script without touching the real
+system.
 """
 from __future__ import annotations
 
+import importlib.resources
 import os
 import re
 import subprocess
@@ -24,7 +26,16 @@ MIN_INTERVAL = 60
 
 
 def _script_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "daemon" / "install.sh"
+    # Resolved from package data (maestro/_assets/daemon/) via importlib.resources, so
+    # it works from an installed wheel as well as a repo checkout. importlib.resources
+    # may extract to a temp path on exotic (e.g. zipped) installs, which can lose the
+    # exec bit — restore it defensively.
+    ref = importlib.resources.files("maestro") / "_assets" / "daemon" / "install.sh"
+    with importlib.resources.as_file(ref) as p:
+        path = Path(p)
+    if path.exists() and not os.access(path, os.X_OK):
+        path.chmod(path.stat().st_mode | 0o111)
+    return path
 
 
 def _plist_path() -> Path:

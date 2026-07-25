@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COMPLETION_SCRIPT = REPO_ROOT / "completions" / "_maestro"
+COMPLETION_SCRIPT = REPO_ROOT / "maestro" / "_assets" / "completions" / "_maestro"
 
 
 # ---------------------------------------------------------------------------

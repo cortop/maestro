@@ -17,9 +17,9 @@ no long-lived process to crash. This is what makes the fleet survive a reboot.
 ```bash
 pip install -e .            # puts `maestro` on PATH
 maestro init                # scaffold ~/.maestro + config.toml
-daemon/install.sh up        # load the LaunchAgent (use --interval N to change cadence)
+maestro fleet up            # load the LaunchAgent (use --interval N to change cadence)
 maestro doctor              # confirm a heartbeat appears
-daemon/install.sh down      # uninstall
+maestro fleet down          # uninstall
 ```
 
 ## 2. The cloud routine — watching the watcher

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Install (or remove) the maestro dispatcher as a launchd LaunchAgent.
-# Usage:
-#   daemon/install.sh up     [--interval 300]
-#   daemon/install.sh down
+# Normally invoked via `maestro fleet up`/`down` (maestro/fleet.py), which resolves this
+# script from package data. Can also be run directly:
+#   maestro/_assets/daemon/install.sh up     [--interval 300]
+#   maestro/_assets/daemon/install.sh down
 set -euo pipefail
 
 ACTION="${1:-up}"
