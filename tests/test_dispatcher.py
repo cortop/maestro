@@ -230,6 +230,27 @@ def test_mint_new_tickets_from_inbox(home, cfg):
     assert snap_mod.load(home, "T-9").phase == Phase.TRIAGING.value
 
 
+def test_mint_new_tickets_skips_late_create_for_already_triaged_key(home, cfg):
+    """If a key gets triaged (e.g. a manual reconcile) before the dispatcher's
+    mint sweep drains the matching inbox/_new entry, the late TicketCreated
+    must not clobber the already-advanced phase back to triaging (T-1)."""
+    inbox.append_new(home, "build the thing", key="T-11")
+    # Simulate the key having already been triaged past the pending _new entry.
+    event_log.append(home, "T-11", "SpecObserved", {"spec_hash": "abc"}, actor="r")
+    event_log.append(home, "T-11", "QuestionAsked", {"qid": "q1", "text": "ok?"}, actor="r")
+    event_log.append(home, "T-11", "PhaseChanged", {"phase": "awaiting-human"}, actor="r")
+    snap_mod.rebuild(home, "T-11")
+
+    minted = disp.mint_new_tickets(cfg)
+
+    assert minted == []
+    snap = snap_mod.load(home, "T-11")
+    assert snap.phase == Phase.AWAITING_HUMAN.value
+    assert snap.open_questions == {"q1": "ok?"}
+    # The stale create-request must still be consumed, not reprocessed forever.
+    assert inbox.pending_new(home) == []
+
+
 def test_worker_cwd_prefers_existing_worktree(home):
     cfg = Config(home=home, repo_path=str(home / "repo"))
     wt = home / "worktrees" / "T-1"
