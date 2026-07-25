@@ -20,7 +20,8 @@ from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
-             "derived/snapshots", "derived/cursors", "derived/claims", "agent-logs"]
+             "derived/snapshots", "derived/cursors", "derived/claims", "derived/context",
+             "agent-logs"]
 
 
 def _cfg(args) -> Config:
@@ -436,6 +437,13 @@ def cmd_check_conflicts(args) -> int:
     return 0
 
 
+def cmd_verify_ac(args) -> int:
+    """[agent] attest AC #n with evidence — content-hash keyed, idempotent."""
+    h = ops.verify_ac(_cfg(args), args.key, args.ac, args.evidence, actor=args.actor)
+    _print({"verified_ac_hash": h})
+    return 0
+
+
 def cmd_finalize(args) -> int:
     cfg = _cfg(args)
     ops.finalize(cfg, args.key, actor=args.actor)
@@ -726,6 +734,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key"); sp.add_argument("seconds", type=int); sp.add_argument("--actor", default="reconciler")
     sp = add("fail", cmd_fail, "[agent] record failure (backoff or dead-letter)")
     sp.add_argument("key"); sp.add_argument("error"); sp.add_argument("--actor", default="reconciler")
+    sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with evidence (content-hash keyed)")
+    sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")
+    sp.add_argument("--evidence", required=True); sp.add_argument("--actor", default="reconciler")
+
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")

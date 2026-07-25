@@ -7,12 +7,28 @@ append, so the dispatcher's cheap read is always current.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from . import events as E
 from . import event_log, store
+from .idempotency import content_hash
 from .statemachine import Phase
+
+# Spec acceptance criteria are Markdown task-list items: "- [ ] ..." / "- [x] ...".
+_AC_RE = re.compile(r"^- \[[ xX]\]\s*(.+)$", re.MULTILINE)
+
+
+def parse_acs(spec_text: str) -> list[str]:
+    """Extract acceptance-criteria line texts (in spec order) from a spec's body."""
+    return [m.group(1).strip() for m in _AC_RE.finditer(spec_text)]
+
+
+def ac_hash(ac_text: str) -> str:
+    """Content hash identifying one AC — invalidated by any edit to its line, so a
+    human spec edit desyncs a stale attestation instead of mismatching by index."""
+    return content_hash(ac_text.strip())
 
 
 @dataclass
@@ -44,6 +60,10 @@ class Snapshot:
     kind: str = "implementation"
     proposal_path: str | None = None
     updated_ts: str | None = None
+    # ac_hash -> evidence text, from AcVerified events. Never reset by a phase
+    # change; only a spec edit that changes an AC's text invalidates an entry
+    # (its hash simply stops matching any current AC — see acs_unverified()).
+    ac_verified: dict[str, str] = field(default_factory=dict)
     # Set when a ticket originated from an external tracker (e.g. Jira) so the
     # dispatcher's sync tick knows which tickets to `refresh`.
     external_source: str | None = None
@@ -52,6 +72,17 @@ class Snapshot:
     @property
     def question_open(self) -> bool:
         return bool(self.open_questions)
+
+    def acs_unverified(self, spec_text: str) -> int:
+        """Count ACs in *spec_text* with no matching AcVerified attestation.
+
+        Matching is by content hash of the AC's own line, so editing an AC's text
+        (even without adding/removing checkboxes) makes its old attestation stop
+        counting — the human's edit desyncs it rather than silently keeping a
+        now-stale "verified" against different wording.
+        """
+        hashes = {ac_hash(t) for t in parse_acs(spec_text)}
+        return len(hashes - set(self.ac_verified.keys()))
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -124,6 +155,10 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.impl_turns = max(s.impl_turns, int(p.get("turn", s.impl_turns)))
             if p.get("summary"):
                 s.last_step = p["summary"]
+        elif t == E.AC_VERIFIED:
+            h = p.get("ac_hash")
+            if h:
+                s.ac_verified[h] = p.get("evidence", "")
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.REQUEUE_SCHEDULED:

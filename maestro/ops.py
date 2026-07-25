@@ -9,6 +9,7 @@ import random
 from pathlib import Path
 
 from . import events as E
+from . import context as context_mod
 from . import event_log, inbox, snapshot as snap_mod, store
 from .config import Config
 from .dispatcher import spec_hash_on_disk
@@ -23,6 +24,7 @@ def _append(cfg: Config, key: str, type: str, payload: dict, *, actor: str,
     ev = event_log.append(cfg.home, key, type, payload, actor=actor,
                           step_id=sid, expected_last_seq=expect)
     snap_mod.rebuild(cfg.home, key)
+    context_mod.regenerate(cfg.home, key)
     return ev
 
 
@@ -38,9 +40,47 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     sid = step_id(key, snap.phase, snap.observed_seq, f"phase:{phase.value}")
     ev = _append(cfg, key, E.PHASE_CHANGED, {"phase": phase.value, "reason": reason},
                  actor=actor, sid=sid, expect=expect)
+    if phase == Phase.AWAITING_CI:
+        _warn_unverified_acs(cfg, key, actor=actor)
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
     return ev
+
+
+def _warn_unverified_acs(cfg: Config, key: str, *, actor: str) -> None:
+    """Soft-warn (a Note event, non-blocking) when entering awaiting-ci with
+    unattested ACs — a nudge for the implementing step, not an enforced gate."""
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        return
+    snap = snap_mod.load(cfg.home, key)
+    n = snap.acs_unverified(spec_path.read_text(encoding="utf-8"))
+    if n <= 0:
+        return
+    _append(cfg, key, E.NOTE,
+            {"text": f"{n} acceptance criteria unverified — run `maestro verify-ac` before merge"},
+            actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "warn-acs-unverified"))
+
+
+def verify_ac(cfg: Config, key: str, ac_index: int, evidence: str, *, actor: str = "reconciler") -> str:
+    """Attest AC #ac_index (1-based, in spec order) with evidence text.
+
+    Identified by content hash of the AC's own spec line, not by index, so a
+    human edit to that line invalidates the attestation (`acs_unverified` counts
+    it again) instead of silently mismatching a different AC at the same index.
+    """
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        raise store.MaestroError(f"{key}: no spec.md to verify ACs against")
+    acs = snap_mod.parse_acs(spec_path.read_text(encoding="utf-8"))
+    if not (1 <= ac_index <= len(acs)):
+        raise store.MaestroError(f"{key}: AC #{ac_index} out of range (spec has {len(acs)} AC(s))")
+    ac_text = acs[ac_index - 1]
+    h = snap_mod.ac_hash(ac_text)
+    _append(cfg, key, E.AC_VERIFIED,
+            {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "evidence": evidence},
+            actor=actor, sid=f"acverified-{key}-{h}")
+    return h
 
 
 def ask(cfg: Config, key: str, text: str, *, qid: str | None = None, actor: str = "reconciler") -> str:
