@@ -56,6 +56,20 @@ replaying the event log.
 | **projector** | snapshots → dashboards, atomic | a phase of `maestro dispatch` |
 | **providers** | Jira / GitHub / custom import, pluggable | `config.toml` |
 
+## Install
+
+Install straight from git — no checkout required, and the wheel is self-sufficient
+(daemon installer + shell completion ship as package data):
+
+```bash
+uv tool install "maestro-orchestrator[tui] @ git+https://github.com/cortop/maestro"
+# or:
+pipx install "maestro-orchestrator[tui] @ git+https://github.com/cortop/maestro"
+```
+
+For contributing to maestro itself, use an editable install from a checkout instead (see
+Quickstart below).
+
 ## Quickstart
 
 ```bash
