@@ -18,6 +18,9 @@ eval "$(maestro env | python3 -c 'import sys,json;d=json.load(sys.stdin);print(f
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
 sed -n '1,200p' "$HOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
+cat "$HOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
+                                                    # failures, CI history, recent impl steps,
+                                                    # dependsOn phases — read before acting
 ```
 If the snapshot shows pending inbox commands, fold them BEFORE deciding:
 ```bash
@@ -156,7 +159,9 @@ git -C "$WT" rebase origin/main || true   # resolve conflicts, then: git -C "$WT
 ```
 If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteria are already
 implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
-step 3 (push the rebased branch + `set-phase awaiting-ci`); do NOT re-do the feature. If you
+step 4 (push the rebased branch + `set-phase awaiting-ci`); do NOT re-do the feature or re-run
+`verify-ac` (prior attestations still hold — the spec, and so their content hashes, didn't
+change). If you
 truly cannot resolve the conflict yourself, escalate:
 `maestro ask "$KEY" "PR #<n> conflict I couldn't auto-resolve: <detail>" --qid "conflict-$KEY-<n>"`
 and exit.
@@ -177,12 +182,26 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    If red, fix and re-run. Do not proceed until green. If you exceed ~`max_impl_turns`
    edit/test cycles without converging: `maestro fail "$KEY" "non-converging: <why>"` and exit.
-3. Commit, push, open a **draft** PR, and record it idempotently:
+3. **Self-review gate — one evidence-citing attestation per spec AC, before opening the PR:**
+   for each `- [ ] ...` checkbox in the spec, `maestro verify-ac "$KEY" --ac <n> --evidence
+   "<file:line or test name proving it>"` (1-based, in spec order; content-hash keyed, so a
+   later spec edit to that line un-verifies it again — re-run verify-ac if that happens). This
+   is a structured self-attestation that saves the human reviewer time, not machine-verified
+   QA — cite the real evidence (a test name, a diff hunk), don't rubber-stamp.
+4. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently:
    ```bash
    git -C "$HOME/worktrees/$KEY" add -A && git -C "$HOME/worktrees/$KEY" commit -q -m "$KEY: <subject>"
    git -C "$HOME/worktrees/$KEY" push -q -u origin "${PREFIX}${KEY}"
+   # Body includes a "| AC | Evidence |" table, one row per spec checkbox, sourced from the
+   # verify-ac calls above (or `maestro snapshot "$KEY"` -> ac_verified for the evidence text).
    PR_URL=$(gh pr create --repo cortop/maestro --head "${PREFIX}${KEY}" --draft \
-            --title "$KEY: <subject>" --body "<motivation/changes/AC-with-output>" 2>/dev/null \
+            --title "$KEY: <subject>" \
+            --body "<motivation/changes> ## AC-to-evidence
+
+| AC | Evidence |
+|----|----------|
+| <ac 1 text> | <evidence 1> |
+| <ac 2 text> | <evidence 2> |" 2>/dev/null \
             || gh pr view "${PREFIX}${KEY}" --repo cortop/maestro --json url -q .url)
    PR_NUM=$(gh pr view "${PREFIX}${KEY}" --repo cortop/maestro --json number -q .number)
    maestro append "$KEY" --type PrOpened --payload "{\"number\":$PR_NUM,\"url\":\"$PR_URL\",\"draft\":true}" --step-id "pr-$KEY"

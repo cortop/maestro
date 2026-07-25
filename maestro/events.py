@@ -24,6 +24,9 @@ CI_OBSERVED = "CiObserved"              # {state}  e.g. "passing" | "failing" | 
 IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-off
 IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
 
+# Self-review
+AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  content-hash keyed AC attestation
+
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent
 
