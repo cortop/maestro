@@ -61,6 +61,9 @@ class Config:
     backup_interval: int = 3600        # seconds between dispatcher auto-backups (0 disables)
     backup_retention: int | None = 24  # keep most-recent N snapshots; 0/None = keep all
     backup_dir: str | None = None      # where snapshots live; None = sibling of the home
+    # Outbound notify tick: fires on a key's first entry into awaiting-human/degraded/done.
+    notify_command: str | None = None  # shell command; KEY/PHASE/QUESTION in env; None = disabled
+    webhook_urls: list = field(default_factory=list)  # JSON-POSTed via stdlib urllib
     raw: dict = field(default_factory=dict)
 
 
@@ -107,6 +110,10 @@ def load(home_arg: str | None = None) -> Config:
         raw_ret = m.get("backup_retention", cfg.backup_retention)
         cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
         cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
+        n = data.get("notify", {})
+        cfg.notify_command = n.get("notify_command", cfg.notify_command) or None
+        raw_webhooks = n.get("webhook_urls", cfg.webhook_urls)
+        cfg.webhook_urls = raw_webhooks if isinstance(raw_webhooks, list) else cfg.webhook_urls
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {
@@ -160,6 +167,10 @@ implementer = "claude_skill"
 #
 # [fetcher.command]
 # cmd = "~/bin/import-tickets.sh"   # writes create-requests to the _new inbox
+
+# [notify]                          # outbound push on awaiting-human/degraded/done (optional)
+# notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""
+# webhook_urls = ["https://ntfy.sh/my-maestro-topic"]   # JSON {key,phase,question,title} POSTed
 
 # [[scheduled]]                    # recurring, prompt-defined triggers (optional, repeatable)
 # name = "morning-pr-digest"       # stable id -> cursor key + dedup token
