@@ -31,6 +31,10 @@ class Config:
     max_failures: int = 4                  # -> dead-letter (DEGRADED)
     max_impl_turns: int = 20               # ralph-loop circuit breaker
     daily_token_ceiling: int | None = None # advisory; surfaced by `maestro doctor`
+    # Fleet-wide spawns/hour above which `maestro doctor` trips `runaway` (exit 1).
+    # None = derive from what the spawn-rate floor itself permits (see health.py);
+    # 0 disables the check.
+    runaway_spawns_per_hour: int | None = None
     repo_path: str | None = None           # primary repo the reconciler builds in
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
     permission_mode: str = "acceptEdits"   # claude permission mode for reconcilers
@@ -88,6 +92,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.max_failures = int(m.get("max_failures", cfg.max_failures))
         cfg.max_impl_turns = int(m.get("max_impl_turns", cfg.max_impl_turns))
         cfg.daily_token_ceiling = m.get("daily_token_ceiling", cfg.daily_token_ceiling)
+        raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
+        cfg.runaway_spawns_per_hour = int(raw_runaway) if raw_runaway is not None else None
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
@@ -137,6 +143,9 @@ backoff_base = 30
 max_failures = 4
 max_impl_turns = 20
 # daily_token_ceiling = 5000000   # advisory cost guardrail
+# runaway_spawns_per_hour = 200   # `maestro doctor` trips runaway above this fleet-wide
+                                  # spawns/hour (default: derived from the spawn floor
+                                  # itself; 0 disables the check)
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
 # backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)

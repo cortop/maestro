@@ -585,6 +585,14 @@ def _spawn_ledger_path(home: Path) -> Path:
     return home / "derived" / ".spawn_ledger.json"
 
 
+# Hard cap on how many timestamps `recent` may hold per key, independent of the
+# window filter -- a board with the spawn floor disabled fires many spawns within
+# the same second, and the window filter alone does not bound growth when
+# `now` barely advances between writes. One entry per window-second is already
+# far more resolution than an hourly rate needs.
+_LEDGER_RECENT_CAP = 3600  # == health.WINDOW_SECONDS; kept as a literal, health imports us
+
+
 def spawn_floor(cfg: Config) -> int:
     """Minimum seconds between two spawns of the same key (0 disables)."""
     floor = cfg.min_spawn_interval
@@ -600,6 +608,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     """
     home = cfg.home
     from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
+    from . import health  # lazy: health -> dispatcher would cycle at import time
 
     minted = mint_new_tickets(cfg)
     sync_external_sources(cfg, now)
@@ -645,7 +654,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     if floor:
         eligible: list[tuple[str, str]] = []
         for key, reason in due:
-            last = ledger.get(key)
+            entry = ledger.get(key)
+            last = entry.get("last") if isinstance(entry, dict) else entry
             if (reason not in _UNTHROTTLED_REASONS
                     and isinstance(last, (int, float)) and now - last < floor):
                 throttled.append(key)
@@ -665,7 +675,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         model, effort = _resolve_model_effort(cfg, key)
         sessions.spawn(key, prompt, cwd, model=model, effort=effort)
         spawned.append(key)
-        ledger[key] = now
+        prev = ledger.get(key)
+        recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
+        recent.append(now)
+        recent = [t for t in recent if now - t <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
+        ledger[key] = {"last": now, "recent": recent}
 
     if spawned:
         # Keep the ledger from growing without bound as keys come and go.
@@ -673,7 +687,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         store.write_json(ledger_path,
                          {k: v for k, v in ledger.items() if k in known})
 
-    _write_heartbeat(home, now, len(spawned), len(active))
+    _write_heartbeat(home, now, len(spawned), len(active), len(throttled), len(due))
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
@@ -719,7 +733,9 @@ def _worker_cwd(cfg: Config, key: str) -> Path:
     return cfg.home
 
 
-def _write_heartbeat(home: Path, now: float, spawned: int, active: int) -> None:
+def _write_heartbeat(home: Path, now: float, spawned: int, active: int,
+                     throttled: int, due: int) -> None:
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"ts": store.iso_now(), "epoch": now,
-                      "spawned": spawned, "active": active})
+                      "spawned": spawned, "active": active,
+                      "throttled": throttled, "due": due})

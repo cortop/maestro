@@ -68,6 +68,14 @@ def _render_fleet(status: dict, doctor: dict) -> str:
     stale = doctor.get("stale", False)
     stale_str = "[yellow]yes[/yellow]" if stale else "no"
     dead_str = (", ".join(dead) if dead else "—")
+    rate = doctor.get("spawns_last_hour") or {}
+    spawns_total = rate.get("total", 0)
+    budget = doctor.get("spawn_budget_per_hour", 0)
+    runaway = doctor.get("runaway", False)
+    runaway_str = ("[red bold]RUNAWAY[/red bold]" if runaway
+                   else "[green]ok[/green]")
+    spawns_str = (f"[red bold]{spawns_total}[/red bold]" if runaway
+                  else str(spawns_total))
 
     lines = [
         "[bold]Fleet & Health[/bold]",
@@ -81,6 +89,8 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         "",
         f"  Stale:           {stale_str}",
         f"  Dead letters:    {dead_str}",
+        f"  Spawns/hr:       {spawns_str} / budget {budget}",
+        f"  Runaway:         {runaway_str}",
     ]
     return "\n".join(lines)
 

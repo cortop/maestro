@@ -204,6 +204,57 @@ def test_dispatch_cli_reports_throttled(home):
     assert second["would_spawn"] == [] and second["throttled"] == ["T-1"]
 
 
+def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
+    """dispatch() writes {key: {"last": float, "recent": [...]}}, and rate
+    computation (health.spawn_rate) drops entries older than the window."""
+    from maestro import health
+
+    _seed(home, "T-1", Phase.IN_REVIEW)
+    cfg.min_spawn_interval = 0
+    sessions = _EphemeralSessions()
+    t0 = 1_000_000
+    for i in range(10):
+        disp.dispatch(cfg, sessions, now=t0 + i)  # 10 spawns, 1s apart
+
+    ledger = store.read_json(disp._spawn_ledger_path(home), {})
+    entry = ledger["T-1"]
+    assert isinstance(entry, dict) and "last" in entry and "recent" in entry
+    assert len(entry["recent"]) == 10
+    assert health.spawn_rate(home, t0 + 9)["total"] == 10
+
+    # Jump past the window and spawn once more: only the fresh entry counts.
+    later = t0 + health.WINDOW_SECONDS + 100
+    disp.dispatch(cfg, sessions, now=later)
+    assert health.spawn_rate(home, later)["total"] == 1
+
+
+def test_spawn_ledger_recent_hard_capped(home, cfg):
+    """`recent` cannot grow without bound even with the spawn floor disabled."""
+    _seed(home, "T-1", Phase.IN_REVIEW)
+    cfg.min_spawn_interval = 0
+    sessions = _EphemeralSessions()
+    t0 = 1_000_000
+    n = disp._LEDGER_RECENT_CAP + 50
+    for i in range(n):
+        disp.dispatch(cfg, sessions, now=t0 + i / 100.0)  # all inside one window
+    ledger = store.read_json(disp._spawn_ledger_path(home), {})
+    assert len(ledger["T-1"]["recent"]) <= disp._LEDGER_RECENT_CAP
+
+
+def test_legacy_bare_float_ledger_still_throttles(home, cfg):
+    """A live home upgrading from the pre-history ledger format needs no
+    migration: a bare float is read as `last` with empty history."""
+    from maestro import health
+
+    _seed(home, "T-1", Phase.READY)
+    cfg.min_spawn_interval = 300
+    store.write_json(disp._spawn_ledger_path(home), {"T-1": 1000.0})
+    sessions = _EphemeralSessions()
+    report = disp.dispatch(cfg, sessions, now=1001)
+    assert report.spawned == [] and report.throttled == ["T-1"]
+    assert health.spawn_rate(home, 1001)["total"] == 0
+
+
 def test_dispatch_respects_concurrency_cap(home, cfg):
     for i in range(1, 6):
         _seed(home, f"T-{i}", Phase.READY)
