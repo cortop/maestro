@@ -802,6 +802,26 @@ def test_render_fleet_no_dead_letters_shows_emdash(home):
     assert "—" in out
 
 
+def test_render_fleet_unpaused_shows_no_rate_limit_line(home):
+    status = {"loaded": True, "heartbeat_age_s": 30, "interval": 300, "label": "x"}
+    doctor = {"dead_letters": [], "stale": False, "rate_limit": {"paused": False}}
+    out = _render_fleet(status, doctor)
+    assert "paused until" not in out
+
+
+def test_render_fleet_paused_shows_paused_until_line(home):
+    import time as time_mod
+
+    until_ts = time_mod.time() + 3600
+    status = {"loaded": True, "heartbeat_age_s": 30, "interval": 300, "label": "x"}
+    doctor = {"dead_letters": [], "stale": False,
+              "rate_limit": {"paused": True, "paused_until": until_ts}}
+    out = _render_fleet(status, doctor)
+    assert "paused until" in out
+    until_str = time_mod.strftime("%H:%M", time_mod.localtime(until_ts))
+    assert until_str in out
+
+
 def test_fleet_screen_constructs(home):
     """FleetScreen can be instantiated without crashing."""
     screen = FleetScreen(home)

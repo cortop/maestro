@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import backup, claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, fleet, inbox, ops, projection, ratelimit, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -310,7 +310,8 @@ def cmd_doctor(args) -> int:
         if (cfg.home / "tickets" / "_deadletter").exists() else []
     _print({"heartbeat": hb, "heartbeat_age_s": age,
             "dead_letters": [p.stem for p in dead],
-            "stale": age is not None and age > 1800})
+            "stale": age is not None and age > 1800,
+            "rate_limit": ratelimit.status(cfg.home, store.now_epoch())})
     return 0
 
 
@@ -333,8 +334,19 @@ def cmd_dispatch(args) -> int:
            "throttled": report.throttled,
            "active_sessions": report.active_sessions,
            "scheduled_fired": report.scheduled_fired,
+           "paused_until": report.paused_until,
            "due": [{"key": k, "reason": r} for k, r in report.due]}
     _print(out)
+    return 0
+
+
+def cmd_ratelimit(args) -> int:
+    """Show (or clear) the fleet-wide rate-limit pause set by maestro/ratelimit.py."""
+    cfg = _cfg(args)
+    if args.clear:
+        _print({"cleared": ratelimit.clear(cfg.home)})
+        return 0
+    _print(ratelimit.status(cfg.home, store.now_epoch()))
     return 0
 
 
@@ -687,6 +699,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
     add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters)")
+
+    sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
+    sp.add_argument("--clear", action="store_true", help="remove any active pause")
 
     sp = add("dispatch", cmd_dispatch, "one dispatcher sweep (launchd calls this)")
     sp.add_argument("--dry-run", action="store_true")

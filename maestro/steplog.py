@@ -43,6 +43,30 @@ def _summary(tool_name: str, inp: dict) -> str:
     return tool_name
 
 
+def iter_records(path: Path, *, start: int = 0) -> Iterator[tuple[int, dict]]:
+    """Yield ``(offset, record)`` for each complete JSON line in *path* from byte
+    *start* onward. ``offset`` is the byte position immediately after the line,
+    so callers (e.g. :mod:`maestro.ratelimit`) can persist it as a resume cursor.
+    A trailing line with no newline yet (the writer is mid-append) is left
+    unconsumed — the next call picks it up once it is complete.
+    """
+    with path.open("rb") as fh:
+        fh.seek(start)
+        pos = start
+        for raw in fh:
+            pos += len(raw)
+            if not raw.endswith(b"\n"):
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            yield pos, obj
+
+
 def _iter_steps(
     stream_path: Path,
 ) -> Iterator[tuple[str, str, int, str, str, str, str]]:
@@ -50,41 +74,33 @@ def _iter_steps(
     session_id = ""
     turn = 0
 
-    with stream_path.open(encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            t = obj.get("type")
-            if t == "system" and not session_id:
-                session_id = obj.get("session_id", "")
-            elif t == "assistant":
-                turn += 1
-                msg = obj.get("message", {})
-                role = msg.get("role", "assistant")
-                for block in msg.get("content", []):
-                    if block.get("type") != "tool_use":
-                        continue
-                    tool_name = block.get("name", "")
-                    if tool_name not in _NOTABLE_TOOLS:
-                        continue
-                    tool_id = block.get("id", "")
-                    if not tool_id:
-                        continue
-                    inp = block.get("input") or {}
-                    yield (
-                        session_id,
-                        tool_id,
-                        turn,
-                        role,
-                        _kind(tool_name, inp),
-                        tool_name,
-                        _summary(tool_name, inp),
-                    )
+    for _offset, obj in iter_records(stream_path):
+        t = obj.get("type")
+        if t == "system" and not session_id:
+            session_id = obj.get("session_id", "")
+        elif t == "assistant":
+            turn += 1
+            msg = obj.get("message", {})
+            role = msg.get("role", "assistant")
+            for block in msg.get("content", []):
+                if block.get("type") != "tool_use":
+                    continue
+                tool_name = block.get("name", "")
+                if tool_name not in _NOTABLE_TOOLS:
+                    continue
+                tool_id = block.get("id", "")
+                if not tool_id:
+                    continue
+                inp = block.get("input") or {}
+                yield (
+                    session_id,
+                    tool_id,
+                    turn,
+                    role,
+                    _kind(tool_name, inp),
+                    tool_name,
+                    _summary(tool_name, inp),
+                )
 
 
 def fold_stream(

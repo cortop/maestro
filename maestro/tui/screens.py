@@ -12,7 +12,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
+from .. import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, ratelimit, snapshot as snap_mod, store
 from ..dispatcher import schedule_status
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
@@ -179,6 +179,7 @@ class FleetScreen(Screen):
             "heartbeat_age_s": age,
             "dead_letters": [p.stem for p in dead],
             "stale": age is not None and age > 1800,
+            "rate_limit": ratelimit.status(self._home, store.now_epoch()),
         }
         return status, doctor
 
