@@ -53,7 +53,7 @@ def test_spawn_budget_falls_back_when_floor_disabled(home):
 
 def test_runaway_check_disabled_when_knob_is_zero(home, cfg):
     (home / "config.toml").write_text("[maestro]\nrunaway_spawns_per_hour = 0\n")
-    _seed(home, "T-1", Phase.IN_REVIEW)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg2 = Config(home=home, min_spawn_interval=0, max_concurrency=1)
     sessions = _EphemeralSessions()
     for i in range(50):
@@ -110,10 +110,10 @@ def test_throttled_last_sweep_reflects_prior_real_sweep(home, cfg):
 
 
 def test_incident_replay_trips_runaway_with_floor_disabled(home):
-    """Four in-review tickets that never advance, spawn floor OFF: real sweeps at
+    """Four tickets that never advance, spawn floor OFF: real sweeps at
     the 2026-07-19 cadence (~11s) exceed the derived budget and doctor trips."""
     for k in ("T-1", "T-2", "T-3", "T-4"):
-        _seed(home, k, Phase.IN_REVIEW)
+        _seed(home, k, Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=4, min_spawn_interval=0)
     sessions = _EphemeralSessions()
     t0, step = store.now_epoch(), 11
@@ -128,7 +128,7 @@ def test_incident_replay_trips_runaway_with_floor_disabled(home):
 def test_same_tickets_under_default_floor_do_not_trip(home):
     """The same shape, but with the default spawn floor engaged, stays healthy."""
     for k in ("T-1", "T-2", "T-3", "T-4"):
-        _seed(home, k, Phase.IN_REVIEW)
+        _seed(home, k, Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=4)  # min_spawn_interval defaults to
                                                  # reconcile_steady_interval (300)
     sessions = _EphemeralSessions()

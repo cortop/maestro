@@ -209,7 +209,7 @@ def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
     computation (health.spawn_rate) drops entries older than the window."""
     from maestro import health
 
-    _seed(home, "T-1", Phase.IN_REVIEW)
+    _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase, no timer -> due every sweep
     cfg.min_spawn_interval = 0
     sessions = _EphemeralSessions()
     t0 = 1_000_000
@@ -230,7 +230,7 @@ def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
 
 def test_spawn_ledger_recent_hard_capped(home, cfg):
     """`recent` cannot grow without bound even with the spawn floor disabled."""
-    _seed(home, "T-1", Phase.IN_REVIEW)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg.min_spawn_interval = 0
     sessions = _EphemeralSessions()
     t0 = 1_000_000
