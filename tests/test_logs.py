@@ -13,6 +13,8 @@ import pytest
 from maestro import store
 from maestro.sessions import list_sessions, session_name
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -168,6 +170,96 @@ def test_cli_logs_json_emits_raw_lines(home, capsys):
     # Each line should be valid JSON
     lines = [l for l in raw.strip().splitlines() if l]
     assert all(json.loads(l) for l in lines)
+
+
+# ---------------------------------------------------------------------------
+# CLI: maestro logs — errored/rate-limited results and rate_limit_event lines
+# ---------------------------------------------------------------------------
+
+def test_cli_logs_rate_limited_result_not_rendered_as_success(home, capsys):
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-2000.000000.stream.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((FIXTURES / "rate_limited.stream.jsonl").read_bytes())
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[result:success]" not in out
+    assert "429" in out
+    assert "monthly spend limit" in out
+
+
+def test_cli_logs_rate_limit_event_surfaced_not_dropped(home, capsys):
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-2000.000000.stream.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((FIXTURES / "rate_limited.stream.jsonl").read_bytes())
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "five_hour" in out
+    assert "resetsAt=" in out
+
+
+def test_cli_logs_follow_renders_rate_limited_not_success(home, capsys):
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.stream.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((FIXTURES / "rate_limited.stream.jsonl").read_bytes())
+
+    from maestro import claims
+    claims.write_claim(home, "T-1", pid=999999999, name="reconcile-T-1",
+                       log_path=str(path))
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1", "--follow"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[result:success]" not in out
+    assert "429" in out
+
+
+# ---------------------------------------------------------------------------
+# CLI: maestro logs --list carries a machine-readable `outcome` per session
+# ---------------------------------------------------------------------------
+
+def test_cli_logs_list_carries_outcome(home, capsys):
+    success_path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.stream.jsonl"
+    success_path.parent.mkdir(parents=True, exist_ok=True)
+    success_path.write_bytes((FIXTURES / "sample.stream.jsonl").read_bytes())
+
+    rl_path = home / "agent-logs" / "T-1" / "reconcile-T-1-2000.000000.stream.jsonl"
+    rl_path.write_bytes((FIXTURES / "rate_limited.stream.jsonl").read_bytes())
+
+    text_path = home / "agent-logs" / "T-1" / "reconcile-T-1-3000.000000.log"
+    _make_text_log(text_path, "plain text")
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1", "--list"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    by_epoch = {s["epoch"]: s["outcome"] for s in out}
+    assert by_epoch[1000.0] == "success"
+    assert by_epoch[2000.0] == "rate_limited"
+    assert by_epoch[3000.0] == "unknown"
+
+
+def test_list_sessions_default_has_no_outcome_and_opens_no_files(home, monkeypatch):
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.stream.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((FIXTURES / "sample.stream.jsonl").read_bytes())
+
+    real_open = Path.open
+
+    def _guarded_open(self, *args, **kwargs):
+        if self == path:
+            raise AssertionError("list_sessions default call must not open log files")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _guarded_open)
+    sessions = list_sessions(home, "T-1")
+    assert "outcome" not in sessions[0]
 
 
 # ---------------------------------------------------------------------------
