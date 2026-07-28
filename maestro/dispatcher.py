@@ -379,6 +379,81 @@ def schedule_status(cfg: Config, now: float) -> list[dict]:
     return rows
 
 
+_REPO_PREFLIGHT_SENTINELS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+_REPO_PREFLIGHT_DIRS = ("rebase-merge", "rebase-apply")
+
+
+def repo_preflight(cfg: Config) -> dict:
+    """Read-only guard: is ``cfg.repo_path`` safe to fast-forward and spawn a
+    reconciler into right now?
+
+    Three probes, all read-only, all against the SAME repo the dispatcher fast-
+    forwards in ``sync_worktrees`` and spawns bare-repo reconcilers into (see
+    ``_worker_cwd``): (a) an in-progress merge/rebase/cherry-pick/revert, via
+    the sentinel files git leaves under the git dir; (b) unmerged index
+    entries; (c) a tracked file carrying a REAL conflict hunk (both markers —
+    a file that only quotes one, e.g. this feature's own tests/docs, must not
+    block; see T-19 spec Notes on why ``--all-match`` is load-bearing).
+
+    Fails OPEN — returns ``ok=True`` — on anything that makes the probe itself
+    unusable (git missing, ``repo_path`` unset/absent, unborn HEAD, a hung
+    subprocess): a flaky check that can permanently brick the fleet is a worse
+    failure mode than the one this guards against, so only positive evidence
+    of a real conflict blocks. Never raises into ``dispatch()``.
+    """
+    if not cfg.repo_preflight:
+        return {"ok": True, "blockers": []}
+    repo = cfg.repo_path
+    if not repo or not Path(repo).exists():
+        return {"ok": True, "blockers": ["preflight-unavailable"]}
+
+    import subprocess
+
+    def _run(args, timeout=10):
+        try:
+            return subprocess.run(["git", "-C", repo, *args],
+                                  capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    try:
+        # One rev-parse resolves the git dir AND validates HEAD is born: a repo
+        # with an unborn HEAD (or no repo at all) makes this exit non-zero even
+        # though the git-dir line alone would otherwise print fine.
+        head_res = _run(["rev-parse", "--absolute-git-dir", "HEAD"])
+        if head_res is None or head_res.returncode != 0 or not head_res.stdout.strip():
+            return {"ok": True, "blockers": ["preflight-unavailable"]}
+        gitdir = Path(head_res.stdout.splitlines()[0].strip())
+
+        blockers: list[str] = []
+        for name in _REPO_PREFLIGHT_SENTINELS:
+            if (gitdir / name).exists():
+                blockers.append(name)
+        for name in _REPO_PREFLIGHT_DIRS:
+            if (gitdir / name).exists():
+                blockers.append(f"{name}/")
+
+        unmerged = _run(["ls-files", "-u"])
+        if unmerged is not None and unmerged.returncode == 0 and unmerged.stdout.strip():
+            blockers.append("unmerged index entries (git ls-files -u)")
+
+        # --all-match is load-bearing: a lone quoted marker (docs, this
+        # feature's own tests) must not match; a real conflict hunk always
+        # carries both.
+        grep_res = _run(["grep", "-I", "-l", "--all-match",
+                         "-e", "^<<<<<<< ", "-e", "^>>>>>>> ", "--", "."])
+        if grep_res is not None and grep_res.returncode == 0 and grep_res.stdout.strip():
+            paths = grep_res.stdout.strip().splitlines()
+            shown = ", ".join(paths[:5])
+            if len(paths) > 5:
+                shown += f" (+{len(paths) - 5} more)"
+            blockers.append(f"conflict markers in: {shown}")
+
+        return {"ok": not blockers, "blockers": blockers}
+    except Exception:
+        return {"ok": True, "blockers": ["preflight-unavailable"]}
+
+
 def sync_worktrees(cfg: Config) -> dict:
     """Keep other tickets' worktrees from drifting behind a just-merged main.
 
@@ -573,6 +648,7 @@ class DispatchReport:
     active_sessions: int
     scheduled_fired: list[str] = field(default_factory=list)
     throttled: list[str] = field(default_factory=list)  # due + free but under the spawn floor
+    repo_blockers: list[str] = field(default_factory=list)  # non-empty -> spawn step was skipped
 
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
@@ -604,7 +680,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     minted = mint_new_tickets(cfg)
     sync_external_sources(cfg, now)
     scheduled_fired = run_scheduled_tasks(cfg, now)["fired"]
-    sync_worktrees(cfg)
+    preflight = repo_preflight(cfg)
+    repo_ok = preflight["ok"]
+    repo_blockers = list(preflight["blockers"]) if not repo_ok else []
+    if repo_ok:
+        sync_worktrees(cfg)
     sync_vcs(cfg, now)
     backup.maybe_backup(cfg, now)
     notify.maybe_notify(cfg, now)
@@ -632,6 +712,19 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             claimed.append(key)        # per-key serialization: one reconciler per key
             continue
         due.append((key, res.reason))
+
+    if not repo_ok:
+        # Repo is mid-merge/rebase or conflict-marked: everything above (mint,
+        # external sync, scheduled tasks, backup, due computation) still ran —
+        # only the spawn step (and the ff-only merge in sync_worktrees above)
+        # is skipped, so a human fixing the repo doesn't also lose backups.
+        _write_heartbeat(home, now, 0, len(active), repo_blockers=repo_blockers)
+        return DispatchReport(
+            minted=minted, due=due, claimed=claimed, spawned=[],
+            capacity_skipped=[], active_sessions=len(active),
+            scheduled_fired=scheduled_fired, throttled=[],
+            repo_blockers=repo_blockers,
+        )
 
     # Spawn-rate floor. The claim file is the ONLY other per-key spawn memory and it
     # is unlinked the moment the worker dies — so a session that exits in under a
@@ -673,11 +766,12 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         store.write_json(ledger_path,
                          {k: v for k, v in ledger.items() if k in known})
 
-    _write_heartbeat(home, now, len(spawned), len(active))
+    _write_heartbeat(home, now, len(spawned), len(active), repo_blockers=repo_blockers)
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
         scheduled_fired=scheduled_fired, throttled=throttled,
+        repo_blockers=repo_blockers,
     )
 
 
@@ -719,7 +813,9 @@ def _worker_cwd(cfg: Config, key: str) -> Path:
     return cfg.home
 
 
-def _write_heartbeat(home: Path, now: float, spawned: int, active: int) -> None:
+def _write_heartbeat(home: Path, now: float, spawned: int, active: int,
+                     repo_blockers: list[str] | None = None) -> None:
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"ts": store.iso_now(), "epoch": now,
-                      "spawned": spawned, "active": active})
+                      "spawned": spawned, "active": active,
+                      "repo_blockers": repo_blockers or []})

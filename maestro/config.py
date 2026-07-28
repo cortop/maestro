@@ -61,6 +61,9 @@ class Config:
     backup_interval: int = 3600        # seconds between dispatcher auto-backups (0 disables)
     backup_retention: int | None = 24  # keep most-recent N snapshots; 0/None = keep all
     backup_dir: str | None = None      # where snapshots live; None = sibling of the home
+    # Refuse to fast-forward/spawn into repo_path while it's mid-merge/rebase or carries
+    # a real conflict hunk (see dispatcher.repo_preflight). Fails open on a broken probe.
+    repo_preflight: bool = True
     # Outbound notify tick: fires on a key's first entry into awaiting-human/degraded/done.
     notify_command: str | None = None  # shell command; KEY/PHASE/QUESTION in env; None = disabled
     webhook_urls: list = field(default_factory=list)  # JSON-POSTed via stdlib urllib
@@ -110,6 +113,7 @@ def load(home_arg: str | None = None) -> Config:
         raw_ret = m.get("backup_retention", cfg.backup_retention)
         cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
         cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
+        cfg.repo_preflight = bool(m.get("repo_preflight", cfg.repo_preflight))
         n = data.get("notify", {})
         cfg.notify_command = n.get("notify_command", cfg.notify_command) or None
         raw_webhooks = n.get("webhook_urls", cfg.webhook_urls)
@@ -141,6 +145,7 @@ max_impl_turns = 20
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
 # backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
 # backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
+# repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "github_issues" | custom

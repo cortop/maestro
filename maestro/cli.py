@@ -50,7 +50,10 @@ def _nudge(cfg: Config) -> None:
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
     )
-    disp.dispatch(cfg, sessions, now=store.now_epoch())
+    report = disp.dispatch(cfg, sessions, now=store.now_epoch())
+    if report.repo_blockers:
+        print(f"warning: repo_path is blocked ({'; '.join(report.repo_blockers)}) "
+              "— no reconciler spawned", file=sys.stderr)
 
 
 # --- lifecycle / human verbs -------------------------------------------------
@@ -310,7 +313,8 @@ def cmd_doctor(args) -> int:
         if (cfg.home / "tickets" / "_deadletter").exists() else []
     _print({"heartbeat": hb, "heartbeat_age_s": age,
             "dead_letters": [p.stem for p in dead],
-            "stale": age is not None and age > 1800})
+            "stale": age is not None and age > 1800,
+            "repo_preflight": disp.repo_preflight(cfg)})
     return 0
 
 
@@ -333,7 +337,8 @@ def cmd_dispatch(args) -> int:
            "throttled": report.throttled,
            "active_sessions": report.active_sessions,
            "scheduled_fired": report.scheduled_fired,
-           "due": [{"key": k, "reason": r} for k, r in report.due]}
+           "due": [{"key": k, "reason": r} for k, r in report.due],
+           "repo_blocked": report.repo_blockers}
     _print(out)
     return 0
 
