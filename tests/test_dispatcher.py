@@ -727,3 +727,211 @@ def test_schedule_list_cli(home):
     out = json.loads(buf.getvalue())
     assert out["scheduled"][0]["name"] == "digest"
     assert out["scheduled"][0]["last_fired"] is None
+
+
+# ---------------------------------------------------------------------------
+# T-20: prune-logs dispatcher tick
+# ---------------------------------------------------------------------------
+
+PRUNE_NOW = 1_700_000_000.0
+
+
+def _log(home, key, epoch, fmt="log"):
+    from maestro.sessions import session_name
+    session_id = f"{session_name(key)}-{epoch:.6f}"
+    path = (store.session_stream_path(home, key, session_id) if fmt == "stream-json"
+            else store.session_log_path(home, key, session_id))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x" * 10, encoding="utf-8")
+    return path
+
+
+def test_prune_tick_cursor_gates_repeat_sweeps(home, cfg):
+    cfg.prune_interval = 100
+    cfg.session_log_retention_days = 5
+    cfg.session_log_max_per_ticket = 0
+
+    old1 = _log(home, "T-1", PRUNE_NOW - 10 * 86400)
+    report1 = disp.dispatch(cfg, DryRunSessions(), now=PRUNE_NOW)
+    assert not old1.exists()
+    assert report1.pruned_logs == 1
+    assert report1.pruned_bytes > 0
+
+    # A second, equally stale file appears before the gate reopens: the tick
+    # must NOT run again at now + interval/2.
+    old2 = _log(home, "T-1", PRUNE_NOW - 10 * 86400)
+    report2 = disp.dispatch(cfg, DryRunSessions(), now=PRUNE_NOW + 50)
+    assert old2.exists()
+    assert report2.pruned_logs == 0
+
+    report3 = disp.dispatch(cfg, DryRunSessions(), now=PRUNE_NOW + 100)
+    assert not old2.exists()
+    assert report3.pruned_logs == 1
+    assert (home / "derived" / ".prune_cursor.json").exists()
+
+
+def test_prune_tick_spares_in_window_and_live_claim(home, cfg):
+    from maestro import claims
+
+    cfg.prune_interval = 100
+    cfg.session_log_retention_days = 5
+    cfg.session_log_max_per_ticket = 2
+
+    newest = _log(home, "T-1", PRUNE_NOW)
+    recent = _log(home, "T-1", PRUNE_NOW - 3600)
+    over_count = _log(home, "T-1", PRUNE_NOW - 2 * 3600)     # in-window by age, over count cap
+    live = _log(home, "T-1", PRUNE_NOW - 20 * 86400)          # would be pruned by age+count, but live
+    claims.write_claim(home, "T-1", 1, "reconcile-T-1", log_path=str(live))
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=PRUNE_NOW)
+
+    assert newest.exists()
+    assert recent.exists()
+    assert live.exists()
+    assert not over_count.exists()
+    assert report.pruned_logs == 1
+    assert report.pruned_bytes > 0
+
+
+def test_prune_tick_reaches_orphan_agent_logs_dir_and_never_touches_protected_paths(home, cfg):
+    from conftest import seed_ticket
+
+    cfg.prune_interval = 100
+    cfg.session_log_retention_days = 5
+    cfg.session_log_max_per_ticket = 0
+
+    # Orphan: no ticket dir, no events, no snapshot — absent from list_keys.
+    orphan_old = _log(home, "T-ORPHAN", PRUNE_NOW - 10 * 86400)
+
+    # launchd's live stdio files at the top level of agent-logs/.
+    agent_logs = home / "agent-logs"
+    agent_logs.mkdir(parents=True, exist_ok=True)
+    dispatch_out = agent_logs / "dispatch.out.log"
+    dispatch_err = agent_logs / "dispatch.err.log"
+    dispatch_out.write_text("out\n", encoding="utf-8")
+    dispatch_err.write_text("err\n", encoding="utf-8")
+
+    # A directory whose name is not a valid key.
+    bad_dir = agent_logs / "not a key"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    bad_file = bad_dir / "whatever.log"
+    bad_file.write_text("x", encoding="utf-8")
+
+    # A real, terminal (done) ticket exercising events/snapshot/inbox untouched-ness.
+    seed_ticket(home, "T-1", "a finished ticket", phase="done")
+    events_file = store.events_path(home, "T-1")
+    archive_file = store.events_archive_path(home, "T-1")
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text('{"seq":0}\n', encoding="utf-8")
+    snap_file = store.snapshot_path(home, "T-1")
+    inbox_file = store.inbox_path(home, "T-1")
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("", encoding="utf-8")
+
+    ledger_file = home / "derived" / ".spawn_ledger.json"
+    ledger_file.parent.mkdir(parents=True, exist_ok=True)
+    ledger_file.write_text('{"T-9": 123}', encoding="utf-8")
+
+    claims_dir = home / "derived" / "claims"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    claim_file = claims_dir / "T-9.json"
+    claim_file.write_text('{"pid": 999999999, "name": "x"}', encoding="utf-8")
+
+    protected = [dispatch_out, dispatch_err, bad_file, events_file, archive_file,
+                 snap_file, inbox_file, ledger_file, claim_file]
+    before = {p: p.read_bytes() for p in protected}
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=PRUNE_NOW)
+
+    assert not orphan_old.exists()
+    assert report.pruned_logs == 1
+    for p, content in before.items():
+        assert p.read_bytes() == content, f"{p} was modified"
+
+
+def test_prune_tick_unreadable_dir_does_not_abort_the_sweep(home, cfg):
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permission bits")
+
+    cfg.prune_interval = 100
+    cfg.session_log_retention_days = 5
+    cfg.session_log_max_per_ticket = 0
+
+    bad_key_dir = home / "agent-logs" / "T-BAD"
+    bad_key_dir.mkdir(parents=True, exist_ok=True)
+    _log(home, "T-BAD", PRUNE_NOW - 10 * 86400)
+    good_old = _log(home, "T-GOOD", PRUNE_NOW - 10 * 86400)
+
+    _seed(home, "T-DUE", Phase.READY)
+
+    bad_key_dir.chmod(0o000)
+    try:
+        report = disp.dispatch(cfg, DryRunSessions(), now=PRUNE_NOW)
+    finally:
+        bad_key_dir.chmod(0o755)  # restore so pytest's tmp_path cleanup can remove it
+
+    assert "T-DUE" in report.spawned
+    assert (home / "derived" / ".heartbeat.json").exists()
+    assert not good_old.exists()          # other keys' logs still pruned
+    assert report.errors.get("prune")     # error recorded, not propagated
+
+
+def test_prune_logs_cli_end_to_end(home):
+    import json
+
+    from maestro import cli
+
+    home_str = str(home)
+    cli.main(["--home", home_str, "init"])
+    (home / "config.toml").write_text(
+        "[maestro]\n"
+        "session_log_retention_days = 5\n"
+        "session_log_max_per_ticket = 0\n",
+        encoding="utf-8",
+    )
+
+    real_now = store.now_epoch()  # cmd_prune_logs uses wall-clock time, not an injected `now`
+    old_a = _log(home, "T-1", real_now - 10 * 86400)
+    recent_a = _log(home, "T-1", real_now - 1 * 86400)
+    old_b = _log(home, "T-2", real_now - 10 * 86400)
+
+    def _run(args):
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            rc = cli.main(["--home", home_str, *args])
+        finally:
+            sys.stdout = old_stdout
+        return rc, json.loads(buf.getvalue())
+
+    # --all --dry-run: reports counts, deletes nothing.
+    rc, out = _run(["prune-logs", "--all", "--dry-run"])
+    assert rc == 0
+    assert out["pruned_logs"] == 2
+    assert old_a.exists() and old_b.exists()
+
+    # Single-key prune only touches that key.
+    rc, out = _run(["prune-logs", "T-1"])
+    assert rc == 0
+    assert out["pruned_logs"] == 1
+    assert not old_a.exists()
+    assert recent_a.exists()
+    assert old_b.exists()
+
+    # --all prunes every remaining key.
+    rc, out = _run(["prune-logs", "--all"])
+    assert rc == 0
+    assert out["pruned_logs"] == 1
+    assert not old_b.exists()
+
+    # Cross-check against `maestro logs --list`.
+    rc, out = _run(["logs", "T-1", "--list"])
+    assert rc == 0
+    assert [s["path"] for s in out] == [str(recent_a)]
+
+    rc, out = _run(["logs", "T-2", "--list"])
+    assert rc == 0
+    assert out == []

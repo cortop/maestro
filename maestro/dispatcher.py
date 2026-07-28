@@ -550,6 +550,34 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs) -> None:
                  reason=f"changes requested: {changes_requested_body}", actor="dispatcher")
 
 
+def maintenance_tick(home: Path, name: str, interval: int, now: float, fn) -> dict | None:
+    """Generic cursor-gated maintenance tick: run ``fn()`` at most once per
+    ``interval`` seconds, persisted in ``derived/.<name>_cursor.json``
+    (level-triggered, idempotent — the same shape ``backup.maybe_backup`` already
+    uses). ``interval <= 0`` disables the tick entirely. Returns ``fn()``'s result,
+    or ``None`` when the tick didn't run this sweep. Left generic so other
+    maintenance ticks (e.g. L-12's compact/archive_done) can adopt it instead of
+    hand-rolling another cursor.
+    """
+    if not interval or interval <= 0:
+        return None
+    cursor_path = home / "derived" / f".{name}_cursor.json"
+    cursor = store.read_json(cursor_path, {}) or {}
+    if now - cursor.get("epoch", 0) < interval:
+        return None
+    result = fn()
+    cursor["epoch"] = now
+    store.write_json(cursor_path, cursor)
+    return result
+
+
+def prune_logs_tick(cfg: Config, now: float) -> dict | None:
+    """Cursor-gated session-log pruning tick — see ``ops.prune_all_session_logs``."""
+    from . import ops
+    return maintenance_tick(cfg.home, "prune", cfg.prune_interval, now,
+                            lambda: ops.prune_all_session_logs(cfg, now=now))
+
+
 def _has_unmet_deps(home: Path, key: str) -> bool:
     """Return True if any dependsOn entry for *key* is not yet done."""
     spec_file = store.spec_path(home, key)
@@ -573,6 +601,9 @@ class DispatchReport:
     active_sessions: int
     scheduled_fired: list[str] = field(default_factory=list)
     throttled: list[str] = field(default_factory=list)  # due + free but under the spawn floor
+    pruned_logs: int = 0
+    pruned_bytes: int = 0
+    errors: dict = field(default_factory=dict)  # tick name -> error string (never aborts the sweep)
 
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
@@ -608,6 +639,20 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     sync_vcs(cfg, now)
     backup.maybe_backup(cfg, now)
     notify.maybe_notify(cfg, now)
+
+    pruned_logs = 0
+    pruned_bytes = 0
+    errors: dict = {}
+    try:
+        prune_result = prune_logs_tick(cfg, now)
+        if prune_result:
+            pruned_logs = prune_result.get("pruned_logs", 0)
+            pruned_bytes = prune_result.get("pruned_bytes", 0)
+            per_key_errors = prune_result.get("errors") or {}
+            if per_key_errors:
+                errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
+    except OSError as e:
+        errors["prune"] = str(e)
 
     active = sessions.list_active()
     due: list[tuple[str, str]] = []
@@ -678,6 +723,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
         scheduled_fired=scheduled_fired, throttled=throttled,
+        pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
     )
 
 
