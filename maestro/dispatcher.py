@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import claims, events as E
-from . import event_log, inbox, notify, schedule, snapshot as snap_mod, store
+from . import event_log, inbox, notify, ratelimit, schedule, snapshot as snap_mod, store
 from .config import Config
 from .idempotency import content_hash
 from .sessions import SessionManager
@@ -633,6 +633,7 @@ class DispatchReport:
     active_sessions: int
     scheduled_fired: list[str] = field(default_factory=list)
     throttled: list[str] = field(default_factory=list)  # due + free but under the spawn floor
+    paused_until: float | None = None  # fleet-wide rate-limit gate deadline, if paused
     reaped: list[str] = field(default_factory=list)     # watchdog: killed for age or no-progress
 
 
@@ -668,6 +669,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     sync_worktrees(cfg)
     sync_vcs(cfg, now)
     backup.maybe_backup(cfg, now)
+    ratelimit.probe(cfg, now)
     notify.maybe_notify(cfg, now)
 
     # Watchdog runs before `active` is computed: a hung claim must not count
@@ -701,64 +703,74 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             continue
         due.append((key, res.reason))
 
-    # Spawn-rate floor. The claim file is the ONLY other per-key spawn memory and it
-    # is unlinked the moment the worker dies — so a session that exits in under a
-    # second (a rate-limit rejection, a crash) leaves nothing behind and the key is
-    # instantly re-spawnable. This ledger outlives the process and bounds the rate no
-    # matter how often the dispatcher itself is fired.
-    floor = spawn_floor(cfg)
-    ledger_path = _spawn_ledger_path(home)
-    ledger = store.read_json(ledger_path, {}) or {}
-    throttled: list[str] = []
-    if floor:
-        eligible: list[tuple[str, str]] = []
-        for key, reason in due:
-            last = ledger.get(key)
-            if (reason not in _UNTHROTTLED_REASONS
-                    and isinstance(last, (int, float)) and now - last < floor):
-                throttled.append(key)
-                continue
-            eligible.append((key, reason))
+    # Fleet-wide rate-limit gate. Above the human-signal bypass below: an inbox
+    # answer must not punch through a 429, since that spawn would be rejected too.
+    # While paused, nothing spawns and the spawn ledger is left untouched.
+    paused_until_ts = ratelimit.paused_until(home, now)
+    if paused_until_ts is not None:
+        spawned: list[str] = []
+        throttled: list[str] = []
+        capacity_skipped: list[str] = []
     else:
-        eligible = due
+        # Spawn-rate floor. The claim file is the ONLY other per-key spawn memory and it
+        # is unlinked the moment the worker dies — so a session that exits in under a
+        # second (a rate-limit rejection, a crash) leaves nothing behind and the key is
+        # instantly re-spawnable. This ledger outlives the process and bounds the rate no
+        # matter how often the dispatcher itself is fired.
+        floor = spawn_floor(cfg)
+        ledger_path = _spawn_ledger_path(home)
+        ledger = store.read_json(ledger_path, {}) or {}
+        throttled = []
+        if floor:
+            eligible: list[tuple[str, str]] = []
+            for key, reason in due:
+                last = ledger.get(key)
+                if (reason not in _UNTHROTTLED_REASONS
+                        and isinstance(last, (int, float)) and now - last < floor):
+                    throttled.append(key)
+                    continue
+                eligible.append((key, reason))
+        else:
+            eligible = due
 
-    slots = max(0, cfg.max_concurrency - len(active))
-    to_spawn = eligible[:slots]
-    capacity_skipped = [k for k, _ in eligible[slots:]]
+        slots = max(0, cfg.max_concurrency - len(active))
+        to_spawn = eligible[:slots]
+        capacity_skipped = [k for k, _ in eligible[slots:]]
 
-    attempts_path = _spawn_attempts_path(home)
-    attempts = store.read_json(attempts_path, {}) or {}
-    attempts_changed = False
+        attempts_path = _spawn_attempts_path(home)
+        attempts = store.read_json(attempts_path, {}) or {}
+        attempts_changed = False
 
-    spawned: list[str] = []
-    for key, _reason in to_spawn:
-        if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
+        spawned = []
+        for key, _reason in to_spawn:
+            if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
+                attempts_changed = True
+                reaped.append(key)
+                continue
             attempts_changed = True
-            reaped.append(key)
-            continue
-        attempts_changed = True
-        cwd = _worker_cwd(cfg, key)
-        prompt = f"{cfg.reconcile_command} {key}"
-        model, effort = _resolve_model_effort(cfg, key)
-        sessions.spawn(key, prompt, cwd, model=model, effort=effort)
-        spawned.append(key)
-        ledger[key] = now
+            cwd = _worker_cwd(cfg, key)
+            prompt = f"{cfg.reconcile_command} {key}"
+            model, effort = _resolve_model_effort(cfg, key)
+            sessions.spawn(key, prompt, cwd, model=model, effort=effort)
+            spawned.append(key)
+            ledger[key] = now
 
-    if spawned:
-        # Keep the ledger from growing without bound as keys come and go.
-        known = set(list_keys(home))
-        store.write_json(ledger_path,
-                         {k: v for k, v in ledger.items() if k in known})
-    if attempts_changed:
-        known = set(list_keys(home))
-        store.write_json(attempts_path,
-                         {k: v for k, v in attempts.items() if k in known})
+        if spawned:
+            # Keep the ledger from growing without bound as keys come and go.
+            known = set(list_keys(home))
+            store.write_json(ledger_path,
+                             {k: v for k, v in ledger.items() if k in known})
+        if attempts_changed:
+            known = set(list_keys(home))
+            store.write_json(attempts_path,
+                             {k: v for k, v in attempts.items() if k in known})
 
     _write_heartbeat(home, now, len(spawned), len(active))
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
-        scheduled_fired=scheduled_fired, throttled=throttled, reaped=reaped,
+        scheduled_fired=scheduled_fired, throttled=throttled,
+        paused_until=paused_until_ts, reaped=reaped,
     )
 
 
