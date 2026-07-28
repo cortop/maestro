@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import events as E
-from . import event_log, inbox, notify, schedule, snapshot as snap_mod, store
+from . import event_log, fleet, inbox, notify, schedule, snapshot as snap_mod, store
 from .config import Config
 from .idempotency import content_hash
 from .sessions import SessionManager
@@ -573,6 +573,7 @@ class DispatchReport:
     active_sessions: int
     scheduled_fired: list[str] = field(default_factory=list)
     throttled: list[str] = field(default_factory=list)  # due + free but under the spawn floor
+    paused: bool = False            # the fleet.pause() kill switch was armed this sweep
 
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
@@ -599,6 +600,19 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     run on a timer — minting and folding are no-ops when nothing changed.
     """
     home = cfg.home
+
+    if fleet.pause_state(home, now) is not None:
+        # The kill switch. Ahead of EVERYTHING else — mint/sync/scheduled-tasks/
+        # worktrees/backup/sessions all stay untouched, and no due-computation
+        # even runs, so there is no due-reason (not even an _UNTHROTTLED_REASONS
+        # human signal) that could slip past it. The one permitted side effect
+        # is the heartbeat, so a paused board never reads as a dead dispatcher.
+        _write_heartbeat(home, now, 0, 0, paused=True)
+        return DispatchReport(
+            minted=[], due=[], claimed=[], spawned=[], capacity_skipped=[],
+            active_sessions=0, paused=True,
+        )
+
     from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
 
     minted = mint_new_tickets(cfg)
@@ -719,7 +733,8 @@ def _worker_cwd(cfg: Config, key: str) -> Path:
     return cfg.home
 
 
-def _write_heartbeat(home: Path, now: float, spawned: int, active: int) -> None:
+def _write_heartbeat(home: Path, now: float, spawned: int, active: int, *,
+                     paused: bool = False) -> None:
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"ts": store.iso_now(), "epoch": now,
-                      "spawned": spawned, "active": active})
+                      "spawned": spawned, "active": active, "paused": paused})
