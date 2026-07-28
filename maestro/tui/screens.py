@@ -85,6 +85,7 @@ class LogsScreen(Screen):
         claim = claims.read_claim(self._home, self._key)
         live_pid = claim.get("pid") if claim else None
         log_path_str = claim.get("log_path") if claim else None
+        verdict = claims.verify_claim(self._home, self._key) if claim else "unknown"
 
         if log_path_str:
             log_path = Path(log_path_str)
@@ -122,6 +123,8 @@ class LogsScreen(Screen):
                     else:
                         self.app.call_from_thread(log_widget.write, chunk)
                 else:
+                    if verdict == "denied":
+                        break
                     if live_pid and not claims.pid_alive(live_pid):
                         break
                     if not live_pid:

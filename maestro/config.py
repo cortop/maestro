@@ -58,6 +58,10 @@ class Config:
     # Declarative recurring triggers: [[scheduled]] array-of-tables, each a dict with
     # name/prompt/every (+ optional approval_tier/kind/priority/prefix/enabled).
     scheduled: list = field(default_factory=list)
+    # Ceiling on how long an "unknown" (unverifiable identity) claim may still be
+    # honored via raw pid liveness before it is released with no kill/no event.
+    # Generously large so it never races T-13's max_session_seconds watchdog.
+    unverified_claim_max_age: int = 24 * 3600
     backup_interval: int = 3600        # seconds between dispatcher auto-backups (0 disables)
     backup_retention: int | None = 24  # keep most-recent N snapshots; 0/None = keep all
     backup_dir: str | None = None      # where snapshots live; None = sibling of the home
@@ -104,6 +108,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.research_effort = m.get("research_effort", cfg.research_effort)
         cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
         cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
+        cfg.unverified_claim_max_age = int(
+            m.get("unverified_claim_max_age", cfg.unverified_claim_max_age))
         raw_scheduled = data.get("scheduled", [])
         cfg.scheduled = raw_scheduled if isinstance(raw_scheduled, list) else []
         cfg.backup_interval = int(m.get("backup_interval", cfg.backup_interval))
@@ -138,6 +144,8 @@ max_failures = 4
 max_impl_turns = 20
 # daily_token_ceiling = 5000000   # advisory cost guardrail
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
+# unverified_claim_max_age = 86400  # ceiling (s) for honoring an unverifiable ("unknown"
+                                    # identity) claim by raw pid liveness before releasing it
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
 # backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
 # backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home

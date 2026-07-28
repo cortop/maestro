@@ -1,6 +1,9 @@
 """Tests for maestro logs <KEY> command (L-3)."""
 import json
 import os
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -210,3 +213,36 @@ def test_cli_logs_follow_exits_when_pid_gone(home, capsys, tmp_path):
     assert rc == 0
     out = capsys.readouterr().out
     assert "line one" in out
+
+
+def test_cli_logs_follow_stops_on_denied_pid_instead_of_blocking(home, capsys):
+    """A claim pointing at a live pid that was REUSED (identity denied) must not
+    make --follow poll pid_alive() forever — the reused process really is alive,
+    so only the verified check can tell the loop to stop (T-17)."""
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.log"
+    _make_text_log(path, "line one\n")
+
+    from maestro import claims
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        old_epoch = store.now_epoch() - 3600  # predates the child -> denied
+        store.write_json(claims.claim_path(home, "T-1"),
+                         {"pid": proc.pid, "name": "reconcile-T-1",
+                          "ts": store.iso_now(), "epoch": old_epoch,
+                          "log_path": str(path)})
+
+        from maestro.cli import main
+        result = {}
+
+        def run():
+            result["rc"] = main(["--home", str(home), "logs", "T-1", "--follow"])
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), "logs --follow blocked on a denied (reused) pid"
+        assert result["rc"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
