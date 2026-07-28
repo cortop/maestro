@@ -3,6 +3,10 @@
 Extracts notable tool_use blocks from a Claude stream log (Edit/Write/Bash/Agent) and
 records each as an ``ImplStepRecorded`` event against the ticket log.  Idempotent:
 ``step_id = f"step-{key}-{session_id}-{tool_id}"`` prevents re-appending on replay.
+
+Also the one place that classifies a session's terminal outcome (``classify_result``,
+``session_outcome``) — every render site (``cli.py``, ``tui/events.py``) and
+``sessions.list_sessions`` calls through here rather than re-deriving the rule.
 """
 from __future__ import annotations
 
@@ -105,6 +109,84 @@ def fold_stream(
         if ev is not None:
             appended += 1
     return appended
+
+
+def format_resets_at(epoch) -> str:
+    """Render a ``rate_limit_info.resetsAt`` epoch as a human-readable UTC timestamp."""
+    if epoch is None:
+        return "unknown"
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError):
+        return "unknown"
+
+
+def classify_result(obj: dict) -> dict:
+    """Classify a stream-json ``result`` object's outcome.
+
+    Outcome is derived from ``is_error`` / ``api_error_status`` — NOT ``subtype`` — since
+    a 429 rejection reports ``subtype: "success"`` with ``is_error: true``. Returns
+    ``{"outcome": "success"|"error"|"rate_limited", "is_error", "api_error_status",
+    "subtype", "message"}``.
+    """
+    is_error = bool(obj.get("is_error"))
+    api_error_status = obj.get("api_error_status")
+    subtype = obj.get("subtype")
+    errored = is_error or api_error_status is not None
+    if errored:
+        outcome = "rate_limited" if api_error_status == 429 else "error"
+    elif subtype == "success":
+        outcome = "success"
+    else:
+        outcome = "error"
+    return {
+        "outcome": outcome,
+        "is_error": is_error,
+        "api_error_status": api_error_status,
+        "subtype": subtype,
+        "message": obj.get("result"),
+    }
+
+
+def session_outcome(stream_path: Path) -> dict:
+    """Tail-scan *stream_path* for its terminal ``result`` and any ``rate_limit_event``.
+
+    Returns ``{"outcome": ..., "result": <result obj or None>, "rate_limit_info": ...}``.
+    ``outcome`` is one of ``success`` / ``error`` / ``rate_limited`` (terminal result seen),
+    ``running`` (stream-json log with no terminal result yet), or ``unknown`` (not a
+    ``.stream.jsonl`` log — e.g. a plain-text session). A rejected ``rate_limit_event``
+    only escalates an already-errored result to ``rate_limited``; it never overrides an
+    otherwise-``success`` result — the event is context, not the verdict.
+    """
+    if not stream_path.name.endswith(".stream.jsonl"):
+        return {"outcome": "unknown", "result": None, "rate_limit_info": None}
+
+    result_obj: dict | None = None
+    rate_limit_info: dict | None = None
+    with stream_path.open(encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "result":
+                result_obj = obj
+            elif t == "rate_limit_event":
+                rate_limit_info = obj.get("rate_limit_info")
+
+    if result_obj is None:
+        return {"outcome": "running", "result": None, "rate_limit_info": rate_limit_info}
+
+    classified = classify_result(result_obj)
+    outcome = classified["outcome"]
+    if outcome == "error" and rate_limit_info and rate_limit_info.get("status") == "rejected":
+        outcome = "rate_limited"
+    return {"outcome": outcome, "result": result_obj, "rate_limit_info": rate_limit_info}
 
 
 def fold_current_session(home: Path, key: str, *, actor: str = "reconciler") -> int:

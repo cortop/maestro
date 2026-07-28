@@ -6,8 +6,10 @@ import pytest
 
 from maestro import event_log, snapshot as snap_mod, store
 from maestro import events as E
-from maestro.steplog import fold_stream, fold_current_session
+from maestro.steplog import classify_result, fold_stream, fold_current_session, session_outcome
 from maestro.ops import compact
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 # ---------------------------------------------------------------------------
@@ -185,3 +187,69 @@ def test_cli_fold_steps_with_log_arg(home, tmp_path):
     assert rc == 0
     evs = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
     assert len(evs) == 1
+
+
+# ---------------------------------------------------------------------------
+# classify_result: is_error/api_error_status drive the verdict, not subtype
+# ---------------------------------------------------------------------------
+
+def test_classify_result_rate_limited_for_real_incident_payload():
+    """The 2026-07-19 runaway payload: subtype says success, is_error says otherwise."""
+    obj = {
+        "subtype": "success",
+        "is_error": True,
+        "api_error_status": 429,
+        "terminal_reason": "api_error",
+    }
+    assert classify_result(obj)["outcome"] == "rate_limited"
+
+
+def test_classify_result_success_for_real_healthy_payload():
+    """api_error_status present-but-null must not trip a naive key-presence check."""
+    obj = {"subtype": "success", "is_error": False, "api_error_status": None}
+    assert classify_result(obj)["outcome"] == "success"
+
+
+def test_classify_result_error_during_execution_fallback():
+    """A non-success subtype with no is_error/api_error_status still classifies as error."""
+    obj = {"subtype": "error_during_execution"}
+    assert classify_result(obj)["outcome"] == "error"
+
+
+def test_classify_result_non_429_error_status_is_plain_error():
+    obj = {"subtype": "success", "is_error": True, "api_error_status": 500}
+    assert classify_result(obj)["outcome"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# session_outcome: tail-scan a stream log for terminal result + rate_limit_event
+# ---------------------------------------------------------------------------
+
+def test_session_outcome_rate_limited_fixture():
+    assert session_outcome(FIXTURES / "rate_limited.stream.jsonl")["outcome"] == "rate_limited"
+
+
+def test_session_outcome_advisory_rate_limit_event_does_not_override_success():
+    """A carried-but-ignored rate_limit_event is context, never the verdict."""
+    outcome = session_outcome(FIXTURES / "rate_limit_advisory_only.stream.jsonl")
+    assert outcome["outcome"] == "success"
+    assert outcome["rate_limit_info"]["overageStatus"] == "allowed"
+
+
+def test_session_outcome_clean_success_fixture():
+    assert session_outcome(FIXTURES / "sample.stream.jsonl")["outcome"] == "success"
+
+
+def test_session_outcome_running_when_no_terminal_result(tmp_path):
+    p = tmp_path / "reconcile-T-1-1.stream.jsonl"
+    p.write_text(
+        json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}) + "\n",
+        encoding="utf-8",
+    )
+    assert session_outcome(p)["outcome"] == "running"
+
+
+def test_session_outcome_unknown_for_plain_text_log(tmp_path):
+    p = tmp_path / "reconcile-T-1-1.log"
+    p.write_text("plain text output\n", encoding="utf-8")
+    assert session_outcome(p)["outcome"] == "unknown"
