@@ -333,6 +333,7 @@ def cmd_dispatch(args) -> int:
            "throttled": report.throttled,
            "active_sessions": report.active_sessions,
            "scheduled_fired": report.scheduled_fired,
+           "reaped": report.reaped,
            "due": [{"key": k, "reason": r} for k, r in report.due]}
     _print(out)
     return 0

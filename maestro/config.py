@@ -30,6 +30,12 @@ class Config:
     backoff_cap: int = 3600
     max_failures: int = 4                  # -> dead-letter (DEGRADED)
     max_impl_turns: int = 20               # ralph-loop circuit breaker
+    # Watchdog: reap a claim whose session has run past this many seconds (0 disables).
+    # Generous by default -- real implementation sessions legitimately run 30-60+ min.
+    max_session_seconds: int = 7200
+    # Watchdog: fail a key instead of respawning once it has been spawned this many
+    # times with observed_seq unchanged (no progress). Resets the moment seq advances.
+    max_spawn_attempts: int = 5
     daily_token_ceiling: int | None = None # advisory; surfaced by `maestro doctor`
     repo_path: str | None = None           # primary repo the reconciler builds in
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
@@ -87,6 +93,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.backoff_cap = int(m.get("backoff_cap", cfg.backoff_cap))
         cfg.max_failures = int(m.get("max_failures", cfg.max_failures))
         cfg.max_impl_turns = int(m.get("max_impl_turns", cfg.max_impl_turns))
+        cfg.max_session_seconds = int(m.get("max_session_seconds", cfg.max_session_seconds))
+        cfg.max_spawn_attempts = int(m.get("max_spawn_attempts", cfg.max_spawn_attempts))
         cfg.daily_token_ceiling = m.get("daily_token_ceiling", cfg.daily_token_ceiling)
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
@@ -136,6 +144,11 @@ reconcile_steady_interval = 300
 backoff_base = 30
 max_failures = 4
 max_impl_turns = 20
+# max_session_seconds = 7200      # kill+fail a claim whose session ran longer than this
+                                  # (0 disables). Generous default -- real implementation
+                                  # sessions legitimately run 30-60+ min.
+# max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
+                                  # zero progress (observed_seq unchanged)
 # daily_token_ceiling = 5000000   # advisory cost guardrail
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
