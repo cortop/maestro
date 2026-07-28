@@ -1584,6 +1584,49 @@ def test_render_log_line_result_error():
     assert "red" in lines[0]
 
 
+def test_render_log_line_result_rate_limited_not_green():
+    """The 2026-07-19 runaway payload: subtype success, is_error true, 429 — must
+    render red/rate_limited, never green success."""
+    obj = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "api_error_status": 429,
+        "result": "You've hit your monthly spend limit.",
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "green" not in lines[0]
+    assert "429" in lines[0]
+    assert "rate_limited" in lines[0]
+
+
+def test_render_log_line_clean_success_still_green():
+    obj = {"type": "result", "subtype": "success", "is_error": False, "api_error_status": None,
+           "duration_ms": 1234}
+    lines = render_log_line(obj)
+    assert "green" in lines[0]
+    assert "1234ms" in lines[0]
+
+
+def test_render_log_line_rate_limit_event_surfaced():
+    """rate_limit_event is a first-class rendered line, not silently dropped."""
+    obj = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "rejected",
+            "rateLimitType": "five_hour",
+            "resetsAt": 1784400000,
+            "overageStatus": "rejected",
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert lines[0]
+    assert "green" not in lines[0]
+    assert "five_hour" in lines[0]
+
+
 def test_render_log_line_unknown_type_returns_empty():
     """Unknown event types produce no lines (safe no-op)."""
     obj = {"type": "system", "session_id": "abc123"}

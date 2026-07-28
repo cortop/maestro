@@ -1,0 +1,4 @@
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":1784400000,"overageStatus":"allowed"}}
+{"type":"system","subtype":"init","cwd":"/repo","session_id":"sess_rl2","tools":["Bash"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"acceptEdits","apiKeySource":"ANTHROPIC_API_KEY"}
+{"type":"assistant","message":{"id":"msg_001","type":"message","role":"assistant","content":[{"type":"text","text":"Done."}],"model":"claude-sonnet-4-6","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":100,"output_tokens":10}},"session_id":"sess_rl2"}
+{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"duration_ms":500,"result":"All good.","session_id":"sess_rl2"}
