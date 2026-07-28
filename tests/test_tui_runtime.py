@@ -527,6 +527,39 @@ def test_fleet_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, None, "fleet_panel", FleetScreen)
 
 
+def test_fleet_screen_shows_paused_until_when_rate_limited(seeded_home):
+    """A real .ratelimit.json pause is picked up by FleetScreen's fleet-refresh
+    worker and rendered into #fleet-status as a 'paused until HH:MM' line."""
+    import time as time_mod
+
+    from maestro import store
+
+    until_ts = time_mod.time() + 3600
+    store.write_json(seeded_home / "derived" / ".ratelimit.json", {
+        "paused_until": until_ts, "resets_at": until_ts - 60,
+        "rate_limit_type": "five_hour", "source_key": "T-1",
+        "source_log": "x", "ts": store.iso_now(),
+    })
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            rendered = app.screen_stack[-1].query_one("#fleet-status", Static).content
+            text = rendered if isinstance(rendered, str) else str(rendered)
+            assert "paused until" in text
+            until_str = time_mod.strftime("%H:%M", time_mod.localtime(until_ts))
+            assert until_str in text
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_detail_screen_open_and_escape(seeded_home):
     """Enter on a selected row opens DetailScreen (fullscreen right panel); Escape closes it."""
     _run_modal_test(seeded_home, "T-3", "focus_detail", DetailScreen)
