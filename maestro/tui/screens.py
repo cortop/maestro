@@ -12,7 +12,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, snapshot as snap_mod, store
+from .. import claims, config as config_mod, event_log, fleet as fleet_mod, inbox, ratelimit, snapshot as snap_mod, store
 from ..dispatcher import schedule_status
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
@@ -138,6 +138,7 @@ class FleetScreen(Screen):
         ("d", "fleet_down", "Down"),
         ("s", "dispatch_sweep", "Sweep"),
         ("p", "project_rebuild", "Project"),
+        ("P", "toggle_pause", "Pause/Resume"),
         ("r", "refresh_status", "Refresh"),
     ]
 
@@ -179,6 +180,7 @@ class FleetScreen(Screen):
             "heartbeat_age_s": age,
             "dead_letters": [p.stem for p in dead],
             "stale": age is not None and age > 1800,
+            "rate_limit": ratelimit.status(self._home, store.now_epoch()),
         }
         return status, doctor
 
@@ -215,6 +217,16 @@ class FleetScreen(Screen):
     def action_fleet_down(self) -> None:
         self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down")
         self._log("fleet down … ")
+        self._refresh_worker()
+
+    def action_toggle_pause(self) -> None:
+        paused = self._status.get("paused", False)
+        if paused:
+            self.run_worker(lambda: fleet_mod.resume(self._home), thread=True, name="fleet-resume")
+            self._log("fleet resume … ")
+        else:
+            self.run_worker(lambda: fleet_mod.pause(self._home), thread=True, name="fleet-pause")
+            self._log("fleet pause … ")
         self._refresh_worker()
 
     def action_dispatch_sweep(self) -> None:

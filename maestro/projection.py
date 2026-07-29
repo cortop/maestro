@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from . import snapshot as snap_mod, store
+from . import fleet, snapshot as snap_mod, store
 from .dispatcher import list_keys, split_key
 from .statemachine import Phase
 
@@ -77,6 +77,10 @@ def render(home: Path) -> dict[str, str]:
 
     # ---- WORKSTATE.md -------------------------------------------------------
     lines = [_BANNER, f"# Workstate\n\n*Generated: {store.iso_now()}*\n"]
+    pause = fleet.pause_state(home, store.now_epoch())
+    if pause is not None:
+        reason = f" — {pause['reason']}" if pause.get("reason") else ""
+        lines.append(f"\n> ⏸ **Fleet paused**{reason} (`maestro fleet resume` to lift)\n")
     order = [Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.READY,
              Phase.TRIAGING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING]
     lines.append(f"\n**{len(snaps)} tickets** — "

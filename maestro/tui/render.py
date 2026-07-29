@@ -55,7 +55,10 @@ def _render_badge(status: dict) -> str:
     interval = status.get("interval")
     interval_str = f"{interval}s" if interval else "—"
     hb = _fmt_age(status.get("heartbeat_age_s"))
-    return f"{dot}  [dim]int[/dim] {interval_str}  [dim]hb[/dim] {hb} "
+    badge = f"{dot}  [dim]int[/dim] {interval_str}  [dim]hb[/dim] {hb} "
+    if status.get("paused"):
+        badge = f"[yellow bold]⏸ PAUSED[/yellow bold]  {badge}"
+    return badge
 
 
 def _render_fleet(status: dict, doctor: dict) -> str:
@@ -68,6 +71,8 @@ def _render_fleet(status: dict, doctor: dict) -> str:
     stale = doctor.get("stale", False)
     stale_str = "[yellow]yes[/yellow]" if stale else "no"
     dead_str = (", ".join(dead) if dead else "—")
+    paused = status.get("paused", False)
+    paused_str = "[yellow bold]yes[/yellow bold]" if paused else "no"
 
     lines = [
         "[bold]Fleet & Health[/bold]",
@@ -76,12 +81,25 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         f"  Heartbeat:       {age}",
         f"  Interval:        {interval_str}",
         f"  Label:           {label}",
+        f"  Paused:          {paused_str}",
+    ]
+    if paused:
+        until = _fmt_epoch(status.get("pause_until"))
+        reason = status.get("pause_reason") or "—"
+        lines.append(f"    until:         {until}")
+        lines.append(f"    reason:        {reason}")
+    lines += [
         "",
         "[bold]Doctor[/bold]",
         "",
         f"  Stale:           {stale_str}",
         f"  Dead letters:    {dead_str}",
     ]
+    rl = doctor.get("rate_limit") or {}
+    if rl.get("paused"):
+        until_ts = rl.get("paused_until")
+        until_str = time.strftime("%H:%M", time.localtime(until_ts)) if until_ts else "?"
+        lines.append(f"  Rate limit:      [red bold]paused until {until_str}[/red bold]")
     return "\n".join(lines)
 
 

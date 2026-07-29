@@ -64,6 +64,11 @@ class Config:
     # Refuse to fast-forward/spawn into repo_path while it's mid-merge/rebase or carries
     # a real conflict hunk (see dispatcher.repo_preflight). Fails open on a broken probe.
     repo_preflight: bool = True
+    # Fleet-wide rate-limit gate (maestro/ratelimit.py): a rejected rate_limit_event
+    # pauses ALL spawns until resets_at + ratelimit_grace, clamped to ratelimit_max_pause.
+    ratelimit_grace: int = 60          # seconds added after resetsAt before resuming (clock-skew buffer)
+    ratelimit_fallback_pause: int = 1800  # pause length when resetsAt is missing/invalid/past
+    ratelimit_max_pause: int = 21600   # cap on any single pause; 0 disables the gate
     # Outbound notify tick: fires on a key's first entry into awaiting-human/degraded/done.
     notify_command: str | None = None  # shell command; KEY/PHASE/QUESTION in env; None = disabled
     webhook_urls: list = field(default_factory=list)  # JSON-POSTed via stdlib urllib
@@ -114,6 +119,10 @@ def load(home_arg: str | None = None) -> Config:
         cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
         cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
         cfg.repo_preflight = bool(m.get("repo_preflight", cfg.repo_preflight))
+        cfg.ratelimit_grace = int(m.get("ratelimit_grace", cfg.ratelimit_grace))
+        cfg.ratelimit_fallback_pause = int(
+            m.get("ratelimit_fallback_pause", cfg.ratelimit_fallback_pause))
+        cfg.ratelimit_max_pause = int(m.get("ratelimit_max_pause", cfg.ratelimit_max_pause))
         n = data.get("notify", {})
         cfg.notify_command = n.get("notify_command", cfg.notify_command) or None
         raw_webhooks = n.get("webhook_urls", cfg.webhook_urls)
@@ -146,6 +155,9 @@ max_impl_turns = 20
 # backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
 # backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
 # repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
+# ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
+# ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
+# ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "github_issues" | custom

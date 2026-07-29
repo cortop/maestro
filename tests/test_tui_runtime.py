@@ -527,6 +527,39 @@ def test_fleet_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, None, "fleet_panel", FleetScreen)
 
 
+def test_fleet_screen_shows_paused_until_when_rate_limited(seeded_home):
+    """A real .ratelimit.json pause is picked up by FleetScreen's fleet-refresh
+    worker and rendered into #fleet-status as a 'paused until HH:MM' line."""
+    import time as time_mod
+
+    from maestro import store
+
+    until_ts = time_mod.time() + 3600
+    store.write_json(seeded_home / "derived" / ".ratelimit.json", {
+        "paused_until": until_ts, "resets_at": until_ts - 60,
+        "rate_limit_type": "five_hour", "source_key": "T-1",
+        "source_log": "x", "ts": store.iso_now(),
+    })
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            rendered = app.screen_stack[-1].query_one("#fleet-status", Static).content
+            text = rendered if isinstance(rendered, str) else str(rendered)
+            assert "paused until" in text
+            until_str = time_mod.strftime("%H:%M", time_mod.localtime(until_ts))
+            assert until_str in text
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_detail_screen_open_and_escape(seeded_home):
     """Enter on a selected row opens DetailScreen (fullscreen right panel); Escape closes it."""
     _run_modal_test(seeded_home, "T-3", "focus_detail", DetailScreen)
@@ -591,6 +624,44 @@ def test_logs_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-3", "view_logs", LogsScreen)
 
 
+def test_logs_screen_renders_rate_limited_result_not_green(seeded_home):
+    """T-18: a session log whose terminal result is is_error/429 must render as an
+    error/rate-limit line in the real mounted logs pane, never green success."""
+    from pathlib import Path
+    from textual.widgets import RichLog
+
+    fixture = Path(__file__).parent / "fixtures" / "rate_limited.stream.jsonl"
+    log_dir = seeded_home / "agent-logs" / "T-3"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "reconcile-T-3-9999999999.000000.stream.jsonl").write_bytes(
+        fixture.read_bytes()
+    )
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("view_logs")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], LogsScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            log_widget = app.screen.query_one("#logs-view", RichLog)
+            rendered = "\n".join(strip.text for strip in log_widget.lines)
+            assert "429" in rendered
+            assert "rate_limited" in rendered
+            assert "success" not in rendered
+
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_interval_modal_inside_fleet_screen(seeded_home):
     """FleetScreen 'u' (fleet_up) opens the _IntervalModal; escape dismisses it."""
     async def _inner():
@@ -606,6 +677,55 @@ def test_interval_modal_inside_fleet_screen(seeded_home):
             await pilot.press("escape")
             await pilot.pause()
             assert isinstance(app.screen_stack[-1], FleetScreen)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_header_badge_shows_paused_state(seeded_home):
+    """AC (T-15): the header badge reflects a paused board."""
+    from maestro import fleet
+
+    fleet.pause(seeded_home, reason="tui check")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.1)  # let the threaded badge worker land
+            badge = app.query_one("#fleet-badge", Static)
+            assert "PAUSED" in str(badge.content)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
+    """AC (T-15): FleetScreen surfaces the paused state and the new 'P' binding
+    (not 'p' — already project_rebuild in both binding tables) toggles it."""
+    from maestro import fleet
+
+    fleet.pause(seeded_home, reason="tui toggle")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await pilot.pause(0.1)  # let the status-load worker land
+            status_widget = app.screen.query_one("#fleet-status", Static)
+            assert "Paused" in str(status_widget.content)
+
+            await pilot.press("P")  # toggle_pause -> resume (was paused)
+            await pilot.pause(0.1)
+            assert fleet.pause_state(seeded_home, store.now_epoch()) is None
+            assert app._exception is None
+
+            await pilot.press("P")  # toggle_pause -> pause (now unpaused)
+            await pilot.pause(0.1)
+            assert fleet.pause_state(seeded_home, store.now_epoch()) is not None
             assert app._exception is None
 
     asyncio.run(_inner())
