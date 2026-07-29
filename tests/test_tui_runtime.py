@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -35,7 +37,7 @@ from textual.widgets import DataTable, Input, Select, Static, TextArea  # noqa: 
 from rich.text import Text  # noqa: E402
 
 from conftest import seed_ticket  # noqa: E402
-from maestro import config as config_mod, store  # noqa: E402
+from maestro import claims, config as config_mod, store  # noqa: E402
 from maestro.tui import (  # noqa: E402
     DetailScreen,
     EventsScreen,
@@ -622,6 +624,27 @@ def test_logs_screen_open_and_escape(seeded_home):
     """LogsScreen runs a thread worker that calls app.call_from_thread — the exact
     surface of the 'call_from_thread is on App, not Screen' regression."""
     _run_modal_test(seeded_home, "T-3", "view_logs", LogsScreen)
+
+
+def test_logs_screen_stops_tail_on_denied_claim(seeded_home):
+    """A claim whose recorded epoch predates a real, live, non-reconciler process
+    (pid reuse) is verified-denied — the tail worker must stop instead of polling
+    a genuinely-alive-but-wrong pid forever (T-17). Proved via the real app, not
+    a mocked query_one/notify."""
+    log_path = seeded_home / "agent-logs" / "T-3" / "reconcile-T-3-1000.000000.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("line one\n", encoding="utf-8")
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        store.write_json(claims.claim_path(seeded_home, "T-3"),
+                         {"pid": proc.pid, "name": "reconcile-T-3",
+                          "ts": store.iso_now(), "epoch": store.now_epoch() - 3600,
+                          "log_path": str(log_path)})
+        _run_modal_test(seeded_home, "T-3", "view_logs", LogsScreen)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 def test_logs_screen_renders_rate_limited_result_not_green(seeded_home):

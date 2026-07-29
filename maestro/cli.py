@@ -52,6 +52,7 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
         extra_args=_web_tools_extra_args(cfg),
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
+        unverified_claim_max_age=cfg.unverified_claim_max_age,
     )
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     if report.paused:
@@ -325,7 +326,8 @@ def cmd_dispatch(args) -> int:
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
             extra_args=_web_tools_extra_args(cfg),
-            session_log_format=cfg.session_log_format)
+            session_log_format=cfg.session_log_format,
+            unverified_claim_max_age=cfg.unverified_claim_max_age)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     projection.write(cfg.home)
     out = {"minted": report.minted,
@@ -502,6 +504,21 @@ def cmd_release(args) -> int:
     return 0
 
 
+def cmd_claims(args) -> int:
+    """List claim files with verified identity: key/pid/age/verdict; --purge drops
+    the denied and over-age ones (leaves confirmed claims on disk)."""
+    cfg = _cfg(args)
+    rows = claims.describe_claims(cfg.home, max_age=cfg.unverified_claim_max_age)
+    if args.purge:
+        dropped = [r["key"] for r in rows if not r["claimed"]]
+        for key in dropped:
+            claims.release(cfg.home, key)
+        _print({"purged": dropped})
+    else:
+        _print(rows)
+    return 0
+
+
 def cmd_fold_steps(args) -> int:
     """Fold notable stream steps from a session log into IMPL_STEP events."""
     cfg = _cfg(args)
@@ -603,9 +620,12 @@ def cmd_logs(args) -> int:
     is_stream = sess["format"] == "stream-json"
 
     if args.follow:
-        # Tail the file; stop when the session process is gone
+        # Tail the file; stop when the session process is gone OR its identity is
+        # denied (a reused pid claiming to be this session would otherwise poll
+        # pid_alive() forever, since the reused process really is alive).
         claim = claims.read_claim(cfg.home, key)
         live_pid = claim.get("pid") if claim else None
+        verdict = claims.verify_claim(cfg.home, key) if claim else "unknown"
         with log_path.open(encoding="utf-8", errors="replace") as f:
             buf = ""
             while True:
@@ -633,6 +653,8 @@ def cmd_logs(args) -> int:
                         sys.stdout.write(chunk)
                         sys.stdout.flush()
                 else:
+                    if verdict == "denied":
+                        break
                     if live_pid and not claims.pid_alive(live_pid):
                         break
                     if not live_pid:
@@ -809,6 +831,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
+
+    sp = add("claims", cmd_claims, "list claim files with verified identity (key/pid/age/verdict)")
+    sp.add_argument("--purge", action="store_true", help="release denied and over-age claims")
 
     sp = add("check-conflicts", cmd_check_conflicts,
              "[agent] route to implementing for auto-resolution if PR is CONFLICTING (idempotent)")

@@ -225,8 +225,10 @@ def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
 def prune_session_logs(cfg: Config, key: str) -> int:
     """Delete stale session log files for *key* per retention settings.
 
-    Never removes the log belonging to a currently-live reconciler (pid alive).
-    Returns the number of files deleted.
+    Never removes the log belonging to a currently-live, correctly-identified
+    reconciler (pid alive AND not a verified-denied identity — a reused pid is
+    definitionally not our reconciler, so its stale log is fair game). Returns
+    the number of files deleted.
     """
     from . import claims
     from .sessions import list_sessions
@@ -243,7 +245,8 @@ def prune_session_logs(cfg: Config, key: str) -> int:
     # Paths belonging to the live session (if any) are off-limits.
     live_paths: set[str] = set()
     claim = claims.read_claim(cfg.home, key)
-    if claim and claims.pid_alive(claim.get("pid")):
+    if (claim and claims.pid_alive(claim.get("pid"))
+            and claims.verify_claim(cfg.home, key) != "denied"):
         lp = claim.get("log_path")
         if lp:
             live_paths.add(lp)
