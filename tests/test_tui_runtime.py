@@ -682,6 +682,55 @@ def test_interval_modal_inside_fleet_screen(seeded_home):
     asyncio.run(_inner())
 
 
+def test_header_badge_shows_paused_state(seeded_home):
+    """AC (T-15): the header badge reflects a paused board."""
+    from maestro import fleet
+
+    fleet.pause(seeded_home, reason="tui check")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.1)  # let the threaded badge worker land
+            badge = app.query_one("#fleet-badge", Static)
+            assert "PAUSED" in str(badge.content)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
+    """AC (T-15): FleetScreen surfaces the paused state and the new 'P' binding
+    (not 'p' — already project_rebuild in both binding tables) toggles it."""
+    from maestro import fleet
+
+    fleet.pause(seeded_home, reason="tui toggle")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await pilot.pause(0.1)  # let the status-load worker land
+            status_widget = app.screen.query_one("#fleet-status", Static)
+            assert "Paused" in str(status_widget.content)
+
+            await pilot.press("P")  # toggle_pause -> resume (was paused)
+            await pilot.pause(0.1)
+            assert fleet.pause_state(seeded_home, store.now_epoch()) is None
+            assert app._exception is None
+
+            await pilot.press("P")  # toggle_pause -> pause (now unpaused)
+            await pilot.pause(0.1)
+            assert fleet.pause_state(seeded_home, store.now_epoch()) is not None
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # --------------------------------------------------------------------------- #
 # (d) TUI-13: phase styling and live notifications                             #
 # --------------------------------------------------------------------------- #
