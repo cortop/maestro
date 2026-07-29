@@ -1,5 +1,7 @@
 """Session log retention & rotation (L-6)."""
 import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -120,6 +122,25 @@ def test_prune_removes_session_whose_pid_is_dead(home):
     with patch("maestro.claims.pid_alive", return_value=False), \
          patch("maestro.store.now_epoch", return_value=NOW):
         count = prune_session_logs(_cfg(home, session_log_retention_days=5), "T-1")
+    assert count == 1
+    assert not old.exists()
+
+
+def test_prune_removes_session_whose_claim_is_denied(home):
+    """A live pid whose recorded epoch predates its true start (pid reuse) is a
+    verified-denied identity, not our reconciler — its stale log is fair game
+    even though the pid itself is very much alive (T-17)."""
+    old = _make_log(home, "T-1", NOW - 10 * 86400)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        store.write_json(claims.claim_path(home, "T-1"),
+                         {"pid": proc.pid, "name": "reconcile-T-1",
+                          "ts": store.iso_now(), "epoch": store.now_epoch() - 3600,
+                          "log_path": str(old)})
+        count = prune_session_logs(_cfg(home, session_log_retention_days=5), "T-1")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
     assert count == 1
     assert not old.exists()
 

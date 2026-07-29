@@ -9,7 +9,7 @@ import pytest
 from maestro import claims, dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.config import Config
-from maestro.sessions import DryRunSessions
+from maestro.sessions import ClaudeCliSessions, DryRunSessions
 from maestro.statemachine import Phase
 
 
@@ -788,6 +788,95 @@ def test_schedule_list_cli(home):
     assert out["scheduled"][0]["last_fired"] is None
 
 
+# --- claim identity verification (T-17): pid reuse must not deadlock a slot ------
+#
+# Plain DryRunSessions.list_active() never touches claims/, which would make a
+# pid-reuse test vacuous — it has to delegate to the real, claims-file-backed
+# ClaudeCliSessions.list_active() (only the `claude` spawn itself is faked).
+
+class _RealClaimsSessions(DryRunSessions):
+    def __init__(self, home, **kw):
+        super().__init__()
+        self._real = ClaudeCliSessions(home, **kw)
+
+    def list_active(self) -> set[str]:
+        return self._real.list_active()
+
+
+@pytest.fixture
+def _children():
+    procs = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+             for _ in range(4)]
+    try:
+        yield procs
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait(timeout=5)
+
+
+def test_pid_reuse_claims_are_released_and_spawned(home, _children):
+    """The 2026-07-19 hazard, reproduced and fixed: four claims whose recorded
+    epoch predates a real, live, NON-reconciler process (pid reuse) must not
+    eat dispatch slots forever — they're denied, released, and the key spawns."""
+    keys = ["T-1", "T-2", "T-3", "T-4"]
+    old_epoch = store.now_epoch() - 3600
+    for key, proc in zip(keys, _children):
+        _seed(home, key, Phase.READY)
+        store.write_json(claims.claim_path(home, key),
+                         {"pid": proc.pid, "name": f"reconcile-{key}",
+                          "ts": store.iso_now(), "epoch": old_epoch})
+
+    cfg = Config(home=home, max_concurrency=10)
+    sessions = _RealClaimsSessions(home)
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    for key in keys:
+        assert key in report.spawned
+        assert key not in report.claimed
+        assert not claims.claim_path(home, key).exists()
+    assert report.active_sessions == 0
+
+
+def test_genuine_reconciler_claim_survives_a_sweep(home, _children):
+    """A real, correctly-identified claim (epoch matches the child's true start)
+    stays claimed/confirmed and is never spawned over."""
+    proc = _children[0]
+    _seed(home, "T-1", Phase.READY)
+    claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
+
+    cfg = Config(home=home, max_concurrency=10)
+    sessions = _RealClaimsSessions(home)
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    assert "T-1" in report.claimed
+    assert "T-1" not in report.spawned
+    assert report.active_sessions == 1
+    assert claims.is_claimed(home, "T-1")
+    assert claims.verify_claim(home, "T-1") == "confirmed"
+    assert claims.claim_path(home, "T-1").exists()
+
+
+def test_probe_forks_once_per_sweep_regardless_of_claim_count(home, _children):
+    calls = []
+
+    def counting_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.run(cmd, **kw)
+
+    for i in range(8):
+        key = f"T-{i}"
+        _seed(home, key, Phase.READY)
+        pid = _children[i % len(_children)].pid
+        claims.write_claim(home, key, pid, f"reconcile-{key}")
+
+    cfg = Config(home=home, max_concurrency=10)
+    sessions = _RealClaimsSessions(home, claims_run=counting_run)
+    disp.dispatch(cfg, sessions, now=1000)
+
+    assert len(calls) == 1
+
+
 # --- T-13: session watchdog ---
 
 
@@ -885,7 +974,11 @@ def test_watchdog_disabled_when_max_session_seconds_is_zero(home, cfg):
     _age_claim(home, "T-1", store.now_epoch() - 1_000_000)  # ancient, but watchdog is off
 
     assert disp.run_watchdog(cfg, now=store.now_epoch()) == []
-    assert claims.is_claimed(home, "T-1")
+    # NOT claims.is_claimed(): backdating epoch this far past this (real, live)
+    # pid's true start time is indistinguishable from pid reuse (T-17) and would
+    # be correctly denied -- the disabled-watchdog behavior under test is that
+    # the claim file itself is left untouched, not that identity re-verifies.
+    assert claims.read_claim(home, "T-1") is not None
 
 
 def test_dispatch_runs_watchdog_before_computing_active(home, cfg):

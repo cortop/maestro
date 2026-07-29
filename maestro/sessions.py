@@ -90,7 +90,9 @@ class ClaudeCliSessions:
                  extra_args: list[str] | None = None,
                  capture_session_logs: bool = True,
                  session_log_format: str = "stream-json",
-                 clock: Callable[[], float] | None = None):
+                 clock: Callable[[], float] | None = None,
+                 unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
+                 claims_run=subprocess.run):
         self.home = Path(home)
         self.model = model
         self.permission_mode = permission_mode
@@ -98,9 +100,12 @@ class ClaudeCliSessions:
         self.capture_session_logs = capture_session_logs
         self.session_log_format = session_log_format
         self._clock: Callable[[], float] = clock or store.now_epoch
+        self._unverified_claim_max_age = unverified_claim_max_age
+        self._claims_run = claims_run
 
     def list_active(self) -> set[str]:
-        return claims.active_keys(self.home)
+        return claims.active_keys(self.home, run=self._claims_run,
+                                  max_age=self._unverified_claim_max_age)
 
     def spawn(self, key: str, prompt: str, cwd: Path,
               model: str | None = None, effort: str | None = None) -> int | None:
