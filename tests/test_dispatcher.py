@@ -817,3 +817,124 @@ def test_probe_forks_once_per_sweep_regardless_of_claim_count(home, _children):
     disp.dispatch(cfg, sessions, now=1000)
 
     assert len(calls) == 1
+
+
+# --- launchctl-free kill switch: fleet.pause()/resume() (T-15) --------------
+
+def test_paused_sweep_mints_and_spawns_nothing(home, cfg):
+    """A pending _new create-request AND an active due ticket: a paused sweep
+    must touch neither — no mint, no spawn, no backup, inbox stays unacked."""
+    from maestro import fleet
+
+    _seed(home, "T-1", Phase.READY)
+    inbox.append_new(home, "queued while paused", key="T-9")
+    fleet.pause(home, reason="testing")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.paused is True
+    assert report.minted == [] and report.due == [] and report.spawned == []
+    assert report.throttled == []
+    assert inbox.pending_new(home) != []  # _new inbox still unacked
+    assert event_log.last_seq(home, "T-9") == 0  # no TicketCreated
+    backup_dir = home.parent / f"{home.name}-backups"
+    assert not backup_dir.exists() or list(backup_dir.glob("*.tar.gz")) == []
+
+    # Resume: the identical sweep now mints the request and spawns the due key.
+    fleet.resume(home)
+    report2 = disp.dispatch(cfg, DryRunSessions(), now=1001)
+    assert "T-9" in report2.minted
+    assert "T-1" in report2.spawned
+
+
+def test_pause_has_no_human_bypass(home, cfg):
+    """A pending human answer (an _UNTHROTTLED_REASONS due-reason) must NOT
+    slip past the pause — the reason that skips the spawn floor must not
+    also skip the kill switch."""
+    from maestro import fleet
+
+    _seed(home, "T-1", Phase.READY)
+    inbox.append_command(home, "T-1", "ans", {"qid": "q1", "text": "go"})
+    fleet.pause(home, reason="no bypass")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.paused is True
+    assert report.spawned == []
+
+
+def test_paused_sweep_fails_safe_on_corrupt_pause_file(home, cfg):
+    from maestro import fleet
+
+    _seed(home, "T-1", Phase.READY)
+    store.atomic_write(fleet.pause_path(home), "{not json at all")
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.paused is True and report.spawned == []
+
+
+def test_paused_sweep_fails_safe_on_garbage_until(home, cfg):
+    from maestro import fleet
+
+    _seed(home, "T-1", Phase.READY)
+    store.atomic_write(fleet.pause_path(home),
+                       '{"since": 1, "until": "not-a-timestamp", "reason": "x"}')
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.paused is True and report.spawned == []
+
+
+def test_past_until_auto_resumes_mid_sweep(home, cfg):
+    """A `.paused` whose `until` has already elapsed must unlink and complete a
+    full normal sweep in that SAME dispatch() call — the due key is spawned."""
+    from maestro import fleet
+
+    _seed(home, "T-1", Phase.READY)
+    now = 1_000_000
+    fleet.pause(home, until=now - 10, reason="expired")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=now)
+    assert report.paused is False
+    assert report.spawned == ["T-1"]
+    assert not fleet.pause_path(home).exists()
+
+
+def test_future_until_stays_paused_across_sweeps(home, cfg):
+    from maestro import fleet
+
+    _seed(home, "T-1", Phase.READY)
+    now = 1_000_000
+    fleet.pause(home, until=now + 3600, reason="future")
+
+    r1 = disp.dispatch(cfg, DryRunSessions(), now=now)
+    r2 = disp.dispatch(cfg, DryRunSessions(), now=now + 100)
+    assert r1.paused is True and r1.spawned == []
+    assert r2.paused is True and r2.spawned == []
+    assert fleet.pause_path(home).exists()
+
+
+def test_paused_sweep_still_writes_heartbeat(home, cfg):
+    from maestro import fleet
+
+    fleet.pause(home, reason="hb check")
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    hb = store.read_json(home / "derived" / ".heartbeat.json", {})
+    assert hb.get("paused") is True
+    assert hb.get("spawned") == 0
+    assert hb.get("active") == 0
+
+
+def test_doctor_reports_paused_board(home):
+    import json
+
+    from maestro import cli, fleet
+
+    fleet.pause(home, reason="doctor check")
+    disp.dispatch(Config(home=home), DryRunSessions(), now=1000)
+
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "doctor"])
+    finally:
+        sys.stdout = old_stdout
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["paused"] is True

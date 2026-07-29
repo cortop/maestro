@@ -141,3 +141,208 @@ def test_install_script_floors_a_dangerous_interval(tmp_path):
     assert fleet._interval_from_plist(plist) == 60
     assert fleet._throttle_from_plist(plist) == 60
     assert "below the 60s floor" in proc.stderr
+
+
+# --- pause / resume kill switch (T-15) --------------------------------------
+
+def test_pause_writes_since_until_reason(home):
+    fleet.pause(home, until=12345.0, reason="runaway")
+    raw = store.read_json(fleet.pause_path(home), None)
+    assert raw is not None
+    assert raw["until"] == 12345.0
+    assert raw["reason"] == "runaway"
+    assert raw["since"] is not None
+
+
+def test_pause_state_none_when_unpaused(home):
+    assert fleet.pause_state(home, store.now_epoch()) is None
+
+
+def test_pause_state_paused_with_no_until(home):
+    fleet.pause(home, reason="indefinite")
+    state = fleet.pause_state(home, store.now_epoch())
+    assert state is not None
+    assert state["reason"] == "indefinite"
+    assert state["until"] is None
+
+
+def test_pause_is_idempotent_and_reports_prior_state(home):
+    fleet.pause(home, reason="first")
+    out = fleet.pause(home, reason="second")
+    assert out["reason"] == "second"
+    assert out["previous"]["reason"] == "first"
+    state = fleet.pause_state(home, store.now_epoch())
+    assert state["reason"] == "second"
+
+
+def test_resume_removes_pause_file(home):
+    fleet.pause(home, reason="x")
+    out = fleet.resume(home)
+    assert out["resumed"] is True
+    assert out["was_paused"] is True
+    assert not fleet.pause_path(home).exists()
+    assert fleet.pause_state(home, store.now_epoch()) is None
+
+
+def test_resume_on_unpaused_home_is_a_noop(home):
+    out = fleet.resume(home)
+    assert out["resumed"] is True
+    assert out["was_paused"] is False
+
+
+def test_pause_state_fails_safe_on_corrupt_json(home):
+    """File existence alone arms the switch, even with un-parseable JSON."""
+    store.atomic_write(fleet.pause_path(home), "{not valid json::")
+    state = fleet.pause_state(home, store.now_epoch())
+    assert state is not None
+
+
+def test_pause_state_fails_safe_on_garbage_until(home):
+    """An unparseable `until` must not be treated as expired."""
+    store.atomic_write(fleet.pause_path(home), '{"since": 1, "until": "garbage", "reason": "x"}')
+    state = fleet.pause_state(home, store.now_epoch())
+    assert state is not None
+    assert state["until"] == "garbage"
+
+
+def test_pause_state_auto_resumes_past_until(home):
+    now = store.now_epoch()
+    fleet.pause(home, until=now - 10, reason="expired")
+    assert fleet.pause_state(home, now) is None
+    assert not fleet.pause_path(home).exists()
+
+
+def test_pause_state_stays_paused_before_until(home):
+    now = store.now_epoch()
+    fleet.pause(home, until=now + 3600, reason="future")
+    state = fleet.pause_state(home, now)
+    assert state is not None
+    state2 = fleet.pause_state(home, now + 10)
+    assert state2 is not None
+
+
+def test_status_reports_paused(home):
+    def run(cmd, **kw):
+        return FakeProc(0, "")
+
+    fleet.pause(home, until=999999999999.0, reason="testing")
+    res = fleet.status(home, run=run, plist="/nonexistent")
+    assert res["paused"] is True
+    assert res["pause_reason"] == "testing"
+    assert res["pause_until"] == 999999999999.0
+
+
+def test_status_reports_not_paused(home):
+    def run(cmd, **kw):
+        return FakeProc(0, "")
+
+    res = fleet.status(home, run=run, plist="/nonexistent")
+    assert res["paused"] is False
+
+
+# --- real CLI round-trip (T-15 ACs) -----------------------------------------
+
+def test_cli_fleet_pause_resume_round_trip(home):
+    import json
+
+    from maestro import cli
+
+    def _run(args):
+        import io
+        import sys
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            rc = cli.main(["--home", str(home)] + args)
+        finally:
+            sys.stdout = old
+        return rc, json.loads(buf.getvalue())
+
+    rc, out = _run(["fleet", "pause", "--for", "2h", "--reason", "runaway"])
+    assert rc == 0
+    assert out["reason"] == "runaway"
+    raw = store.read_json(fleet.pause_path(home), None)
+    assert raw is not None and raw["reason"] == "runaway"
+
+    # --until accepted as both a bare epoch and an ISO-8601 string.
+    rc, out = _run(["fleet", "pause", "--until", "9999999999", "--reason", "epoch"])
+    assert rc == 0 and out["until"] == 9999999999.0
+
+    rc, out = _run(["fleet", "pause", "--until", "2099-01-01T00:00:00", "--reason", "iso"])
+    assert rc == 0
+    from datetime import datetime
+    assert out["until"] == datetime.fromisoformat("2099-01-01T00:00:00").timestamp()
+
+    # Idempotent re-arm reports the prior state.
+    rc, out = _run(["fleet", "pause", "--reason", "again"])
+    assert rc == 0 and out["previous"]["reason"] == "iso"
+
+    rc, out = _run(["fleet", "resume"])
+    assert rc == 0 and out["resumed"] is True
+    assert not fleet.pause_path(home).exists()
+
+    # resume on an already-unpaused home still exits 0.
+    rc, out = _run(["fleet", "resume"])
+    assert rc == 0
+
+
+def test_cli_dispatch_json_includes_paused(home):
+    import io
+    import json
+    import sys
+
+    from maestro import cli
+
+    fleet.pause(home, reason="cli check")
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "dispatch", "--dry-run"])
+    finally:
+        sys.stdout = old
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["paused"] is True
+
+
+def test_cli_fleet_status_reports_paused(home):
+    import io
+    import json
+    import sys
+
+    from maestro import cli
+
+    fleet.pause(home, until=store.now_epoch() + 3600, reason="status check")
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "fleet", "status"])
+    finally:
+        sys.stdout = old
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["paused"] is True
+    assert out["pause_reason"] == "status check"
+    assert out["pause_until"] is not None
+
+
+def test_projection_workstate_carries_paused_banner(home):
+    from maestro import projection
+
+    fleet.pause(home, reason="board frozen")
+    written = projection.write(home)
+    assert "WORKSTATE.md" in written
+    text = (home / "derived" / "WORKSTATE.md").read_text()
+    assert "paused" in text.lower()
+    assert "board frozen" in text
+
+
+def test_projection_workstate_no_banner_when_unpaused(home):
+    from maestro import projection
+
+    projection.write(home)
+    text = (home / "derived" / "WORKSTATE.md").read_text()
+    assert "paused" not in text.lower()
