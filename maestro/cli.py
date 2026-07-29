@@ -11,9 +11,10 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, event_log, fleet, inbox, ops, projection, ratelimit, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, fleet, inbox, ops, projection, ratelimit, schedule, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -37,11 +38,13 @@ def _web_tools_extra_args(cfg: Config) -> list[str]:
     return ["--allowedTools", "WebSearch,WebFetch"] if cfg.reconcile_web_tools else []
 
 
-def _nudge(cfg: Config) -> None:
+def _nudge(cfg: Config) -> disp.DispatchReport:
     """In-process dispatch sweep after a human-input verb (ans/cmd/create).
 
     Spawns are detached Popen so this returns quickly. The existing per-key
     claim dedup prevents double-spawning if a reconciler is already live.
+    Returns the report so callers can react (e.g. a paused-fleet notice); every
+    call site inherits that notice for free since the print lives here.
     """
     sessions = ClaudeCliSessions(
         cfg.home, model=cfg.reconcile_model,
@@ -50,7 +53,10 @@ def _nudge(cfg: Config) -> None:
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
     )
-    disp.dispatch(cfg, sessions, now=store.now_epoch())
+    report = disp.dispatch(cfg, sessions, now=store.now_epoch())
+    if report.paused:
+        print("fleet is paused — queued, will run on resume")
+    return report
 
 
 # --- lifecycle / human verbs -------------------------------------------------
@@ -311,7 +317,8 @@ def cmd_doctor(args) -> int:
     _print({"heartbeat": hb, "heartbeat_age_s": age,
             "dead_letters": [p.stem for p in dead],
             "stale": age is not None and age > 1800,
-            "rate_limit": ratelimit.status(cfg.home, store.now_epoch())})
+            "rate_limit": ratelimit.status(cfg.home, store.now_epoch()),
+            "paused": hb.get("paused", False)})
     return 0
 
 
@@ -338,7 +345,8 @@ def cmd_dispatch(args) -> int:
            "pruned_bytes": report.pruned_bytes,
            "errors": report.errors,
            "paused_until": report.paused_until,
-           "due": [{"key": k, "reason": r} for k, r in report.due]}
+           "due": [{"key": k, "reason": r} for k, r in report.due],
+           "paused": report.paused}
     _print(out)
     return 0
 
@@ -367,12 +375,30 @@ def cmd_project(args) -> int:
     return 0
 
 
+def _parse_until(value: str) -> float:
+    """A bare epoch (int/float) or an ISO-8601 string (naive = local time)."""
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return datetime.fromisoformat(value).timestamp()
+
+
 def cmd_fleet(args) -> int:
     cfg = _cfg(args)
     if args.action == "up":
         _print(fleet.up(cfg.home, interval=args.interval))
     elif args.action == "down":
         _print(fleet.down(cfg.home))
+    elif args.action == "pause":
+        until = None
+        if args.until:
+            until = _parse_until(args.until)
+        elif args.for_:
+            until = store.now_epoch() + schedule.parse_every(args.for_)
+        _print(fleet.pause(cfg.home, until=until, reason=args.reason))
+    elif args.action == "resume":
+        _print(fleet.resume(cfg.home))
     else:
         _print(fleet.status(cfg.home))
     return 0
@@ -763,9 +789,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true",
                     help="overwrite a non-empty events/ or tickets/")
 
-    sp = add("fleet", cmd_fleet, "manage the launchd dispatcher (up/down/status)")
-    sp.add_argument("action", choices=["up", "down", "status"])
+    sp = add("fleet", cmd_fleet,
+             "manage the launchd dispatcher (up/down/status) and the pause kill switch")
+    sp.description = (
+        "pause/resume stop the DISPATCHER from minting or spawning NEW reconcilers; "
+        "they do not touch sessions already running (see a T-13 watchdog for that) "
+        "and do not unload the launchd agent (use 'fleet down' for that)."
+    )
+    sp.add_argument("action", choices=["up", "down", "status", "pause", "resume"])
     sp.add_argument("--interval", type=int, default=300, help="dispatch cadence (seconds)")
+    sp.add_argument("--for", dest="for_", default=None,
+                    help="pause [action=pause] for a duration (30m/6h/24h/7d/seconds)")
+    sp.add_argument("--until", default=None,
+                    help="pause [action=pause] until a bare epoch or ISO-8601 timestamp")
+    sp.add_argument("--reason", default=None, help="pause [action=pause] reason")
 
     sp = add("snapshot", cmd_snapshot, "[agent] folded snapshot"); sp.add_argument("key")
     sp = add("events", cmd_events, "[agent] event log"); sp.add_argument("key"); sp.add_argument("--since", type=int, default=0)

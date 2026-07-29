@@ -4,7 +4,7 @@ export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
 
 PY := .venv/bin/python
 
-.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down autocomplete backup restore prune-logs
+.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs
 
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
@@ -16,6 +16,8 @@ help:
 	@echo "make doctor      fleet health (heartbeat, dead-letters)"
 	@echo "make reconcile KEY=M-1   run ONE reconcile in the foreground (for testing)"
 	@echo "make fleet-up / fleet-down   install / remove the launchd dispatcher"
+	@echo "make fleet-pause REASON=... [FOR=2h]   launchctl-free kill switch (no new spawns)"
+	@echo "make fleet-resume            lift the pause"
 	@echo "make backup                  snapshot events/tickets/inbox/config to a tarball"
 	@echo "make restore                 restore the latest backup (refuses to clobber; use FORCE=1)"
 	@echo "make prune-logs              delete stale session logs per retention settings (DRY_RUN=1 to preview)"
@@ -72,6 +74,12 @@ fleet-up:
 
 fleet-down:
 	maestro/_assets/daemon/install.sh down
+
+fleet-pause:
+	maestro fleet pause $(if $(FOR),--for $(FOR),) $(if $(REASON),--reason "$(REASON)",)
+
+fleet-resume:
+	maestro fleet resume
 
 COMPLETION_SCRIPT := maestro/_assets/completions/_maestro
 COMPLETION_DIR := $(HOME)/.zsh/completions
