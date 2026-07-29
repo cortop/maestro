@@ -54,7 +54,7 @@ def _spawn_and_seed_ledger(home, cfg, key, now):
     _seed(home, key, Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=now)
     assert key in report.spawned
-    assert store.read_json(home / "derived" / ".spawn_ledger.json", {}).get(key) == now
+    assert store.read_json(home / "derived" / ".spawn_ledger.json", {}).get(key, {}).get("last") == now
     return report
 
 
