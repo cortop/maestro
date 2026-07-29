@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, event_log, fleet, inbox, ops, projection, ratelimit, schedule, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, fleet, health, inbox, ops, projection, ratelimit, schedule, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -308,18 +308,11 @@ def cmd_show(args) -> int:
 
 def cmd_doctor(args) -> int:
     cfg = _cfg(args)
-    hb = store.read_json(cfg.home / "derived" / ".heartbeat.json", {})
-    age = None
-    if hb.get("epoch"):
-        age = round(store.now_epoch() - hb["epoch"])
-    dead = list((cfg.home / "tickets" / "_deadletter").glob("*.md")) \
-        if (cfg.home / "tickets" / "_deadletter").exists() else []
-    _print({"heartbeat": hb, "heartbeat_age_s": age,
-            "dead_letters": [p.stem for p in dead],
-            "stale": age is not None and age > 1800,
-            "rate_limit": ratelimit.status(cfg.home, store.now_epoch()),
-            "paused": hb.get("paused", False)})
-    return 0
+    now = store.now_epoch()
+    rpt = health.report(cfg, now)
+    rpt["rate_limit"] = ratelimit.status(cfg.home, now)
+    _print(rpt)
+    return 1 if rpt["runaway"] else 0
 
 
 # --- dispatcher / projection (launchd) --------------------------------------
@@ -345,6 +338,7 @@ def cmd_dispatch(args) -> int:
            "pruned_bytes": report.pruned_bytes,
            "errors": report.errors,
            "paused_until": report.paused_until,
+           "reaped": report.reaped,
            "due": [{"key": k, "reason": r} for k, r in report.due],
            "paused": report.paused}
     _print(out)
@@ -761,7 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--session", help="select a specific session_id")
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
-    add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters)")
+    add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
 
     sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
     sp.add_argument("--clear", action="store_true", help="remove any active pause")

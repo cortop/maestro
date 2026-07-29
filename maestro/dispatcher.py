@@ -15,11 +15,13 @@ No global lock, no wave barrier. Different keys are wholly independent.
 """
 from __future__ import annotations
 
+import os
 import re
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import events as E
+from . import claims, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, store
 from .config import Config
 from .idempotency import content_hash
@@ -578,6 +580,64 @@ def prune_logs_tick(cfg: Config, now: float) -> dict | None:
                             lambda: ops.prune_all_session_logs(cfg, now=now))
 
 
+def run_watchdog(cfg: Config, now: float) -> list[str]:
+    """Reap any claim whose session has run past ``max_session_seconds`` (0
+    disables). ``claims.active_keys`` only checks pid-alive, so a live-but-stuck
+    claude session holds its key forever; this is the age-based backstop, and it
+    must run before ``active`` is computed so a hung claim never counts toward
+    concurrency. Best-effort SIGTERM to the process group (pid == pgid, since
+    sessions spawn with ``start_new_session=True``) -- a pid that's already gone
+    is not an error, just one less thing to kill."""
+    home = cfg.home
+    max_seconds = cfg.max_session_seconds
+    if not max_seconds:
+        return []
+    reaped: list[str] = []
+    for key, claim in claims.all_claims(home).items():
+        epoch = claim.get("epoch")
+        if not isinstance(epoch, (int, float)) or now - epoch <= max_seconds:
+            continue
+        pid = claim.get("pid")
+        try:
+            os.killpg(int(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, ValueError, TypeError, OSError):
+            pass
+        claims.release(home, key)
+        from . import ops
+        ops.fail(cfg, key, f"watchdog: session exceeded {max_seconds}s (pid {pid})",
+                actor="dispatcher")
+        reaped.append(key)
+    return reaped
+
+
+def _spawn_attempts_path(home: Path) -> Path:
+    return home / "derived" / ".spawn_attempts.json"
+
+
+def _allow_spawn(cfg: Config, key: str, observed_seq: int, attempts: dict) -> bool:
+    """Gate one spawn of *key* against the no-progress counter, mutating
+    ``attempts`` in place. Returns False (and fails the ticket instead) once the
+    key has been spawned ``max_spawn_attempts`` times at the same observed_seq --
+    i.e. it crashed before appending a single event, every time. Any real
+    progress (observed_seq advancing) resets the count to zero."""
+    max_attempts = cfg.max_spawn_attempts
+    if not max_attempts:
+        return True
+    entry = attempts.get(key)
+    if not entry or entry.get("seq") != observed_seq:
+        entry = {"seq": observed_seq, "count": 0}
+    if entry["count"] >= max_attempts:
+        from . import ops
+        ops.fail(cfg, key,
+                 f"watchdog: {entry['count']} spawns with no progress at seq {observed_seq}",
+                 actor="dispatcher")
+        attempts.pop(key, None)
+        return False
+    entry["count"] += 1
+    attempts[key] = entry
+    return True
+
+
 def _has_unmet_deps(home: Path, key: str) -> bool:
     """Return True if any dependsOn entry for *key* is not yet done."""
     spec_file = store.spec_path(home, key)
@@ -605,6 +665,7 @@ class DispatchReport:
     pruned_bytes: int = 0
     errors: dict = field(default_factory=dict)  # tick name -> error string (never aborts the sweep)
     paused_until: float | None = None  # fleet-wide rate-limit gate deadline, if paused
+    reaped: list[str] = field(default_factory=list)     # watchdog: killed for age or no-progress
     paused: bool = False            # the fleet.pause() kill switch was armed this sweep
 
 
@@ -616,6 +677,14 @@ _UNTHROTTLED_REASONS = frozenset({"inbox", "spec-changed", "answered-pending"})
 
 def _spawn_ledger_path(home: Path) -> Path:
     return home / "derived" / ".spawn_ledger.json"
+
+
+# Hard cap on how many timestamps `recent` may hold per key, independent of the
+# window filter -- a board with the spawn floor disabled fires many spawns within
+# the same second, and the window filter alone does not bound growth when
+# `now` barely advances between writes. One entry per window-second is already
+# far more resolution than an hourly rate needs.
+_LEDGER_RECENT_CAP = 3600  # == health.WINDOW_SECONDS; kept as a literal, health imports us
 
 
 def spawn_floor(cfg: Config) -> int:
@@ -646,6 +715,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         )
 
     from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
+    from . import health  # lazy: health -> dispatcher would cycle at import time
 
     minted = mint_new_tickets(cfg)
     sync_external_sources(cfg, now)
@@ -655,6 +725,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     backup.maybe_backup(cfg, now)
     ratelimit.probe(cfg, now)
     notify.maybe_notify(cfg, now)
+
+    # Watchdog runs before `active` is computed: a hung claim must not count
+    # toward concurrency, and a reaped key needs to be re-fold-visible (fail
+    # appends an event) before this sweep's due-check reads its snapshot.
+    reaped = run_watchdog(cfg, now)
 
     pruned_logs = 0
     pruned_bytes = 0
@@ -673,12 +748,14 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     active = sessions.list_active()
     due: list[tuple[str, str]] = []
     claimed: list[str] = []
+    observed_seq_by_key: dict[str, int] = {}
 
     for key in list_keys(home):
         snap = snap_mod.load(home, key)
         # Keep the dispatcher's view fresh if a writer fell behind on its fold.
         if event_log.last_seq(home, key) > snap.observed_seq:
             snap = snap_mod.rebuild(home, key)
+        observed_seq_by_key[key] = snap.observed_seq
         blocked_dep = _has_unmet_deps(home, key)
         res = is_due(
             snap,
@@ -715,7 +792,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         if floor:
             eligible: list[tuple[str, str]] = []
             for key, reason in due:
-                last = ledger.get(key)
+                entry = ledger.get(key)
+                last = entry.get("last") if isinstance(entry, dict) else entry
                 if (reason not in _UNTHROTTLED_REASONS
                         and isinstance(last, (int, float)) and now - last < floor):
                     throttled.append(key)
@@ -728,28 +806,45 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         to_spawn = eligible[:slots]
         capacity_skipped = [k for k, _ in eligible[slots:]]
 
+        attempts_path = _spawn_attempts_path(home)
+        attempts = store.read_json(attempts_path, {}) or {}
+        attempts_changed = False
+
         spawned = []
         for key, _reason in to_spawn:
+            if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
+                attempts_changed = True
+                reaped.append(key)
+                continue
+            attempts_changed = True
             cwd = _worker_cwd(cfg, key)
             prompt = f"{cfg.reconcile_command} {key}"
             model, effort = _resolve_model_effort(cfg, key)
             sessions.spawn(key, prompt, cwd, model=model, effort=effort)
             spawned.append(key)
-            ledger[key] = now
+            prev = ledger.get(key)
+            recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
+            recent.append(now)
+            recent = [t for t in recent if now - t <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
+            ledger[key] = {"last": now, "recent": recent}
 
         if spawned:
             # Keep the ledger from growing without bound as keys come and go.
             known = set(list_keys(home))
             store.write_json(ledger_path,
                              {k: v for k, v in ledger.items() if k in known})
+        if attempts_changed:
+            known = set(list_keys(home))
+            store.write_json(attempts_path,
+                             {k: v for k, v in attempts.items() if k in known})
 
-    _write_heartbeat(home, now, len(spawned), len(active))
+    _write_heartbeat(home, now, len(spawned), len(active), len(throttled), len(due))
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
         scheduled_fired=scheduled_fired, throttled=throttled,
         pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
-        paused_until=paused_until_ts,
+        paused_until=paused_until_ts, reaped=reaped,
     )
 
 
@@ -791,8 +886,9 @@ def _worker_cwd(cfg: Config, key: str) -> Path:
     return cfg.home
 
 
-def _write_heartbeat(home: Path, now: float, spawned: int, active: int, *,
-                     paused: bool = False) -> None:
+def _write_heartbeat(home: Path, now: float, spawned: int, active: int,
+                     throttled: int = 0, due: int = 0, *, paused: bool = False) -> None:
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"ts": store.iso_now(), "epoch": now,
-                      "spawned": spawned, "active": active, "paused": paused})
+                      "spawned": spawned, "active": active,
+                      "throttled": throttled, "due": due, "paused": paused})
