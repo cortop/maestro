@@ -12,7 +12,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, snapshot as snap_mod, store
+from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ratelimit, snapshot as snap_mod, store
 from ..dispatcher import schedule_status
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
@@ -171,7 +171,9 @@ class FleetScreen(Screen):
 
     def _load_status(self) -> tuple[dict, dict]:
         status = fleet_mod.status(self._home)
-        doctor = health.report(config_mod.load(str(self._home)), store.now_epoch())
+        now = store.now_epoch()
+        doctor = health.report(config_mod.load(str(self._home)), now)
+        doctor["rate_limit"] = ratelimit.status(self._home, now)
         return status, doctor
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:

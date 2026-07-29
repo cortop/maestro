@@ -2,7 +2,9 @@
 
 Schema fields that L-4 depends on:
   - type       : event kind — "system" | "assistant" | "user" | "result"
-  - subtype    : qualifier — "init" on system, "success"/"error" on result
+  - subtype    : qualifier — "init" on system; on result it is NOT the verdict (a 429
+                 rejection reports subtype "success") — see steplog.classify_result,
+                 which derives the outcome from is_error / api_error_status instead.
   - name       : tool name, in message.content[].name where content[].type == "tool_use"
   - id         : message id in message.id; tool call id in content[].id
 """

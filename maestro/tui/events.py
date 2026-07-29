@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json as _json
 
+from ..steplog import classify_result, format_resets_at
+
 _EM = "—"
 _TAIL_N = 20
 
@@ -90,9 +92,21 @@ def render_log_line(obj: dict) -> list[str]:
                 lines.append(f"[dim bold]▶ {name}[/dim bold] [dim]{inp_str}[/dim]")
         return lines
     if type_ == "result":
-        sub = obj.get("subtype", "")
+        classified = classify_result(obj)
         dur = obj.get("duration_ms")
         suffix = f" ({dur}ms)" if dur else ""
-        color = "green" if sub == "success" else "red"
-        return [f"[{color}]── {sub}{suffix}[/{color}]"]
+        if classified["outcome"] == "success":
+            return [f"[green]── {classified['subtype']}{suffix}[/green]"]
+        parts = [classified["outcome"]]
+        if classified["api_error_status"] is not None:
+            parts.append(str(classified["api_error_status"]))
+        if classified["message"]:
+            parts.append(_esc_log(classified["message"][:200]))
+        return [f"[red]── {' '.join(parts)}{suffix}[/red]"]
+    if type_ == "rate_limit_event":
+        info = obj.get("rate_limit_info") or {}
+        kind = info.get("rateLimitType", "")
+        status = info.get("status", "")
+        resets_at = format_resets_at(info.get("resetsAt"))
+        return [f"[yellow]── rate_limit:{kind} status={status} resetsAt={resets_at}[/yellow]"]
     return []
