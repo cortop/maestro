@@ -497,6 +497,23 @@ def cmd_compact(args) -> int:
     return 0
 
 
+def cmd_archive_done(args) -> int:
+    cfg = _cfg(args)
+    moved = ops.archive_done(cfg, after=args.after, now=store.now_epoch())
+    _print({"archived": moved})
+    return 0
+
+
+def cmd_why(args) -> int:
+    """The recent per-sweep dispatcher decisions recorded for one key, from the
+    `derived/dispatch.jsonl` ledger's tail -- what made it due/skipped/spawned,
+    and any hook errors on those sweeps."""
+    cfg = _cfg(args)
+    _print({"key": args.key,
+            "decisions": disp.key_decisions(cfg.home, args.key, tail=args.tail)})
+    return 0
+
+
 def cmd_release(args) -> int:
     """A reconciler calls this on exit to drop its claim (best-effort)."""
     claims.release(_cfg(args).home, args.key)
@@ -764,6 +781,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
     add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
 
+    sp = add("why", cmd_why, "recent dispatcher decisions for one key (derived/dispatch.jsonl tail)")
+    sp.add_argument("key")
+    sp.add_argument("--tail", type=int, default=20, help="how many recent sweep decisions to show")
+
     sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
     sp.add_argument("--clear", action="store_true", help="remove any active pause")
 
@@ -830,6 +851,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
+    sp = add("archive-done", cmd_archive_done, "[maintenance] move DONE tickets out of the active scan")
+    sp.add_argument("--after", type=float, default=0, help="grace period in seconds since the ticket's last event")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
 
     sp = add("claims", cmd_claims, "list claim files with verified identity (key/pid/age/verdict)")

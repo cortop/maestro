@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import random
+from datetime import datetime
 from pathlib import Path
 
 from . import events as E
@@ -347,17 +348,52 @@ def compact(cfg: Config, key: str) -> dict:
             "pruned_logs": pruned_logs}
 
 
-def archive_done(cfg: Config) -> list[str]:
-    """Move DONE tickets out of the active scan into tickets/_archive/."""
+def _archive_key_files(home: Path, key: str) -> None:
+    """Relocate every home-scanned artifact of *key* out of the active tree.
+
+    Moving events + the snapshot (not just the ticket dir) is what makes
+    ``dispatcher.list_keys`` stop sweeping the key -- it globs those two
+    directories directly. ``snapshot.load`` falls back to the archived
+    snapshot path, so a ``dependsOn`` on an archived-done ticket still
+    resolves correctly instead of blocking forever on a phantom fresh snapshot.
+    """
+    pairs = [
+        (store.ticket_dir(home, key), home / "tickets" / "_archive" / key),
+        (store.events_path(home, key), store.archived_events_path(home, key)),
+        (store.events_archive_path(home, key), store.archived_events_archive_path(home, key)),
+        (store.snapshot_path(home, key), store.archived_snapshot_path(home, key)),
+    ]
+    for src, dst in pairs:
+        if src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.replace(dst)
+
+
+def archive_done(cfg: Config, *, after: float | None = None, now: float | None = None) -> list[str]:
+    """Move DONE tickets out of the active scan into ``_archive`` locations.
+
+    ``after`` (seconds) is a grace period since the ticket's last event
+    (``snapshot.updated_ts``) -- a freshly-DONE ticket stays visible for that
+    long before disappearing from dashboards/``list_keys``. ``None``/0 archives
+    on the very next call.
+    """
     from .dispatcher import list_keys
+    if now is None:
+        now = store.now_epoch()
     moved = []
     for key in list_keys(cfg.home):
         snap = snap_mod.load(cfg.home, key)
-        if snap.phase == Phase.DONE.value:
-            src = store.ticket_dir(cfg.home, key)
-            dst = cfg.home / "tickets" / "_archive" / key
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.exists():
-                src.replace(dst)
-            moved.append(key)
+        if snap.phase != Phase.DONE.value:
+            continue
+        if after:
+            if not snap.updated_ts:
+                continue
+            try:
+                done_epoch = datetime.fromisoformat(snap.updated_ts).timestamp()
+            except ValueError:
+                continue
+            if now - done_epoch < after:
+                continue
+        _archive_key_files(cfg.home, key)
+        moved.append(key)
     return moved

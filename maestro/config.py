@@ -75,6 +75,11 @@ class Config:
     backup_interval: int = 3600        # seconds between dispatcher auto-backups (0 disables)
     backup_retention: int | None = 24  # keep most-recent N snapshots; 0/None = keep all
     backup_dir: str | None = None      # where snapshots live; None = sibling of the home
+    # Maintenance ticks (dispatcher.run_compact_tick / run_archive_tick).
+    compact_interval: int = 0          # seconds between dispatcher-driven compact sweeps (0 disables)
+    compact_min_events: int = 200      # only compact a key once its folded log reaches this many events
+    archive_after: int | None = None   # seconds a DONE ticket stays visible before archive_done moves
+                                        # it out of list_keys; None disables the tick, 0 = next sweep
     # Fleet-wide rate-limit gate (maestro/ratelimit.py): a rejected rate_limit_event
     # pauses ALL spawns until resets_at + ratelimit_grace, clamped to ratelimit_max_pause.
     ratelimit_grace: int = 60          # seconds added after resetsAt before resuming (clock-skew buffer)
@@ -135,6 +140,10 @@ def load(home_arg: str | None = None) -> Config:
         raw_ret = m.get("backup_retention", cfg.backup_retention)
         cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
         cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
+        cfg.compact_interval = int(m.get("compact_interval", cfg.compact_interval))
+        cfg.compact_min_events = int(m.get("compact_min_events", cfg.compact_min_events))
+        raw_archive_after = m.get("archive_after", cfg.archive_after)
+        cfg.archive_after = int(raw_archive_after) if raw_archive_after is not None else None
         cfg.ratelimit_grace = int(m.get("ratelimit_grace", cfg.ratelimit_grace))
         cfg.ratelimit_fallback_pause = int(
             m.get("ratelimit_fallback_pause", cfg.ratelimit_fallback_pause))
@@ -180,6 +189,11 @@ max_impl_turns = 20
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
 # backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
 # backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
+# compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
+                                  # (0 disables; a manual `maestro compact <key>` always works)
+# compact_min_events = 200        # skip compacting a key until its folded log reaches this size
+# archive_after = 259200          # seconds a DONE ticket stays visible before being moved out of
+                                  # list_keys/dashboards (None disables; 0 = archive next sweep)
 # ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
 # ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
 # ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
