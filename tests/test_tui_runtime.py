@@ -705,6 +705,61 @@ def test_interval_modal_inside_fleet_screen(seeded_home):
     asyncio.run(_inner())
 
 
+def test_fleet_screen_reports_spawn_rate_from_health_report(seeded_home):
+    """FleetScreen._load_status must return health.report(...) verbatim (no
+    hand-rolled doctor dict, no second copy of the 1800s staleness threshold):
+    mounting the real app and opening FleetScreen renders the spawn-rate line."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status = app.screen_stack[-1].query_one("#fleet-status", Static)
+            content = str(status.content)
+            assert "Spawns/hr" in content
+            assert "Runaway" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_screen_renders_runaway_board_differently(seeded_home):
+    """A board that has actually exceeded its spawn budget must render visibly
+    differently (RUNAWAY, red) from the healthy seeded_home above."""
+    from maestro import dispatcher as disp
+    from maestro.config import Config
+    from maestro.statemachine import Phase
+    from test_dispatcher import _EphemeralSessions, _seed
+
+    (seeded_home / "config.toml").write_text(
+        "[maestro]\nrunaway_spawns_per_hour = 1\n")
+    _seed(seeded_home, "R-1", Phase.IN_REVIEW)
+    cfg = Config(home=seeded_home, max_concurrency=1, min_spawn_interval=0)
+    sessions = _EphemeralSessions()
+    t0 = store.now_epoch()
+    for i in range(3):
+        disp.dispatch(cfg, sessions, now=t0 + i)  # 3 spawns > budget of 1
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status = app.screen_stack[-1].query_one("#fleet-status", Static)
+            content = str(status.content)
+            assert "RUNAWAY" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_header_badge_shows_paused_state(seeded_home):
     """AC (T-15): the header badge reflects a paused board."""
     from maestro import fleet
