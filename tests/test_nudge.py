@@ -121,3 +121,27 @@ def test_create_no_nudge_suppresses_dispatch(home, monkeypatch):
     rc = cli.main(["--home", str(home), "create", "My new ticket", "--no-nudge"])
     assert rc == 0
     assert calls == []
+
+
+def test_ans_on_paused_fleet_queues_and_prints_notice(home, monkeypatch, capsys):
+    """AC: on a paused home, `maestro ans` exits 0, leaves the answer pending in
+    the inbox, spawns nothing, and prints a paused notice — driven through the
+    REAL disp.dispatch (only the external claude-spawn boundary is substituted)."""
+    from maestro import fleet
+
+    _seed_awaiting_human(home, "T-1")
+    sessions = DryRunSessions()
+    monkeypatch.setattr(cli, "ClaudeCliSessions", lambda *a, **kw: sessions)
+    fleet.pause(home, reason="mid-flight")
+
+    rc = cli.main(["--home", str(home), "ans", "T-1", "yes"])
+    assert rc == 0
+    assert "fleet is paused" in capsys.readouterr().out
+    assert sessions.spawned == []
+    # The answer is durably queued, not lost.
+    assert inbox.pending(home, "T-1") != []
+
+    # A real sweep after resume picks it up.
+    fleet.resume(home)
+    report = disp.dispatch(Config(home=home), sessions, now=store.now_epoch())
+    assert "T-1" in report.spawned

@@ -34,7 +34,7 @@ _maestro() {
         'dispatch:one dispatcher sweep (launchd calls this)'
         'project:regenerate dashboards'
         'env:resolved config (home, repo_path, ...)'
-        'fleet:manage the launchd dispatcher (up/down/status)'
+        'fleet:manage the launchd dispatcher (up/down/status) and pause/resume kill switch'
         'snapshot:[agent] folded snapshot'
         'events:[agent] event log'
         'append:[agent] append a raw event'
@@ -120,7 +120,10 @@ _maestro() {
           _arguments \
             '(-h --help)'{-h,--help}'[show help]' \
             '--interval=[dispatch cadence in seconds]:interval:' \
-            '1:action:(up down status)'
+            '--for=[pause duration, e.g. 30m/2h/24h/7d]:duration:' \
+            '--until=[pause until epoch or ISO-8601 timestamp]:timestamp:' \
+            '--reason=[pause reason]:reason:' \
+            '1:action:(up down status pause resume)'
           ;;
         dispatch)
           _arguments \

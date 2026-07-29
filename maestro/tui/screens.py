@@ -138,6 +138,7 @@ class FleetScreen(Screen):
         ("d", "fleet_down", "Down"),
         ("s", "dispatch_sweep", "Sweep"),
         ("p", "project_rebuild", "Project"),
+        ("P", "toggle_pause", "Pause/Resume"),
         ("r", "refresh_status", "Refresh"),
     ]
 
@@ -209,6 +210,16 @@ class FleetScreen(Screen):
     def action_fleet_down(self) -> None:
         self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down")
         self._log("fleet down … ")
+        self._refresh_worker()
+
+    def action_toggle_pause(self) -> None:
+        paused = self._status.get("paused", False)
+        if paused:
+            self.run_worker(lambda: fleet_mod.resume(self._home), thread=True, name="fleet-resume")
+            self._log("fleet resume … ")
+        else:
+            self.run_worker(lambda: fleet_mod.pause(self._home), thread=True, name="fleet-pause")
+            self._log("fleet pause … ")
         self._refresh_worker()
 
     def action_dispatch_sweep(self) -> None:

@@ -70,4 +70,5 @@ def report(cfg: Config, now: float) -> dict:
         "throttled_last_sweep": hb.get("throttled", 0),
         "spawn_budget_per_hour": budget,
         "runaway": bool(budget) and rate["total"] > budget,
+        "paused": hb.get("paused", False),
     }
