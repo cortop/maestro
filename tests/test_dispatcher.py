@@ -1,9 +1,12 @@
 import io
+import os
+import subprocess
 import sys
+import time
 
 import pytest
 
-from maestro import dispatcher as disp
+from maestro import claims, dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
@@ -727,6 +730,170 @@ def test_schedule_list_cli(home):
     out = json.loads(buf.getvalue())
     assert out["scheduled"][0]["name"] == "digest"
     assert out["scheduled"][0]["last_fired"] is None
+
+
+# --- T-13: session watchdog ---
+
+
+def _age_claim(home, key, epoch):
+    """Backdate a just-written claim's epoch (claims.write_claim always stamps
+    the current wall clock -- tests fabricate age by patching the file directly)."""
+    data = claims.read_claim(home, key)
+    data["epoch"] = epoch
+    store.write_json(claims.claim_path(home, key), data)
+
+
+def test_config_parses_watchdog_knobs(home):
+    from maestro import config as config_mod
+
+    store.atomic_write(home / "config.toml",
+                       "[maestro]\nmax_session_seconds = 999\nmax_spawn_attempts = 7\n")
+    cfg = config_mod.load(str(home))
+    assert cfg.max_session_seconds == 999
+    assert cfg.max_spawn_attempts == 7
+
+
+def test_watchdog_knobs_documented_in_sample_config():
+    from maestro.config import DEFAULT_CONFIG_TOML
+    assert "max_session_seconds" in DEFAULT_CONFIG_TOML
+    assert "max_spawn_attempts" in DEFAULT_CONFIG_TOML
+
+
+def test_watchdog_kills_aged_claim_and_fails_ticket(home, cfg):
+    """AC: a claim older than max_session_seconds is SIGTERM'd (pid == pgid),
+    released, and routed through ops.fail -- proven over a REAL process group."""
+    cfg.max_session_seconds = 100
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
+        _age_claim(home, "T-1", store.now_epoch() - 10_000)  # far past the threshold
+
+        reaped = disp.run_watchdog(cfg, now=store.now_epoch())
+
+        assert reaped == ["T-1"]
+        assert claims.read_claim(home, "T-1") is None       # claim released
+        assert not claims.is_claimed(home, "T-1")
+
+        for _ in range(30):                                  # process group actually died
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert proc.poll() is not None
+
+        events = event_log.read(home, "T-1")
+        assert any(e["type"] == "Failed" for e in events)
+        assert snap_mod.load(home, "T-1").failure_count == 1
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_watchdog_leaves_healthy_session_untouched(home, cfg):
+    """AC: an under-threshold session is untouched -- no kill, no fail, still
+    counted as claimed/active."""
+    cfg.max_session_seconds = 3600
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")  # this process: alive, fresh
+
+    reaped = disp.run_watchdog(cfg, now=store.now_epoch())
+
+    assert reaped == []
+    assert claims.is_claimed(home, "T-1")
+    assert "T-1" in claims.active_keys(home)
+    events = event_log.read(home, "T-1")
+    assert all(e["type"] != "Failed" for e in events)
+
+
+def test_watchdog_never_raises_on_already_dead_pid(home, cfg):
+    """AC: the watchdog never raises when the claimed pid is already gone."""
+    cfg.max_session_seconds = 100
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    dead_pid = 2_000_000_000  # almost certainly not a live pid
+    claims.write_claim(home, "T-1", dead_pid, "reconcile-T-1")
+    _age_claim(home, "T-1", store.now_epoch() - 10_000)
+
+    reaped = disp.run_watchdog(cfg, now=store.now_epoch())  # must not raise
+
+    assert reaped == ["T-1"]
+    assert claims.read_claim(home, "T-1") is None
+    events = event_log.read(home, "T-1")
+    assert any(e["type"] == "Failed" for e in events)
+
+
+def test_watchdog_disabled_when_max_session_seconds_is_zero(home, cfg):
+    cfg.max_session_seconds = 0
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
+    _age_claim(home, "T-1", store.now_epoch() - 1_000_000)  # ancient, but watchdog is off
+
+    assert disp.run_watchdog(cfg, now=store.now_epoch()) == []
+    assert claims.is_claimed(home, "T-1")
+
+
+def test_dispatch_runs_watchdog_before_computing_active(home, cfg):
+    """A hung claim must not count toward concurrency in the same sweep it's
+    reaped -- run_watchdog runs before `active = sessions.list_active()`."""
+    cfg.max_session_seconds = 100
+    cfg.max_concurrency = 1
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    _seed(home, "T-2", Phase.READY)
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
+        _age_claim(home, "T-1", store.now_epoch() - 10_000)
+
+        report = disp.dispatch(cfg, DryRunSessions(), now=store.now_epoch())
+
+        assert "T-1" in report.reaped
+        assert report.spawned == ["T-2"]  # the freed slot went to T-2, not held by the dead claim
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_spawn_attempts_fail_after_max_with_no_progress(home, cfg):
+    """AC: N spawns with zero new events (observed_seq never advances) convert
+    into a failure instead of an infinite respawn loop -- looped over real
+    dispatch() sweeps with a no-op session manager."""
+    _seed(home, "T-1", Phase.READY)
+    cfg.max_spawn_attempts = 3
+    cfg.min_spawn_interval = 0
+    sessions = _EphemeralSessions()  # "dies" instantly every sweep; appends nothing
+
+    now = 1_000_000
+    reports = [disp.dispatch(cfg, sessions, now=now + i) for i in range(4)]
+
+    assert [r.spawned for r in reports[:3]] == [["T-1"]] * 3
+    assert reports[3].spawned == []          # 4th attempt: failed instead of respawned
+    assert "T-1" in reports[3].reaped
+
+    snap = snap_mod.load(home, "T-1")
+    assert snap.failure_count == 1
+    # lands in the existing backoff/dead-letter machinery -- one or the other:
+    assert snap.next_requeue_at is not None or snap.phase == Phase.DEGRADED.value
+
+
+def test_spawn_attempts_reset_when_observed_seq_advances(home, cfg):
+    """Real progress (an appended event) resets the no-progress counter, so a
+    normally-converging ticket is never penalized."""
+    _seed(home, "T-1", Phase.READY)
+    cfg.max_spawn_attempts = 2
+    cfg.min_spawn_interval = 0
+    sessions = _EphemeralSessions()
+
+    now = 1_000_000
+    r1 = disp.dispatch(cfg, sessions, now=now)
+    assert r1.spawned == ["T-1"]
+    # Progress happens between sweeps (a real reconciler would append something).
+    event_log.append(home, "T-1", "Note", {"text": "made progress"}, actor="r")
+    snap_mod.rebuild(home, "T-1")
+
+    r2 = disp.dispatch(cfg, sessions, now=now + 1)
+    assert r2.spawned == ["T-1"]  # counter reset by the seq bump -- not failed
+    assert snap_mod.load(home, "T-1").failure_count == 0
 
 
 # --- launchctl-free kill switch: fleet.pause()/resume() (T-15) --------------

@@ -70,3 +70,18 @@ def active_keys(home: Path) -> set[str]:
             if is_claimed(home, f.stem):
                 out.add(f.stem)
     return out
+
+
+def all_claims(home: Path) -> dict[str, dict]:
+    """Every claim file's raw contents, keyed by ticket key -- regardless of pid
+    liveness. Used by the watchdog, which reaps on session AGE, not liveness."""
+    d = home / "derived" / "claims"
+    out: dict[str, dict] = {}
+    if d.exists():
+        for f in d.glob("*.json"):
+            if f.name.startswith("."):
+                continue
+            c = store.read_json(f)
+            if c:
+                out[f.stem] = c
+    return out

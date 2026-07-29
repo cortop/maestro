@@ -342,6 +342,7 @@ def cmd_dispatch(args) -> int:
            "active_sessions": report.active_sessions,
            "scheduled_fired": report.scheduled_fired,
            "paused_until": report.paused_until,
+           "reaped": report.reaped,
            "due": [{"key": k, "reason": r} for k, r in report.due],
            "paused": report.paused}
     _print(out)
