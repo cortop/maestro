@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import backup, claims, event_log, fleet, inbox, ops, projection, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, fleet, inbox, ops, projection, ratelimit, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -310,7 +310,8 @@ def cmd_doctor(args) -> int:
         if (cfg.home / "tickets" / "_deadletter").exists() else []
     _print({"heartbeat": hb, "heartbeat_age_s": age,
             "dead_letters": [p.stem for p in dead],
-            "stale": age is not None and age > 1800})
+            "stale": age is not None and age > 1800,
+            "rate_limit": ratelimit.status(cfg.home, store.now_epoch())})
     return 0
 
 
@@ -336,8 +337,19 @@ def cmd_dispatch(args) -> int:
            "pruned_logs": report.pruned_logs,
            "pruned_bytes": report.pruned_bytes,
            "errors": report.errors,
+           "paused_until": report.paused_until,
            "due": [{"key": k, "reason": r} for k, r in report.due]}
     _print(out)
+    return 0
+
+
+def cmd_ratelimit(args) -> int:
+    """Show (or clear) the fleet-wide rate-limit pause set by maestro/ratelimit.py."""
+    cfg = _cfg(args)
+    if args.clear:
+        _print({"cleared": ratelimit.clear(cfg.home)})
+        return 0
+    _print(ratelimit.status(cfg.home, store.now_epoch()))
     return 0
 
 
@@ -484,6 +496,29 @@ def cmd_fold_steps(args) -> int:
     return 0
 
 
+def _render_result_line(obj: dict) -> str:
+    classified = steplog.classify_result(obj)
+    dur = obj.get("duration_ms")
+    suffix = f" ({dur}ms)" if dur else ""
+    outcome = classified["outcome"]
+    if outcome == "success":
+        return f"[result:{classified['subtype']}]{suffix}"
+    parts = [f"[result:{outcome}]"]
+    if classified["api_error_status"] is not None:
+        parts.append(f"api_error_status={classified['api_error_status']}")
+    if classified["message"]:
+        parts.append(classified["message"])
+    return " ".join(parts) + suffix
+
+
+def _render_rate_limit_line(obj: dict) -> str:
+    info = obj.get("rate_limit_info") or {}
+    kind = info.get("rateLimitType", "")
+    status = info.get("status", "")
+    resets_at = steplog.format_resets_at(info.get("resetsAt"))
+    return f"[rate_limit:{kind}] status={status} resetsAt={resets_at}"
+
+
 def _render_stream_jsonl(path: Path) -> None:
     """Print a human-readable view of a stream-jsonl session log."""
     seen_msg_ids: dict[str, dict] = {}
@@ -499,15 +534,14 @@ def _render_stream_jsonl(path: Path) -> None:
             if obj.get("type") == "assistant":
                 mid = obj["message"]["id"]
                 seen_msg_ids[mid] = obj
+            elif obj.get("type") == "rate_limit_event":
+                print(_render_rate_limit_line(obj))
             elif obj.get("type") == "result":
                 # Flush collected assistant messages in order, then show result
                 for _, msg_obj in seen_msg_ids.items():
                     _print_assistant_message(msg_obj)
                 seen_msg_ids.clear()
-                sub = obj.get("subtype", "")
-                dur = obj.get("duration_ms")
-                suffix = f" ({dur}ms)" if dur else ""
-                print(f"[result:{sub}]{suffix}")
+                print(_render_result_line(obj))
     # Flush any remaining (live/incomplete session)
     for _, msg_obj in seen_msg_ids.items():
         _print_assistant_message(msg_obj)
@@ -530,12 +564,11 @@ def cmd_logs(args) -> int:
     if not key:
         print("error: a ticket key is required (positional or --key)", file=sys.stderr)
         return 2
-    sessions = list_sessions(cfg.home, key)
-
     if args.list:
-        _print(sessions)
+        _print(list_sessions(cfg.home, key, with_outcome=True))
         return 0
 
+    sessions = list_sessions(cfg.home, key)
     if not sessions:
         print(f"No session logs found for {key}.", file=sys.stderr)
         return 1
@@ -575,9 +608,10 @@ def cmd_logs(args) -> int:
                                 continue
                             if obj.get("type") == "assistant":
                                 _print_assistant_message(obj)
+                            elif obj.get("type") == "rate_limit_event":
+                                print(_render_rate_limit_line(obj))
                             elif obj.get("type") == "result":
-                                sub = obj.get("subtype", "")
-                                print(f"[result:{sub}]")
+                                print(_render_result_line(obj))
                     else:
                         sys.stdout.write(chunk)
                         sys.stdout.flush()
@@ -702,6 +736,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
     add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters)")
+
+    sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
+    sp.add_argument("--clear", action="store_true", help="remove any active pause")
 
     sp = add("dispatch", cmd_dispatch, "one dispatcher sweep (launchd calls this)")
     sp.add_argument("--dry-run", action="store_true")

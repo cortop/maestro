@@ -1,0 +1,3 @@
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":1784400000,"overageStatus":"rejected"}}
+{"type":"system","subtype":"init","cwd":"/repo","session_id":"sess_rl1","tools":["Bash"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"acceptEdits","apiKeySource":"ANTHROPIC_API_KEY"}
+{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"terminal_reason":"api_error","duration_ms":150,"result":"You've hit your monthly spend limit, resets at https://example.com/limits","session_id":"sess_rl1"}

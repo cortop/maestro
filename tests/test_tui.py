@@ -802,6 +802,26 @@ def test_render_fleet_no_dead_letters_shows_emdash(home):
     assert "—" in out
 
 
+def test_render_fleet_unpaused_shows_no_rate_limit_line(home):
+    status = {"loaded": True, "heartbeat_age_s": 30, "interval": 300, "label": "x"}
+    doctor = {"dead_letters": [], "stale": False, "rate_limit": {"paused": False}}
+    out = _render_fleet(status, doctor)
+    assert "paused until" not in out
+
+
+def test_render_fleet_paused_shows_paused_until_line(home):
+    import time as time_mod
+
+    until_ts = time_mod.time() + 3600
+    status = {"loaded": True, "heartbeat_age_s": 30, "interval": 300, "label": "x"}
+    doctor = {"dead_letters": [], "stale": False,
+              "rate_limit": {"paused": True, "paused_until": until_ts}}
+    out = _render_fleet(status, doctor)
+    assert "paused until" in out
+    until_str = time_mod.strftime("%H:%M", time_mod.localtime(until_ts))
+    assert until_str in out
+
+
 def test_fleet_screen_constructs(home):
     """FleetScreen can be instantiated without crashing."""
     screen = FleetScreen(home)
@@ -1562,6 +1582,49 @@ def test_render_log_line_result_error():
     lines = render_log_line(obj)
     assert len(lines) == 1
     assert "red" in lines[0]
+
+
+def test_render_log_line_result_rate_limited_not_green():
+    """The 2026-07-19 runaway payload: subtype success, is_error true, 429 — must
+    render red/rate_limited, never green success."""
+    obj = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "api_error_status": 429,
+        "result": "You've hit your monthly spend limit.",
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert "green" not in lines[0]
+    assert "429" in lines[0]
+    assert "rate_limited" in lines[0]
+
+
+def test_render_log_line_clean_success_still_green():
+    obj = {"type": "result", "subtype": "success", "is_error": False, "api_error_status": None,
+           "duration_ms": 1234}
+    lines = render_log_line(obj)
+    assert "green" in lines[0]
+    assert "1234ms" in lines[0]
+
+
+def test_render_log_line_rate_limit_event_surfaced():
+    """rate_limit_event is a first-class rendered line, not silently dropped."""
+    obj = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "rejected",
+            "rateLimitType": "five_hour",
+            "resetsAt": 1784400000,
+            "overageStatus": "rejected",
+        },
+    }
+    lines = render_log_line(obj)
+    assert len(lines) == 1
+    assert lines[0]
+    assert "green" not in lines[0]
+    assert "five_hour" in lines[0]
 
 
 def test_render_log_line_unknown_type_returns_empty():

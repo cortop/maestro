@@ -82,6 +82,11 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         f"  Stale:           {stale_str}",
         f"  Dead letters:    {dead_str}",
     ]
+    rl = doctor.get("rate_limit") or {}
+    if rl.get("paused"):
+        until_ts = rl.get("paused_until")
+        until_str = time.strftime("%H:%M", time.localtime(until_ts)) if until_ts else "?"
+        lines.append(f"  Rate limit:      [red bold]paused until {until_str}[/red bold]")
     return "\n".join(lines)
 
 
