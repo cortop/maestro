@@ -216,7 +216,9 @@ def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
 
     _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase, no timer -> due every sweep
     cfg.min_spawn_interval = 0
-    cfg.max_spawn_attempts = 0  # the no-progress counter (T-14) is not under test here
+    cfg.max_spawn_attempts = 0  # this test's ticket never progresses observed_seq by
+    # design (it's exercising the ledger, not real reconcile steps); the no-progress
+    # watchdog (T-13) would otherwise fail it after 5 spawns and starve `recent`.
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     for i in range(10):
@@ -238,6 +240,8 @@ def test_spawn_ledger_recent_hard_capped(home, cfg):
     """`recent` cannot grow without bound even with the spawn floor disabled."""
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg.min_spawn_interval = 0
+    cfg.max_spawn_attempts = 0  # no-progress watchdog would otherwise fail this
+    # never-progressing ticket long before `recent` reaches the cap.
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     n = disp._LEDGER_RECENT_CAP + 50

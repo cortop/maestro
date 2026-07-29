@@ -55,6 +55,9 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
         unverified_claim_max_age=cfg.unverified_claim_max_age,
     )
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
+    if report.repo_blockers:
+        print(f"warning: repo_path is blocked ({'; '.join(report.repo_blockers)}) "
+              "— no reconciler spawned", file=sys.stderr)
     if report.paused:
         print("fleet is paused — queued, will run on resume")
     return report
@@ -312,6 +315,7 @@ def cmd_doctor(args) -> int:
     now = store.now_epoch()
     rpt = health.report(cfg, now)
     rpt["rate_limit"] = ratelimit.status(cfg.home, now)
+    rpt["repo_preflight"] = disp.repo_preflight(cfg)
     _print(rpt)
     return 1 if rpt["runaway"] else 0
 
@@ -339,7 +343,8 @@ def cmd_dispatch(args) -> int:
            "paused_until": report.paused_until,
            "reaped": report.reaped,
            "due": [{"key": k, "reason": r} for k, r in report.due],
-           "paused": report.paused}
+           "paused": report.paused,
+           "repo_blocked": report.repo_blockers}
     _print(out)
     return 0
 
