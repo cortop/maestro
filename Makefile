@@ -4,7 +4,7 @@ export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
 
 PY := .venv/bin/python
 
-.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore
+.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs
 
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
@@ -20,6 +20,7 @@ help:
 	@echo "make fleet-resume            lift the pause"
 	@echo "make backup                  snapshot events/tickets/inbox/config to a tarball"
 	@echo "make restore                 restore the latest backup (refuses to clobber; use FORCE=1)"
+	@echo "make prune-logs              delete stale session logs per retention settings (DRY_RUN=1 to preview)"
 	@echo "make autocomplete            install zsh completion script"
 	@echo "make run-tui-dev"
 
@@ -62,6 +63,11 @@ backup:
 # board unless FORCE=1 (e.g. `make restore FORCE=1`).
 restore:
 	maestro restore $(if $(FORCE),--force,)
+
+# Delete stale session logs (per session_log_retention_days / session_log_max_per_ticket)
+# across every ticket. DRY_RUN=1 to preview counts/bytes without deleting anything.
+prune-logs:
+	maestro prune-logs --all $(if $(DRY_RUN),--dry-run,)
 
 fleet-up:
 	maestro/_assets/daemon/install.sh up

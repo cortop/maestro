@@ -223,25 +223,24 @@ def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
 
 
-def prune_session_logs(cfg: Config, key: str) -> int:
-    """Delete stale session log files for *key* per retention settings.
-
-    Never removes the log belonging to a currently-live, correctly-identified
-    reconciler (pid alive AND not a verified-denied identity — a reused pid is
-    definitionally not our reconciler, so its stale log is fair game). Returns
-    the number of files deleted.
-    """
+def _prune_plan(cfg: Config, key: str, *, now: float | None = None) -> list[dict]:
+    """Compute which of *key*'s session log files retention settings would delete,
+    without touching disk. 0/None on either knob means that dimension is unlimited;
+    both unlimited is a no-op. Never plans to delete the log belonging to a
+    currently-live, correctly-identified reconciler (pid alive AND not a
+    verified-denied identity — a reused pid is definitionally not our
+    reconciler, so its stale log is fair game)."""
     from . import claims
     from .sessions import list_sessions
 
     retention_days = cfg.session_log_retention_days
     max_per_ticket = cfg.session_log_max_per_ticket
-    if retention_days is None and max_per_ticket is None:
-        return 0
+    if not retention_days and not max_per_ticket:
+        return []
 
     all_files = list_sessions(cfg.home, key)
     if not all_files:
-        return 0
+        return []
 
     # Paths belonging to the live session (if any) are off-limits.
     live_paths: set[str] = set()
@@ -269,9 +268,9 @@ def prune_session_logs(cfg: Config, key: str) -> int:
     )
 
     to_delete: set[str] = set()
-    now = store.now_epoch()
+    now = now if now is not None else store.now_epoch()
 
-    if max_per_ticket is not None:
+    if max_per_ticket:
         kept = 0
         for sid in sorted_ids:
             files = by_id[sid]
@@ -283,7 +282,7 @@ def prune_session_logs(cfg: Config, key: str) -> int:
                 for f in files:
                     to_delete.add(f["path"])
 
-    if retention_days is not None:
+    if retention_days:
         cutoff = now - retention_days * 86400
         for sid in sorted_ids:
             files = by_id[sid]
@@ -293,14 +292,91 @@ def prune_session_logs(cfg: Config, key: str) -> int:
                 for f in files:
                     to_delete.add(f["path"])
 
+    return [f for f in all_files if f["path"] in to_delete]
+
+
+def prune_session_logs(cfg: Config, key: str, *, now: float | None = None) -> tuple[int, int]:
+    """Delete stale session log files for *key* per retention settings.
+
+    Never removes the log belonging to a currently-live reconciler (pid alive).
+    Returns (files deleted, bytes reclaimed).
+    """
     pruned = 0
-    for path_str in to_delete:
+    pruned_bytes = 0
+    for f in _prune_plan(cfg, key, now=now):
+        path = Path(f["path"])
         try:
-            Path(path_str).unlink(missing_ok=True)
-            pruned += 1
+            size = path.stat().st_size
+        except OSError:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        pruned += 1
+        pruned_bytes += size
+    return pruned, pruned_bytes
+
+
+def prune_session_logs_dry_run(cfg: Config, key: str, *, now: float | None = None) -> tuple[int, int]:
+    """Like ``prune_session_logs`` but only reports what would be deleted."""
+    total_bytes = 0
+    plan = _prune_plan(cfg, key, now=now)
+    for f in plan:
+        try:
+            total_bytes += Path(f["path"]).stat().st_size
         except OSError:
             pass
-    return pruned
+    return len(plan), total_bytes
+
+
+def prune_all_session_logs(cfg: Config, *, now: float | None = None,
+                            dry_run: bool = False, keys: list[str] | None = None) -> dict:
+    """Prune session logs for every key reachable under ``agent-logs/`` (or just
+    *keys*, when given, for a targeted single-key sweep).
+
+    Walks ``agent-logs/*`` directly rather than ``dispatcher.list_keys`` so orphaned
+    log dirs (no ticket/events/snapshot) stay reachable, while launchd's live
+    ``dispatch.out.log`` / ``dispatch.err.log`` are skipped (not directories) and any
+    non-key-shaped name is skipped too (belt and braces alongside the directory
+    check). A per-key ``OSError`` (e.g. an unreadable directory) is swallowed so one
+    bad key never stops the rest of the walk.
+    """
+    home = cfg.home
+    if keys is not None:
+        candidates = list(keys)
+    else:
+        candidates = []
+        log_root = home / "agent-logs"
+        if log_root.exists():
+            for entry in sorted(log_root.iterdir()):
+                if not entry.is_dir():
+                    continue
+                try:
+                    store.validate_key(entry.name)
+                except store.MaestroError:
+                    continue
+                candidates.append(entry.name)
+
+    per_key: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    total_files = 0
+    total_bytes = 0
+    for key in candidates:
+        try:
+            if dry_run:
+                count, nbytes = prune_session_logs_dry_run(cfg, key, now=now)
+            else:
+                count, nbytes = prune_session_logs(cfg, key, now=now)
+        except OSError as e:
+            errors[key] = str(e)
+            continue
+        if count:
+            per_key[key] = {"pruned_logs": count, "pruned_bytes": nbytes}
+        total_files += count
+        total_bytes += nbytes
+    return {"per_key": per_key, "pruned_logs": total_files, "pruned_bytes": total_bytes,
+            "errors": errors}
 
 
 def compact(cfg: Config, key: str) -> dict:
@@ -343,9 +419,9 @@ def compact(cfg: Config, key: str) -> dict:
                 f.write(json.dumps(ev, separators=(",", ":")) + "\n")
         tmp.replace(active_path)
 
-    pruned_logs = prune_session_logs(cfg, key)
+    pruned_logs, pruned_bytes = prune_session_logs(cfg, key)
     return {"archived": len(to_archive), "remaining": len(post), "cutoff_seq": cutoff,
-            "pruned_logs": pruned_logs}
+            "pruned_logs": pruned_logs, "pruned_bytes": pruned_bytes}
 
 
 def _archive_key_files(home: Path, key: str) -> None:

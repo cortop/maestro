@@ -340,6 +340,9 @@ def cmd_dispatch(args) -> int:
            "throttled": report.throttled,
            "active_sessions": report.active_sessions,
            "scheduled_fired": report.scheduled_fired,
+           "pruned_logs": report.pruned_logs,
+           "pruned_bytes": report.pruned_bytes,
+           "errors": report.errors,
            "paused_until": report.paused_until,
            "reaped": report.reaped,
            "due": [{"key": k, "reason": r} for k, r in report.due],
@@ -705,6 +708,18 @@ def cmd_tui(args) -> int:
     return tui_main(args)
 
 
+def cmd_prune_logs(args) -> int:
+    """[human] delete stale session logs per retention settings (--dry-run to preview)."""
+    cfg = _cfg(args)
+    if not args.key and not args.all:
+        print("error: pass a ticket key or --all", file=sys.stderr)
+        return 2
+    keys = None if args.all else [args.key]
+    result = ops.prune_all_session_logs(cfg, now=store.now_epoch(), dry_run=args.dry_run, keys=keys)
+    _print(result)
+    return 0
+
+
 def cmd_backup(args) -> int:
     """Snapshot the irreplaceable state (events/tickets/inbox/config) to a tarball."""
     cfg = _cfg(args)
@@ -801,6 +816,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("schedule", cmd_schedule, "list config-declared scheduled tasks (name/cadence/last_fired/next_due)")
     sp.add_argument("action", choices=["list"], nargs="?", default="list")
+
+    sp = add("prune-logs", cmd_prune_logs, "[human] delete stale session logs per retention settings")
+    sp.add_argument("key", nargs="?", default=None, help="prune only this ticket's logs")
+    sp.add_argument("--all", action="store_true", help="prune every key reachable under agent-logs/")
+    sp.add_argument("--dry-run", action="store_true", help="report what would be pruned; delete nothing")
 
     sp = add("backup", cmd_backup, "snapshot events/tickets/inbox/config to a tarball")
     sp.add_argument("--list", action="store_true",

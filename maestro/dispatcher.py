@@ -676,6 +676,34 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs) -> None:
                  reason=f"changes requested: {changes_requested_body}", actor="dispatcher")
 
 
+def maintenance_tick(home: Path, name: str, interval: int, now: float, fn) -> dict | None:
+    """Generic cursor-gated maintenance tick: run ``fn()`` at most once per
+    ``interval`` seconds, persisted in ``derived/.<name>_cursor.json``
+    (level-triggered, idempotent — the same shape ``backup.maybe_backup`` already
+    uses). ``interval <= 0`` disables the tick entirely. Returns ``fn()``'s result,
+    or ``None`` when the tick didn't run this sweep. Left generic so other
+    maintenance ticks (e.g. L-12's compact/archive_done) can adopt it instead of
+    hand-rolling another cursor.
+    """
+    if not interval or interval <= 0:
+        return None
+    cursor_path = home / "derived" / f".{name}_cursor.json"
+    cursor = store.read_json(cursor_path, {}) or {}
+    if now - cursor.get("epoch", 0) < interval:
+        return None
+    result = fn()
+    cursor["epoch"] = now
+    store.write_json(cursor_path, cursor)
+    return result
+
+
+def prune_logs_tick(cfg: Config, now: float) -> dict | None:
+    """Cursor-gated session-log pruning tick — see ``ops.prune_all_session_logs``."""
+    from . import ops
+    return maintenance_tick(cfg.home, "prune", cfg.prune_interval, now,
+                            lambda: ops.prune_all_session_logs(cfg, now=now))
+
+
 def run_watchdog(cfg: Config, now: float) -> list[str]:
     """Reap any claim whose session has run past ``max_session_seconds`` (0
     disables). ``claims.active_keys`` only checks pid-alive, so a live-but-stuck
@@ -757,6 +785,9 @@ class DispatchReport:
     active_sessions: int
     scheduled_fired: list[str] = field(default_factory=list)
     throttled: list[str] = field(default_factory=list)  # due + free but under the spawn floor
+    pruned_logs: int = 0
+    pruned_bytes: int = 0
+    errors: dict = field(default_factory=dict)  # tick name -> error string (never aborts the sweep)
     paused_until: float | None = None  # fleet-wide rate-limit gate deadline, if paused
     reaped: list[str] = field(default_factory=list)     # watchdog: killed for age or no-progress
     paused: bool = False            # the fleet.pause() kill switch was armed this sweep
@@ -894,6 +925,17 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     # appends an event) before this sweep's due-check reads its snapshot.
     reaped = _run_hook("watchdog", hook_errors, run_watchdog, cfg, now, default=[])
 
+    pruned_logs = 0
+    pruned_bytes = 0
+    errors: dict = {}
+    prune_result = _run_hook("prune_tick", hook_errors, prune_logs_tick, cfg, now, default=None)
+    if prune_result:
+        pruned_logs = prune_result.get("pruned_logs", 0)
+        pruned_bytes = prune_result.get("pruned_bytes", 0)
+        per_key_errors = prune_result.get("errors") or {}
+        if per_key_errors:
+            errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
+
     active = sessions.list_active()
     due: list[tuple[str, str]] = []
     claimed: list[str] = []
@@ -1011,6 +1053,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
         scheduled_fired=scheduled_fired, throttled=throttled,
+        pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
         paused_until=paused_until_ts, reaped=reaped,
         repo_blockers=repo_blockers, hook_errors=hook_errors,
     )

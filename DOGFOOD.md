@@ -99,3 +99,28 @@ maestro restore <tarball> --force   # a specific one; --force overwrites a non-e
 
 `restore` refuses to clobber a non-empty `events/`/`tickets/` unless `--force`, so a mistaken
 restore can't wipe a live board.
+
+## Pruning session logs (bounding `agent-logs/` disk usage)
+
+The dispatcher auto-prunes stale reconciler session logs (`agent-logs/<KEY>/*.log` /
+`*.stream.jsonl`) on a timer — `prune_interval = 3600` by default (0 disables). Retention is
+`session_log_retention_days` (14) + `session_log_max_per_ticket` (200); either can be set to
+`0` (or `None`) for "unlimited" on that dimension. A currently-live reconciler's own log is
+never pruned. This is disk hygiene only — `agent-logs/` is deliberately excluded from `backup`
+(see the module docstring in `backup.py`), since it's disposable transcript, not source of truth.
+
+```bash
+maestro prune-logs --all --dry-run   # preview: per-key file/byte counts, deletes nothing
+maestro prune-logs --all             # prune every key
+maestro prune-logs <KEY>             # prune just one key
+```
+
+One-off cleanup of a backlog (e.g. after a runaway spawn incident): back up first — the backup
+protects `events/`, not the logs themselves, which are disposable by design — then dry-run to
+see what would go, then actually prune:
+
+```bash
+maestro backup
+maestro prune-logs --all --dry-run
+maestro prune-logs --all
+```

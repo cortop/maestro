@@ -58,8 +58,9 @@ class Config:
     reconcile_command: str = "/maestro-reconcile"
     capture_session_logs: bool = True
     session_log_format: str = "stream-json"  # "stream-json" | "text"
-    session_log_retention_days: int | None = None  # prune logs older than N days; None = keep all
-    session_log_max_per_ticket: int | None = None  # keep at most N logs per ticket; None = unlimited
+    session_log_retention_days: int | None = 14   # prune logs older than N days; 0/None = unlimited
+    session_log_max_per_ticket: int | None = 200  # keep at most N logs per ticket; 0/None = unlimited
+    prune_interval: int = 3600          # seconds between dispatcher auto-prune ticks (0 disables)
     nudge_on_human_input: bool = True  # trigger in-process dispatch after ans/cmd/create
     research_model: str = "opus"       # model for kind=research tickets
     research_effort: str = "high"      # effort for kind=research tickets
@@ -130,6 +131,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.session_log_retention_days = int(raw_days) if raw_days is not None else None
         raw_max = m.get("session_log_max_per_ticket", cfg.session_log_max_per_ticket)
         cfg.session_log_max_per_ticket = int(raw_max) if raw_max is not None else None
+        cfg.prune_interval = int(m.get("prune_interval", cfg.prune_interval))
         cfg.nudge_on_human_input = bool(m.get("nudge_on_human_input", cfg.nudge_on_human_input))
         cfg.research_model = m.get("research_model", cfg.research_model)
         cfg.research_effort = m.get("research_effort", cfg.research_effort)
@@ -193,6 +195,9 @@ max_impl_turns = 20
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
 # backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
 # backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
+# prune_interval = 3600           # auto-prune stale session logs on this cadence (0 disables)
+# session_log_retention_days = 14 # delete session logs older than N days (0/None = keep all)
+# session_log_max_per_ticket = 200 # keep at most N session logs per ticket (0/None = unlimited)
 # repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
 # compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
                                   # (0 disables; a manual `maestro compact <key>` always works)
