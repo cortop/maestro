@@ -52,8 +52,12 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
         extra_args=_web_tools_extra_args(cfg),
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
+        unverified_claim_max_age=cfg.unverified_claim_max_age,
     )
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
+    if report.repo_blockers:
+        print(f"warning: repo_path is blocked ({'; '.join(report.repo_blockers)}) "
+              "— no reconciler spawned", file=sys.stderr)
     if report.paused:
         print("fleet is paused — queued, will run on resume")
     return report
@@ -311,6 +315,7 @@ def cmd_doctor(args) -> int:
     now = store.now_epoch()
     rpt = health.report(cfg, now)
     rpt["rate_limit"] = ratelimit.status(cfg.home, now)
+    rpt["repo_preflight"] = disp.repo_preflight(cfg)
     _print(rpt)
     return 1 if rpt["runaway"] else 0
 
@@ -325,7 +330,8 @@ def cmd_dispatch(args) -> int:
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
             extra_args=_web_tools_extra_args(cfg),
-            session_log_format=cfg.session_log_format)
+            session_log_format=cfg.session_log_format,
+            unverified_claim_max_age=cfg.unverified_claim_max_age)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     projection.write(cfg.home)
     out = {"minted": report.minted,
@@ -340,7 +346,8 @@ def cmd_dispatch(args) -> int:
            "paused_until": report.paused_until,
            "reaped": report.reaped,
            "due": [{"key": k, "reason": r} for k, r in report.due],
-           "paused": report.paused}
+           "paused": report.paused,
+           "repo_blocked": report.repo_blockers}
     _print(out)
     return 0
 
@@ -498,10 +505,42 @@ def cmd_compact(args) -> int:
     return 0
 
 
+def cmd_archive_done(args) -> int:
+    cfg = _cfg(args)
+    moved = ops.archive_done(cfg, after=args.after, now=store.now_epoch())
+    _print({"archived": moved})
+    return 0
+
+
+def cmd_why(args) -> int:
+    """The recent per-sweep dispatcher decisions recorded for one key, from the
+    `derived/dispatch.jsonl` ledger's tail -- what made it due/skipped/spawned,
+    and any hook errors on those sweeps."""
+    cfg = _cfg(args)
+    _print({"key": args.key,
+            "decisions": disp.key_decisions(cfg.home, args.key, tail=args.tail)})
+    return 0
+
+
 def cmd_release(args) -> int:
     """A reconciler calls this on exit to drop its claim (best-effort)."""
     claims.release(_cfg(args).home, args.key)
     _print({"released": args.key})
+    return 0
+
+
+def cmd_claims(args) -> int:
+    """List claim files with verified identity: key/pid/age/verdict; --purge drops
+    the denied and over-age ones (leaves confirmed claims on disk)."""
+    cfg = _cfg(args)
+    rows = claims.describe_claims(cfg.home, max_age=cfg.unverified_claim_max_age)
+    if args.purge:
+        dropped = [r["key"] for r in rows if not r["claimed"]]
+        for key in dropped:
+            claims.release(cfg.home, key)
+        _print({"purged": dropped})
+    else:
+        _print(rows)
     return 0
 
 
@@ -606,9 +645,12 @@ def cmd_logs(args) -> int:
     is_stream = sess["format"] == "stream-json"
 
     if args.follow:
-        # Tail the file; stop when the session process is gone
+        # Tail the file; stop when the session process is gone OR its identity is
+        # denied (a reused pid claiming to be this session would otherwise poll
+        # pid_alive() forever, since the reused process really is alive).
         claim = claims.read_claim(cfg.home, key)
         live_pid = claim.get("pid") if claim else None
+        verdict = claims.verify_claim(cfg.home, key) if claim else "unknown"
         with log_path.open(encoding="utf-8", errors="replace") as f:
             buf = ""
             while True:
@@ -636,6 +678,8 @@ def cmd_logs(args) -> int:
                         sys.stdout.write(chunk)
                         sys.stdout.flush()
                 else:
+                    if verdict == "denied":
+                        break
                     if live_pid and not claims.pid_alive(live_pid):
                         break
                     if not live_pid:
@@ -757,6 +801,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
     add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
 
+    sp = add("why", cmd_why, "recent dispatcher decisions for one key (derived/dispatch.jsonl tail)")
+    sp.add_argument("key")
+    sp.add_argument("--tail", type=int, default=20, help="how many recent sweep decisions to show")
+
     sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
     sp.add_argument("--clear", action="store_true", help="remove any active pause")
 
@@ -828,7 +876,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
+    sp = add("archive-done", cmd_archive_done, "[maintenance] move DONE tickets out of the active scan")
+    sp.add_argument("--after", type=float, default=0, help="grace period in seconds since the ticket's last event")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
+
+    sp = add("claims", cmd_claims, "list claim files with verified identity (key/pid/age/verdict)")
+    sp.add_argument("--purge", action="store_true", help="release denied and over-age claims")
 
     sp = add("check-conflicts", cmd_check_conflicts,
              "[agent] route to implementing for auto-resolution if PR is CONFLICTING (idempotent)")

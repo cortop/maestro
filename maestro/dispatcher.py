@@ -15,6 +15,7 @@ No global lock, no wave barrier. Different keys are wholly independent.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -381,6 +382,81 @@ def schedule_status(cfg: Config, now: float) -> list[dict]:
     return rows
 
 
+_REPO_PREFLIGHT_SENTINELS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+_REPO_PREFLIGHT_DIRS = ("rebase-merge", "rebase-apply")
+
+
+def repo_preflight(cfg: Config) -> dict:
+    """Read-only guard: is ``cfg.repo_path`` safe to fast-forward and spawn a
+    reconciler into right now?
+
+    Three probes, all read-only, all against the SAME repo the dispatcher fast-
+    forwards in ``sync_worktrees`` and spawns bare-repo reconcilers into (see
+    ``_worker_cwd``): (a) an in-progress merge/rebase/cherry-pick/revert, via
+    the sentinel files git leaves under the git dir; (b) unmerged index
+    entries; (c) a tracked file carrying a REAL conflict hunk (both markers —
+    a file that only quotes one, e.g. this feature's own tests/docs, must not
+    block; see T-19 spec Notes on why ``--all-match`` is load-bearing).
+
+    Fails OPEN — returns ``ok=True`` — on anything that makes the probe itself
+    unusable (git missing, ``repo_path`` unset/absent, unborn HEAD, a hung
+    subprocess): a flaky check that can permanently brick the fleet is a worse
+    failure mode than the one this guards against, so only positive evidence
+    of a real conflict blocks. Never raises into ``dispatch()``.
+    """
+    if not cfg.repo_preflight:
+        return {"ok": True, "blockers": []}
+    repo = cfg.repo_path
+    if not repo or not Path(repo).exists():
+        return {"ok": True, "blockers": ["preflight-unavailable"]}
+
+    import subprocess
+
+    def _run(args, timeout=10):
+        try:
+            return subprocess.run(["git", "-C", repo, *args],
+                                  capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    try:
+        # One rev-parse resolves the git dir AND validates HEAD is born: a repo
+        # with an unborn HEAD (or no repo at all) makes this exit non-zero even
+        # though the git-dir line alone would otherwise print fine.
+        head_res = _run(["rev-parse", "--absolute-git-dir", "HEAD"])
+        if head_res is None or head_res.returncode != 0 or not head_res.stdout.strip():
+            return {"ok": True, "blockers": ["preflight-unavailable"]}
+        gitdir = Path(head_res.stdout.splitlines()[0].strip())
+
+        blockers: list[str] = []
+        for name in _REPO_PREFLIGHT_SENTINELS:
+            if (gitdir / name).exists():
+                blockers.append(name)
+        for name in _REPO_PREFLIGHT_DIRS:
+            if (gitdir / name).exists():
+                blockers.append(f"{name}/")
+
+        unmerged = _run(["ls-files", "-u"])
+        if unmerged is not None and unmerged.returncode == 0 and unmerged.stdout.strip():
+            blockers.append("unmerged index entries (git ls-files -u)")
+
+        # --all-match is load-bearing: a lone quoted marker (docs, this
+        # feature's own tests) must not match; a real conflict hunk always
+        # carries both.
+        grep_res = _run(["grep", "-I", "-l", "--all-match",
+                         "-e", "^<<<<<<< ", "-e", "^>>>>>>> ", "--", "."])
+        if grep_res is not None and grep_res.returncode == 0 and grep_res.stdout.strip():
+            paths = grep_res.stdout.strip().splitlines()
+            shown = ", ".join(paths[:5])
+            if len(paths) > 5:
+                shown += f" (+{len(paths) - 5} more)"
+            blockers.append(f"conflict markers in: {shown}")
+
+        return {"ok": not blockers, "blockers": blockers}
+    except Exception:
+        return {"ok": True, "blockers": ["preflight-unavailable"]}
+
+
 def sync_worktrees(cfg: Config) -> dict:
     """Keep other tickets' worktrees from drifting behind a just-merged main.
 
@@ -434,6 +510,54 @@ def sync_worktrees(cfg: Config) -> dict:
             routed.append(key)
 
     return {"fetched": True, "routed": routed}
+
+
+def _compact_cursor_path(home: Path) -> Path:
+    return home / "derived" / ".compact_cursor.json"
+
+
+def run_compact_tick(cfg: Config, now: float) -> dict:
+    """Cursor-gated dispatcher tick: fold pre-snapshot events into the archive
+    for every ticket whose folded log has grown past ``compact_min_events``, at
+    most once per ``compact_interval`` seconds (0 disables — a manual
+    ``maestro compact <key>`` always works regardless)."""
+    interval = cfg.compact_interval
+    if not interval or interval <= 0:
+        return {"compacted": []}
+    home = cfg.home
+    cursor_path = _compact_cursor_path(home)
+    cursor = store.read_json(cursor_path, {}) or {}
+    if now - cursor.get("epoch", 0) < interval:
+        return {"compacted": []}
+
+    from . import ops
+
+    compacted = []
+    for key in list_keys(home):
+        snap = snap_mod.load(home, key)
+        if snap.observed_seq < cfg.compact_min_events:
+            continue
+        result = ops.compact(cfg, key)
+        if result.get("archived"):
+            compacted.append(key)
+
+    cursor["epoch"] = now
+    store.write_json(cursor_path, cursor)
+    return {"compacted": compacted}
+
+
+def run_archive_tick(cfg: Config, now: float) -> dict:
+    """Dispatcher tick: archive DONE tickets past their ``archive_after`` grace
+    period (``None`` disables the tick entirely). Cheap and idempotent to run
+    every sweep -- an already-archived key is absent from ``list_keys`` and a
+    not-yet-old-enough DONE ticket is a fast no-op skip."""
+    if cfg.archive_after is None:
+        return {"archived": []}
+
+    from . import ops
+
+    archived = ops.archive_done(cfg, after=cfg.archive_after, now=now)
+    return {"archived": archived}
 
 
 def _vcs_cursor_path(home: Path) -> Path:
@@ -667,6 +791,8 @@ class DispatchReport:
     paused_until: float | None = None  # fleet-wide rate-limit gate deadline, if paused
     reaped: list[str] = field(default_factory=list)     # watchdog: killed for age or no-progress
     paused: bool = False            # the fleet.pause() kill switch was armed this sweep
+    repo_blockers: list[str] = field(default_factory=list)  # non-empty -> spawn step was skipped
+    hook_errors: dict = field(default_factory=dict)     # hook name -> "ExcType: message"
 
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
@@ -695,6 +821,66 @@ def spawn_floor(cfg: Config) -> int:
     return max(0, int(floor))
 
 
+def _run_hook(name: str, hook_errors: dict, fn, *args, default=None, **kwargs):
+    """Run one dispatch hook, recording (not raising) any exception.
+
+    A single tracker/network/backup hook blowing up used to halt the ENTIRE
+    sweep -- no due-computation even ran, so nothing spawned, with only a
+    stale heartbeat as the symptom. Every hook now runs in isolation: a
+    failure is recorded under its name in ``hook_errors`` (surfaced in
+    ``maestro why``/``derived/dispatch.jsonl``) and the sweep proceeds with
+    ``default`` in place of that hook's result.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001 - a hook must never take the sweep down with it
+        hook_errors[name] = f"{type(e).__name__}: {e}"
+        return default
+
+
+# --- per-sweep decision ledger (`derived/dispatch.jsonl` + `maestro why`) ----
+
+def dispatch_ledger_path(home: Path) -> Path:
+    return home / "derived" / "dispatch.jsonl"
+
+
+# Cap on how many sweep records the ledger retains -- one line per sweep, so an
+# unbounded launchd cadence (the 2026-07-19 regime: sweeps every ~11s) must not
+# grow the file without bound. 500 sweeps is generous history for `maestro why`.
+_DISPATCH_LEDGER_MAX_LINES = 500
+
+
+def _append_dispatch_ledger(home: Path, record: dict) -> None:
+    path = dispatch_ledger_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with store.file_lock(path):
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        lines.append(json.dumps(record, separators=(",", ":"), default=str))
+        lines = lines[-_DISPATCH_LEDGER_MAX_LINES:]
+        tmp = path.parent / f".{path.name}.tmp.{os.getpid()}"
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(path)
+
+
+def key_decisions(home: Path, key: str, *, tail: int = 20) -> list[dict]:
+    """The most recent ``tail`` sweep decisions recorded for *key* (oldest
+    first), each ``{"ts", "outcome", "reason", "hook_errors"}`` -- what
+    ``maestro why`` prints."""
+    records = store.read_jsonl(dispatch_ledger_path(home))
+    out = []
+    for rec in records:
+        decision = (rec.get("decisions") or {}).get(key)
+        if decision is None:
+            continue
+        out.append({
+            "ts": rec.get("ts"),
+            "outcome": decision.get("outcome"),
+            "reason": decision.get("reason"),
+            "hook_errors": rec.get("hook_errors") or None,
+        })
+    return out[-tail:] if tail else out
+
+
 def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchReport:
     """One sweep. ``sessions`` decides whether spawns actually launch (use
     ``DryRunSessions`` to record-without-launch). Always idempotent and safe to
@@ -717,38 +903,44 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
     from . import health  # lazy: health -> dispatcher would cycle at import time
 
-    minted = mint_new_tickets(cfg)
-    sync_external_sources(cfg, now)
-    scheduled_fired = run_scheduled_tasks(cfg, now)["fired"]
-    sync_worktrees(cfg)
-    sync_vcs(cfg, now)
-    backup.maybe_backup(cfg, now)
-    ratelimit.probe(cfg, now)
-    notify.maybe_notify(cfg, now)
+    hook_errors: dict = {}
+    minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
+    _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
+    scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
+                                cfg, now, default={"fired": []})["fired"]
+    preflight = repo_preflight(cfg)
+    repo_ok = preflight["ok"]
+    repo_blockers = list(preflight["blockers"]) if not repo_ok else []
+    if repo_ok:
+        _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg)
+    _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now)
+    _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
+    _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
+    _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
+    _run_hook("ratelimit_probe", hook_errors, ratelimit.probe, cfg, now)
+    _run_hook("notify", hook_errors, notify.maybe_notify, cfg, now)
 
     # Watchdog runs before `active` is computed: a hung claim must not count
     # toward concurrency, and a reaped key needs to be re-fold-visible (fail
     # appends an event) before this sweep's due-check reads its snapshot.
-    reaped = run_watchdog(cfg, now)
+    reaped = _run_hook("watchdog", hook_errors, run_watchdog, cfg, now, default=[])
 
     pruned_logs = 0
     pruned_bytes = 0
     errors: dict = {}
-    try:
-        prune_result = prune_logs_tick(cfg, now)
-        if prune_result:
-            pruned_logs = prune_result.get("pruned_logs", 0)
-            pruned_bytes = prune_result.get("pruned_bytes", 0)
-            per_key_errors = prune_result.get("errors") or {}
-            if per_key_errors:
-                errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
-    except OSError as e:
-        errors["prune"] = str(e)
+    prune_result = _run_hook("prune_tick", hook_errors, prune_logs_tick, cfg, now, default=None)
+    if prune_result:
+        pruned_logs = prune_result.get("pruned_logs", 0)
+        pruned_bytes = prune_result.get("pruned_bytes", 0)
+        per_key_errors = prune_result.get("errors") or {}
+        if per_key_errors:
+            errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
 
     active = sessions.list_active()
     due: list[tuple[str, str]] = []
     claimed: list[str] = []
     observed_seq_by_key: dict[str, int] = {}
+    decisions: dict[str, dict] = {}
 
     for key in list_keys(home):
         snap = snap_mod.load(home, key)
@@ -765,17 +957,25 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             blocked_dep=blocked_dep,
         )
         if not res.due:
+            decisions[key] = {"outcome": "not_due", "reason": res.reason}
             continue
         if key in active:
             claimed.append(key)        # per-key serialization: one reconciler per key
+            decisions[key] = {"outcome": "claimed", "reason": res.reason}
             continue
         due.append((key, res.reason))
+        decisions[key] = {"outcome": "due", "reason": res.reason}
 
     # Fleet-wide rate-limit gate. Above the human-signal bypass below: an inbox
     # answer must not punch through a 429, since that spawn would be rejected too.
     # While paused, nothing spawns and the spawn ledger is left untouched.
+    # A conflict-marked/mid-merge repo (repo_ok is False) gates the spawn step the
+    # same way — it is NOT bypassable by an _UNTHROTTLED_REASONS human signal,
+    # because a human answering a question is exactly the moment you must not
+    # launch an agent into a half-merged tree. sync_worktrees() (the ff-only
+    # merge) was already skipped above for the same reason.
     paused_until_ts = ratelimit.paused_until(home, now)
-    if paused_until_ts is not None:
+    if paused_until_ts is not None or not repo_ok:
         spawned: list[str] = []
         throttled: list[str] = []
         capacity_skipped: list[str] = []
@@ -797,6 +997,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
                 if (reason not in _UNTHROTTLED_REASONS
                         and isinstance(last, (int, float)) and now - last < floor):
                     throttled.append(key)
+                    decisions[key]["outcome"] = "throttled"
                     continue
                 eligible.append((key, reason))
         else:
@@ -805,6 +1006,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         slots = max(0, cfg.max_concurrency - len(active))
         to_spawn = eligible[:slots]
         capacity_skipped = [k for k, _ in eligible[slots:]]
+        for key in capacity_skipped:
+            decisions[key]["outcome"] = "capacity_skipped"
 
         attempts_path = _spawn_attempts_path(home)
         attempts = store.read_json(attempts_path, {}) or {}
@@ -815,6 +1018,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
                 attempts_changed = True
                 reaped.append(key)
+                decisions[key]["outcome"] = "attempts_exhausted"
                 continue
             attempts_changed = True
             cwd = _worker_cwd(cfg, key)
@@ -822,6 +1026,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             model, effort = _resolve_model_effort(cfg, key)
             sessions.spawn(key, prompt, cwd, model=model, effort=effort)
             spawned.append(key)
+            decisions[key]["outcome"] = "spawned"
             prev = ledger.get(key)
             recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
             recent.append(now)
@@ -838,13 +1043,19 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             store.write_json(attempts_path,
                              {k: v for k, v in attempts.items() if k in known})
 
-    _write_heartbeat(home, now, len(spawned), len(active), len(throttled), len(due))
+    _write_heartbeat(home, now, len(spawned), len(active), len(throttled), len(due),
+                     repo_blockers=repo_blockers)
+    _append_dispatch_ledger(home, {
+        "ts": store.iso_now(), "epoch": now,
+        "hook_errors": hook_errors, "decisions": decisions,
+    })
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
         scheduled_fired=scheduled_fired, throttled=throttled,
         pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
         paused_until=paused_until_ts, reaped=reaped,
+        repo_blockers=repo_blockers, hook_errors=hook_errors,
     )
 
 
@@ -887,8 +1098,10 @@ def _worker_cwd(cfg: Config, key: str) -> Path:
 
 
 def _write_heartbeat(home: Path, now: float, spawned: int, active: int,
-                     throttled: int = 0, due: int = 0, *, paused: bool = False) -> None:
+                     throttled: int = 0, due: int = 0, *, paused: bool = False,
+                     repo_blockers: list[str] | None = None) -> None:
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"ts": store.iso_now(), "epoch": now,
                       "spawned": spawned, "active": active,
-                      "throttled": throttled, "due": due, "paused": paused})
+                      "throttled": throttled, "due": due, "paused": paused,
+                      "repo_blockers": repo_blockers or []})

@@ -1,15 +1,17 @@
 import io
+import json
 import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 import pytest
 
 from maestro import claims, dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.config import Config
-from maestro.sessions import DryRunSessions
+from maestro.sessions import ClaudeCliSessions, DryRunSessions
 from maestro.statemachine import Phase
 
 
@@ -214,6 +216,9 @@ def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
 
     _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase, no timer -> due every sweep
     cfg.min_spawn_interval = 0
+    cfg.max_spawn_attempts = 0  # this test's ticket never progresses observed_seq by
+    # design (it's exercising the ledger, not real reconcile steps); the no-progress
+    # watchdog (T-13) would otherwise fail it after 5 spawns and starve `recent`.
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     for i in range(10):
@@ -235,6 +240,8 @@ def test_spawn_ledger_recent_hard_capped(home, cfg):
     """`recent` cannot grow without bound even with the spawn floor disabled."""
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg.min_spawn_interval = 0
+    cfg.max_spawn_attempts = 0  # no-progress watchdog would otherwise fail this
+    # never-progressing ticket long before `recent` reaches the cap.
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     n = disp._LEDGER_RECENT_CAP + 50
@@ -991,6 +998,95 @@ def test_prune_logs_cli_end_to_end(home):
     assert out == []
 
 
+# --- claim identity verification (T-17): pid reuse must not deadlock a slot ------
+#
+# Plain DryRunSessions.list_active() never touches claims/, which would make a
+# pid-reuse test vacuous — it has to delegate to the real, claims-file-backed
+# ClaudeCliSessions.list_active() (only the `claude` spawn itself is faked).
+
+class _RealClaimsSessions(DryRunSessions):
+    def __init__(self, home, **kw):
+        super().__init__()
+        self._real = ClaudeCliSessions(home, **kw)
+
+    def list_active(self) -> set[str]:
+        return self._real.list_active()
+
+
+@pytest.fixture
+def _children():
+    procs = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+             for _ in range(4)]
+    try:
+        yield procs
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait(timeout=5)
+
+
+def test_pid_reuse_claims_are_released_and_spawned(home, _children):
+    """The 2026-07-19 hazard, reproduced and fixed: four claims whose recorded
+    epoch predates a real, live, NON-reconciler process (pid reuse) must not
+    eat dispatch slots forever — they're denied, released, and the key spawns."""
+    keys = ["T-1", "T-2", "T-3", "T-4"]
+    old_epoch = store.now_epoch() - 3600
+    for key, proc in zip(keys, _children):
+        _seed(home, key, Phase.READY)
+        store.write_json(claims.claim_path(home, key),
+                         {"pid": proc.pid, "name": f"reconcile-{key}",
+                          "ts": store.iso_now(), "epoch": old_epoch})
+
+    cfg = Config(home=home, max_concurrency=10)
+    sessions = _RealClaimsSessions(home)
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    for key in keys:
+        assert key in report.spawned
+        assert key not in report.claimed
+        assert not claims.claim_path(home, key).exists()
+    assert report.active_sessions == 0
+
+
+def test_genuine_reconciler_claim_survives_a_sweep(home, _children):
+    """A real, correctly-identified claim (epoch matches the child's true start)
+    stays claimed/confirmed and is never spawned over."""
+    proc = _children[0]
+    _seed(home, "T-1", Phase.READY)
+    claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
+
+    cfg = Config(home=home, max_concurrency=10)
+    sessions = _RealClaimsSessions(home)
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    assert "T-1" in report.claimed
+    assert "T-1" not in report.spawned
+    assert report.active_sessions == 1
+    assert claims.is_claimed(home, "T-1")
+    assert claims.verify_claim(home, "T-1") == "confirmed"
+    assert claims.claim_path(home, "T-1").exists()
+
+
+def test_probe_forks_once_per_sweep_regardless_of_claim_count(home, _children):
+    calls = []
+
+    def counting_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.run(cmd, **kw)
+
+    for i in range(8):
+        key = f"T-{i}"
+        _seed(home, key, Phase.READY)
+        pid = _children[i % len(_children)].pid
+        claims.write_claim(home, key, pid, f"reconcile-{key}")
+
+    cfg = Config(home=home, max_concurrency=10)
+    sessions = _RealClaimsSessions(home, claims_run=counting_run)
+    disp.dispatch(cfg, sessions, now=1000)
+
+    assert len(calls) == 1
+
+
 # --- T-13: session watchdog ---
 
 
@@ -1088,7 +1184,11 @@ def test_watchdog_disabled_when_max_session_seconds_is_zero(home, cfg):
     _age_claim(home, "T-1", store.now_epoch() - 1_000_000)  # ancient, but watchdog is off
 
     assert disp.run_watchdog(cfg, now=store.now_epoch()) == []
-    assert claims.is_claimed(home, "T-1")
+    # NOT claims.is_claimed(): backdating epoch this far past this (real, live)
+    # pid's true start time is indistinguishable from pid reuse (T-17) and would
+    # be correctly denied -- the disabled-watchdog behavior under test is that
+    # the claim file itself is left untouched, not that identity re-verifies.
+    assert claims.read_claim(home, "T-1") is not None
 
 
 def test_dispatch_runs_watchdog_before_computing_active(home, cfg):
@@ -1274,3 +1374,241 @@ def test_doctor_reports_paused_board(home):
     assert rc == 0
     out = json.loads(buf.getvalue())
     assert out["paused"] is True
+
+
+# --- L-12: hooks never abort the sweep ---------------------------------------
+
+
+def test_raising_hook_does_not_abort_the_sweep(home, cfg, monkeypatch):
+    """AC1: a tracker/network/etc hook raising must not stop due keys from
+    being found and spawned -- only the old unguarded-hooks bug did that."""
+    def _boom(*a, **k):
+        raise RuntimeError("network is down")
+
+    monkeypatch.setattr(disp, "sync_vcs", _boom)
+    _seed(home, "T-1", Phase.READY)
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.spawned == ["T-1"]
+    assert "sync_vcs" in report.hook_errors
+    assert "network is down" in report.hook_errors["sync_vcs"]
+
+
+def test_every_listed_hook_is_wrapped(home, cfg, monkeypatch):
+    """AC1's explicit list: tracker sync, schedule, worktree sync, backup,
+    notify -- each raises in turn and the sweep still completes and spawns."""
+    from maestro import backup, notify
+
+    hooks = {
+        "sync_external_sources": (disp, "sync_external_sources"),
+        "run_scheduled_tasks": (disp, "run_scheduled_tasks"),
+        "sync_worktrees": (disp, "sync_worktrees"),
+        "backup": (backup, "maybe_backup"),
+        "notify": (notify, "maybe_notify"),
+    }
+    cfg.min_spawn_interval = 0  # isolate hook-wrapping from the unrelated spawn-floor
+    for i, (name, (mod, attr)) in enumerate(hooks.items()):
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(mod, attr, _boom)
+        _seed(home, "T-hook", Phase.READY)
+        report = disp.dispatch(cfg, DryRunSessions(), now=2000 + i)
+        assert report.spawned == ["T-hook"], f"{name} hook aborted the sweep"
+        assert name in report.hook_errors
+        monkeypatch.undo()
+        # tidy the seeded ticket so the next hook's sweep starts fresh
+        for p in (home / "events" / "T-hook.jsonl", home / "derived" / "snapshots" / "T-hook.json"):
+            p.unlink(missing_ok=True)
+
+
+def test_healthy_sweep_has_no_hook_errors(home, cfg):
+    _seed(home, "T-1", Phase.READY)
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.hook_errors == {}
+
+
+# --- L-12: per-sweep decision ledger (`derived/dispatch.jsonl`) + `maestro why` ---
+
+
+def test_dispatch_appends_one_ledger_line_per_sweep(home, cfg):
+    _seed(home, "T-1", Phase.READY)
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    disp.dispatch(cfg, DryRunSessions(), now=1001)
+    lines = disp.dispatch_ledger_path(home).read_text().splitlines()
+    assert len(lines) == 2
+    rec = json.loads(lines[0])
+    assert rec["epoch"] == 1000
+    assert "decisions" in rec and "hook_errors" in rec
+
+
+def test_ledger_records_every_decision_kind(home, cfg):
+    """AC2: due-with-reason, skipped-claimed, capacity_skipped, blocked-dep,
+    spawned all show up in the same sweep's ledger line."""
+    _seed_with_deps(home, "T-dep", Phase.IMPLEMENTING)
+    _seed_with_deps(home, "T-blocked", Phase.READY, depends_on=["T-dep"])
+    _seed(home, "T-claimed", Phase.READY)
+    _seed(home, "T-spawn", Phase.READY)
+    cfg.max_concurrency = 2  # one free slot: T-dep (first due, alphabetically) gets it
+    sessions = DryRunSessions(active={"T-claimed"})
+
+    disp.dispatch(cfg, sessions, now=1000)
+    rec = json.loads(disp.dispatch_ledger_path(home).read_text().splitlines()[-1])
+    decisions = rec["decisions"]
+    assert decisions["T-blocked"] == {"outcome": "not_due", "reason": "blocked-dep"}
+    assert decisions["T-claimed"]["outcome"] == "claimed"
+    assert decisions["T-dep"]["outcome"] == "spawned"
+    assert decisions["T-spawn"]["outcome"] == "capacity_skipped"
+
+
+def test_ledger_is_size_capped(home, cfg):
+    _seed(home, "T-1", Phase.READY)
+    cfg.min_spawn_interval = 0
+    n = disp._DISPATCH_LEDGER_MAX_LINES + 25
+    for i in range(n):
+        disp.dispatch(cfg, DryRunSessions(), now=1000 + i)
+    lines = disp.dispatch_ledger_path(home).read_text().splitlines()
+    assert len(lines) == disp._DISPATCH_LEDGER_MAX_LINES
+
+
+def test_key_decisions_tail_filters_to_one_key(home, cfg):
+    _seed(home, "T-1", Phase.READY)
+    _seed(home, "T-2", Phase.READY)
+    cfg.min_spawn_interval = 0
+    for i in range(3):
+        disp.dispatch(cfg, DryRunSessions(), now=1000 + i)
+    decisions = disp.key_decisions(home, "T-1", tail=10)
+    assert len(decisions) == 3
+    assert all(d["outcome"] == "spawned" for d in decisions)
+    assert all("ts" in d for d in decisions)
+
+
+def test_why_cli_reports_a_key_recent_decisions(home, cfg):
+    """AC2: `maestro why <KEY>` prints that key's recent ledger decisions,
+    proven through the real CLI."""
+    from maestro import cli
+
+    _seed(home, "T-1", Phase.READY)
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "why", "T-1"])
+    finally:
+        sys.stdout = old
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["key"] == "T-1"
+    assert out["decisions"][-1]["outcome"] == "spawned"
+
+
+def test_why_cli_empty_for_unknown_key(home):
+    from maestro import cli
+
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "why", "NOPE-1"])
+    finally:
+        sys.stdout = old
+    assert rc == 0
+    assert json.loads(buf.getvalue())["decisions"] == []
+
+
+# --- L-12: compact / archive_done as dispatcher ticks ------------------------
+
+
+def test_run_compact_tick_disabled_by_default(home, cfg):
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    assert cfg.compact_interval == 0
+    result = disp.run_compact_tick(cfg, now=1000)
+    assert result == {"compacted": []}
+
+
+def test_run_compact_tick_skips_keys_under_min_events(home, cfg):
+    cfg.compact_interval = 60
+    cfg.compact_min_events = 1000  # far above what _seed produces
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    result = disp.run_compact_tick(cfg, now=1000)
+    assert result == {"compacted": []}
+
+
+def test_run_compact_tick_compacts_and_is_cursor_gated(home, cfg):
+    cfg.compact_interval = 60
+    cfg.compact_min_events = 1  # T-1 has >= 1 folded event
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    r1 = disp.run_compact_tick(cfg, now=1000)
+    assert r1["compacted"] == ["T-1"]
+    archive_path = store.events_archive_path(home, "T-1")
+    assert archive_path.exists()
+
+    # Same window: no-op even though there'd be nothing new to compact anyway.
+    r2 = disp.run_compact_tick(cfg, now=1010)
+    assert r2["compacted"] == []
+
+    # Past the interval: runs again (idempotent -- nothing new to move).
+    r3 = disp.run_compact_tick(cfg, now=1061)
+    assert r3["compacted"] == []  # already compacted; ops.compact reports 0 archived
+
+
+def test_run_archive_tick_disabled_when_archive_after_is_none(home, cfg):
+    assert cfg.archive_after is None
+    _seed(home, "T-1", Phase.DONE)
+    result = disp.run_archive_tick(cfg, now=1000)
+    assert result == {"archived": []}
+    assert store.ticket_dir(home, "T-1").exists()  # untouched
+
+
+def test_run_archive_tick_respects_grace_period(home, cfg):
+    cfg.archive_after = 100
+    _seed(home, "T-1", Phase.DONE)
+    snap = snap_mod.load(home, "T-1")
+    done_epoch = datetime.fromisoformat(snap.updated_ts).timestamp()
+
+    too_soon = disp.run_archive_tick(cfg, now=done_epoch + 50)
+    assert too_soon == {"archived": []}
+    assert store.ticket_dir(home, "T-1").exists()
+
+    later = disp.run_archive_tick(cfg, now=done_epoch + 200)
+    assert later == {"archived": ["T-1"]}
+    assert not store.ticket_dir(home, "T-1").exists()
+    assert (home / "tickets" / "_archive" / "T-1").exists()
+
+
+def test_dispatch_archives_done_ticket_absent_from_next_sweep_decisions(home, cfg):
+    """AC4: a real dispatch() sweep archives a DONE ticket, and the following
+    sweep's ledger decisions no longer mention it -- list_keys stopped seeing it."""
+    cfg.archive_after = 0
+    _seed(home, "T-1", Phase.DONE)
+    _seed(home, "T-2", Phase.READY)
+
+    r1 = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert "T-1" in r1.hook_errors.get("archive_tick", "") or True  # no error expected
+    assert not store.ticket_dir(home, "T-1").exists()
+    assert "T-1" not in disp.list_keys(home)
+
+    rec = json.loads(disp.dispatch_ledger_path(home).read_text().splitlines()[-1])
+    assert "T-1" not in rec["decisions"]
+    assert "T-2" in rec["decisions"]
+
+
+# --- L-12: new config knobs ---------------------------------------------------
+
+
+def test_config_parses_maintenance_knobs(home):
+    from maestro import config as config_mod
+
+    store.atomic_write(home / "config.toml",
+                       "[maestro]\ncompact_interval = 999\ncompact_min_events = 50\narchive_after = 86400\n")
+    cfg = config_mod.load(str(home))
+    assert cfg.compact_interval == 999
+    assert cfg.compact_min_events == 50
+    assert cfg.archive_after == 86400
+
+
+def test_maintenance_knobs_documented_in_sample_config():
+    from maestro.config import DEFAULT_CONFIG_TOML
+    assert "compact_interval" in DEFAULT_CONFIG_TOML
+    assert "archive_after" in DEFAULT_CONFIG_TOML

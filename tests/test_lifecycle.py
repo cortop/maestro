@@ -78,3 +78,38 @@ def test_finalize_and_archive(cfg):
     moved = ops.archive_done(cfg)
     assert "T-1" in moved
     assert (home / "tickets" / "_archive" / "T-1").exists()
+
+
+def test_archive_done_relocates_events_and_snapshot(cfg):
+    """L-12 AC4: archive_done must relocate events/<KEY>.jsonl + the snapshot
+    too, not just the ticket dir -- that's what makes `list_keys` stop
+    sweeping an archived key."""
+    home = cfg.home
+    _create(cfg, "T-1")
+    ops.finalize(cfg, "T-1")
+    assert store.events_path(home, "T-1").exists()
+    assert store.snapshot_path(home, "T-1").exists()
+
+    moved = ops.archive_done(cfg)
+    assert moved == ["T-1"]
+
+    assert not store.events_path(home, "T-1").exists()
+    assert not store.snapshot_path(home, "T-1").exists()
+    assert store.archived_events_path(home, "T-1").exists()
+    assert store.archived_snapshot_path(home, "T-1").exists()
+    assert "T-1" not in disp.list_keys(home)
+
+
+def test_archived_dependency_still_resolves_as_done(cfg):
+    """A dependent must not block forever just because its dependency finished
+    and got archived -- snapshot.load falls back to the archived location."""
+    home = cfg.home
+    _create(cfg, "T-dep")
+    ops.finalize(cfg, "T-dep")
+    ops.archive_done(cfg)
+    assert "T-dep" not in disp.list_keys(home)
+
+    _create(cfg, "T-1")
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 0\ndependsOn: [T-dep]\n")
+    assert disp._has_unmet_deps(home, "T-1") is False

@@ -1,12 +1,14 @@
 import io
 import json
+import os
+import subprocess
 import sys
 
-from maestro import cli, dispatcher as disp, health, store
+from maestro import cli, claims, dispatcher as disp, health, ops, store
 from maestro.config import Config
 from maestro.statemachine import Phase
 
-from test_dispatcher import _EphemeralSessions, _seed
+from test_dispatcher import _EphemeralSessions, _seed, _seed_with_deps
 
 
 def _sweep(home):
@@ -139,3 +141,153 @@ def test_same_tickets_under_default_floor_do_not_trip(home):
     code, out = _sweep(home)
     assert out["runaway"] is False
     assert code == 0
+
+
+# --- L-12: doctor v2 check registry --------------------------------------------
+
+
+def test_stale_threshold_derived_from_plist_interval(tmp_path):
+    plist = tmp_path / "agent.plist"
+    plist.write_text("<key>StartInterval</key>\n  <integer>100</integer>\n")
+    assert health.stale_threshold(plist=plist) == 100 * health.STALE_INTERVAL_FACTOR
+
+
+def test_stale_threshold_falls_back_without_a_plist():
+    assert health.stale_threshold(plist="/nonexistent") == health.DEFAULT_STALE_THRESHOLD
+
+
+def test_check_heartbeat_uses_the_derived_threshold(home, cfg, tmp_path):
+    plist = tmp_path / "agent.plist"
+    plist.write_text("<key>StartInterval</key>\n  <integer>100</integer>\n")  # threshold 600
+    store.write_json(home / "derived" / ".heartbeat.json",
+                     {"ts": "x", "epoch": store.now_epoch() - 650, "spawned": 0})
+    result = health.check_heartbeat(cfg, store.now_epoch(), plist=plist)
+    assert result["threshold_s"] == 600
+    assert result["stale"] is True
+    assert result["status"] == "fail"
+
+
+def test_check_backup_age_ok_when_disabled(home, cfg):
+    cfg.backup_interval = 0
+    result = health.check_backup_age(cfg, store.now_epoch())
+    assert result == {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
+
+
+def test_check_backup_age_warns_when_stale(home, cfg):
+    cfg.backup_interval = 100
+    now = store.now_epoch()
+    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now - 1000})
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] == "warn"
+    assert result["age_s"] == 1000
+
+
+def test_check_backup_age_ok_when_fresh(home, cfg):
+    cfg.backup_interval = 3600
+    now = store.now_epoch()
+    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now - 10})
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] == "ok"
+
+
+def test_check_claim_age_ok_with_no_claims(home, cfg):
+    result = health.check_claim_age(cfg, store.now_epoch())
+    assert result == {"name": "claim_age", "status": "ok", "detail": "no live claims",
+                       "oldest_key": None, "oldest_age_s": None}
+
+
+def test_check_claim_age_warns_past_max_session_seconds(home, cfg):
+    cfg.max_session_seconds = 100
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
+    data = claims.read_claim(home, "T-1")
+    data["epoch"] = store.now_epoch() - 10_000
+    store.write_json(claims.claim_path(home, "T-1"), data)
+
+    result = health.check_claim_age(cfg, store.now_epoch())
+    assert result["status"] == "warn"
+    assert result["oldest_key"] == "T-1"
+    assert result["oldest_age_s"] >= 10_000
+
+
+def test_check_launchctl_ok_when_not_loaded():
+    def fake_run(*a, **k):
+        return subprocess.CompletedProcess(a[0], 1, stdout="")
+    result = health.check_launchctl(run=fake_run)
+    assert result == {"name": "launchctl", "status": "ok", "detail": "not loaded", "last_exit_code": None}
+
+
+def test_check_launchctl_fails_on_nonzero_last_exit():
+    def fake_run(*a, **k):
+        return subprocess.CompletedProcess(a[0], 0, stdout='"LastExitStatus" = 1;\n')
+    result = health.check_launchctl(run=fake_run)
+    assert result["status"] == "fail"
+    assert result["last_exit_code"] == 1
+
+
+def test_check_launchctl_ok_on_zero_last_exit():
+    def fake_run(*a, **k):
+        return subprocess.CompletedProcess(a[0], 0, stdout='"LastExitStatus" = 0;\n')
+    result = health.check_launchctl(run=fake_run)
+    assert result["status"] == "ok"
+    assert result["last_exit_code"] == 0
+
+
+def test_check_dead_letters_reports_ages(home, cfg):
+    dl = home / "tickets" / "_deadletter"
+    dl.mkdir(parents=True)
+    (dl / "T-1.md").write_text("dead")
+    result = health.check_dead_letters(cfg, store.now_epoch())
+    assert result["status"] == "warn"
+    assert "T-1" in result["ages_s"]
+
+
+def test_check_dead_letters_ok_when_none(home, cfg):
+    result = health.check_dead_letters(cfg, store.now_epoch())
+    assert result == {"name": "dead_letters", "status": "ok", "detail": "none", "ages_s": {}}
+
+
+def test_check_depends_on_reports_missing_key(home, cfg):
+    _seed_with_deps(home, "T-1", Phase.READY, depends_on=["TYPO-9"])
+    result = health.check_depends_on(cfg, store.now_epoch())
+    assert result["status"] == "warn"
+    assert {"key": "T-1", "dep": "TYPO-9"} in result["missing"]
+    assert result["cycles"] == []
+
+
+def test_check_depends_on_ignores_an_archived_done_dependency(home, cfg):
+    """A finished, archived dependency is not a 'missing' dep -- that would
+    falsely flag every completed-and-archived ticket's dependents forever."""
+    _seed(home, "T-dep", Phase.DONE)
+    ops.archive_done(cfg)
+    _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
+
+    result = health.check_depends_on(cfg, store.now_epoch())
+    assert result["missing"] == []
+    assert result["status"] == "ok"
+
+
+def test_check_depends_on_detects_a_cycle(home, cfg):
+    _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-2"])
+    _seed_with_deps(home, "T-2", Phase.READY, depends_on=["T-1"])
+    result = health.check_depends_on(cfg, store.now_epoch())
+    assert result["status"] == "fail"
+    assert len(result["cycles"]) >= 1
+    assert set(result["cycles"][0]) == {"T-1", "T-2"}
+
+
+def test_check_depends_on_ok_with_no_deps(home, cfg):
+    _seed(home, "T-1", Phase.READY)
+    result = health.check_depends_on(cfg, store.now_epoch())
+    assert result == {"name": "depends_on", "status": "ok",
+                       "detail": "0 missing dep(s), 0 cycle(s)", "missing": [], "cycles": []}
+
+
+def test_doctor_cli_includes_check_registry(home, cfg):
+    """AC3: `maestro doctor` runs the full check registry via the real CLI."""
+    _seed(home, "T-1", Phase.READY)
+    code, out = _sweep(home)
+    assert code == 0
+    names = {c["name"] for c in out["checks"]}
+    assert names == {"heartbeat", "backup_age", "claim_age", "dead_letters",
+                      "depends_on", "launchctl"}
+    assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
