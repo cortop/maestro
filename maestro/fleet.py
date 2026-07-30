@@ -96,6 +96,23 @@ def _throttle_from_plist(plist=None) -> int | None:
     return _plist_integer(plist.read_text(encoding="utf-8"), "ThrottleInterval")
 
 
+_LAST_EXIT_RE = re.compile(r'"LastExitStatus"\s*=\s*(-?\d+);')
+
+
+def last_exit_code(*, run=subprocess.run) -> int | None:
+    """Parse ``LastExitStatus`` from ``launchctl list <LABEL>`` (a per-job query,
+    unlike the bare ``launchctl list`` ``status()`` uses to check membership) --
+    ``None`` if the job isn't loaded or ``launchctl`` isn't available."""
+    try:
+        p = run(["launchctl", "list", LABEL], capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    if p.returncode != 0:
+        return None
+    m = _LAST_EXIT_RE.search(p.stdout or "")
+    return int(m.group(1)) if m else None
+
+
 def status(home: Path, *, run=subprocess.run, plist=None) -> dict:
     try:
         p = run(["launchctl", "list"], capture_output=True, text=True)

@@ -60,6 +60,18 @@ def snapshot_path(home: Path, key: str) -> Path:
     return home / "derived" / "snapshots" / f"{validate_key(key)}.json"
 
 
+def archived_snapshot_path(home: Path, key: str) -> Path:
+    return home / "derived" / "snapshots" / "_archive" / f"{validate_key(key)}.json"
+
+
+def archived_events_path(home: Path, key: str) -> Path:
+    return home / "events" / "_archive" / f"{validate_key(key)}.jsonl"
+
+
+def archived_events_archive_path(home: Path, key: str) -> Path:
+    return home / "events" / "_archive" / f"{validate_key(key)}.archive.jsonl"
+
+
 def cursor_path(home: Path, key: str) -> Path:
     return home / "derived" / "cursors" / f"{validate_key(key)}.json"
 

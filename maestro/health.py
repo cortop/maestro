@@ -3,16 +3,29 @@ that trips ``runaway`` when observed spawns/hour exceed what the rate guards
 (``dispatcher.spawn_floor``) themselves permit. The existing liveness signals only
 answer "is the dispatcher alive"; this answers "is it doing too much" (the
 2026-07-19 incident: fresh heartbeat, zero dead letters, 21,731 no-op spawns).
+
+``report()`` also runs a small check registry (L-12) surfacing things a stale
+heartbeat alone won't: backup age, oldest live claim, launchd's last exit code,
+dead-letter ages, and ``dependsOn`` graph validation (missing keys / cycles --
+previously a typo'd or cyclic dependency stranded a ticket in ``blocked-dep``
+forever with zero signal).
 """
 from __future__ import annotations
 
 import math
 from pathlib import Path
 
-from . import dispatcher, store
+from . import claims, dispatcher, fleet, store
 from .config import Config
 
 WINDOW_SECONDS = 3600
+
+# Fallback heartbeat-stale threshold when no plist interval can be read (no
+# LaunchAgent installed, or a plist override that doesn't exist). Matches the
+# old hardcoded value, which itself assumed the common 300s default interval
+# times this same factor.
+DEFAULT_STALE_THRESHOLD = 1800
+STALE_INTERVAL_FACTOR = 6  # missing this many consecutive sweeps looks stale
 
 
 def spawn_rate(home: Path, now: float, window: int = WINDOW_SECONDS) -> dict:
@@ -51,9 +64,168 @@ def spawn_budget(cfg: Config) -> int:
     return n_keys * math.ceil(3600 / effective_floor)
 
 
-def report(cfg: Config, now: float) -> dict:
+def stale_threshold(*, plist=None) -> int:
+    """Heartbeat-stale threshold, derived from the actual installed plist's
+    ``StartInterval`` rather than a hardcoded guess -- a fleet run at a
+    non-default cadence (``maestro fleet up --interval N``) used to be flagged
+    stale (or not) against a threshold that had nothing to do with its real
+    sweep rate."""
+    interval = fleet._interval_from_plist(plist)
+    if not interval:
+        return DEFAULT_STALE_THRESHOLD
+    return interval * STALE_INTERVAL_FACTOR
+
+
+def check_heartbeat(cfg: Config, now: float, *, plist=None) -> dict:
+    home = cfg.home
+    hb = store.read_json(home / "derived" / ".heartbeat.json", {})
+    age = round(now - hb["epoch"]) if hb.get("epoch") else None
+    threshold = stale_threshold(plist=plist)
+    stale = age is not None and age > threshold
+    return {
+        "name": "heartbeat", "status": "fail" if stale else "ok",
+        "detail": f"heartbeat age {age}s (threshold {threshold}s)" if age is not None
+                  else "no heartbeat yet",
+        "heartbeat": hb, "age_s": age, "threshold_s": threshold, "stale": stale,
+    }
+
+
+def check_backup_age(cfg: Config, now: float) -> dict:
+    if not cfg.backup_interval or cfg.backup_interval <= 0:
+        return {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
+    cursor = store.read_json(cfg.home / "derived" / ".backup_cursor.json", {}) or {}
+    epoch = cursor.get("epoch")
+    age = round(now - epoch) if epoch else None
+    stale = age is None or age > cfg.backup_interval * 2
+    return {
+        "name": "backup_age", "status": "warn" if stale else "ok",
+        "detail": f"last backup {age}s ago" if age is not None else "no backup yet",
+        "age_s": age,
+    }
+
+
+def check_claim_age(cfg: Config, now: float) -> dict:
+    ages = {k: now - c.get("epoch", now) for k, c in claims.all_claims(cfg.home).items()}
+    if not ages:
+        return {"name": "claim_age", "status": "ok", "detail": "no live claims",
+                "oldest_key": None, "oldest_age_s": None}
+    oldest_key, oldest_age = max(ages.items(), key=lambda kv: kv[1])
+    threshold = cfg.max_session_seconds or None
+    warn = bool(threshold) and oldest_age > threshold
+    return {
+        "name": "claim_age", "status": "warn" if warn else "ok",
+        "detail": f"oldest claim {oldest_key} is {round(oldest_age)}s old",
+        "oldest_key": oldest_key, "oldest_age_s": round(oldest_age),
+    }
+
+
+def check_launchctl(*, run=None) -> dict:
+    kwargs = {"run": run} if run is not None else {}
+    code = fleet.last_exit_code(**kwargs)
+    fail = code is not None and code != 0
+    return {
+        "name": "launchctl", "status": "fail" if fail else "ok",
+        "detail": f"last exit code {code}" if code is not None else "not loaded",
+        "last_exit_code": code,
+    }
+
+
+def check_dead_letters(cfg: Config, now: float) -> dict:
+    dl_dir = cfg.home / "tickets" / "_deadletter"
+    ages = {}
+    if dl_dir.exists():
+        for p in dl_dir.glob("*.md"):
+            try:
+                ages[p.stem] = round(now - p.stat().st_mtime)
+            except OSError:
+                continue
+    return {
+        "name": "dead_letters", "status": "warn" if ages else "ok",
+        "detail": f"{len(ages)} dead-lettered ticket(s)" if ages else "none",
+        "ages_s": ages,
+    }
+
+
+def _key_exists_anywhere(home: Path, key: str) -> bool:
+    """A dependency is only genuinely *missing* if it never existed -- a
+    finished, archived ticket (``ops.archive_done``) is a legitimate satisfied
+    dependency, not a typo."""
+    if store.ticket_dir(home, key).exists():
+        return True
+    return (home / "tickets" / "_archive" / key).exists()
+
+
+def _depends_on_graph(home: Path) -> dict[str, list[str]]:
+    graph: dict[str, list[str]] = {}
+    for key in dispatcher.list_keys(home):
+        spec_file = store.spec_path(home, key)
+        graph[key] = (dispatcher.parse_depends_on(spec_file.read_text(encoding="utf-8"))
+                      if spec_file.exists() else [])
+    return graph
+
+
+def _find_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
+    """DFS cycle detection over the dependsOn graph; each cycle is reported as
+    the key path from its first repeated node back to itself."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {k: WHITE for k in graph}
+    path: list[str] = []
+    cycles: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        color[node] = GRAY
+        path.append(node)
+        for dep in graph.get(node, []):
+            if dep not in graph:
+                continue
+            if color.get(dep) == GRAY:
+                i = path.index(dep)
+                cycles.append(path[i:] + [dep])
+            elif color.get(dep) == WHITE:
+                visit(dep)
+        path.pop()
+        color[node] = BLACK
+
+    for node in list(graph):
+        if color[node] == WHITE:
+            visit(node)
+    return cycles
+
+
+def check_depends_on(cfg: Config, now: float) -> dict:
+    home = cfg.home
+    graph = _depends_on_graph(home)
+    missing = [{"key": key, "dep": dep}
+               for key, deps in graph.items() for dep in deps
+               if dep and dep not in graph and not _key_exists_anywhere(home, dep)]
+    cycles = _find_cycles(graph)
+    status = "fail" if cycles else ("warn" if missing else "ok")
+    return {
+        "name": "depends_on", "status": status,
+        "detail": f"{len(missing)} missing dep(s), {len(cycles)} cycle(s)",
+        "missing": missing, "cycles": cycles,
+    }
+
+
+# The check registry: cmd_doctor/report() run every entry and surface the
+# results under "checks", in addition to the existing top-level fields kept
+# for backward compatibility with the TUI fleet view and prior doctor output.
+CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
+          check_depends_on)
+
+
+def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
+    results = [check_heartbeat(cfg, now, plist=plist)]
+    results += [check(cfg, now) for check in CHECKS[1:]]
+    results.append(check_launchctl())
+    return results
+
+
+def report(cfg: Config, now: float, *, plist=None) -> dict:
     """The full doctor payload. ``cmd_doctor`` and the TUI fleet view both render
-    this exact dict, so there is only one implementation of "is this too much"."""
+    this exact dict, so there is only one implementation of "is this too much".
+    ``plist`` overrides the LaunchAgent plist path read for the heartbeat-stale
+    threshold -- production always resolves the real one; tests inject a fake."""
     home = cfg.home
     hb = store.read_json(home / "derived" / ".heartbeat.json", {})
     age = round(now - hb["epoch"]) if hb.get("epoch") else None
@@ -61,14 +233,17 @@ def report(cfg: Config, now: float) -> dict:
     dead = list(dl_dir.glob("*.md")) if dl_dir.exists() else []
     rate = spawn_rate(home, now)
     budget = spawn_budget(cfg)
+    checks = run_checks(cfg, now, plist=plist)
+    threshold = stale_threshold(plist=plist)
     return {
         "heartbeat": hb,
         "heartbeat_age_s": age,
         "dead_letters": [p.stem for p in dead],
-        "stale": age is not None and age > 1800,
+        "stale": age is not None and age > threshold,
         "spawns_last_hour": rate,
         "throttled_last_sweep": hb.get("throttled", 0),
         "spawn_budget_per_hour": budget,
         "runaway": bool(budget) and rate["total"] > budget,
         "paused": hb.get("paused", False),
+        "checks": checks,
     }

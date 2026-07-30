@@ -183,8 +183,16 @@ def rebuild(home: Path, key: str) -> Snapshot:
 
 
 def load(home: Path, key: str) -> Snapshot:
-    """Load the persisted snapshot, or a fresh TRIAGING default if none exists."""
+    """Load the persisted snapshot, or a fresh TRIAGING default if none exists.
+
+    Falls back to the archived location (``archive_done`` relocates a DONE
+    ticket's snapshot there): otherwise a dependent whose ``dependsOn`` entry
+    finished and got archived would see a phantom fresh-TRIAGING snapshot and
+    block forever on a dependency that actually completed.
+    """
     d = store.read_json(store.snapshot_path(home, key))
+    if not d:
+        d = store.read_json(store.archived_snapshot_path(home, key))
     if not d:
         return Snapshot(key=key)
     return Snapshot.from_dict(d)
