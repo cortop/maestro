@@ -64,13 +64,14 @@ def spawn_budget(cfg: Config) -> int:
     return n_keys * math.ceil(3600 / effective_floor)
 
 
-def stale_threshold(*, plist=None) -> int:
+def stale_threshold(home: Path | None = None, *, plist=None) -> int:
     """Heartbeat-stale threshold, derived from the actual installed plist's
     ``StartInterval`` rather than a hardcoded guess -- a fleet run at a
     non-default cadence (``maestro fleet up --interval N``) used to be flagged
     stale (or not) against a threshold that had nothing to do with its real
-    sweep rate."""
-    interval = fleet._interval_from_plist(plist)
+    sweep rate. *home* resolves which home's (possibly slugged) plist to read
+    when ``plist`` isn't given an explicit override."""
+    interval = fleet._interval_from_plist(plist, home=home)
     if not interval:
         return DEFAULT_STALE_THRESHOLD
     return interval * STALE_INTERVAL_FACTOR
@@ -80,7 +81,7 @@ def check_heartbeat(cfg: Config, now: float, *, plist=None) -> dict:
     home = cfg.home
     hb = store.read_json(home / "derived" / ".heartbeat.json", {})
     age = round(now - hb["epoch"]) if hb.get("epoch") else None
-    threshold = stale_threshold(plist=plist)
+    threshold = stale_threshold(home, plist=plist)
     stale = age is not None and age > threshold
     return {
         "name": "heartbeat", "status": "fail" if stale else "ok",
@@ -119,9 +120,9 @@ def check_claim_age(cfg: Config, now: float) -> dict:
     }
 
 
-def check_launchctl(*, run=None) -> dict:
+def check_launchctl(cfg: Config, *, run=None) -> dict:
     kwargs = {"run": run} if run is not None else {}
-    code = fleet.last_exit_code(**kwargs)
+    code = fleet.last_exit_code(cfg.home, **kwargs)
     fail = code is not None and code != 0
     return {
         "name": "launchctl", "status": "fail" if fail else "ok",
@@ -217,7 +218,7 @@ CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
     results = [check_heartbeat(cfg, now, plist=plist)]
     results += [check(cfg, now) for check in CHECKS[1:]]
-    results.append(check_launchctl())
+    results.append(check_launchctl(cfg))
     return results
 
 
@@ -234,7 +235,7 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
     rate = spawn_rate(home, now)
     budget = spawn_budget(cfg)
     checks = run_checks(cfg, now, plist=plist)
-    threshold = stale_threshold(plist=plist)
+    threshold = stale_threshold(home, plist=plist)
     return {
         "heartbeat": hb,
         "heartbeat_age_s": age,

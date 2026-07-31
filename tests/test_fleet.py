@@ -1,5 +1,6 @@
 """`maestro fleet` — tested against a fake launchctl / install script (no real system)."""
 import re
+from pathlib import Path
 
 from maestro import fleet, store
 
@@ -39,7 +40,7 @@ def test_status_loaded_with_heartbeat(home):
                      {"epoch": store.now_epoch() - 10})
 
     def run(cmd, **kw):
-        return FakeProc(0, "123\t0\tcom.maestro.dispatcher\nother\t0\tcom.apple.foo\n")
+        return FakeProc(0, f"123\t0\t{fleet.label(home)}\nother\t0\tcom.apple.foo\n")
 
     res = fleet.status(home, run=run, plist="/nonexistent")
     assert res["loaded"] is True
@@ -90,7 +91,7 @@ def test_up_clamps_a_dangerous_interval_before_calling_the_script(home):
     assert res["clamped_from"] == 10
 
 
-def _render_plist(tmp_path, interval):
+def _render_plist(tmp_path, interval, label="com.maestro.dispatcher"):
     """Run the REAL daemon/install.sh against a throwaway HOME, with launchctl and
     the binaries it probes stubbed out, and return the plist it rendered."""
     import os
@@ -110,12 +111,13 @@ def _render_plist(tmp_path, interval):
     env = dict(os.environ)
     env["HOME"] = str(fake_home)
     env["MAESTRO_HOME"] = str(tmp_path / "mhome")
+    env["MAESTRO_LABEL"] = label
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
 
     p = subprocess.run([str(script), "up", "--interval", str(interval)],
                        env=env, capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
-    plist = fake_home / "Library" / "LaunchAgents" / "com.maestro.dispatcher.plist"
+    plist = fake_home / "Library" / "LaunchAgents" / f"{label}.plist"
     assert plist.exists(), p.stderr
     return plist, p
 
@@ -346,3 +348,185 @@ def test_projection_workstate_no_banner_when_unpaused(home):
     projection.write(home)
     text = (home / "derived" / "WORKSTATE.md").read_text()
     assert "paused" not in text.lower()
+
+
+# --- MR-1: per-home launchd label ---------------------------------------------
+# One label ("com.maestro.dispatcher") for every MAESTRO_HOME meant one
+# `fleet up` on a second home silently overwrote/unloaded the first home's
+# dispatcher. fleet.label() derives a per-home slug so N homes can run N
+# fleets; the default ~/.maestro home keeps the legacy bare label so existing
+# single-home installs aren't orphaned.
+
+
+def test_label_distinct_and_stable_and_default_home_keeps_legacy(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home1 = tmp_path / "repo1" / ".maestro"
+    home2 = tmp_path / "repo2" / ".maestro"
+    home1.mkdir(parents=True)
+    home2.mkdir(parents=True)
+
+    lbl1, lbl2 = fleet.label(home1), fleet.label(home2)
+    assert lbl1 != lbl2
+    assert lbl1.startswith("com.maestro.dispatcher.")
+    assert lbl2.startswith("com.maestro.dispatcher.")
+    assert fleet.label(home1) == lbl1  # stable across calls
+    assert fleet.label(home2) == lbl2
+
+    p1, p2 = fleet._plist_path(home1), fleet._plist_path(home2)
+    assert p1 != p2
+    assert p1.name == f"{lbl1}.plist"
+    assert p2.name == f"{lbl2}.plist"
+
+    default_home = tmp_path / ".maestro"
+    default_home.mkdir()
+    assert fleet.label(default_home) == fleet.LEGACY_LABEL
+    assert fleet._plist_path(default_home).name == f"{fleet.LEGACY_LABEL}.plist"
+
+
+def test_up_real_flow_two_homes_no_clobber(tmp_path, monkeypatch):
+    """Drives the REAL install.sh (via fleet.up) for two temp homes with
+    launchctl/maestro/claude stubbed on PATH -- proves the second `up` leaves
+    the first home's plist alone (T-19-style clobber the label slug fixes)."""
+    import os as _os
+
+    fake_home = tmp_path / "fakehome"
+    (fake_home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("launchctl", "maestro", "claude"):
+        stub = fake_bin / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{_os.environ['PATH']}")
+
+    script = Path(__file__).resolve().parents[1] / "maestro" / "_assets" / "daemon" / "install.sh"
+    home1, home2 = tmp_path / "home1", tmp_path / "home2"
+    home1.mkdir()
+    home2.mkdir()
+
+    res1 = fleet.up(home1, interval=120, script=script)
+    res2 = fleet.up(home2, interval=180, script=script)
+    assert res1["rc"] == 0, res1["stdout"]
+    assert res2["rc"] == 0, res2["stdout"]
+
+    lbl1, lbl2 = fleet.label(home1), fleet.label(home2)
+    assert lbl1 != lbl2
+
+    agents_dir = fake_home / "Library" / "LaunchAgents"
+    plist1, plist2 = agents_dir / f"{lbl1}.plist", agents_dir / f"{lbl2}.plist"
+    assert plist1.exists() and plist2.exists()
+
+    text1, text2 = plist1.read_text(), plist2.read_text()
+    assert f"<string>{lbl1}</string>" in text1
+    assert f"<string>{lbl2}</string>" in text2
+    assert str(home1) in text1 and str(home1) not in text2
+    assert str(home2) in text2 and str(home2) not in text1
+    assert f"{home1}/agent-logs/dispatch.out.log" in text1
+    assert f"{home2}/agent-logs/dispatch.out.log" in text2
+
+
+def test_up_migrates_same_home_legacy_plist_but_warns_off_a_different_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "Library" / "LaunchAgents").mkdir(parents=True)
+    home = tmp_path / "myhome"
+    home.mkdir()
+    other_home = tmp_path / "otherhome"
+    other_home.mkdir()
+    legacy = tmp_path / "Library" / "LaunchAgents" / "com.maestro.dispatcher.plist"
+
+    # Same home baked into the legacy plist -> unloaded + removed, replaced by the slugged one.
+    legacy.write_text(f"<key>MAESTRO_HOME</key>\n<string>{home}</string>\n")
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return FakeProc(0, "")
+
+    res = fleet.up(home, interval=120, run=run, script="/fake/install.sh")
+    assert res["migrated_legacy"] is True
+    assert not legacy.exists()
+    assert ["launchctl", "unload", str(legacy)] in calls
+
+    # A DIFFERENT home baked into the legacy plist -> left untouched, just warned.
+    legacy.write_text(f"<key>MAESTRO_HOME</key>\n<string>{other_home}</string>\n")
+    calls2 = []
+
+    def run2(cmd, **kw):
+        calls2.append(cmd)
+        return FakeProc(0, "")
+
+    res2 = fleet.up(home, interval=120, run=run2, script="/fake/install.sh")
+    assert res2["migrated_legacy"] is False
+    assert "warning" in res2
+    assert legacy.exists()
+    assert ["launchctl", "unload", str(legacy)] not in calls2
+
+
+def test_last_exit_code_queries_the_slugged_label(home):
+    lbl = fleet.label(home)
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return FakeProc(0, '"LastExitStatus" = 0;\n')
+
+    code = fleet.last_exit_code(home, run=run)
+    assert code == 0
+    assert calls[0] == ["launchctl", "list", lbl]
+
+
+def test_status_reports_the_slugged_label(home):
+    def run(cmd, **kw):
+        return FakeProc(0, "")
+
+    res = fleet.status(home, run=run, plist="/nonexistent")
+    assert res["label"] == fleet.label(home)
+    assert res["label"] != fleet.LEGACY_LABEL
+
+
+def test_status_default_home_exact_token_not_fooled_by_a_slugged_line(tmp_path, monkeypatch):
+    """The legacy label is a strict prefix of every slugged label -- a naive
+    substring check on the default home would false-positive whenever ANY
+    slugged job is loaded. Exact-token match must not."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    default_home = tmp_path / ".maestro"
+    default_home.mkdir(parents=True)
+    other_home = tmp_path / "other"
+    other_home.mkdir()
+    slugged = fleet.label(other_home)
+
+    def run(cmd, **kw):
+        return FakeProc(0, f"123\t0\t{slugged}\n")
+
+    res = fleet.status(default_home, run=run, plist="/nonexistent")
+    assert res["label"] == fleet.LEGACY_LABEL
+    assert res["loaded"] is False
+
+
+def test_cli_fleet_status_reports_slugged_label(home):
+    import io
+    import json
+    import sys
+
+    from maestro import cli
+
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "fleet", "status"])
+    finally:
+        sys.stdout = old
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["label"] == fleet.label(home)
+    assert out["label"] != fleet.LEGACY_LABEL
+
+
+def test_min_interval_matches_install_sh():
+    script = Path(__file__).resolve().parents[1] / "maestro" / "_assets" / "daemon" / "install.sh"
+    m = re.search(r"^MIN_INTERVAL=(\d+)", script.read_text(), re.MULTILINE)
+    assert m is not None
+    assert int(m.group(1)) == fleet.MIN_INTERVAL
