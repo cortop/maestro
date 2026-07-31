@@ -10,6 +10,7 @@ need no such seam — they are pure ``derived/.paused`` JSON reads/writes via
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.resources
 import os
 import re
@@ -18,7 +19,10 @@ from pathlib import Path
 
 from . import store
 
-LABEL = "com.maestro.dispatcher"
+# The legacy, pre-multi-home label. Still used verbatim for the DEFAULT home
+# (``~/.maestro``) so existing single-home installs are not orphaned by this
+# change -- only a NON-default home gets a slugged label (see ``label()``).
+LEGACY_LABEL = "com.maestro.dispatcher"
 
 # Floor on the dispatch cadence, enforced here because ``up`` is the ONLY Python
 # path to the install script (the CLI and the TUI fleet panel both route through
@@ -41,8 +45,53 @@ def _script_path() -> Path:
     return path
 
 
-def _plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+def _default_home() -> Path:
+    return (Path.home() / ".maestro").resolve()
+
+
+def _slug(home: Path) -> str:
+    """Sanitized basename + short hash of the resolved home path, so two homes
+    that happen to share a basename (``~/.maestro`` vs. ``/other/.maestro``)
+    still get distinct labels."""
+    resolved = str(home)
+    basename = re.sub(r"[^A-Za-z0-9]+", "-", home.name).strip("-").lower() or "home"
+    digest = hashlib.sha256(resolved.encode()).hexdigest()[:8]
+    return f"{basename}-{digest}"
+
+
+def label(home: Path) -> str:
+    """launchd label for *home*'s dispatcher. The default ``~/.maestro`` home
+    keeps the bare legacy label (existing installs are not orphaned); any other
+    home gets ``com.maestro.dispatcher.<slug>`` so two homes never collide."""
+    resolved = Path(home).expanduser().resolve()
+    if resolved == _default_home():
+        return LEGACY_LABEL
+    return f"{LEGACY_LABEL}.{_slug(resolved)}"
+
+
+def _legacy_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LEGACY_LABEL}.plist"
+
+
+def _plist_home(plist: Path) -> str | None:
+    """The ``MAESTRO_HOME`` baked into an on-disk plist, if any."""
+    if not plist.exists():
+        return None
+    m = re.search(r"<key>MAESTRO_HOME</key>\s*<string>(.*?)</string>",
+                  plist.read_text(encoding="utf-8"))
+    return m.group(1) if m else None
+
+
+def _same_home(a, b) -> bool:
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return False
+
+
+def _plist_path(home: Path | None = None) -> Path:
+    lbl = label(home) if home is not None else LEGACY_LABEL
+    return Path.home() / "Library" / "LaunchAgents" / f"{lbl}.plist"
 
 
 def clamp_interval(interval) -> int:
@@ -54,27 +103,65 @@ def clamp_interval(interval) -> int:
     return max(MIN_INTERVAL, val)
 
 
+def _migrate_legacy_plist(home: Path, lbl: str, *, run) -> dict | None:
+    """If *home* now gets a slugged label, unload+remove a same-home legacy
+    plist so ``up()`` doesn't leave two jobs pointed at one home. A legacy
+    plist baked for a DIFFERENT home is left untouched -- it belongs to that
+    other home's own migration -- and we just warn about it."""
+    if lbl == LEGACY_LABEL:
+        return None
+    legacy = _legacy_plist_path()
+    if not legacy.exists():
+        return None
+    baked_home = _plist_home(legacy)
+    if baked_home and _same_home(baked_home, home):
+        run(["launchctl", "unload", str(legacy)], capture_output=True, text=True)
+        legacy.unlink(missing_ok=True)
+        return {"migrated_legacy": True, "legacy_plist": str(legacy)}
+    return {"migrated_legacy": False,
+            "warning": f"legacy plist {legacy} is bound to a different home "
+                       f"({baked_home!r}); left untouched"}
+
+
 def up(home: Path, interval: int = 300, *, run=subprocess.run, script=None) -> dict:
     script = Path(script) if script else _script_path()
     requested = interval
     interval = clamp_interval(interval)
+    lbl = label(home)
+    migration = _migrate_legacy_plist(home, lbl, run=run)
     env = dict(os.environ)
     env["MAESTRO_HOME"] = str(home)
+    env["MAESTRO_LABEL"] = lbl
     p = run([str(script), "up", "--interval", str(interval)],
             env=env, capture_output=True, text=True)
     out = {"action": "up", "interval": interval, "rc": p.returncode,
-           "stdout": (p.stdout or "").strip()}
+           "stdout": (p.stdout or "").strip(), "label": lbl}
     if requested != interval:
         out["clamped_from"] = requested
+    if migration:
+        out.update(migration)
     return out
 
 
 def down(home: Path, *, run=subprocess.run, script=None) -> dict:
     script = Path(script) if script else _script_path()
+    lbl = label(home)
     env = dict(os.environ)
     env["MAESTRO_HOME"] = str(home)
+    env["MAESTRO_LABEL"] = lbl
     p = run([str(script), "down"], env=env, capture_output=True, text=True)
-    return {"action": "down", "rc": p.returncode, "stdout": (p.stdout or "").strip()}
+    out = {"action": "down", "rc": p.returncode, "stdout": (p.stdout or "").strip(),
+           "label": lbl}
+    # Clean up a same-home legacy plist left over from before this home ever
+    # migrated (i.e. `down` run without a prior `up` under the new label).
+    if lbl != LEGACY_LABEL:
+        legacy = _legacy_plist_path()
+        baked_home = _plist_home(legacy)
+        if legacy.exists() and baked_home and _same_home(baked_home, home):
+            run(["launchctl", "unload", str(legacy)], capture_output=True, text=True)
+            legacy.unlink(missing_ok=True)
+            out["migrated_legacy"] = True
+    return out
 
 
 def _plist_integer(text: str, key: str) -> int | None:
@@ -82,15 +169,15 @@ def _plist_integer(text: str, key: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _interval_from_plist(plist=None) -> int | None:
-    plist = Path(plist) if plist else _plist_path()
+def _interval_from_plist(plist=None, *, home=None) -> int | None:
+    plist = Path(plist) if plist else _plist_path(home)
     if not plist.exists():
         return None
     return _plist_integer(plist.read_text(encoding="utf-8"), "StartInterval")
 
 
-def _throttle_from_plist(plist=None) -> int | None:
-    plist = Path(plist) if plist else _plist_path()
+def _throttle_from_plist(plist=None, *, home=None) -> int | None:
+    plist = Path(plist) if plist else _plist_path(home)
     if not plist.exists():
         return None
     return _plist_integer(plist.read_text(encoding="utf-8"), "ThrottleInterval")
@@ -99,12 +186,15 @@ def _throttle_from_plist(plist=None) -> int | None:
 _LAST_EXIT_RE = re.compile(r'"LastExitStatus"\s*=\s*(-?\d+);')
 
 
-def last_exit_code(*, run=subprocess.run) -> int | None:
+def last_exit_code(home: Path | None = None, *, run=subprocess.run) -> int | None:
     """Parse ``LastExitStatus`` from ``launchctl list <LABEL>`` (a per-job query,
     unlike the bare ``launchctl list`` ``status()`` uses to check membership) --
-    ``None`` if the job isn't loaded or ``launchctl`` isn't available."""
+    ``None`` if the job isn't loaded or ``launchctl`` isn't available. *home*
+    resolves which home's (possibly slugged) label to query; omitted means the
+    legacy default label."""
+    lbl = label(home) if home is not None else LEGACY_LABEL
     try:
-        p = run(["launchctl", "list", LABEL], capture_output=True, text=True)
+        p = run(["launchctl", "list", lbl], capture_output=True, text=True)
     except FileNotFoundError:
         return None
     if p.returncode != 0:
@@ -113,18 +203,39 @@ def last_exit_code(*, run=subprocess.run) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _label_column(line: str) -> str:
+    # launchctl list's bare form is tab-separated: PID, Status, Label.
+    cols = line.split("\t")
+    return cols[-1].strip() if cols else ""
+
+
+def _any_label_loaded(labels: set[str], output: str) -> bool:
+    lines = (output or "").splitlines()
+    return any(_label_column(line) in labels for line in lines)
+
+
 def status(home: Path, *, run=subprocess.run, plist=None) -> dict:
+    lbl = label(home)
+    labels_to_check = {lbl}
+    # During the transition, a home may still be registered under the legacy
+    # label if it hasn't run `fleet up` since upgrading -- check both, but
+    # only the legacy job actually baked for THIS home (never another home's).
+    if lbl != LEGACY_LABEL:
+        legacy = _legacy_plist_path()
+        baked_home = _plist_home(legacy)
+        if baked_home and _same_home(baked_home, home):
+            labels_to_check.add(LEGACY_LABEL)
     try:
         p = run(["launchctl", "list"], capture_output=True, text=True)
-        loaded = p.returncode == 0 and LABEL in (p.stdout or "")
+        loaded = p.returncode == 0 and _any_label_loaded(labels_to_check, p.stdout or "")
     except FileNotFoundError:
         loaded = False
     hb = store.read_json(home / "derived" / ".heartbeat.json", {})
     age = round(store.now_epoch() - hb["epoch"]) if hb.get("epoch") else None
     pause = pause_state(home, store.now_epoch())
     return {"loaded": loaded, "heartbeat_age_s": age,
-            "interval": _interval_from_plist(plist),
-            "throttle": _throttle_from_plist(plist), "label": LABEL,
+            "interval": _interval_from_plist(plist, home=home),
+            "throttle": _throttle_from_plist(plist, home=home), "label": lbl,
             "paused": pause is not None,
             "pause_since": pause.get("since") if pause else None,
             "pause_until": pause.get("until") if pause else None,
