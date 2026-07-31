@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, event_log, fleet, health, inbox, ops, projection, ratelimit, schedule, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -195,11 +195,19 @@ def cmd_create(args) -> int:
             _nudge(cfg)
         return 0
 
+    if getattr(args, "repo", None) and args.repo not in cfg.repos:
+        names = ", ".join(sorted(cfg.repos)) or "(none configured)"
+        print(f"error: unknown repo '{args.repo}' — configured repos: {names}",
+              file=sys.stderr)
+        return 2
+
     a = {"approval_tier": args.tier, "priority": args.priority}
     if args.intent:
         a["intent"] = args.intent
     if getattr(args, "kind", None):
         a["kind"] = args.kind
+    if getattr(args, "repo", None):
+        a["repo"] = args.repo
     if getattr(args, "model", None):
         a["model"] = args.model
     if getattr(args, "effort", None):
@@ -743,6 +751,17 @@ def cmd_restore(args) -> int:
 def cmd_env(args) -> int:
     """Resolved config essentials — used by the reconcile skill to find the repo."""
     cfg = _cfg(args)
+    key = getattr(args, "key", None)
+    if key:
+        name = repos_mod.bound_repo_name(cfg.home, key)
+        if name and name not in cfg.repos:
+            print(f"error: {key} is bound to repo '{name}' but no [repos.{name}] "
+                  f"table is configured", file=sys.stderr)
+            return 1
+        binding = repos_mod.resolve(cfg, cfg.home, key)
+        _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
+                "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix})
+        return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
             "max_concurrency": cfg.max_concurrency, "max_impl_turns": cfg.max_impl_turns,
@@ -773,6 +792,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--notes", default=None, help="text for the ## Notes section")
     sp.add_argument("--depends-on", dest="depends_on", nargs="+", default=None,
                     metavar="KEY", help="ticket keys this ticket depends on")
+    sp.add_argument("--repo", default=None,
+                    help="[repos.<name>] binding for this ticket's reconciler")
     sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
                     help="skip in-process dispatch nudge after queuing")
 
@@ -812,7 +833,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true")
     sp.add_argument("--model", default=None, help="override reconcile_model from config")
     add("project", cmd_project, "regenerate dashboards")
-    add("env", cmd_env, "resolved config (home, repo_path, ...)")
+    sp = add("env", cmd_env, "resolved config (home, repo_path, ...)")
+    sp.add_argument("--key", default=None,
+                    help="resolve one ticket's repo binding instead of the bare config")
 
     sp = add("schedule", cmd_schedule, "list config-declared scheduled tasks (name/cadence/last_fired/next_due)")
     sp.add_argument("action", choices=["list"], nargs="?", default="list")

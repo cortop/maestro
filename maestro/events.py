@@ -6,7 +6,7 @@ Everything else (snapshots, dashboards) is a disposable projection folded from i
 from __future__ import annotations
 
 # Lifecycle
-TICKET_CREATED = "TicketCreated"        # {title, source, spec_hash}
+TICKET_CREATED = "TicketCreated"        # {title, source, spec_hash, repo}
 TICKET_TRIAGED = "TicketTriaged"        # {tier, classification, phase}
 SPEC_OBSERVED = "SpecObserved"          # {spec_hash}  reconciler folded the current spec
 PHASE_CHANGED = "PhaseChanged"          # {phase, reason}

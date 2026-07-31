@@ -78,7 +78,7 @@ def parse_spec_overrides(spec_text: str) -> dict:
         if not m:
             continue
         field, val = m.group(1), m.group(2).strip()
-        if field in ("kind", "model", "effort"):
+        if field in ("kind", "model", "effort", "repo"):
             result[field] = val
     return result
 
@@ -200,6 +200,8 @@ def mint_new_tickets(cfg: Config) -> list[str]:
         }
         if ticket_args.get("kind"):
             ticket_payload["kind"] = ticket_args["kind"]
+        if ticket_args.get("repo"):
+            ticket_payload["repo"] = ticket_args["repo"]
         if ticket_args.get("external_source"):
             ticket_payload["external_source"] = ticket_args["external_source"]
         if ticket_args.get("external_id"):
@@ -253,6 +255,8 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
         lines.append(f"model: {args['model']}")
     if args.get("effort"):
         lines.append(f"effort: {args['effort']}")
+    if args.get("repo"):
+        lines.append(f"repo: {args['repo']}")
     lines.append(f"dependsOn: [{deps_str}]")
     lines.append("")
     lines.append("## Intent")

@@ -1,0 +1,216 @@
+"""MR-2: per-ticket repo binding data model — config [repos.*], repos.resolve()
+precedence, `create --repo`, `env --key`. Zero consumer behavior change: nothing
+yet reads a resolved binding to pick a worktree/cwd, so a full dispatch sweep
+must still spawn identically to today (AC6).
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from maestro import config as config_mod
+from maestro import event_log, inbox, repos as repos_mod, snapshot as snap_mod, store
+from maestro.cli import main as cli_main
+from maestro.dispatcher import dispatch
+from maestro.sessions import DryRunSessions
+
+MULTI_REPO_TOML = """\
+[maestro]
+repo_path = "/repo/default"
+branch_prefix = "maestro/"
+
+[repos.alpha]
+path = "/repo/alpha"
+slug = "acme/alpha"
+base_branch = "develop"
+branch_prefix = "alpha/"
+
+[repos.beta]
+path = "/repo/beta"
+slug = "acme/beta"
+"""
+
+
+def _write_multi_repo_config(home):
+    (home / "config.toml").write_text(MULTI_REPO_TOML, encoding="utf-8")
+    return config_mod.load(str(home))
+
+
+# --- AC1: create --repo travels through mint -> spec frontmatter -> snapshot.repo ---
+
+def test_create_repo_flows_through_mint_to_spec_and_snapshot(home):
+    cfg = _write_multi_repo_config(home)
+    rc = cli_main(["--home", str(home), "create", "Multi-repo ticket",
+                   "--key", "X-1", "--repo", "beta", "--no-nudge"])
+    assert rc == 0
+
+    report = dispatch(cfg, DryRunSessions(), now=1000)
+    assert "X-1" in report.minted
+
+    events = event_log.read(home, "X-1")
+    created = next(e for e in events if e["type"] == "TicketCreated")
+    assert created["payload"]["repo"] == "beta"
+
+    spec_text = store.spec_path(home, "X-1").read_text(encoding="utf-8")
+    assert "repo: beta" in spec_text
+
+    snap = snap_mod.load(home, "X-1")
+    assert snap.repo == "beta"
+
+
+# --- AC2: config.load parses [repos.*] tables; implicit default matches today's cfg ---
+
+def test_config_load_parses_repos_tables(home):
+    cfg = _write_multi_repo_config(home)
+    assert cfg.repos["alpha"] == {
+        "path": "/repo/alpha", "slug": "acme/alpha",
+        "base_branch": "develop", "branch_prefix": "alpha/", "default": False,
+    }
+    assert cfg.repos["beta"] == {
+        "path": "/repo/beta", "slug": "acme/beta",
+        "base_branch": "main", "branch_prefix": "maestro/", "default": False,
+    }
+
+
+def test_no_repos_tables_yields_implicit_default_matching_repo_path(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/only"\nbranch_prefix = "solo/"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos == {}
+
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.path == cfg.repo_path == "/repo/only"
+    assert binding.branch_prefix == cfg.branch_prefix == "solo/"
+
+
+# --- AC3: precedence proven by editing the real spec.md ---
+
+def test_precedence_frontmatter_beats_payload_beats_default(home):
+    cfg = _write_multi_repo_config(home)
+    rc = cli_main(["--home", str(home), "create", "Precedence ticket",
+                   "--key", "X-2", "--repo", "alpha", "--no-nudge"])
+    assert rc == 0
+    dispatch(cfg, DryRunSessions(), now=1000)
+
+    # Payload says alpha, no frontmatter edit yet -> resolve() follows payload via snapshot.repo.
+    binding = repos_mod.resolve(cfg, home, "X-2")
+    assert binding.name == "alpha"
+
+    # Edit the real spec.md frontmatter to beta -> frontmatter wins over the payload.
+    spec_path = store.spec_path(home, "X-2")
+    spec_text = spec_path.read_text(encoding="utf-8")
+    spec_text = spec_text.replace("repo: alpha", "repo: beta")
+    store.atomic_write(spec_path, spec_text)
+    binding = repos_mod.resolve(cfg, home, "X-2")
+    assert binding.name == "beta"
+
+    # Delete the frontmatter line entirely -> falls back to the payload via snapshot.repo.
+    spec_text = spec_path.read_text(encoding="utf-8")
+    spec_text = "\n".join(l for l in spec_text.splitlines() if not l.startswith("repo:")) + "\n"
+    store.atomic_write(spec_path, spec_text)
+    binding = repos_mod.resolve(cfg, home, "X-2")
+    assert binding.name == "alpha"  # payload's original repo, via snapshot.repo
+
+    # A spec naming an unconfigured repo resolves to the implicit default, never raises.
+    # Insert into the frontmatter (before the first "##" section) -- parse_spec_overrides
+    # stops scanning at the first section header, matching parse_depends_on/etc.
+    lines = spec_text.splitlines()
+    header_idx = next(i for i, l in enumerate(lines) if l.startswith("##"))
+    lines.insert(header_idx, "repo: nope")
+    store.atomic_write(spec_path, "\n".join(lines) + "\n")
+    binding = repos_mod.resolve(cfg, home, "X-2")
+    assert binding.name == "default"
+    assert binding.path == cfg.repo_path
+
+
+# --- AC4: `maestro env --key` ---
+
+def test_env_key_prints_resolved_binding(home, capsys):
+    cfg = _write_multi_repo_config(home)
+    rc = cli_main(["--home", str(home), "create", "Env ticket",
+                   "--key", "X-3", "--repo", "beta", "--no-nudge"])
+    assert rc == 0
+    dispatch(cfg, DryRunSessions(), now=1000)
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "env", "--key", "X-3"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    import json
+    printed = json.loads(out)
+    assert printed == {"repo": "beta", "repo_path": "/repo/beta", "slug": "acme/beta",
+                        "base_branch": "main", "branch_prefix": "maestro/"}
+
+
+def test_env_key_unknown_repo_exits_nonzero(home, capsys):
+    cfg = _write_multi_repo_config(home)
+    store.atomic_write(store.spec_path(home, "X-4"),
+                       "# X-4\napproval_tier: 1\nrepo: ghost\n\n## Intent\nx\n")
+    event_log.append(home, "X-4", "TicketCreated",
+                     {"title": "X-4", "source": "test", "spec_hash": "x"}, actor="d")
+    snap_mod.rebuild(home, "X-4")
+
+    rc = cli_main(["--home", str(home), "env", "--key", "X-4"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "ghost" in err
+    assert "Traceback" not in err
+
+
+def test_bare_env_unchanged_key_set(home, capsys):
+    cfg = _write_multi_repo_config(home)
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "env"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    import json
+    printed = json.loads(out)
+    assert set(printed.keys()) == {"home", "repo_path", "branch_prefix", "reconcile_command",
+                                    "max_concurrency", "max_impl_turns", "providers"}
+
+
+# --- AC5: unknown --repo fails fast at create; old snapshots round-trip ---
+
+def test_create_unknown_repo_fails_fast(home, capsys):
+    cfg = _write_multi_repo_config(home)
+    rc = cli_main(["--home", str(home), "create", "Bad repo ticket",
+                   "--repo", "nope", "--no-nudge"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "alpha" in err and "beta" in err
+
+    assert inbox.pending_new(home) == []
+    report = dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.minted == []
+
+
+def test_old_snapshot_without_repo_field_round_trips(home):
+    d = {"key": "T-9", "phase": "ready", "observed_seq": 1}
+    store.write_json(store.snapshot_path(home, "T-9"), d)
+    snap = snap_mod.load(home, "T-9")
+    assert snap.repo is None
+    assert snap.key == "T-9"
+    assert snap.phase == "ready"
+
+
+# --- AC6: a full dispatch sweep is data-plane only -- identical spawn tuples/cwd ---
+
+def test_dispatch_spawn_tuples_unaffected_by_repo_binding(home):
+    cfg = _write_multi_repo_config(home)
+    assert cli_main(["--home", str(home), "create", "Ticket X-5",
+                     "--key", "X-5", "--no-nudge"]) == 0
+    assert cli_main(["--home", str(home), "create", "Ticket X-6",
+                     "--key", "X-6", "--repo", "alpha", "--no-nudge"]) == 0
+
+    sessions = DryRunSessions()
+    dispatch(cfg, sessions, now=1000)
+
+    # No worktree exists yet for either key, so _worker_cwd falls back to cfg.repo_path
+    # for BOTH -- the repo binding must have zero effect on today's spawn cwd/tuples,
+    # proving this ticket is data-plane only (worktree/cwd consumption is MR-3/4/5/6).
+    cwd_by_key = {k: c for k, _p, c, _m, _e in sessions.spawned}
+    assert cwd_by_key["X-5"] == cwd_by_key["X-6"] == cfg.repo_path
