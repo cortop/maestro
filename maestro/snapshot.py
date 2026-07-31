@@ -68,6 +68,9 @@ class Snapshot:
     # dispatcher's sync tick knows which tickets to `refresh`.
     external_source: str | None = None
     external_id: str | None = None
+    # [repos.<name>] this ticket is bound to, from TicketCreated.repo. None = no
+    # explicit binding -- repos.resolve() falls back to the implicit default.
+    repo: str | None = None
 
     @property
     def question_open(self) -> bool:
@@ -113,6 +116,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.kind = p.get("kind", "implementation")
             s.external_source = p.get("external_source", s.external_source)
             s.external_id = p.get("external_id", s.external_id)
+            s.repo = p.get("repo", s.repo)
             s.phase = Phase.TRIAGING.value
         elif t == E.SPEC_OBSERVED:
             s.spec_hash = p.get("spec_hash", s.spec_hash)

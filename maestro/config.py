@@ -43,6 +43,10 @@ class Config:
     runaway_spawns_per_hour: int | None = None
     repo_path: str | None = None           # primary repo the reconciler builds in
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
+    # [repos.<name>] tables: name -> {path, slug, base_branch, branch_prefix, default}.
+    # Optional -- when empty, repos.resolve() synthesizes an implicit default binding
+    # from repo_path/branch_prefix so every existing single-repo config works untouched.
+    repos: dict = field(default_factory=dict)
     permission_mode: str = "acceptEdits"   # claude permission mode for reconcilers
     reconcile_model: str = "sonnet"        # model for spawned reconciler sessions
     # Provider selection (names resolved by providers/registry).
@@ -123,6 +127,18 @@ def load(home_arg: str | None = None) -> Config:
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
+        raw_repos = data.get("repos", {})
+        if isinstance(raw_repos, dict):
+            for name, table in raw_repos.items():
+                if not isinstance(table, dict) or not table.get("path"):
+                    continue
+                cfg.repos[name] = {
+                    "path": table["path"],
+                    "slug": table.get("slug"),
+                    "base_branch": table.get("base_branch", "main"),
+                    "branch_prefix": table.get("branch_prefix", cfg.branch_prefix),
+                    "default": bool(table.get("default", False)),
+                }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
         cfg.capture_session_logs = bool(m.get("capture_session_logs", cfg.capture_session_logs))
@@ -234,6 +250,13 @@ implementer = "claude_skill"
 #
 # [fetcher.command]
 # cmd = "~/bin/import-tickets.sh"   # writes create-requests to the _new inbox
+
+# [repos.<name>]                    # optional multi-repo bindings; `maestro create --repo <name>`
+# path = "/abs/path/to/repo"        # required
+# slug = "owner/repo"               # for the vcs provider (gh, etc.)
+# base_branch = "main"              # default: "main"
+# branch_prefix = "you/"            # default: [maestro] branch_prefix
+# default = true                    # this binding is the implicit default (optional)
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""
