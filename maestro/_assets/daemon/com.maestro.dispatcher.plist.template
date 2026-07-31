@@ -21,7 +21,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.maestro.dispatcher</string>
+  <string>@LABEL@</string>
 
   <key>ProgramArguments</key>
   <array>

@@ -19,10 +19,28 @@ if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || (( INTERVAL < MIN_INTERVAL )); then
   INTERVAL=$MIN_INTERVAL
 fi
 
-LABEL="com.maestro.dispatcher"
+LEGACY_LABEL="com.maestro.dispatcher"
+DEFAULT_HOME="$HOME/.maestro"
+MAESTRO_HOME_RAW="${MAESTRO_HOME:-}"
+MAESTRO_HOME="${MAESTRO_HOME:-$DEFAULT_HOME}"
+
+# The label is derived per-home so a second MAESTRO_HOME's `up` doesn't clobber
+# the first home's plist/launchd job. Only maestro/fleet.py computes the slug
+# (fleet.label) -- this script never duplicates that hash, it just consumes
+# MAESTRO_LABEL. The default home keeps the bare legacy label for backward
+# compatibility with existing installs.
+if [[ -n "${MAESTRO_LABEL:-}" ]]; then
+  LABEL="$MAESTRO_LABEL"
+elif [[ -z "$MAESTRO_HOME_RAW" || "$MAESTRO_HOME" == "$DEFAULT_HOME" ]]; then
+  LABEL="$LEGACY_LABEL"
+else
+  echo "error: MAESTRO_HOME is set to a non-default home ($MAESTRO_HOME) but no MAESTRO_LABEL was given." >&2
+  echo "Run 'maestro fleet up' instead -- it derives the per-home label automatically." >&2
+  exit 1
+fi
+
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-MAESTRO_HOME="${MAESTRO_HOME:-$HOME/.maestro}"
 MAESTRO_BIN="$(command -v maestro || true)"
 
 if [[ "$ACTION" == "down" ]]; then
@@ -51,6 +69,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$MAESTRO_HOME/agent-logs"
 sed -e "s#@MAESTRO_BIN@#${MAESTRO_BIN}#g" \
     -e "s#@MAESTRO_HOME@#${MAESTRO_HOME}#g" \
     -e "s#@PATH@#${LAUNCHD_PATH}#g" \
+    -e "s#@LABEL@#${LABEL}#g" \
     -e "s#<integer>300</integer>#<integer>${INTERVAL}</integer>#g" \
     "$HERE/com.maestro.dispatcher.plist.template" > "$PLIST"
 

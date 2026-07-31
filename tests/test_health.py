@@ -209,25 +209,25 @@ def test_check_claim_age_warns_past_max_session_seconds(home, cfg):
     assert result["oldest_age_s"] >= 10_000
 
 
-def test_check_launchctl_ok_when_not_loaded():
+def test_check_launchctl_ok_when_not_loaded(cfg):
     def fake_run(*a, **k):
         return subprocess.CompletedProcess(a[0], 1, stdout="")
-    result = health.check_launchctl(run=fake_run)
+    result = health.check_launchctl(cfg, run=fake_run)
     assert result == {"name": "launchctl", "status": "ok", "detail": "not loaded", "last_exit_code": None}
 
 
-def test_check_launchctl_fails_on_nonzero_last_exit():
+def test_check_launchctl_fails_on_nonzero_last_exit(cfg):
     def fake_run(*a, **k):
         return subprocess.CompletedProcess(a[0], 0, stdout='"LastExitStatus" = 1;\n')
-    result = health.check_launchctl(run=fake_run)
+    result = health.check_launchctl(cfg, run=fake_run)
     assert result["status"] == "fail"
     assert result["last_exit_code"] == 1
 
 
-def test_check_launchctl_ok_on_zero_last_exit():
+def test_check_launchctl_ok_on_zero_last_exit(cfg):
     def fake_run(*a, **k):
         return subprocess.CompletedProcess(a[0], 0, stdout='"LastExitStatus" = 0;\n')
-    result = health.check_launchctl(run=fake_run)
+    result = health.check_launchctl(cfg, run=fake_run)
     assert result["status"] == "ok"
     assert result["last_exit_code"] == 0
 
@@ -280,6 +280,40 @@ def test_check_depends_on_ok_with_no_deps(home, cfg):
     result = health.check_depends_on(cfg, store.now_epoch())
     assert result == {"name": "depends_on", "status": "ok",
                        "detail": "0 missing dep(s), 0 cycle(s)", "missing": [], "cycles": []}
+
+
+def test_doctor_resolves_per_home_plist_ignoring_a_legacy_decoy(home, tmp_path, monkeypatch):
+    """MR-1 AC5: doctor must resolve the per-home (slugged) plist's
+    StartInterval for the heartbeat threshold, ignoring a same-machine decoy
+    legacy plist, and query launchctl with the slugged label."""
+    from maestro import fleet
+
+    fake_home = tmp_path / "fakehome"
+    (fake_home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    lbl = fleet.label(home)
+    agents_dir = fake_home / "Library" / "LaunchAgents"
+    (agents_dir / f"{lbl}.plist").write_text(
+        "<key>StartInterval</key>\n<integer>111</integer>\n")
+    (agents_dir / f"{fleet.LEGACY_LABEL}.plist").write_text(
+        "<key>StartInterval</key>\n<integer>999</integer>\n")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    argv_log = tmp_path / "argv.log"
+    stub = fake_bin / "launchctl"
+    stub.write_text(f'#!/bin/sh\necho "$@" >> "{argv_log}"\nexit 0\n')
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    _code, out = _sweep(home)
+    hb_check = next(c for c in out["checks"] if c["name"] == "heartbeat")
+    assert hb_check["threshold_s"] == 111 * health.STALE_INTERVAL_FACTOR
+
+    lines = [l for l in argv_log.read_text().splitlines() if l.strip()]
+    assert any(line == f"list {lbl}" for line in lines)
+    assert not any(line == f"list {fleet.LEGACY_LABEL}" for line in lines)
 
 
 def test_doctor_cli_includes_check_registry(home, cfg):
