@@ -108,6 +108,13 @@ def deadletter_path(home: Path, key: str) -> Path:
     return home / "tickets" / "_deadletter" / f"{validate_key(key)}.md"
 
 
+def worktree_path(home: Path, key: str) -> Path:
+    """Where *key*'s reconciler worktree lives. Flat under ``home/worktrees``
+    (keys are home-unique) regardless of which repo the ticket is bound to --
+    the git metadata inside the worktree already records its owning repo."""
+    return home / "worktrees" / validate_key(key)
+
+
 def _lock_file(target: Path) -> Path:
     return target.parent / f".{target.name}.lock"
 
