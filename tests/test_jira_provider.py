@@ -119,7 +119,7 @@ def test_dispatch_sweep_imports_then_mints_and_refreshes(home, monkeypatch):
                                           "status": {"name": "To Do"}, "updated": "2026-01-01T00:00:00.000+0000"}}
     transport = FakeJiraTransport(issues=[issue])
     fake_tracker = JiraTracker({"sync_interval": 0}, transport=transport)
-    monkeypatch.setattr(providers, "get_tracker", lambda c: fake_tracker)
+    monkeypatch.setattr(providers, "get_trackers", lambda c: {"jira": fake_tracker})
 
     # Sweep 1: no existing tickets yet -> import queues JIRA-ACME-9 into `_new`.
     report1 = disp.dispatch(cfg, DryRunSessions(), now=1000)

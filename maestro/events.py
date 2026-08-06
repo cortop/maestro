@@ -34,8 +34,9 @@ AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, 
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent
 
-# External sync (opt-in trackers, e.g. Jira)
+# External sync (opt-in trackers, e.g. Jira, Linear)
 JIRA_SYNCED = "JiraSynced"              # {jira_updated_ts, status, last_comment_id}
+LINEAR_SYNCED = "LinearSynced"          # {linear_updated_ts, status, last_comment_id}
 
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket

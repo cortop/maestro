@@ -227,7 +227,10 @@ max_impl_turns = 20
 # ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
 
 [providers]
-tracker = "none"          # "none" | "jira" | "jira_cli" | "github_issues" | custom
+tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom
+                          # may also be a list, e.g. ["jira", "linear"], to run more than one
+                          # tracker concurrently -- each ticket refreshes against the one it
+                          # came from (`external_source`), on its own `sync_interval` cursor
 vcs = "none"              # "none" | "github_cli" | custom
 fetcher = "none"          # "none" | "command" (runs a shell command to import tickets)
 implementer = "claude_skill"
@@ -243,6 +246,11 @@ implementer = "claude_skill"
 # token_env = "JIRA_API_TOKEN"   # token read from env, never stored in config
 # import_jql = "(reporter = currentUser() OR assignee = currentUser()) AND statusCategory = 'To Do'"
 # import_fields = ["summary", "description", "status", "issuetype"]
+# sync_interval = 900            # seconds between dispatcher sync ticks
+#
+# [tracker.linear]             # GraphQL adapter; opt-in ticket import + tracking sync
+# api_key_env = "LINEAR_API_KEY"   # personal API key read from env, never stored in config
+# import_filter = { assignee = { isMe = { eq = true } }, state = { type = { nin = ["completed", "canceled"] } } }
 # sync_interval = 900            # seconds between dispatcher sync ticks
 #
 # [vcs.github_cli]
