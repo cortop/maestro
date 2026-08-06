@@ -89,13 +89,13 @@ class FakeVCS:
     def pr_for_branch(self, branch):
         return None
 
-    def pr_status(self, pr_number: int) -> dict:
+    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
         return self.statuses.get(pr_number, {
             "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha1",
             "ci_state": "unknown", "failing_checks": [],
         })
 
-    def review_feedback(self, pr_number: int) -> list[dict]:
+    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]:
         return []
 
 

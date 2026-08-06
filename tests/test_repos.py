@@ -216,3 +216,41 @@ def test_dispatch_spawn_cwd_honors_repo_binding(home):
     cwd_by_key = {k: c for k, _p, c, _m, _e in sessions.spawned}
     assert cwd_by_key["X-5"] == cfg.repo_path
     assert cwd_by_key["X-6"] == "/repo/alpha"
+
+
+# --- MR-4: resolve_vcs_slug / slug_from_pr_url -- the VCS-layer repo resolution ---
+
+def test_slug_from_pr_url_parses_owner_repo():
+    assert repos_mod.slug_from_pr_url("https://github.com/acme/beta/pull/9") == "acme/beta"
+
+
+def test_slug_from_pr_url_none_for_unset_or_unparseable():
+    assert repos_mod.slug_from_pr_url(None) is None
+    assert repos_mod.slug_from_pr_url("not a url") is None
+    assert repos_mod.slug_from_pr_url("https://gitlab.com/acme/beta/pull/9") is None
+
+
+def test_resolve_vcs_slug_prefers_bound_repo_table_over_pr_url(home):
+    cfg = _write_multi_repo_config(home)
+    snap = snap_mod.Snapshot(key="X", repo="alpha",
+                              pr_url="https://github.com/other/owner/pull/1")
+    assert repos_mod.resolve_vcs_slug(cfg, snap) == "acme/alpha"
+
+
+def test_resolve_vcs_slug_falls_back_to_pr_url_shim_when_unbound(home):
+    cfg = _write_multi_repo_config(home)
+    snap = snap_mod.Snapshot(key="X", pr_url="https://github.com/acme/beta/pull/9")
+    assert repos_mod.resolve_vcs_slug(cfg, snap) == "acme/beta"
+
+
+def test_resolve_vcs_slug_bound_to_unconfigured_name_falls_back_to_pr_url_shim(home):
+    cfg = _write_multi_repo_config(home)
+    snap = snap_mod.Snapshot(key="X", repo="ghost",
+                              pr_url="https://github.com/acme/beta/pull/9")
+    assert repos_mod.resolve_vcs_slug(cfg, snap) == "acme/beta"
+
+
+def test_resolve_vcs_slug_none_when_neither_available(home):
+    cfg = _write_multi_repo_config(home)
+    snap = snap_mod.Snapshot(key="X")
+    assert repos_mod.resolve_vcs_slug(cfg, snap) is None

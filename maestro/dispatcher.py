@@ -652,7 +652,7 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     if now - last_sync < interval:
         return {"checked": 0}
 
-    from . import providers  # lazy: avoid a hard import-time dependency
+    from . import providers, repos  # lazy: avoid a hard import-time dependency
 
     vcs = providers.get_vcs(cfg)
     checked = 0
@@ -663,7 +663,8 @@ def sync_vcs(cfg: Config, now: float) -> dict:
         if phase not in (Phase.AWAITING_CI, Phase.IN_REVIEW) or not snap.pr_number:
             continue
         checked += 1
-        status = vcs.pr_status(snap.pr_number)
+        repo_slug = repos.resolve_vcs_slug(cfg, snap)
+        status = vcs.pr_status(snap.pr_number, repo=repo_slug)
 
         if _route_if_merged(cfg, key, status, worktree_removal_errors):
             continue
@@ -673,7 +674,7 @@ def sync_vcs(cfg: Config, now: float) -> dict:
             continue
 
         _observe_ci(cfg, key, status, phase)
-        _observe_reviews(cfg, key, snap.pr_number, vcs)
+        _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug)
 
     cursor[vcs_name] = now
     store.write_json(cursor_path, cursor)
@@ -725,9 +726,9 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase) -> None:
         ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher")
 
 
-def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs) -> None:
+def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None) -> None:
     changes_requested_body: str | None = None
-    for r in vcs.review_feedback(pr_number):
+    for r in vcs.review_feedback(pr_number, repo=repo):
         cid = r.get("id")
         if not cid:
             continue

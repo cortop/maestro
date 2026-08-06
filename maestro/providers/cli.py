@@ -51,12 +51,12 @@ class GitHubCliVCS:
     def __init__(self, settings: dict):
         self.repos = settings.get("repos", [])
 
-    def pr_for_branch(self, branch: str) -> dict | None:
-        for repo in self.repos or [None]:
+    def pr_for_branch(self, branch: str, repo: str | None = None) -> dict | None:
+        for r in [repo] if repo else (self.repos or [None]):
             cmd = ["gh", "pr", "list", "--head", branch, "--state", "all",
                    "--json", "number,url,isDraft,state,mergeStateStatus"]
-            if repo:
-                cmd += ["--repo", repo]
+            if r:
+                cmd += ["--repo", r]
             rc, out, _ = _run(cmd)
             if rc == 0 and out.strip():
                 rows = json.loads(out)
@@ -64,8 +64,8 @@ class GitHubCliVCS:
                     return rows[0]
         return None
 
-    def pr_status(self, pr_number: int) -> dict:
-        repo = self.repos[0] if self.repos else None
+    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
+        repo = repo or (self.repos[0] if self.repos else None)
         cmd = ["gh", "pr", "view", str(pr_number), "--json",
                "state,mergeable,headRefOid,statusCheckRollup"]
         if repo:
@@ -103,8 +103,8 @@ class GitHubCliVCS:
             "failing_checks": failing,
         }
 
-    def review_feedback(self, pr_number: int) -> list[dict]:
-        repo = self.repos[0] if self.repos else None
+    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]:
+        repo = repo or (self.repos[0] if self.repos else None)
         cmd = ["gh", "pr", "view", str(pr_number), "--json", "reviews"]
         if repo:
             cmd += ["--repo", repo]
