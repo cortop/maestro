@@ -9,9 +9,10 @@ import random
 from datetime import datetime
 from pathlib import Path
 
+from . import backup
 from . import events as E
 from . import context as context_mod
-from . import event_log, inbox, snapshot as snap_mod, store
+from . import event_log, inbox, repos as repos_mod, snapshot as snap_mod, store
 from .config import Config
 from .dispatcher import spec_hash_on_disk
 from .idempotency import content_hash, step_id
@@ -124,6 +125,35 @@ def _validate_evidence(evidence: dict) -> None:
     if missing:
         raise store.MaestroError(
             f"evidence missing required field(s): {', '.join(missing)} (need {', '.join(EVIDENCE_FIELDS)})")
+
+
+def local_write_backup(cfg: Config, key: str, *, actor: str = "reconciler",
+                       now: float | None = None) -> str | None:
+    """AD-6: snapshot *key*'s resolved target directory before the reconciler
+    writes into it in place -- the compensating control a ``mode = "local"``
+    repo binding uses in place of the PR review checkpoint a git binding gets.
+    No-op (returns None) unless the ticket resolves to a local-mode binding
+    with an existing path.
+
+    Idempotent per reconcile step: the backup is recorded under a step-id keyed
+    on ``(phase, observed_seq)``, so a crash-and-respawn mid-step (after the
+    tarball was already taken) does not create a second one -- it just resumes
+    writing against the same backup.
+    """
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode != "local" or not binding.path:
+        return None
+    target = Path(binding.path)
+    if not target.exists():
+        return None
+    snap = snap_mod.load(cfg.home, key)
+    sid = step_id(key, snap.phase, snap.observed_seq, "local-write-backup")
+    if any(e.get("step_id") == sid for e in event_log.read(cfg.home, key)):
+        return None  # already backed up this step
+    now = now if now is not None else store.now_epoch()
+    archive = backup.backup_local_target(target, now)
+    _append(cfg, key, E.NOTE, {"text": f"local write backup: {archive}"}, actor=actor, sid=sid)
+    return str(archive)
 
 
 def verify_ac(cfg: Config, key: str, ac_index: int, evidence: dict, *, actor: str = "reconciler") -> str:
@@ -255,6 +285,13 @@ def check_merged(cfg: Config, key: str, pr_state: str, *, actor: str = "reconcil
             actor=actor, sid=f"pr-merged-{key}")
     finalize(cfg, key, actor=actor)
     return True
+
+
+def approve(cfg: Config, key: str, *, actor: str = "human") -> None:
+    """Clear the tier-2 implementing gate (idempotent -- a fixed step-id means
+    repeat calls are a no-op). Once appended, `dispatcher.is_due` finds
+    `snap.approved` and the ticket is due on the very next sweep."""
+    _append(cfg, key, E.APPROVED, {}, actor=actor, sid=f"approve-{key}")
 
 
 def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | None:

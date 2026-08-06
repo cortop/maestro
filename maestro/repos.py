@@ -20,6 +20,9 @@ from .dispatcher import parse_spec_overrides
 _PR_URL_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/pull/\d+")
 
 
+_MODES = frozenset({"git", "local"})
+
+
 @dataclass
 class RepoBinding:
     name: str
@@ -31,9 +34,19 @@ class RepoBinding:
     # sweep, independent of max_concurrency/min_spawn_interval/max_spawn_attempts
     # (all still apply on top). None = uncapped -- today's behavior.
     max_spawns_per_sweep: int | None = None
+    # AD-6: "git" (default -- worktree/branch/PR, today's behavior) or "local"
+    # (a plain directory -- a notes vault, `~/.claude` for self-editing skills --
+    # that has no branch/PR path; the reconciler writes in place instead, with
+    # backup-on-write as the compensating control for skipping PR review). An
+    # unrecognized value falls back to "git" -- never silently write in place
+    # from a typo'd config.
+    mode: str = "git"
 
 
 def _binding_from_table(name: str, table: dict) -> RepoBinding:
+    mode = table.get("mode", "git")
+    if mode not in _MODES:
+        mode = "git"
     return RepoBinding(
         name=name,
         path=table.get("path"),
@@ -41,6 +54,7 @@ def _binding_from_table(name: str, table: dict) -> RepoBinding:
         base_branch=table.get("base_branch", "main"),
         branch_prefix=table.get("branch_prefix", "maestro/"),
         max_spawns_per_sweep=table.get("max_spawns_per_sweep"),
+        mode=mode,
     )
 
 
