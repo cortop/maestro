@@ -193,6 +193,66 @@ def _find_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
     return cycles
 
 
+def check_repo_preflight(cfg: Config, now: float) -> dict:
+    """Live per-repo preflight (MR-5) across every repo referenced by any
+    current ticket, plus the implicit default -- what a human sees in
+    ``maestro doctor`` right now, independent of the last sweep's (possibly
+    stale) heartbeat verdict. A configured-but-unreferenced ``[repos.*]``
+    table never appears here (referenced-only, same as the dispatcher's own
+    per-sweep probe)."""
+    keys = dispatcher.list_keys(cfg.home)
+    verdict = dispatcher.repo_preflight_all(cfg, cfg.home, keys)
+    status = "fail" if not verdict["ok"] else "ok"
+    if verdict["blockers_by_repo"]:
+        detail = "; ".join(f"{name}: {', '.join(bl)}"
+                           for name, bl in verdict["blockers_by_repo"].items())
+    else:
+        detail = "all referenced repos clean"
+    return {"name": "repo_preflight", "status": status, "detail": detail,
+            "blockers_by_repo": verdict["blockers_by_repo"]}
+
+
+def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
+    """WARN (never blocks a spawn) when a ticket's spec/TicketCreated names a
+    repo that isn't a configured ``[repos.<name>]`` table -- e.g. a human typo
+    in the ``repo:`` frontmatter line. ``repos.resolve()`` silently falls back
+    to the implicit default so the dispatcher can never wedge on this; this
+    check surfaces the typo instead of letting it hide forever."""
+    from . import repos as repos_mod
+
+    home = cfg.home
+    unknown = []
+    for key in dispatcher.list_keys(home):
+        name = repos_mod.bound_repo_name(home, key)
+        if name and name not in cfg.repos:
+            unknown.append({"key": key, "repo": name})
+    status = "warn" if unknown else "ok"
+    detail = (f"{len(unknown)} ticket(s) bound to an unconfigured repo name"
+              if unknown else "none")
+    return {"name": "unknown_repo_bindings", "status": status, "detail": detail,
+            "unknown": unknown}
+
+
+def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
+    """WARN (never blocks a spawn) when a repo bound by a current ticket is
+    missing ``.claude/commands/maestro-reconcile.md`` -- a reconciler spawned
+    into that repo's worktree would silently no-op the ``/maestro-reconcile``
+    command every turn."""
+    home = cfg.home
+    bindings = dispatcher.referenced_repo_bindings(cfg, home, dispatcher.list_keys(home))
+    missing = []
+    for name, binding in bindings.items():
+        if not binding.path or not Path(binding.path).exists():
+            continue
+        skill_path = Path(binding.path) / ".claude" / "commands" / "maestro-reconcile.md"
+        if not skill_path.exists():
+            missing.append(name)
+    status = "warn" if missing else "ok"
+    detail = f"missing maestro-reconcile.md in: {', '.join(missing)}" if missing else "none"
+    return {"name": "missing_reconcile_skill", "status": status, "detail": detail,
+            "missing": missing}
+
+
 def check_depends_on(cfg: Config, now: float) -> dict:
     home = cfg.home
     graph = _depends_on_graph(home)
@@ -212,7 +272,8 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
-          check_depends_on)
+          check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
+          check_missing_reconcile_skill)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:

@@ -56,8 +56,17 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     )
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     if report.repo_blockers:
-        print(f"warning: repo_path is blocked ({'; '.join(report.repo_blockers)}) "
-              "— no reconciler spawned", file=sys.stderr)
+        if cfg.repos:
+            # Named [repos.*] tables configured -- attribute each warning to its
+            # own repo (a bound repo's tickets are the only ones actually gated).
+            for name, blockers in report.repo_blockers_by_repo.items():
+                print(f"warning: repo '{name}' is blocked ({'; '.join(blockers)}) "
+                      "— no reconciler spawned for its tickets", file=sys.stderr)
+        else:
+            # Back-compat: a single-repo board (no [repos.*] tables) keeps the
+            # exact pre-MR-5 message, unattributed.
+            print(f"warning: repo_path is blocked ({'; '.join(report.repo_blockers)}) "
+                  "— no reconciler spawned", file=sys.stderr)
     if report.paused:
         print("fleet is paused — queued, will run on resume")
     return report
@@ -356,6 +365,7 @@ def cmd_dispatch(args) -> int:
            "due": [{"key": k, "reason": r} for k, r in report.due],
            "paused": report.paused,
            "repo_blocked": report.repo_blockers,
+           "repo_blocked_by_repo": report.repo_blockers_by_repo,
            "worktree_removal_errors": report.worktree_removal_errors}
     _print(out)
     return 0

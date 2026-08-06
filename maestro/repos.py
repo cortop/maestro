@@ -24,6 +24,10 @@ class RepoBinding:
     slug: str | None
     base_branch: str
     branch_prefix: str
+    # MR-5 safety rail: caps how many keys THIS repo may spawn in one dispatcher
+    # sweep, independent of max_concurrency/min_spawn_interval/max_spawn_attempts
+    # (all still apply on top). None = uncapped -- today's behavior.
+    max_spawns_per_sweep: int | None = None
 
 
 def _binding_from_table(name: str, table: dict) -> RepoBinding:
@@ -33,6 +37,7 @@ def _binding_from_table(name: str, table: dict) -> RepoBinding:
         slug=table.get("slug"),
         base_branch=table.get("base_branch", "main"),
         branch_prefix=table.get("branch_prefix", "maestro/"),
+        max_spawns_per_sweep=table.get("max_spawns_per_sweep"),
     )
 
 
