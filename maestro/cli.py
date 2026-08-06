@@ -488,6 +488,12 @@ def cmd_fail(args) -> int:
     return 0
 
 
+def cmd_impl_turn(args) -> int:
+    """[agent] record one implementing turn; parks the ticket if this crosses max_impl_turns."""
+    _print(ops.record_impl_turn(_cfg(args), args.key, role=args.role, actor=args.actor))
+    return 0
+
+
 def cmd_check_conflicts(args) -> int:
     """Route a CONFLICTING PR back to implementing for auto-resolution (idempotent)."""
     if args.state != "CONFLICTING":
@@ -904,6 +910,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key"); sp.add_argument("seconds", type=int); sp.add_argument("--actor", default="reconciler")
     sp = add("fail", cmd_fail, "[agent] record failure (backoff or dead-letter)")
     sp.add_argument("key"); sp.add_argument("error"); sp.add_argument("--actor", default="reconciler")
+    sp = add("impl-turn", cmd_impl_turn,
+             "[agent] record one implementing turn; parks the ticket past max_impl_turns")
+    sp.add_argument("key"); sp.add_argument("--role", default="implementer")
+    sp.add_argument("--actor", default="reconciler")
     sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with evidence (content-hash keyed)")
     sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")
     sp.add_argument("--evidence", required=True); sp.add_argument("--actor", default="reconciler")

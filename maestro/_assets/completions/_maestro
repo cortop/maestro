@@ -45,6 +45,7 @@ _maestro() {
         'observe-spec:[agent] record current spec hash'
         'requeue:[agent] schedule a re-wake'
         'fail:[agent] record failure (backoff or dead-letter)'
+        'impl-turn:[agent] record one implementing turn; parks past max_impl_turns'
         'finalize:[agent] tombstone a finished ticket'
         'compact:fold pre-snapshot events into archive'
         'release:[agent] drop this ticket'\''s claim on exit'
