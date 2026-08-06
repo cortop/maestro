@@ -167,9 +167,9 @@ git -C "$WT" rebase "origin/$BASE" || true   # resolve conflicts, then: git -C "
 ```
 If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteria are already
 implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
-step 4 (push the rebased branch + `set-phase awaiting-ci`); do NOT re-do the feature or re-run
-`verify-ac` (prior attestations still hold — the spec, and so their content hashes, didn't
-change). If you
+step 5 (push the rebased branch + `set-phase awaiting-ci`); do NOT re-do the feature, re-run
+`verify-ac`, or re-run the QA loop below (prior attestations and verdicts still hold — the
+spec, and so their content hashes, didn't change). If you
 truly cannot resolve the conflict yourself, escalate:
 `maestro ask "$KEY" "PR #<n> conflict I couldn't auto-resolve: <detail>" --qid "conflict-$KEY-<n>"`
 and exit.
@@ -190,19 +190,46 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    If red, fix and re-run. Do not proceed until green. If you exceed ~`max_impl_turns`
    edit/test cycles without converging: `maestro fail "$KEY" "non-converging: <why>"` and exit.
-3. **Self-review gate — one structured attestation per spec AC, before opening the PR:**
+3. **Adversarial QA loop — an agent that did not write the code independently re-checks each
+   AC against the diff, before you self-attest.** This is the Implementer↔QA hand-off, mined
+   from the orchestrator's `orch-implement` shape but collapsed into this one `implementing`
+   step: it runs entirely via `Agent`-tool sub-agent spawns inside this session, not across
+   dispatcher sweeps.
+   ```bash
+   git -C "$WT" diff "origin/$BASE" -- . > /tmp/$KEY-qa-diff.txt
+   ```
+   Spawn a **QA** sub-agent (`Agent` tool), briefed with only: the spec's Acceptance criteria
+   list and the diff above — not your implementation reasoning. Its job, per AC: judge PASS or
+   FAIL strictly against what the diff actually does, then record a verdict itself (it must not
+   edit code):
+   `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --evidence "<what it checked, what
+   it saw in the diff>"` (1-based, in spec order — same indexing as `verify-ac`).
+   - **Every AC verdict PASS** → continue to step 4.
+   - **Any AC verdict FAIL** → you (the implementer) fix the code per the QA evidence, append a
+     turn breadcrumb (`maestro append "$KEY" --type ImplTurnRecorded --payload
+     "{\"turn\":<n>,\"role\":\"implementer\"}" --step-id "turn-$KEY-<n>-impl"`), re-run tests,
+     then spawn QA again against the refreshed diff. Bound the rounds at `max_impl_turns`
+     combined turns; if still failing when exhausted, do **not** open a PR —
+     `maestro set-phase "$KEY" implementing --reason "QA loop non-converging after N rounds:
+     <summary>"` then `maestro requeue "$KEY" 60` and exit so the dispatcher resumes the loop
+     next sweep. This is enforced, not just convention: `set-phase awaiting-ci` refuses (raises,
+     no event appended) while any current AC's latest QA verdict is `fail`, so a failing verdict
+     always routes back to `implementing`, never onward to `awaiting-ci`.
+4. **Self-review gate — one structured attestation per spec AC, before opening the PR:**
    for each `- [ ] ...` checkbox in the spec, `maestro verify-ac "$KEY" --ac <n> --what
    "<what you ran>" --where "<file:line or test name>" --result "<the observed outcome>"`
    (1-based, in spec order; content-hash keyed, so a later spec edit to that line un-verifies
    it again — re-run verify-ac if that happens). All three fields are required — a call
    missing any of them is rejected. This is a structured self-attestation that saves the human
-   reviewer time, not machine-verified QA — cite the real evidence (a test name, a diff hunk),
-   don't rubber-stamp. **`set-phase awaiting-ci` (step 4) refuses with a non-zero exit and
-   appends no event if any spec AC is still unverified** — verify all of them here, don't skip
-   this step. (A human can still force a ticket through with `--force` on `set-phase`, which
-   records `forced_by=<actor>` in the event log — that escape hatch is for a human override,
-   not something you should reach for yourself; if you truly cannot verify an AC, ask instead.)
-4. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently:
+   reviewer time — the QA loop above is what makes it independently checked; cite the real
+   evidence (a test name, a diff hunk), don't rubber-stamp. **`set-phase awaiting-ci` (step 5)
+   refuses with a non-zero exit and appends no event if any spec AC is still unverified, and
+   also refuses while any current AC's latest QA verdict is `fail`** — verify all of them here,
+   don't skip this step. (A human can still force a ticket through with `--force` on
+   `set-phase`, which records `forced_by=<actor>` in the event log — that escape hatch overrides
+   only the unverified-ACs gate, not a failing QA verdict, and is for a human override, not
+   something you should reach for yourself; if you truly cannot verify an AC, ask instead.)
+5. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently:
    ```bash
    git -C "$HOME/worktrees/$KEY" add -A && git -C "$HOME/worktrees/$KEY" commit -q -m "$KEY: <subject>"
    git -C "$HOME/worktrees/$KEY" push -q -u origin "${PREFIX}${KEY}"
