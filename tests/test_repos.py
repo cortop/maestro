@@ -67,12 +67,12 @@ def test_config_load_parses_repos_tables(home):
     assert cfg.repos["alpha"] == {
         "path": "/repo/alpha", "slug": "acme/alpha",
         "base_branch": "develop", "branch_prefix": "alpha/", "default": False,
-        "max_spawns_per_sweep": None,
+        "max_spawns_per_sweep": None, "mode": "git",
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
         "base_branch": "main", "branch_prefix": "maestro/", "default": False,
-        "max_spawns_per_sweep": None,
+        "max_spawns_per_sweep": None, "mode": "git",
     }
 
 
@@ -145,7 +145,7 @@ def test_env_key_prints_resolved_binding(home, capsys):
     import json
     printed = json.loads(out)
     assert printed == {"repo": "beta", "repo_path": "/repo/beta", "slug": "acme/beta",
-                        "base_branch": "main", "branch_prefix": "maestro/"}
+                        "base_branch": "main", "branch_prefix": "maestro/", "mode": "git"}
 
 
 def test_env_key_unknown_repo_exits_nonzero(home, capsys):

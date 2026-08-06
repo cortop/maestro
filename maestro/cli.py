@@ -774,6 +774,14 @@ def cmd_backup(args) -> int:
     return 0
 
 
+def cmd_local_backup(args) -> int:
+    """[agent] AD-6: back up a mode="local" ticket's target dir before writing in place."""
+    cfg = _cfg(args)
+    archive = ops.local_write_backup(cfg, args.key, actor=args.actor)
+    _print({"backed_up": archive})
+    return 0
+
+
 def cmd_restore(args) -> int:
     """Restore a backup tarball into the home, then refold snapshots + dashboards."""
     cfg = _cfg(args)
@@ -794,7 +802,8 @@ def cmd_env(args) -> int:
             return 1
         binding = repos_mod.resolve(cfg, cfg.home, key)
         _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
-                "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix})
+                "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
+                "mode": binding.mode})
         return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
@@ -888,6 +897,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("backup", cmd_backup, "snapshot events/tickets/inbox/config to a tarball")
     sp.add_argument("--list", action="store_true",
                     help="list existing backups instead of creating one")
+    sp = add("local-backup", cmd_local_backup,
+             "[agent] back up a mode=\"local\" ticket's target dir before writing in place")
+    sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("restore", cmd_restore, "restore a backup tarball into the home")
     sp.add_argument("archive", nargs="?", default=None,
                     help="tarball path to restore (default: latest)")

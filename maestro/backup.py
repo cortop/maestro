@@ -81,6 +81,27 @@ def create_backup(cfg: Config, now: float) -> Path:
     return archive
 
 
+def backup_local_target(target: Path, now: float, *, dest_dir: Path | None = None) -> Path:
+    """One-off tarball of an arbitrary directory -- the backup-on-write
+    compensating control for an AD-6 ``mode = "local"`` repo binding, which
+    writes in place instead of opening a PR. Mirrors ``create_backup``'s
+    atomic temp-then-rename pattern, but captures the WHOLE *target* (there is
+    no fixed ``BACKUP_MEMBERS`` set for an arbitrary directory) and defaults to
+    a SIBLING of *target* (never inside it), so a wipe of *target* can't take
+    the backup with it. Callers own retention -- this always writes a new
+    archive.
+    """
+    target = Path(target).expanduser()
+    dest = Path(dest_dir).expanduser() if dest_dir else target.parent / f"{target.name}-backups"
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = dest / f"{_PREFIX}{_stamp(now)}{_SUFFIX}"
+    tmp = dest / f".{archive.name}.tmp"
+    with tarfile.open(tmp, "w:gz") as tar:
+        tar.add(target, arcname=target.name)
+    tmp.replace(archive)
+    return archive
+
+
 def maybe_backup(cfg: Config, now: float) -> Path | None:
     """Dispatcher hook: create a snapshot at most once per ``backup_interval``
     seconds, gated by a persisted cursor (level-triggered, idempotent — mirrors
