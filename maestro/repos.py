@@ -8,6 +8,7 @@ the implicit default so the dispatcher can never wedge on a bad spec edit.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from . import snapshot as snap_mod
 from . import store
 from .config import Config
 from .dispatcher import parse_spec_overrides
+
+_PR_URL_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/pull/\d+")
 
 
 @dataclass
@@ -74,6 +77,36 @@ def bound_repo_name(home: Path, key: str) -> str | None:
         if overrides.get("repo"):
             return overrides["repo"]
     return snap_mod.load(home, key).repo
+
+
+def slug_from_pr_url(pr_url: str | None) -> str | None:
+    """Parse "owner/repo" out of a GitHub PR URL (e.g.
+    "https://github.com/acme/beta/pull/9" -> "acme/beta"). Migration shim: for a
+    ticket minted before per-ticket repo binding existed (snapshot.repo unset),
+    ``pr_url`` (snapshot.py:44) is the only per-ticket artifact that already
+    identifies which repo its PR lives in. Returns None if unset or unparseable.
+    """
+    if not pr_url:
+        return None
+    m = _PR_URL_RE.match(pr_url)
+    if not m:
+        return None
+    return f"{m.group(1)}/{m.group(2)}"
+
+
+def resolve_vcs_slug(cfg: Config, snap: snap_mod.Snapshot) -> str | None:
+    """The ``owner/repo`` slug ``dispatcher.sync_vcs``/``_observe_reviews`` should
+    pass to the VCS provider for *snap*'s PR: ``[repos.<snap.repo>].slug`` if
+    bound to a configured table, else the ``pr_url``-parse shim for pre-binding
+    tickets. None means "let the VCS provider fall back to its own default"
+    (today's ``repos[0]``/iterate-all behavior), so single-repo boards and
+    unbound tickets with no parseable ``pr_url`` are unaffected.
+    """
+    if snap.repo:
+        table = cfg.repos.get(snap.repo)
+        if table and table.get("slug"):
+            return table["slug"]
+    return slug_from_pr_url(snap.pr_url)
 
 
 def resolve(cfg: Config, home: Path, key: str) -> RepoBinding:

@@ -31,11 +31,15 @@ class Tracker(Protocol):
 
 
 class VCS(Protocol):
-    """A code host (GitHub, GitLab, ...)."""
+    """A code host (GitHub, GitLab, ...). PR numbers are only unique WITHIN a repo,
+    so every call takes an optional ``repo`` slug (e.g. "owner/repo"); ``None`` means
+    "use the provider's own default" (today's single-repo/iterate-all behavior), so
+    single-repo boards are unaffected. Callers resolve the slug via ``repos.py``.
+    """
 
-    def pr_for_branch(self, branch: str) -> dict | None: ...
+    def pr_for_branch(self, branch: str, repo: str | None = None) -> dict | None: ...
 
-    def pr_status(self, pr_number: int) -> dict:
+    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
         """Poll one PR's merge state and CI checks in a single round-trip.
 
         Returns {"state": "OPEN"|"MERGED"|"CLOSED"|"unknown",
@@ -45,7 +49,7 @@ class VCS(Protocol):
         """
         ...
 
-    def review_feedback(self, pr_number: int) -> list[dict]:
+    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]:
         """Return every review left on the PR as [{"id": str, "state": str|None,
         "body": str, "author": str|None}, ...]. The caller de-dupes per comment-id
         via the event log's step-id idempotency (see ``dispatcher.sync_vcs``)."""
@@ -69,11 +73,11 @@ class NullTracker:
 
 
 class NullVCS:
-    def pr_for_branch(self, branch: str) -> dict | None: return None
-    def pr_status(self, pr_number: int) -> dict:
+    def pr_for_branch(self, branch: str, repo: str | None = None) -> dict | None: return None
+    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
         return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
                 "ci_state": "unknown", "failing_checks": []}
-    def review_feedback(self, pr_number: int) -> list[dict]: return []
+    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]: return []
 
 
 class NullFetcher:
