@@ -222,6 +222,31 @@ def requeue(cfg: Config, key: str, seconds: int, *, actor: str = "reconciler") -
             sid=step_id(key, snap.phase, snap.observed_seq, f"requeue:{int(at)}"))
 
 
+def record_impl_turn(cfg: Config, key: str, *, role: str = "implementer",
+                      actor: str = "reconciler") -> dict:
+    """Append one ``ImplTurnRecorded{turn, role}``, folding into ``snapshot.impl_turns``.
+
+    Crossing ``cfg.max_impl_turns`` parks the ticket via `fail` (the same backoff/
+    dead-letter machinery `max_spawn_attempts`'s watchdog uses) instead of letting
+    it keep churning edit/test cycles -- so a non-converging implementing session
+    stops on its own. The ceiling check reads the just-folded snapshot value, not
+    a counter held in the calling session, so it is exact under crash-and-respawn
+    (a respawned session sees the same folded count a prior one left behind).
+    """
+    snap = snap_mod.load(cfg.home, key)
+    turn = snap.impl_turns + 1
+    _append(cfg, key, E.IMPL_TURN, {"turn": turn, "role": role}, actor=actor,
+            sid=step_id(key, snap.phase, snap.observed_seq, f"implturn:{turn}"))
+    snap = snap_mod.load(cfg.home, key)
+    parked = False
+    if cfg.max_impl_turns and snap.impl_turns >= cfg.max_impl_turns:
+        fail(cfg, key,
+             f"max_impl_turns ceiling reached ({snap.impl_turns}/{cfg.max_impl_turns})",
+             actor=actor)
+        parked = True
+    return {"turn": snap.impl_turns, "parked": parked}
+
+
 def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler") -> str:
     """Record a failure; back off, or dead-letter if over the threshold."""
     snap = snap_mod.load(cfg.home, key)

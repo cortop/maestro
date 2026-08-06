@@ -1,5 +1,5 @@
 ---
-description: Reconcile ONE maestro ticket by exactly one idempotent step, then exit.
+description: Reconcile ONE maestro ticket by exactly one idempotent step, then exit. (maestro self-dev)
 argument-hint: <TICKET-KEY>
 ---
 
@@ -12,15 +12,21 @@ may use the `Agent` tool. Every state write goes through `maestro` so it is idem
 crash-and-respawn.
 
 ## Always: load state first
+Resolve this ticket's bound repo — REPO/SLUG/BASE/PREFIX come from `maestro env --key`, which
+can differ per ticket in a multi-repo home (single-repo homes fall back to the legacy
+`repo_path`/`branch_prefix` config, so this is unchanged there) — plus HOME, which is board-wide
+and comes from the key-less `maestro env`:
 ```bash
 KEY="$1"
-eval "$(maestro env | python3 -c 'import sys,json;d=json.load(sys.stdin);print(f"REPO={d[\"repo_path\"]}\nPREFIX={d[\"branch_prefix\"]}\nHOME={d[\"home\"]}")')"
+eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+d["repo_path"]+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"])')"
+eval "$(maestro env | python3 -c 'import sys,json;print("HOME="+json.load(sys.stdin)["home"])')"
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
 sed -n '1,200p' "$HOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
 cat "$HOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
                                                     # failures, CI history, recent impl steps,
-                                                    # dependsOn phases — read before acting
+                                                    # dependsOn phases — read this before acting,
+                                                    # it saves re-deriving context from raw events
 ```
 If the snapshot shows pending inbox commands, fold them BEFORE deciding:
 ```bash
@@ -46,7 +52,7 @@ KIND=$(echo "$SNAP" | python3 -c "import sys,json; d=json.load(sys.stdin); print
 ```
 Inspect each qid key in `answered_questions`:
 - **any qid starts with `conflict-`** → an escalated merge conflict the agent could not auto-resolve;
-  the human gave guidance. Re-enter the worktree to apply it and retry the resolution:
+  the human answered with guidance. Re-enter the worktree to apply it and retry the resolution:
   `maestro set-phase "$KEY" implementing --reason "retry conflict resolution: <verbatim>"`
 
 **If `KIND == research`** (research approval question — qid starts with `research-approval-`):
@@ -87,9 +93,10 @@ maestro finalize "$KEY"
 **Then** `maestro inbox-ack "$KEY"` (LAST — so a crash before this re-reads the answer).
 
 If `answered_questions` AND `open_questions` are **both empty**, you were woken as `stranded`
-(awaiting-human with nothing to wait on — the dispatcher wakes these so they can't sleep
-forever). Recover so you make progress this step: if `pr_number` is set →
-`maestro set-phase "$KEY" awaiting-ci --requeue 60`, else `maestro set-phase "$KEY" triaging --reason "stranded recovery"`.
+(a phase set to awaiting-human with nothing to wait on — the dispatcher wakes these so they
+can't sleep forever). Recover by re-deriving the phase so you make progress this step: if
+`pr_number` is set → `maestro set-phase "$KEY" awaiting-ci --requeue 60`, otherwise
+`maestro set-phase "$KEY" triaging --reason "stranded recovery"`.
 
 ### `ready`
 Honor `dependsOn` in the spec: if any listed ticket isn't `done`, sleep
@@ -102,8 +109,8 @@ maestro set-phase "$KEY" researching --reason "research ticket: beginning explor
 
 **If `kind != research`** (implementation — create worktree):
 ```bash
-git -C "$REPO" fetch -q origin main
-git -C "$REPO" worktree add "$HOME/worktrees/$KEY" -b "${PREFIX}${KEY}" origin/main 2>/dev/null \
+git -C "$REPO" fetch -q origin "$BASE"
+git -C "$REPO" worktree add "$HOME/worktrees/$KEY" -b "${PREFIX}${KEY}" "origin/$BASE" 2>/dev/null \
   || git -C "$REPO" worktree add "$HOME/worktrees/$KEY" "${PREFIX}${KEY}"   # adopt if branch exists
 maestro set-phase "$KEY" implementing --reason "worktree ready"
 ```
@@ -154,8 +161,8 @@ here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` say
 rebase onto the latest base first, then resolve any conflicts:
 ```bash
 WT="$HOME/worktrees/$KEY"
-git -C "$REPO" fetch -q origin main
-git -C "$WT" rebase origin/main || true   # resolve conflicts, then: git -C "$WT" rebase --continue
+git -C "$REPO" fetch -q origin "$BASE"
+git -C "$WT" rebase "origin/$BASE" || true   # resolve conflicts, then: git -C "$WT" rebase --continue
 ```
 If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteria are already
 implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
@@ -220,7 +227,7 @@ Otherwise implement the spec's Acceptance criteria:
    git -C "$HOME/worktrees/$KEY" push -q -u origin "${PREFIX}${KEY}"
    # Body includes a "| AC | Evidence |" table, one row per spec checkbox, sourced from the
    # verify-ac calls above (or `maestro snapshot "$KEY"` -> ac_verified for the evidence text).
-   PR_URL=$(gh pr create --repo cortop/maestro --head "${PREFIX}${KEY}" --draft \
+   PR_URL=$(gh pr create --repo "$SLUG" --base "$BASE" --head "${PREFIX}${KEY}" --draft \
             --title "$KEY: <subject>" \
             --body "<motivation/changes> ## AC-to-evidence
 
@@ -228,8 +235,8 @@ Otherwise implement the spec's Acceptance criteria:
 |----|----------|
 | <ac 1 text> | <evidence 1> |
 | <ac 2 text> | <evidence 2> |" 2>/dev/null \
-            || gh pr view "${PREFIX}${KEY}" --repo cortop/maestro --json url -q .url)
-   PR_NUM=$(gh pr view "${PREFIX}${KEY}" --repo cortop/maestro --json number -q .number)
+            || gh pr view "${PREFIX}${KEY}" --repo "$SLUG" --json url -q .url)
+   PR_NUM=$(gh pr view "${PREFIX}${KEY}" --repo "$SLUG" --json number -q .number)
    maestro append "$KEY" --type PrOpened --payload "{\"number\":$PR_NUM,\"url\":\"$PR_URL\",\"draft\":true}" --step-id "pr-$KEY"
    maestro set-phase "$KEY" awaiting-ci --requeue 300
    ```
