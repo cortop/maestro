@@ -28,6 +28,9 @@ IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one
 # Self-review
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  content-hash keyed AC attestation
 
+# Approval
+APPROVED = "Approved"                   # {}  human clears the tier-2 implementing gate (`maestro approve`)
+
 # Independent QA (a separate agent that did not write the code re-checks the diff)
 AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, evidence}  verdict: "pass"|"fail"
 

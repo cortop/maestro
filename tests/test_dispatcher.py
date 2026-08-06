@@ -462,24 +462,30 @@ def test_mint_ticket_prefix_skips_existing(home, cfg):
 
 # --- RT-1: parse_spec_overrides ---
 
-def test_parse_spec_overrides_empty():
-    assert disp.parse_spec_overrides("approval_tier: 1\npriority: 3\n") == {}
+def test_parse_spec_overrides_tier_only():
+    assert disp.parse_spec_overrides("approval_tier: 1\npriority: 3\n") == {"approval_tier": 1}
 
 
 def test_parse_spec_overrides_model_only():
     spec = "approval_tier: 1\nmodel: opus\ndependsOn: []\n"
-    assert disp.parse_spec_overrides(spec) == {"model": "opus"}
+    assert disp.parse_spec_overrides(spec) == {"approval_tier": 1, "model": "opus"}
 
 
 def test_parse_spec_overrides_all_three():
     spec = "approval_tier: 1\nkind: research\nmodel: opus\neffort: high\ndependsOn: []\n"
     result = disp.parse_spec_overrides(spec)
-    assert result == {"kind": "research", "model": "opus", "effort": "high"}
+    assert result == {"approval_tier": 1, "kind": "research", "model": "opus", "effort": "high"}
 
 
 def test_parse_spec_overrides_stops_at_section_header():
     spec = "approval_tier: 1\n## Intent\nmodel: opus\n"
-    assert disp.parse_spec_overrides(spec) == {}
+    assert disp.parse_spec_overrides(spec) == {"approval_tier": 1}
+
+
+def test_parse_spec_overrides_malformed_tier_omitted():
+    """A non-integer approval_tier is dropped, not raised -- `spec_tier` is what
+    supplies the safe (more-restrictive) fallback."""
+    assert disp.parse_spec_overrides("approval_tier: soon\n") == {}
 
 
 # --- RT-1: _resolve_model_effort ---
@@ -553,7 +559,7 @@ def test_dispatch_spawns_with_spec_model_and_effort(home, cfg):
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert "T-1" in report.spawned
-    spawned_map = {k: (m, e) for k, _p, _c, m, e in sessions.spawned}
+    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d in sessions.spawned}
     assert spawned_map["T-1"] == ("opus", "high")
 
 
@@ -562,7 +568,7 @@ def test_dispatch_spawns_with_config_defaults_when_no_spec_overrides(home, cfg):
     _seed_with_overrides(home, "T-1")
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    spawned_map = {k: (m, e) for k, _p, _c, m, e in sessions.spawned}
+    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d in sessions.spawned}
     assert spawned_map["T-1"] == (cfg.reconcile_model, None)
 
 
@@ -574,7 +580,7 @@ def test_dispatch_research_ticket_uses_research_defaults(home):
     _seed_with_overrides(home, "T-1", kind="research")
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    spawned_map = {k: (m, e) for k, _p, _c, m, e in sessions.spawned}
+    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d in sessions.spawned}
     assert spawned_map["T-1"] == ("opus", "high")
 
 
