@@ -128,5 +128,6 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
 
 ## Git
 
-- Default branch `main`; reconcilers branch with prefix `maestro/` and open PRs on `cortop/maestro`.
+- Default branch `main`; reconcilers branch with prefix `maestro/` and open PRs per the ticket's
+  repo binding (`maestro env --key <KEY>`; single-repo homes default to `cortop/maestro`).
 - Commit/push only when asked. Branch first if on `main`.

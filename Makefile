@@ -51,10 +51,13 @@ doctor:
 project:
 	maestro project
 
-# Run one reconcile in the foreground (cwd = repo, so /maestro-reconcile resolves).
+# Run one reconcile in the foreground, cd'd into KEY's bound repo (multi-repo homes: the
+# [repos.*] table it's bound to; single-repo homes: the legacy repo_path) so
+# /maestro-reconcile resolves (needs .claude/commands/ vendored in that repo's checkout).
 reconcile:
 	@test -n "$(KEY)" || (echo "usage: make reconcile KEY=M-1" && exit 1)
-	claude -p "/maestro-reconcile $(KEY)" --permission-mode acceptEdits
+	@REPO=$$(maestro env --key "$(KEY)" | $(PY) -c 'import sys,json;print(json.load(sys.stdin)["repo_path"])'); \
+	cd "$$REPO" && claude -p "/maestro-reconcile $(KEY)" --permission-mode acceptEdits
 
 backup:
 	maestro backup

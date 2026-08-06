@@ -1,8 +1,8 @@
 # Dogfooding: maestro develops maestro
 
 maestro is set up to orchestrate its own development. Tickets describing maestro's next
-features live as specs; reconciler sessions implement them in isolated git worktrees and
-open PRs against `cortop/maestro` for you to review and merge.
+features live as specs; reconciler sessions implement them in isolated git worktrees and open
+PRs against the ticket's bound repo (see below) for you to review and merge.
 
 ## The setup (already done)
 
@@ -15,7 +15,12 @@ open PRs against `cortop/maestro` for you to review and merge.
 | Permissions | `.claude/settings.json` — allowlist so unattended reconcilers don't stall |
 | Seed backlog | `M-1` (fleet CLI), `M-2` (log compaction), `M-3` (dependsOn gating) |
 
-`maestro env` prints the resolved paths the reconciler uses.
+`maestro env` prints the home-wide resolved paths; `maestro env --key <KEY>` prints the repo a
+*specific ticket* builds in (REPO/SLUG/BASE/PREFIX) — see "Multiple repos" below.
+
+Single-repo homes (the out-of-box default, and everything above this line describes) need no
+`[repos.*]` config at all: with no binding, `env --key` falls back to the legacy
+`repo_path`/`branch_prefix` fields, so every existing home reconciles unchanged.
 
 ## The loop
 
@@ -69,7 +74,8 @@ to human-owned/append-only files, never the ones agents rewrite.
 maestro show M-1            # snapshot + event log for one ticket
 maestro doctor             # heartbeat age, dead-letters
 claude agents --json       # live agent-view sessions
-ls ~/.maestro/maestro-dev/worktrees/   # per-ticket worktrees
+ls ~/.maestro/maestro-dev/worktrees/   # per-ticket worktrees (always under the home, even
+                                        # for tickets bound to a different [repos.*] entry)
 ```
 
 ## Safety notes
@@ -81,6 +87,27 @@ ls ~/.maestro/maestro-dev/worktrees/   # per-ticket worktrees
   that changes engine code only takes effect after its PR merges — so maestro improving
   itself is gated by your review, by construction.
 - Start with `max_concurrency = 4`; raise it in `config.toml` once you trust the loop.
+
+## Multiple repos
+
+One `MAESTRO_HOME` can drive reconcilers across several repos: add a `[repos.<name>]` table
+per repo (`path`, `slug`, optionally `base_branch`/`branch_prefix`/`default`) and bind a ticket
+to one with `maestro create --repo <name>` (or a `repo:` line in its spec frontmatter). See the
+commented example block in `config.toml`. A ticket with no binding keeps using the legacy
+`repo_path`/`branch_prefix` fields — single-repo homes need no `[repos.*]` config at all.
+
+**Activation checklist** — binding a *second* real repo to a live board is a human config step,
+permitted only once MR-1 through MR-6 have all merged to `main`:
+
+1. Vendor `.claude/commands/maestro-reconcile.md` into the new repo's checkout — every bound
+   repo needs it, since the reconciler's cwd becomes that repo (via `maestro env --key`) and
+   `/maestro-reconcile` only resolves from a checkout that has it under `.claude/commands/`.
+   (There is no automated distribution yet; this is a manual, documented step.)
+2. Add a `[repos.<name>]` table for it to `config.toml` (`path` + `slug` at minimum).
+3. Add its `owner/repo` slug to the VCS provider's repo list (`[vcs.github_cli] repos = [...]`)
+   so `sync_vcs` polls PRs there too.
+4. Confirm MR-1 .. MR-6 are all merged (per-repo dispatcher plumbing, repo-scoped VCS, and this
+   ticket's hardcode removal all need to be in place first).
 
 ## Backups (the event logs are the sole source of truth — protect them)
 
