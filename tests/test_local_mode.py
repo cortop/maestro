@@ -116,7 +116,9 @@ def test_local_mode_ticket_reaches_done_with_backup_on_write(home, tmp_path):
 
     # self-review gate, then finalize straight to done -- no PR, no CI wait
     assert cli_main(["--home", str(home), "verify-ac", "V-1", "--ac", "1",
-                     "--evidence", "note.md:2 ends with 'updated'"]) == 0
+                     "--what", "read the note back after writing",
+                     "--where", "note.md:2",
+                     "--result", "ends with 'updated'"]) == 0
     assert cli_main(["--home", str(home), "finalize", "V-1"]) == 0
 
     snap = snap_mod.load(home, "V-1")
