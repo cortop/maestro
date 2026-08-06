@@ -64,6 +64,10 @@ class Snapshot:
     # change; only a spec edit that changes an AC's text invalidates an entry
     # (its hash simply stops matching any current AC — see acs_unverified()).
     ac_verified: dict[str, str] = field(default_factory=dict)
+    # Set once by an Approved event (`maestro approve`) and never reset by a
+    # phase change -- the tier-2 implementing gate is a one-time human sign-off
+    # for the ticket's lifetime, not a per-visit checkpoint.
+    approved: bool = False
     # ac_hash -> {"verdict": "pass"|"fail", "evidence": str}, from AcQaVerdict
     # events — an independent QA agent's re-check, distinct from ac_verified's
     # self-attestation. Latest verdict per hash wins (a re-check after a fix
@@ -186,6 +190,8 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 s.qa_verdicts[h] = {"verdict": p.get("verdict"), "evidence": p.get("evidence", "")}
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
+        elif t == E.APPROVED:
+            s.approved = True
         elif t == E.REQUEUE_SCHEDULED:
             s.next_requeue_at = p.get("at")
         elif t == E.FAILED:

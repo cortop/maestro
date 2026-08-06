@@ -133,6 +133,7 @@ def load(home_arg: str | None = None) -> Config:
                 if not isinstance(table, dict) or not table.get("path"):
                     continue
                 raw_cap = table.get("max_spawns_per_sweep")
+                raw_mode = table.get("mode", "git")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -140,6 +141,7 @@ def load(home_arg: str | None = None) -> Config:
                     "branch_prefix": table.get("branch_prefix", cfg.branch_prefix),
                     "default": bool(table.get("default", False)),
                     "max_spawns_per_sweep": int(raw_cap) if raw_cap is not None else None,
+                    "mode": raw_mode if raw_mode in ("git", "local") else "git",
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -227,7 +229,10 @@ max_impl_turns = 20
 # ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
 
 [providers]
-tracker = "none"          # "none" | "jira" | "jira_cli" | "github_issues" | custom
+tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom
+                          # may also be a list, e.g. ["jira", "linear"], to run more than one
+                          # tracker concurrently -- each ticket refreshes against the one it
+                          # came from (`external_source`), on its own `sync_interval` cursor
 vcs = "none"              # "none" | "github_cli" | custom
 fetcher = "none"          # "none" | "command" (runs a shell command to import tickets)
 implementer = "claude_skill"
@@ -245,6 +250,11 @@ implementer = "claude_skill"
 # import_fields = ["summary", "description", "status", "issuetype"]
 # sync_interval = 900            # seconds between dispatcher sync ticks
 #
+# [tracker.linear]             # GraphQL adapter; opt-in ticket import + tracking sync
+# api_key_env = "LINEAR_API_KEY"   # personal API key read from env, never stored in config
+# import_filter = { assignee = { isMe = { eq = true } }, state = { type = { nin = ["completed", "canceled"] } } }
+# sync_interval = 900            # seconds between dispatcher sync ticks
+#
 # [vcs.github_cli]
 # repos = ["owner/repo"]
 # branch_prefix = "you/"
@@ -255,13 +265,17 @@ implementer = "claude_skill"
 
 # [repos.<name>]                    # optional multi-repo bindings; `maestro create --repo <name>`
 # path = "/abs/path/to/repo"        # required
-# slug = "owner/repo"               # for the vcs provider (gh, etc.)
-# base_branch = "main"              # default: "main"
-# branch_prefix = "you/"            # default: [maestro] branch_prefix
+# slug = "owner/repo"               # for the vcs provider (gh, etc.) -- git mode only
+# base_branch = "main"              # default: "main" -- git mode only
+# branch_prefix = "you/"            # default: [maestro] branch_prefix -- git mode only
 # default = true                    # this binding is the implicit default (optional)
 # max_spawns_per_sweep = 5          # cap this repo's spawns in ONE dispatcher sweep (optional;
                                      # default: uncapped). Composes with, never replaces,
                                      # min_spawn_interval/max_spawn_attempts/the fleet-wide rate gate.
+# mode = "local"                    # "git" (default: worktree/branch/PR) or "local" -- a plain
+                                     # directory (a notes vault, `~/.claude` for self-editing
+                                     # skills) with no branch/PR path; the reconciler writes in
+                                     # place, backing up the target first (`maestro local-backup`).
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""

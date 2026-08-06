@@ -153,7 +153,7 @@ def test_dryrun_records_model_and_effort():
     from pathlib import Path
     s = DryRunSessions()
     s.spawn("T-1", "prompt", Path("/tmp"), model="opus", effort="high")
-    key, prompt, cwd, model, effort = s.spawned[0]
+    key, prompt, cwd, model, effort, disallowed = s.spawned[0]
     assert key == "T-1"
     assert model == "opus"
     assert effort == "high"

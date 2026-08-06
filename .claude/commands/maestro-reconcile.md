@@ -13,13 +13,16 @@ may use the `Agent` tool. Every state write goes through `maestro` so it is idem
 crash-and-respawn.
 
 ## Always: load state first
-Resolve this ticket's bound repo — REPO/SLUG/BASE/PREFIX come from `maestro env --key`, which
+Resolve this ticket's bound repo — REPO/SLUG/BASE/PREFIX/MODE come from `maestro env --key`, which
 can differ per ticket in a multi-repo home (single-repo homes fall back to the legacy
 `repo_path`/`branch_prefix` config, so this is unchanged there) — plus HOME, which is board-wide
-and comes from the key-less `maestro env`:
+and comes from the key-less `maestro env`. `MODE` is `git` (default — worktree/branch/PR, the
+rest of this doc unless said otherwise) or `local` (AD-6 — a plain directory, e.g. a notes vault
+or `~/.claude` for self-editing skills, with no branch/PR path; the sections below call this out
+explicitly wherever it changes what you do):
 ```bash
 KEY="$1"
-eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+d["repo_path"]+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"])')"
+eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+(d["repo_path"] or "")+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"]+"\nMODE="+d["mode"])')"
 eval "$(maestro env | python3 -c 'import sys,json;print("HOME="+json.load(sys.stdin)["home"])')"
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
@@ -108,13 +111,19 @@ Honor `dependsOn` in the spec: if any listed ticket isn't `done`, sleep
 maestro set-phase "$KEY" researching --reason "research ticket: beginning exploration"
 ```
 
-**If `kind != research`** (implementation — create worktree):
-```bash
-git -C "$REPO" fetch -q origin "$BASE"
-git -C "$REPO" worktree add "$HOME/worktrees/$KEY" -b "${PREFIX}${KEY}" "origin/$BASE" 2>/dev/null \
-  || git -C "$REPO" worktree add "$HOME/worktrees/$KEY" "${PREFIX}${KEY}"   # adopt if branch exists
-maestro set-phase "$KEY" implementing --reason "worktree ready"
-```
+**If `kind != research`** (implementation):
+- **`MODE == local`** (AD-6 — a plain, non-git target directory): no branch, no worktree, nothing
+  to fetch — the reconciler edits `$REPO` (the resolved target dir) directly.
+  ```bash
+  maestro set-phase "$KEY" implementing --reason "local target ready"
+  ```
+- **`MODE == git`** (default — create a worktree):
+  ```bash
+  git -C "$REPO" fetch -q origin "$BASE"
+  git -C "$REPO" worktree add "$HOME/worktrees/$KEY" -b "${PREFIX}${KEY}" "origin/$BASE" 2>/dev/null \
+    || git -C "$REPO" worktree add "$HOME/worktrees/$KEY" "${PREFIX}${KEY}"   # adopt if branch exists
+  maestro set-phase "$KEY" implementing --reason "worktree ready"
+  ```
 
 ### `researching`
 You are exploring to produce a research proposal. Do **not** create a git worktree.
@@ -154,8 +163,32 @@ You are exploring to produce a research proposal. Do **not** create a git worktr
 Then exit — the dispatcher re-wakes you when the human answers.
 
 ### `implementing`
-You are (or the dispatcher cd'd you) in `$HOME/worktrees/$KEY` (if the worktree is missing,
-recreate it as in `ready` — `worktree add` adopts the existing `${PREFIX}${KEY}` branch).
+
+**If `MODE == local`** (AD-6 — a plain, non-git target directory): you are (or the dispatcher
+cd'd you) directly in `$REPO`, the resolved target dir itself — no worktree, no branch, no PR.
+1. Read the spec's Intent + AC and the relevant files in `$REPO`.
+2. **Before writing anything**, back up the target — the compensating control for skipping the
+   PR review checkpoint (idempotent per reconcile step; a crash-and-respawn mid-step does not
+   create a second tarball):
+   ```bash
+   maestro local-backup "$KEY"
+   ```
+3. Make the edits directly in `$REPO`.
+4. **Prove it.** Where `$REPO` has a real test/lint surface, run it exactly as the `git` path
+   does below and don't proceed until green. A plain-file target (a notes vault, a skill dir)
+   usually has none — for those, cite the concrete evidence instead: the diff you made, or a
+   read-back of the written file confirming its content matches the AC.
+5. **Self-review gate**, same as the `git` path: for each `- [ ] ...` checkbox in the spec,
+   `maestro verify-ac "$KEY" --ac <n> --evidence "<file:line, or the read-back that proves it>"`.
+6. Finalize directly — there is no PR to open or CI to await:
+   ```bash
+   maestro finalize "$KEY"
+   ```
+   Then exit.
+
+**If `MODE == git`** (default): you are (or the dispatcher cd'd you) in `$HOME/worktrees/$KEY`
+(if the worktree is missing, recreate it as in `ready` — `worktree add` adopts the existing
+`${PREFIX}${KEY}` branch).
 
 **Step 0 — sync with the base branch (also how conflicts get resolved).** You may have landed
 here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` says so). Always
