@@ -75,10 +75,13 @@ class SessionManager(Protocol):
         """Keys with a live reconciler (the 'already claimed' set)."""
 
     def spawn(self, key: str, prompt: str, cwd: Path,
-              model: str | None = None, effort: str | None = None) -> int | None:
+              model: str | None = None, effort: str | None = None,
+              disallowed_tools: list[str] | None = None) -> int | None:
         """Launch a detached reconciler for ``key``; return its pid (or None).
 
         *model* and *effort* override instance defaults when provided.
+        *disallowed_tools* is the per-tier tool-surface denylist (see
+        ``dispatcher.tier_denylist``) rendered as a ``--disallowedTools`` flag.
         """
 
 
@@ -108,7 +111,8 @@ class ClaudeCliSessions:
                                   max_age=self._unverified_claim_max_age)
 
     def spawn(self, key: str, prompt: str, cwd: Path,
-              model: str | None = None, effort: str | None = None) -> int | None:
+              model: str | None = None, effort: str | None = None,
+              disallowed_tools: list[str] | None = None) -> int | None:
         session_id = f"{session_name(key)}-{self._clock():.6f}"
         effective_model = model or self.model
         cmd = ["claude", "-p", prompt, "--model", effective_model, "-n", session_name(key)]
@@ -116,6 +120,8 @@ class ClaudeCliSessions:
             cmd += ["--effort", effort]
         if self.permission_mode:
             cmd += ["--permission-mode", self.permission_mode]
+        if disallowed_tools:
+            cmd += ["--disallowedTools", ",".join(disallowed_tools)]
         cmd += self.extra_args
         env = dict(os.environ)
         env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
@@ -155,13 +161,14 @@ class DryRunSessions:
 
     def __init__(self, active: set[str] | None = None):
         self._active = set(active or set())   # KEYS
-        self.spawned: list[tuple[str, str, str, str | None, str | None]] = []
+        self.spawned: list[tuple[str, str, str, str | None, str | None, list[str]]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
 
     def spawn(self, key: str, prompt: str, cwd: Path,
-              model: str | None = None, effort: str | None = None) -> int | None:
-        self.spawned.append((key, prompt, str(cwd), model, effort))
+              model: str | None = None, effort: str | None = None,
+              disallowed_tools: list[str] | None = None) -> int | None:
+        self.spawned.append((key, prompt, str(cwd), model, effort, list(disallowed_tools or [])))
         self._active.add(key)
         return None

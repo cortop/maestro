@@ -64,6 +64,10 @@ class Snapshot:
     # change; only a spec edit that changes an AC's text invalidates an entry
     # (its hash simply stops matching any current AC — see acs_unverified()).
     ac_verified: dict[str, str] = field(default_factory=dict)
+    # Set once by an Approved event (`maestro approve`) and never reset by a
+    # phase change -- the tier-2 implementing gate is a one-time human sign-off
+    # for the ticket's lifetime, not a per-visit checkpoint.
+    approved: bool = False
     # Set when a ticket originated from an external tracker (e.g. Jira) so the
     # dispatcher's sync tick knows which tickets to `refresh`.
     external_source: str | None = None
@@ -165,6 +169,8 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 s.ac_verified[h] = p.get("evidence", "")
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
+        elif t == E.APPROVED:
+            s.approved = True
         elif t == E.REQUEUE_SCHEDULED:
             s.next_requeue_at = p.get("at")
         elif t == E.FAILED:

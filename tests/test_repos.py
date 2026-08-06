@@ -215,7 +215,7 @@ def test_dispatch_spawn_cwd_honors_repo_binding(home):
     # No worktree exists yet for either key. X-5 is unbound -> falls back to
     # cfg.repo_path exactly as before MR-3. X-6 is bound to alpha -> its
     # resolved repo binding's path now wins over cfg.repo_path (MR-3).
-    cwd_by_key = {k: c for k, _p, c, _m, _e in sessions.spawned}
+    cwd_by_key = {k: c for k, _p, c, _m, _e, _d in sessions.spawned}
     assert cwd_by_key["X-5"] == cfg.repo_path
     assert cwd_by_key["X-6"] == "/repo/alpha"
 

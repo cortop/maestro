@@ -28,6 +28,9 @@ IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one
 # Self-review
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  content-hash keyed AC attestation
 
+# Approval
+APPROVED = "Approved"                   # {}  human clears the tier-2 implementing gate (`maestro approve`)
+
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent
 

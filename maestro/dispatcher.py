@@ -66,9 +66,11 @@ def parse_depends_on(spec_text: str) -> list[str]:
 
 
 def parse_spec_overrides(spec_text: str) -> dict:
-    """Extract optional kind/model/effort from a spec's loose frontmatter.
-
-    Stops at the first ## section header. Returns only keys that are present.
+    """Extract optional kind/model/effort/repo/approval_tier from a spec's loose
+    frontmatter. Stops at the first ## section header. Returns only keys that
+    are present. ``approval_tier`` is parsed to int; a malformed value (not an
+    int) is simply omitted -- callers fall back to the safe, more-restrictive
+    default (see ``spec_tier``) rather than this function ever raising.
     """
     result: dict = {}
     for line in spec_text.splitlines():
@@ -80,12 +82,40 @@ def parse_spec_overrides(spec_text: str) -> dict:
         field, val = m.group(1), m.group(2).strip()
         if field in ("kind", "model", "effort", "repo"):
             result[field] = val
+        elif field == "approval_tier":
+            try:
+                result[field] = int(val)
+            except ValueError:
+                pass
     return result
+
+
+def spec_tier(home: Path, key: str) -> int:
+    """*key*'s approval tier, read straight from the spec file on disk (not the
+    snapshot, so a human edit takes effect the very next sweep). Missing file,
+    missing field, or a malformed value all fall back to 1 -- the same
+    more-restrictive default used at mint (``args.get("approval_tier") or 1``)
+    -- so ``is_due``/spawn-arg construction can stay total and never wedge on a
+    bad spec."""
+    spec_file = store.spec_path(home, key)
+    if not spec_file.exists():
+        return 1
+    overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
+    return overrides.get("approval_tier", 1)
+
+
+def tier_denylist(tier: int) -> list[str]:
+    """Tool-surface denylist for a spawned reconciler, keyed by approval tier.
+
+    Tier 0 (auto-approved) gets none. Tier >=1 is denied ``gh pr merge`` --
+    such a ticket can still open a PR, but merging it is a human decision.
+    """
+    return ["Bash(gh pr merge:*)"] if tier >= 1 else []
 
 
 def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
            current_spec_hash: str | None, now: float,
-           blocked_dep: bool = False) -> DueResult:
+           blocked_dep: bool = False, tier: int = 1) -> DueResult:
     phase = Phase(snap.phase)
     if phase in TERMINAL_PHASES:
         return DueResult(False, "terminal")
@@ -120,6 +150,13 @@ def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
     # floor in dispatch() is what bounds it.
     if phase in SLEEPING_PHASES:
         return DueResult(False, "sleeping")
+    # Tier-2 implementing gate: a high-tier ticket sits in `implementing` (the
+    # worktree is set up, phase already transitioned) but is not due for the
+    # actual coding step until a human runs `maestro approve`. Persists across
+    # re-entries into implementing (e.g. a CI-failure retry) since `approved`
+    # is never reset by a PhaseChanged.
+    if phase == Phase.IMPLEMENTING and tier >= 2 and not snap.approved:
+        return DueResult(False, "needs-approval")
     return DueResult(True, "active")
 
 
@@ -1093,6 +1130,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     due: list[tuple[str, str]] = []
     claimed: list[str] = []
     observed_seq_by_key: dict[str, int] = {}
+    tier_by_key: dict[str, int] = {}
     decisions: dict[str, dict] = {}
 
     for key in list_keys(home):
@@ -1102,12 +1140,15 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             snap = snap_mod.rebuild(home, key)
         observed_seq_by_key[key] = snap.observed_seq
         blocked_dep = _has_unmet_deps(home, key)
+        tier = spec_tier(home, key)
+        tier_by_key[key] = tier
         res = is_due(
             snap,
             inbox_pending=inbox.has_pending(home, key),
             current_spec_hash=spec_hash_on_disk(home, key),
             now=now,
             blocked_dep=blocked_dep,
+            tier=tier,
         )
         if not res.due:
             decisions[key] = {"outcome": "not_due", "reason": res.reason}
@@ -1216,7 +1257,9 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             cwd = _worker_cwd(cfg, key)
             prompt = f"{cfg.reconcile_command} {key}"
             model, effort = _resolve_model_effort(cfg, key)
-            sessions.spawn(key, prompt, cwd, model=model, effort=effort)
+            disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
+            sessions.spawn(key, prompt, cwd, model=model, effort=effort,
+                           disallowed_tools=disallowed_tools)
             spawned.append(key)
             decisions[key]["outcome"] = "spawned"
             prev = ledger.get(key)

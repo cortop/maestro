@@ -246,6 +246,16 @@ def cmd_ans(args) -> int:
     return 0
 
 
+def cmd_approve(args) -> int:
+    """[human] clear the tier-2 implementing gate; ticket is due next sweep."""
+    cfg = _cfg(args)
+    ops.approve(cfg, args.key, actor="human")
+    _print(f"approved {args.key}")
+    if not args.no_nudge and cfg.nudge_on_human_input:
+        _nudge(cfg)
+    return 0
+
+
 def cmd_answer(args) -> int:
     """Interactive walkthrough: find every open question and record answers."""
     cfg = _cfg(args)
@@ -812,6 +822,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key"); sp.add_argument("text"); sp.add_argument("--qid")
     sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
                     help="skip in-process dispatch nudge after answering")
+
+    sp = add("approve", cmd_approve,
+             "[human] clear a tier-2 ticket's implementing gate (due next sweep)")
+    sp.add_argument("key")
+    sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
+                    help="skip in-process dispatch nudge after approving")
 
     sp = add("answer", cmd_answer, "interactive walkthrough of all open questions")
     sp.add_argument("key", nargs="?", default=None, help="scope to one ticket (default: all)")
