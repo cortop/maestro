@@ -511,6 +511,13 @@ def cmd_verify_ac(args) -> int:
     return 0
 
 
+def cmd_qa_verdict(args) -> int:
+    """[agent] record an independent QA verdict (pass/fail) for AC #n with evidence."""
+    h = ops.record_qa_verdict(_cfg(args), args.key, args.ac, args.verdict, args.evidence, actor=args.actor)
+    _print({"qa_verdict_ac_hash": h, "verdict": args.verdict})
+    return 0
+
+
 def cmd_finalize(args) -> int:
     cfg = _cfg(args)
     ops.finalize(cfg, args.key, actor=args.actor)
@@ -917,6 +924,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with evidence (content-hash keyed)")
     sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")
     sp.add_argument("--evidence", required=True); sp.add_argument("--actor", default="reconciler")
+
+    sp = add("qa-verdict", cmd_qa_verdict,
+             "[agent] record an independent QA pass/fail verdict for AC #n (content-hash keyed)")
+    sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")
+    sp.add_argument("--verdict", required=True, choices=sorted(ops.QA_VERDICTS))
+    sp.add_argument("--evidence", required=True); sp.add_argument("--actor", default="reconciler-qa")
 
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
