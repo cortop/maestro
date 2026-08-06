@@ -31,11 +31,15 @@ AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}
 # Approval
 APPROVED = "Approved"                   # {}  human clears the tier-2 implementing gate (`maestro approve`)
 
+# Independent QA (a separate agent that did not write the code re-checks the diff)
+AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, evidence}  verdict: "pass"|"fail"
+
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent
 
-# External sync (opt-in trackers, e.g. Jira)
+# External sync (opt-in trackers, e.g. Jira, Linear)
 JIRA_SYNCED = "JiraSynced"              # {jira_updated_ts, status, last_comment_id}
+LINEAR_SYNCED = "LinearSynced"          # {linear_updated_ts, status, last_comment_id}
 
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket

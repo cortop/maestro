@@ -32,6 +32,8 @@ def _append(cfg: Config, key: str, type: str, payload: dict, *, actor: str,
 def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: str = "reconciler",
               requeue_in: int | None = None, expect: int | None = None) -> dict | None:
     snap = snap_mod.load(cfg.home, key)
+    if phase == Phase.AWAITING_CI:
+        _refuse_if_qa_failing(cfg, key, snap)
     src = Phase(snap.phase)
     if src != phase and not can_transition(src, phase):
         # Not fatal — log it, but the engine trusts the agent's judgment.
@@ -46,6 +48,22 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
     return ev
+
+
+def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
+    """Block `implementing -> awaiting-ci` while an independent QA verdict on a
+    current AC is still `fail` — the enforced half of the adversarial loop: a
+    failing verdict must send the ticket back to `implementing`, not let it
+    coast onward to review. Raises (no event appended) rather than warning, so
+    a reconciler that tries anyway gets a hard, actionable stop."""
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        return
+    failing = snap.qa_failing_acs(spec_path.read_text(encoding="utf-8"))
+    if failing:
+        raise store.MaestroError(
+            f"{key}: refusing awaiting-ci — QA verdict is fail on {len(failing)} "
+            f"acceptance criteria: {'; '.join(failing)} — fix and re-run `maestro qa-verdict`")
 
 
 def _warn_unverified_acs(cfg: Config, key: str, *, actor: str) -> None:
@@ -81,6 +99,39 @@ def verify_ac(cfg: Config, key: str, ac_index: int, evidence: str, *, actor: str
     _append(cfg, key, E.AC_VERIFIED,
             {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "evidence": evidence},
             actor=actor, sid=f"acverified-{key}-{h}")
+    return h
+
+
+QA_VERDICTS = {"pass", "fail"}
+
+
+def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, evidence: str, *,
+                       actor: str = "reconciler-qa") -> str:
+    """Record an *independent* QA re-check of AC #ac_index (1-based, in spec
+    order) — the counterpart to `verify_ac`'s self-attestation, meant to be
+    called by a separate agent that did not write the implementation.
+
+    Content-hash keyed like `verify_ac`, but the step id also folds in the
+    current `observed_seq`: unlike a self-attestation, the *same* AC is
+    expected to be re-verdicted after each fix-and-retry round, so a later
+    call (once the log has moved on) must record a new event rather than
+    collapse into the first one.
+    """
+    if verdict not in QA_VERDICTS:
+        raise store.MaestroError(f"{key}: --verdict must be one of {sorted(QA_VERDICTS)}, got {verdict!r}")
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        raise store.MaestroError(f"{key}: no spec.md to verify ACs against")
+    acs = snap_mod.parse_acs(spec_path.read_text(encoding="utf-8"))
+    if not (1 <= ac_index <= len(acs)):
+        raise store.MaestroError(f"{key}: AC #{ac_index} out of range (spec has {len(acs)} AC(s))")
+    ac_text = acs[ac_index - 1]
+    h = snap_mod.ac_hash(ac_text)
+    snap = snap_mod.load(cfg.home, key)
+    sid = step_id(key, snap.phase, snap.observed_seq, f"qaverdict-{h}-{verdict}")
+    _append(cfg, key, E.AC_QA_VERDICT,
+            {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "verdict": verdict, "evidence": evidence},
+            actor=actor, sid=sid)
     return h
 
 
@@ -176,6 +227,31 @@ def requeue(cfg: Config, key: str, seconds: int, *, actor: str = "reconciler") -
     snap = snap_mod.load(cfg.home, key)
     _append(cfg, key, E.REQUEUE_SCHEDULED, {"at": at}, actor=actor,
             sid=step_id(key, snap.phase, snap.observed_seq, f"requeue:{int(at)}"))
+
+
+def record_impl_turn(cfg: Config, key: str, *, role: str = "implementer",
+                      actor: str = "reconciler") -> dict:
+    """Append one ``ImplTurnRecorded{turn, role}``, folding into ``snapshot.impl_turns``.
+
+    Crossing ``cfg.max_impl_turns`` parks the ticket via `fail` (the same backoff/
+    dead-letter machinery `max_spawn_attempts`'s watchdog uses) instead of letting
+    it keep churning edit/test cycles -- so a non-converging implementing session
+    stops on its own. The ceiling check reads the just-folded snapshot value, not
+    a counter held in the calling session, so it is exact under crash-and-respawn
+    (a respawned session sees the same folded count a prior one left behind).
+    """
+    snap = snap_mod.load(cfg.home, key)
+    turn = snap.impl_turns + 1
+    _append(cfg, key, E.IMPL_TURN, {"turn": turn, "role": role}, actor=actor,
+            sid=step_id(key, snap.phase, snap.observed_seq, f"implturn:{turn}"))
+    snap = snap_mod.load(cfg.home, key)
+    parked = False
+    if cfg.max_impl_turns and snap.impl_turns >= cfg.max_impl_turns:
+        fail(cfg, key,
+             f"max_impl_turns ceiling reached ({snap.impl_turns}/{cfg.max_impl_turns})",
+             actor=actor)
+        parked = True
+    return {"turn": snap.impl_turns, "parked": parked}
 
 
 def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler") -> str:

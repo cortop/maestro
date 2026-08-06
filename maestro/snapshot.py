@@ -68,6 +68,12 @@ class Snapshot:
     # phase change -- the tier-2 implementing gate is a one-time human sign-off
     # for the ticket's lifetime, not a per-visit checkpoint.
     approved: bool = False
+    # ac_hash -> {"verdict": "pass"|"fail", "evidence": str}, from AcQaVerdict
+    # events — an independent QA agent's re-check, distinct from ac_verified's
+    # self-attestation. Latest verdict per hash wins (a re-check after a fix
+    # overwrites the earlier fail), same content-hash-keyed invalidation as
+    # ac_verified.
+    qa_verdicts: dict[str, dict] = field(default_factory=dict)
     # Set when a ticket originated from an external tracker (e.g. Jira) so the
     # dispatcher's sync tick knows which tickets to `refresh`.
     external_source: str | None = None
@@ -90,6 +96,17 @@ class Snapshot:
         """
         hashes = {ac_hash(t) for t in parse_acs(spec_text)}
         return len(hashes - set(self.ac_verified.keys()))
+
+    def qa_failing_acs(self, spec_text: str) -> list[str]:
+        """AC texts (in spec order) whose latest independent QA verdict is
+        "fail" — a current AC (matched by content hash) recorded as failing
+        with no later passing re-check overwriting it."""
+        out = []
+        for t in parse_acs(spec_text):
+            v = self.qa_verdicts.get(ac_hash(t))
+            if v and v.get("verdict") == "fail":
+                out.append(t)
+        return out
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -167,6 +184,10 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             h = p.get("ac_hash")
             if h:
                 s.ac_verified[h] = p.get("evidence", "")
+        elif t == E.AC_QA_VERDICT:
+            h = p.get("ac_hash")
+            if h:
+                s.qa_verdicts[h] = {"verdict": p.get("verdict"), "evidence": p.get("evidence", "")}
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.APPROVED:

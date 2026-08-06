@@ -309,46 +309,56 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
 
 
 def sync_external_sources(cfg: Config, now: float) -> dict:
-    """Opt-in external-tracker sync tick (e.g. Jira). No-op unless a tracker other
-    than "none" is configured, and gated to run at most once per that provider's
-    ``sync_interval`` seconds via a persisted cursor (level-triggered, idempotent —
-    matches ``mint_new_tickets``). Imports new work via ``import_new`` (which itself
-    funnels through the audited ``_new`` inbox) and refreshes every tracked,
-    not-done ticket sourced from that tracker.
+    """Opt-in external-tracker sync tick (e.g. Jira, Linear). No-op unless at least
+    one tracker other than "none" is configured. Multiple trackers can be declared
+    at once (``providers.get_trackers``) and run independently: each is gated by
+    its own ``sync_interval`` via a persisted, per-name cursor (level-triggered,
+    idempotent — matches ``mint_new_tickets``), and each ticket refreshes against
+    the ONE tracker matching its own ``external_source`` — never another one's.
+    Imports new work via ``import_new`` (which itself funnels through the audited
+    ``_new`` inbox) and refreshes every tracked, not-done ticket sourced from a due
+    tracker.
     """
     home = cfg.home
-    tracker_name = cfg.providers.get("tracker", "none")
-    if tracker_name in (None, "", "none"):
-        return {"imported": 0, "refreshed": 0}
-
-    settings = cfg.provider_config.get("tracker", {}).get(tracker_name, {})
-    interval = int(settings.get("sync_interval", 900))
-    cursor_path = home / "derived" / ".sync_cursor.json"
-    cursor = store.read_json(cursor_path, {}) or {}
-    last_sync = cursor.get(tracker_name, 0)
-    if now - last_sync < interval:
-        return {"imported": 0, "refreshed": 0}
-
     # Import lazily to avoid a hard dependency from the core onto any one adapter.
     from . import providers
 
-    tracker = providers.get_tracker(cfg)
-    imported = tracker.import_new(home)
+    trackers = providers.get_trackers(cfg)
+    if not trackers:
+        return {"imported": 0, "refreshed": 0}
 
+    cursor_path = home / "derived" / ".sync_cursor.json"
+    cursor = store.read_json(cursor_path, {}) or {}
+
+    imported = 0
+    due_names = []
+    for name, tracker in trackers.items():
+        settings = cfg.provider_config.get("tracker", {}).get(name, {})
+        interval = int(settings.get("sync_interval", 900))
+        if now - cursor.get(name, 0) < interval:
+            continue
+        due_names.append(name)
+        imported += tracker.import_new(home)
+
+    if not due_names:
+        return {"imported": 0, "refreshed": 0}
+
+    due = set(due_names)
     refreshed = 0
     for key in list_keys(home):
         snap = snap_mod.load(home, key)
-        if snap.external_source != tracker_name:
+        if snap.external_source not in due:
             continue
         if Phase(snap.phase) in TERMINAL_PHASES:
             continue
         if not snap.external_id:
             continue
-        refreshed += tracker.refresh(home, key, snap.external_id)
+        refreshed += trackers[snap.external_source].refresh(home, key, snap.external_id)
         if event_log.last_seq(home, key) > snap.observed_seq:
             snap_mod.rebuild(home, key)
 
-    cursor[tracker_name] = now
+    for name in due_names:
+        cursor[name] = now
     store.write_json(cursor_path, cursor)
     return {"imported": imported, "refreshed": refreshed}
 
