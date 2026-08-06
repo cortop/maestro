@@ -34,6 +34,11 @@ def _create(cfg, key, **spec_kwargs):
     return snap_mod.rebuild(cfg.home, key)
 
 
+def _evidence(what="ran pytest", where="tests/test_widget.py::test_builds", result="PASSED"):
+    """A minimally-complete structured evidence dict for `verify_ac`."""
+    return {"what": what, "where": where, "result": result}
+
+
 # ---------------------------------------------------------------------------
 # Dossier content: every section required by the ticket
 # ---------------------------------------------------------------------------
@@ -57,6 +62,7 @@ def test_dossier_regenerated_by_ops_append_with_all_sections(cfg):
     event_log.append(home, "T-1", "ImplStepRecorded",
                      {"turn": 1, "role": "Implementer", "kind": "edit", "tool": "Edit",
                       "summary": "maestro/widget.py"}, actor="reconciler")
+    ops.verify_ac(cfg, "T-1", 1, _evidence())
     ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
 
     path = context.context_path(home, "T-1")
@@ -125,7 +131,7 @@ def test_render_output_is_stable_across_regenerate_calls(cfg):
 # ---------------------------------------------------------------------------
 
 def test_dossier_caps_phase_history_and_notes_the_omission(cfg):
-    _create(cfg, "T-1")
+    _create(cfg, "T-1", acs=())  # no ACs -- unrelated to the AC gate, ping-pongs freely
     # Ping-pong past the cap so there are more phase changes than MAX_PHASE_CHANGES.
     total = context.MAX_PHASE_CHANGES + 5
     for i in range(total):
@@ -149,12 +155,14 @@ def test_verify_ac_appends_event_and_reduces_unverified_count(cfg):
     spec_text = store.spec_path(home, "T-1").read_text(encoding="utf-8")
     assert snap.acs_unverified(spec_text) == 2
 
-    h = ops.verify_ac(cfg, "T-1", 1, "tests/test_widget.py::test_builds passes")
+    ev1 = _evidence(where="tests/test_widget.py::test_builds", result="PASSED")
+    h = ops.verify_ac(cfg, "T-1", 1, ev1)
     snap = snap_mod.load(home, "T-1")
-    assert snap.ac_verified[h] == "tests/test_widget.py::test_builds passes"
+    assert snap.ac_verified[h] == ev1
     assert snap.acs_unverified(spec_text) == 1
 
-    ops.verify_ac(cfg, "T-1", 2, "README.md updated with widget docs")
+    ev2 = _evidence(what="read the diff", where="README.md", result="widget docs present")
+    ops.verify_ac(cfg, "T-1", 2, ev2)
     snap = snap_mod.load(home, "T-1")
     assert snap.acs_unverified(spec_text) == 0
 
@@ -165,31 +173,62 @@ def test_verify_ac_via_real_cli(cfg):
     _create(cfg, "T-1", acs=("build the widget",))
 
     rc = cli.main(["--home", str(home), "verify-ac", "T-1", "--ac", "1",
-                   "--evidence", "ran pytest, green"])
+                   "--what", "ran pytest", "--where", "tests/test_widget.py::test_builds",
+                   "--result", "PASSED"])
     assert rc == 0
 
     events = event_log.read(home, "T-1")
     ac_events = [e for e in events if e["type"] == "AcVerified"]
     assert len(ac_events) == 1
-    assert ac_events[0]["payload"]["evidence"] == "ran pytest, green"
+    assert ac_events[0]["payload"]["evidence"] == {
+        "what": "ran pytest", "where": "tests/test_widget.py::test_builds", "result": "PASSED"}
     assert ac_events[0]["payload"]["ac_index"] == 1
 
 
 def test_verify_ac_is_idempotent_by_step_id(cfg):
     _create(cfg, "T-1", acs=("build the widget",))
-    ops.verify_ac(cfg, "T-1", 1, "first evidence")
-    ops.verify_ac(cfg, "T-1", 1, "second evidence — should be a no-op")
+    ops.verify_ac(cfg, "T-1", 1, _evidence(result="first evidence"))
+    ops.verify_ac(cfg, "T-1", 1, _evidence(result="second evidence — should be a no-op"))
 
     events = event_log.read(cfg.home, "T-1")
     ac_events = [e for e in events if e["type"] == "AcVerified"]
     assert len(ac_events) == 1
-    assert ac_events[0]["payload"]["evidence"] == "first evidence"
+    assert ac_events[0]["payload"]["evidence"]["result"] == "first evidence"
 
 
 def test_verify_ac_out_of_range_raises(cfg):
     _create(cfg, "T-1", acs=("only one thing",))
     with pytest.raises(store.MaestroError, match="out of range"):
-        ops.verify_ac(cfg, "T-1", 2, "n/a")
+        ops.verify_ac(cfg, "T-1", 2, _evidence())
+
+
+def test_verify_ac_rejects_evidence_missing_a_required_field(cfg):
+    """AC1: a call missing any of the three structured-evidence fields is rejected
+    before anything is appended — 'done' is no longer an acceptable attestation."""
+    _create(cfg, "T-1", acs=("build the widget",))
+
+    for incomplete in (
+        {"what": "ran pytest", "where": "tests/test_widget.py"},          # no result
+        {"what": "ran pytest", "result": "PASSED"},                       # no where
+        {"where": "tests/test_widget.py", "result": "PASSED"},            # no what
+        {"what": "ran pytest", "where": "tests/test_widget.py", "result": "   "},  # blank
+    ):
+        with pytest.raises(store.MaestroError, match="missing required field"):
+            ops.verify_ac(cfg, "T-1", 1, incomplete)
+
+    assert event_log.read(cfg.home, "T-1")[-1]["type"] != "AcVerified"
+
+
+def test_verify_ac_rejects_incomplete_evidence_via_real_cli(cfg):
+    """The CLI surface refuses too (argparse `required=True` on --what/--where/--result)."""
+    home = cfg.home
+    _create(cfg, "T-1", acs=("build the widget",))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--home", str(home), "verify-ac", "T-1", "--ac", "1",
+                  "--what", "ran pytest", "--where", "tests/test_widget.py"])  # no --result
+    assert exc.value.code != 0
+    assert not [e for e in event_log.read(home, "T-1") if e["type"] == "AcVerified"]
 
 
 def test_spec_edit_desyncs_stale_attestation(cfg):
@@ -197,7 +236,7 @@ def test_spec_edit_desyncs_stale_attestation(cfg):
     hash — proving desync detection instead of a stale/mismatched index match."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
-    ops.verify_ac(cfg, "T-1", 1, "verified against the original wording")
+    ops.verify_ac(cfg, "T-1", 1, _evidence(result="verified against the original wording"))
 
     spec_text = store.spec_path(home, "T-1").read_text(encoding="utf-8")
     snap = snap_mod.load(home, "T-1")
@@ -212,30 +251,102 @@ def test_spec_edit_desyncs_stale_attestation(cfg):
 
 
 # ---------------------------------------------------------------------------
-# Soft-warn at set-phase awaiting-ci
+# The AC gate at set-phase awaiting-ci: refusal, and the --force escape hatch
 # ---------------------------------------------------------------------------
 
-def test_set_phase_awaiting_ci_soft_warns_when_acs_unverified(cfg):
+def test_set_phase_awaiting_ci_refuses_when_acs_unverified(cfg):
+    """AC2: unattested ACs make the transition exit non-zero and append NO
+    PhaseChanged event — no longer a soft Note, an enforced gate."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget", "document it"))
+    seq_before = snap_mod.load(home, "T-1").observed_seq
 
-    ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
+    with pytest.raises(store.MaestroError, match="2 acceptance criteria unverified"):
+        ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
 
-    events = event_log.read(home, "T-1")
-    notes = [e for e in events if e["type"] == "Note" and "unverified" in e["payload"].get("text", "")]
-    assert len(notes) == 1
-    assert "2 acceptance criteria unverified" in notes[0]["payload"]["text"]
-    # Soft-warn only — the phase transition itself still happened.
-    assert snap_mod.load(home, "T-1").phase == Phase.AWAITING_CI.value
+    assert snap_mod.load(home, "T-1").phase != Phase.AWAITING_CI.value
+    evs = event_log.read(home, "T-1", since=seq_before)
+    assert [e for e in evs if e["type"] == "PhaseChanged"] == []
 
 
-def test_set_phase_awaiting_ci_no_warn_once_all_acs_verified(cfg):
+def test_set_phase_awaiting_ci_refuses_via_real_cli_with_nonzero_exit(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
-    ops.verify_ac(cfg, "T-1", 1, "evidence")
+
+    rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci", "--reason", "tests green"])
+    assert rc != 0
+
+    assert snap_mod.load(home, "T-1").phase != Phase.AWAITING_CI.value
+    assert not [e for e in event_log.read(home, "T-1") if e["type"] == "PhaseChanged"]
+
+
+def test_set_phase_awaiting_ci_succeeds_once_all_acs_verified(cfg):
+    home = cfg.home
+    _create(cfg, "T-1", acs=("build the widget",))
+    ops.verify_ac(cfg, "T-1", 1, _evidence())
 
     ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
 
+    assert snap_mod.load(home, "T-1").phase == Phase.AWAITING_CI.value
     events = event_log.read(home, "T-1")
     notes = [e for e in events if e["type"] == "Note" and "unverified" in e["payload"].get("text", "")]
     assert notes == []
+
+
+def test_set_phase_force_overrides_gate_and_records_actor(cfg):
+    """AC3: --force lets a human push a ticket through with unattested ACs, and
+    the event log records who did it."""
+    home = cfg.home
+    _create(cfg, "T-1", acs=("build the widget", "document it"))
+
+    ev = ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="human override",
+                       actor="valentin", force=True)
+
+    assert ev is not None
+    assert ev["payload"]["forced_by"] == "valentin"
+    snap = snap_mod.load(home, "T-1")
+    assert snap.phase == Phase.AWAITING_CI.value
+
+    events = event_log.read(home, "T-1")
+    changed = [e for e in events if e["type"] == "PhaseChanged" and e["payload"].get("phase") == "awaiting-ci"]
+    assert changed and changed[-1]["payload"]["forced_by"] == "valentin"
+    forced_notes = [e for e in events if e["type"] == "Note" and "forced past" in e["payload"].get("text", "")]
+    assert len(forced_notes) == 1
+    assert "valentin" in forced_notes[0]["payload"]["text"]
+    assert "2 unverified" in forced_notes[0]["payload"]["text"]
+
+
+def test_set_phase_force_not_needed_and_inert_when_all_acs_verified(cfg):
+    """--force is a no-op marker when there was nothing to override."""
+    home = cfg.home
+    _create(cfg, "T-1", acs=("build the widget",))
+    ops.verify_ac(cfg, "T-1", 1, _evidence())
+
+    ev = ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green", force=True)
+
+    assert "forced_by" not in ev["payload"]
+    events = event_log.read(home, "T-1")
+    assert not [e for e in events if e["type"] == "Note" and "forced past" in e["payload"].get("text", "")]
+
+
+def test_set_phase_force_via_real_cli(cfg):
+    """AC4: a real-CLI test proving both the refusal and the forced path, over a
+    temp home, driving the actual `maestro` verbs."""
+    home = cfg.home
+    _create(cfg, "T-1", acs=("build the widget",))
+
+    # Refusal first: no --force, unattested AC -> non-zero exit, no event.
+    rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci", "--reason", "tests green"])
+    assert rc != 0
+    assert not [e for e in event_log.read(home, "T-1") if e["type"] == "PhaseChanged"]
+
+    # The forced path: --force pushes it through and records the actor.
+    rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci",
+                   "--reason", "human override", "--actor", "valentin", "--force"])
+    assert rc == 0
+
+    snap = snap_mod.load(home, "T-1")
+    assert snap.phase == Phase.AWAITING_CI.value
+    events = event_log.read(home, "T-1")
+    changed = [e for e in events if e["type"] == "PhaseChanged" and e["payload"].get("phase") == "awaiting-ci"]
+    assert changed and changed[-1]["payload"]["forced_by"] == "valentin"

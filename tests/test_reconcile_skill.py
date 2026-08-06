@@ -90,10 +90,10 @@ def test_no_bare_origin_main():
     for path in BOTH_SKILLS:
         text = path.read_text()
         assert "origin/main" not in text, f"{path} still hardcodes origin/main"
-        # the rewritten form must actually be present (not just deleted): worktree-add
-        # and rebase both target "origin/$BASE", and both fetches pass "$BASE" too.
-        assert text.count('"origin/$BASE"') == 2, \
-            f'{path} should target "origin/$BASE" exactly twice (worktree-add + rebase)'
+        # the rewritten form must actually be present (not just deleted): worktree-add,
+        # rebase, and the QA-loop diff all target "origin/$BASE"; both fetches pass "$BASE".
+        assert text.count('"origin/$BASE"') == 3, \
+            f'{path} should target "origin/$BASE" exactly three times (worktree-add + rebase + QA diff)'
         assert text.count('fetch -q origin "$BASE"') == 2, \
             f'{path} should fetch "$BASE" exactly twice (ready + implementing step 0)'
 

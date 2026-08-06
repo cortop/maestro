@@ -60,10 +60,11 @@ class Snapshot:
     kind: str = "implementation"
     proposal_path: str | None = None
     updated_ts: str | None = None
-    # ac_hash -> evidence text, from AcVerified events. Never reset by a phase
-    # change; only a spec edit that changes an AC's text invalidates an entry
-    # (its hash simply stops matching any current AC — see acs_unverified()).
-    ac_verified: dict[str, str] = field(default_factory=dict)
+    # ac_hash -> structured evidence dict ({what, where, result}), from
+    # AcVerified events. Never reset by a phase change; only a spec edit that
+    # changes an AC's text invalidates an entry (its hash simply stops matching
+    # any current AC — see acs_unverified()).
+    ac_verified: dict[str, dict] = field(default_factory=dict)
     # Set once by an Approved event (`maestro approve`) and never reset by a
     # phase change -- the tier-2 implementing gate is a one-time human sign-off
     # for the ticket's lifetime, not a per-visit checkpoint.
@@ -183,7 +184,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.AC_VERIFIED:
             h = p.get("ac_hash")
             if h:
-                s.ac_verified[h] = p.get("evidence", "")
+                s.ac_verified[h] = p.get("evidence", {})
         elif t == E.AC_QA_VERDICT:
             h = p.get("ac_hash")
             if h:

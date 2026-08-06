@@ -132,6 +132,9 @@ def test_passing_qa_verdict_after_fix_unblocks_awaiting_ci(cfg):
     event_log.append(home, "T-1", "ImplTurnRecorded", {"turn": 2, "role": "implementer"}, actor="reconciler")
     ops.record_qa_verdict(cfg, "T-1", 1, "pass", "widget.py now present and tested")
 
+    # AD-3's separate unverified-AC gate also has to clear before awaiting-ci.
+    ops.verify_ac(cfg, "T-1", 1, {"what": "ran pytest", "where": "tests/test_widget.py",
+                                   "result": "PASSED"})
     ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
     snap = snap_mod.load(home, "T-1")
     assert snap.phase == Phase.AWAITING_CI.value
@@ -140,12 +143,16 @@ def test_passing_qa_verdict_after_fix_unblocks_awaiting_ci(cfg):
 def test_no_qa_verdicts_recorded_does_not_block(cfg):
     """A ticket that never ran the QA loop (e.g. pre-existing behavior, or a
     conflict-only re-entry that skips it) is unaffected — this is a gate on an
-    explicit fail, not a requirement that QA always run."""
+    explicit fail, not a requirement that QA always run. (ACs are still
+    verify_ac'd here so this test isolates the QA-verdict gate from AD-3's
+    separate unverified-AC gate, which blocks regardless of QA verdicts.)"""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
     ops.set_phase(cfg, "T-1", Phase.READY, reason="approved")
     ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
 
+    ops.verify_ac(cfg, "T-1", 1, {"what": "ran pytest", "where": "tests/test_widget.py",
+                                   "result": "PASSED"})
     ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
     snap = snap_mod.load(home, "T-1")
     assert snap.phase == Phase.AWAITING_CI.value
