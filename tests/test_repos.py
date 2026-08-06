@@ -67,10 +67,12 @@ def test_config_load_parses_repos_tables(home):
     assert cfg.repos["alpha"] == {
         "path": "/repo/alpha", "slug": "acme/alpha",
         "base_branch": "develop", "branch_prefix": "alpha/", "default": False,
+        "max_spawns_per_sweep": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
         "base_branch": "main", "branch_prefix": "maestro/", "default": False,
+        "max_spawns_per_sweep": None,
     }
 
 

@@ -323,5 +323,6 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     assert code == 0
     names = {c["name"] for c in out["checks"]}
     assert names == {"heartbeat", "backup_age", "claim_age", "dead_letters",
-                      "depends_on", "launchctl"}
+                      "depends_on", "launchctl", "repo_preflight",
+                      "unknown_repo_bindings", "missing_reconcile_skill"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])

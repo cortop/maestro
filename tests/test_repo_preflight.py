@@ -198,52 +198,114 @@ def test_dirty_repo_is_not_blocked(home, tmp_path):
     assert report.spawned == ["T-1"]
 
 
-# --- AC5: blocking is scoped to the spawn step, proven by side effects ------
+# --- AC5/MR-5 AC1: blocking is scoped to the AFFECTED REPO's spawn+sync step,
+# never the whole board -- proven with two real repos, one blocked. Replaces
+# the pre-MR-5 whole-board pin (this file's own history) with per-repo
+# semantics: the CONTRACT CHANGE this ticket states up front.
 
-def test_blocked_sweep_skips_only_sync_worktrees_and_spawn(home, tmp_path):
-    origin, repo = _make_origin_and_repo(tmp_path)
-    # Block the repo via a hand-written sentinel — NOT a real conflicting merge —
-    # so local main's tip stays exactly what was pushed, and thus a genuine
-    # ancestor of origin/main once another commit lands there (the ff-only
-    # scenario this test needs; AC1/AC2 above already prove blocker detection
-    # against a real conflicting merge).
-    gitdir = _gitdir(repo)
+def _repo_table(path, *, base_branch="main", default=False):
+    return {"path": str(path), "slug": None, "base_branch": base_branch,
+            "branch_prefix": "maestro/", "default": default, "max_spawns_per_sweep": None}
+
+
+def _seed_bound_ticket(home, key, repo_name, phase=Phase.IMPLEMENTING):
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: 0\nrepo: {repo_name}\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": key, "repo": repo_name,
+                      "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
+    return snap_mod.rebuild(home, key)
+
+
+def test_blocked_repo_skips_only_its_own_spawn_and_sync_two_repo(home, tmp_path):
+    alpha_origin, alpha_repo = _make_origin_and_repo(tmp_path, "alpha", base_branch="main")
+    beta_origin, beta_repo = _make_origin_and_repo(tmp_path, "beta", base_branch="main")
+
+    # Block alpha via a hand-written sentinel — NOT a real conflicting merge —
+    # so its local main tip stays a genuine ancestor of origin/main once
+    # another commit lands there (the ff-only scenario this test needs; AC1/AC2
+    # above already prove blocker detection against a real conflicting merge).
+    gitdir = _gitdir(alpha_repo)
     (gitdir / "MERGE_HEAD").write_text("0" * 40 + "\n")
+    _push_extra_commit_from_new_clone(alpha_origin, tmp_path)  # alpha now behind origin/main
 
-    _push_extra_commit_from_new_clone(origin, home)  # repo is now behind origin/main
+    alpha_main_before = _rev_parse(alpha_repo, "main")
+    alpha_fetch_head = alpha_repo / ".git" / "FETCH_HEAD"
+    beta_fetch_head = beta_repo / ".git" / "FETCH_HEAD"
+    assert not alpha_fetch_head.exists()
+    assert not beta_fetch_head.exists()
 
-    local_main_before = _rev_parse(repo, "main")
-    fetch_head = repo / ".git" / "FETCH_HEAD"
-    assert not fetch_head.exists()
+    cfg = Config(home=home, max_concurrency=3, min_spawn_interval=0, backup_interval=1,
+                repos={"alpha": _repo_table(alpha_repo, default=True),
+                       "beta": _repo_table(beta_repo)})
 
+    _seed_bound_ticket(home, "A-1", "alpha")                       # due, repo blocked
+    _seed_bound_ticket(home, "B-1", "beta")                        # due, repo healthy
+    _seed_bound_ticket(home, "B-2", "beta", phase=Phase.AWAITING_CI)  # forces beta into
+    _add_worktree(beta_repo, home, "B-2", "maestro/B-2")              # sync_worktrees' groups
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    # spawn gate: only alpha's due ticket is skipped, beta's spawns
+    assert report.spawned == ["B-1"]
+    assert "A-1" in [k for k, _ in report.due]          # stays due, not dropped
+    assert report.repo_blockers_by_repo.keys() == {"alpha"}
+    assert "MERGE_HEAD" in report.repo_blockers_by_repo["alpha"]
+    assert set(report.repo_blockers) == set(report.repo_blockers_by_repo["alpha"])
+
+    # sync_worktrees: alpha's group was skipped entirely, beta's fetched
+    assert _rev_parse(alpha_repo, "main") == alpha_main_before
+    assert not alpha_fetch_head.exists()
+    assert beta_fetch_head.exists()
+
+    # repair alpha, next sweep spawns it and fast-forwards it too
+    (gitdir / "MERGE_HEAD").unlink()
+    report2 = disp.dispatch(cfg, DryRunSessions(), now=2000)
+    assert "A-1" in report2.spawned
+    assert report2.repo_blockers_by_repo == {}
+    assert alpha_fetch_head.exists()
+    assert _rev_parse(alpha_repo, "main") != alpha_main_before
+
+
+def _add_worktree(repo, home, key, branch, base="main"):
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch,
+                    str(store.worktree_path(home, key)), base], check=True,
+                   capture_output=True, text=True)
+
+
+def test_all_repos_blocked_still_mints_and_backs_up(home, tmp_path):
+    """AC4: with every referenced repo blocked, the never-halt-siblings ticks
+    (mint, backup) still run -- re-proving T-19's invariant under the new
+    per-repo gate."""
+    repo = _conflicting_merge_repo(tmp_path)
     cfg = Config(home=home, repo_path=str(repo), max_concurrency=3,
                 min_spawn_interval=0, backup_interval=1)
     inbox.append_new(home, "New ticket", key="T-9", args={"approval_tier": 0})
     _seed_due_ticket(home, "T-1")
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
-    assert report.repo_blockers
     assert report.spawned == []
+    assert report.repo_blockers_by_repo
 
-    # mint still ran
     assert "T-9" in disp.list_keys(home)
     assert (home / "events" / "T-9.jsonl").exists()
-    # backup still ran
     assert list(backup.resolve_backup_dir(cfg).glob("*.tar.gz"))
-    # heartbeat still written, with the blockers recorded
+
+
+def test_unreferenced_configured_repo_produces_no_mapping_entry(home, tmp_path):
+    """AC4: a configured-but-unreferenced [repos.gamma] with a nonexistent path
+    is a total no-op -- no probe, no mapping entry, no effect on spawns."""
+    _origin, repo = _make_origin_and_repo(tmp_path, "healthy")
+    cfg = Config(home=home, repo_path=str(repo), max_concurrency=3, min_spawn_interval=0,
+                repos={"gamma": _repo_table(tmp_path / "does-not-exist")})
+    _seed_due_ticket(home, "T-1")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.spawned == ["T-1"]
+    assert "gamma" not in report.repo_blockers_by_repo
     hb = store.read_json(home / "derived" / ".heartbeat.json", {})
-    assert hb["repo_blockers"]
-
-    # sync_worktrees was skipped: no fetch/merge touched the broken repo
-    assert _rev_parse(repo, "main") == local_main_before
-    assert not fetch_head.exists()
-
-    # repair, then the very same sweep DOES fast-forward + fetch
-    (gitdir / "MERGE_HEAD").unlink()
-    report2 = disp.dispatch(cfg, DryRunSessions(), now=2000)
-    assert report2.repo_blockers == []
-    assert fetch_head.exists()
-    assert _rev_parse(repo, "main") != local_main_before
+    assert "gamma" not in hb["repo_blockers_by_repo"]
 
 
 # --- AC6: both CLI surfaces --------------------------------------------------
@@ -299,6 +361,173 @@ def test_ans_cli_warns_on_stderr_when_repo_blocked(home, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "blocked" in err
     assert "MERGE_HEAD" in err
+
+
+# --- MR-5 AC2: heartbeat/doctor/dispatch/why/ans per-repo attribution -------
+
+def test_heartbeat_keeps_flat_list_and_carries_new_per_repo_key(home, tmp_path):
+    repo = _conflicting_merge_repo(tmp_path)
+    cfg = Config(home=home, repo_path=str(repo), max_concurrency=3, min_spawn_interval=0)
+    _seed_due_ticket(home, "T-1")
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    hb = store.read_json(home / "derived" / ".heartbeat.json", {})
+    assert hb["repo_blockers"]                       # unchanged flat union, byte-compatible
+    assert hb["repo_blockers_by_repo"]                # NEW per-repo mapping
+    assert "MERGE_HEAD" in hb["repo_blockers_by_repo"]["default"]
+    assert set(hb["repo_blockers"]) == set(hb["repo_blockers_by_repo"]["default"])
+
+
+def test_dispatch_and_doctor_and_why_render_per_repo_attribution(home, tmp_path, capsys):
+    alpha_repo = _conflicting_merge_repo(tmp_path, name="alpha")
+    _origin, beta_repo = _make_origin_and_repo(tmp_path, "beta")
+    (home / "config.toml").write_text(
+        "[maestro]\nmin_spawn_interval = 0\n\n"
+        f'[repos.alpha]\npath = "{alpha_repo}"\ndefault = true\n\n'
+        f'[repos.beta]\npath = "{beta_repo}"\n')
+    from maestro.config import load
+    cfg = load(str(home))
+    _seed_bound_ticket(home, "A-1", "alpha")
+    _seed_bound_ticket(home, "B-1", "beta")
+
+    rc = cli.main(["--home", str(home), "dispatch", "--dry-run"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["repo_blocked"]                                  # flat, unchanged shape
+    assert out["repo_blocked_by_repo"].keys() == {"alpha"}
+    assert "MERGE_HEAD" in out["repo_blocked_by_repo"]["alpha"]
+    assert out["would_spawn"] == ["B-1"]
+
+    rc2 = cli.main(["--home", str(home), "doctor"])
+    assert rc2 == 0
+    doc = json.loads(capsys.readouterr().out)
+    check = next(c for c in doc["checks"] if c["name"] == "repo_preflight")
+    assert check["status"] == "fail"
+    assert check["blockers_by_repo"].keys() == {"alpha"}
+
+    rc3 = cli.main(["--home", str(home), "why", "A-1"])
+    assert rc3 == 0
+    why = json.loads(capsys.readouterr().out)
+    outcomes = {d["outcome"] for d in why["decisions"]}
+    assert "repo_blocked" in outcomes
+
+
+def test_ans_cli_warns_naming_the_specific_blocked_repo(home, tmp_path, capsys):
+    alpha_repo = _conflicting_merge_repo(tmp_path, name="alpha")
+    _origin, beta_repo = _make_origin_and_repo(tmp_path, "beta")
+    (home / "config.toml").write_text(
+        f'[maestro]\n\n[repos.alpha]\npath = "{alpha_repo}"\ndefault = true\n\n'
+        f'[repos.beta]\npath = "{beta_repo}"\n')
+
+    store.atomic_write(store.spec_path(home, "A-1"), "# A-1\napproval_tier: 0\nrepo: alpha\n")
+    event_log.append(home, "A-1", "TicketCreated", {"title": "A-1", "repo": "alpha"}, actor="d")
+    event_log.append(home, "A-1", "PhaseChanged", {"phase": Phase.AWAITING_HUMAN.value}, actor="r")
+    event_log.append(home, "A-1", "QuestionAsked", {"qid": "q1", "text": "ok?"}, actor="r")
+    snap_mod.rebuild(home, "A-1")
+
+    rc = cli.main(["--home", str(home), "ans", "A-1", "yes", "--qid", "q1"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "alpha" in err
+    assert "MERGE_HEAD" in err
+
+
+# --- MR-5 AC3: max_spawns_per_sweep caps one repo without starving others ---
+
+def test_max_spawns_per_sweep_caps_one_repo_not_others(home, tmp_path):
+    _alpha_origin, alpha_repo = _make_origin_and_repo(tmp_path, "alpha")
+    _beta_origin, beta_repo = _make_origin_and_repo(tmp_path, "beta")
+    beta_table = _repo_table(beta_repo)
+    beta_table["max_spawns_per_sweep"] = 1
+    cfg = Config(home=home, max_concurrency=10, min_spawn_interval=0,
+                repos={"alpha": _repo_table(alpha_repo, default=True), "beta": beta_table})
+
+    _seed_bound_ticket(home, "A-1", "alpha")
+    _seed_bound_ticket(home, "B-1", "beta")
+    _seed_bound_ticket(home, "B-2", "beta")
+    _seed_bound_ticket(home, "B-3", "beta")
+
+    # A single, reused SessionManager -- like the real fleet, a spawned key
+    # stays "active" (claimed) on the very next sweep instead of immediately
+    # coming back due, which is what lets the cap's SECOND sweep reach a
+    # previously-skipped key instead of respawning the same first one.
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+    assert "A-1" in report.spawned
+    spawned_beta = [k for k in report.spawned if k.startswith("B-")]
+    assert len(spawned_beta) == 1
+    assert len(report.spawned) == 2
+
+    skipped_beta = [k for k in ("B-1", "B-2", "B-3") if k not in report.spawned]
+    assert len(skipped_beta) == 2
+    due_keys = {k for k, _ in report.due}
+    for k in skipped_beta:
+        assert k in due_keys                                    # still due, not dropped
+    decision = disp.key_decisions(home, skipped_beta[0], tail=1)[0]
+    assert decision["outcome"] == "repo_capped"
+
+    # the very next sweep gives a skipped key its turn (spawn floor is 0)
+    report2 = disp.dispatch(cfg, sessions, now=1001)
+    assert any(k in report2.spawned for k in skipped_beta)
+
+
+def test_no_cap_set_spawns_all_four_in_one_sweep(home, tmp_path):
+    _alpha_origin, alpha_repo = _make_origin_and_repo(tmp_path, "alpha")
+    _beta_origin, beta_repo = _make_origin_and_repo(tmp_path, "beta")
+    cfg = Config(home=home, max_concurrency=10, min_spawn_interval=0,
+                repos={"alpha": _repo_table(alpha_repo, default=True),
+                       "beta": _repo_table(beta_repo)})   # uncapped
+
+    _seed_bound_ticket(home, "A-1", "alpha")
+    _seed_bound_ticket(home, "B-1", "beta")
+    _seed_bound_ticket(home, "B-2", "beta")
+    _seed_bound_ticket(home, "B-3", "beta")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert set(report.spawned) == {"A-1", "B-1", "B-2", "B-3"}
+
+
+# --- MR-5 AC6: unknown-repo-name + missing-reconcile-skill are WARNINGS -----
+
+def test_doctor_warns_on_unknown_repo_name_and_missing_reconcile_skill(home, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+    (repo / "f.txt").write_text("hi\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "init", cwd=repo)
+    # no .claude/commands/maestro-reconcile.md anywhere in `repo`
+
+    (home / "config.toml").write_text(
+        f'[maestro]\nrepo_path = "{repo}"\nmin_spawn_interval = 0\n')
+    # A spec naming an unconfigured repo (typo/unknown) -- resolves to the
+    # implicit default per repos.resolve(), so the sweep still spawns it.
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 0\nrepo: typo-repo\n")
+    event_log.append(home, "T-1", "TicketCreated",
+                     {"title": "T-1", "repo": "typo-repo",
+                      "spec_hash": disp.spec_hash_on_disk(home, "T-1")}, actor="d")
+    event_log.append(home, "T-1", "PhaseChanged", {"phase": Phase.IMPLEMENTING.value}, actor="r")
+    snap_mod.rebuild(home, "T-1")
+
+    from maestro.config import load
+    cfg = load(str(home))
+    real_report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert real_report.spawned == ["T-1"]                        # warning never blocks the spawn
+
+    rc = cli.main(["--home", str(home), "doctor"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    unknown_check = next(c for c in out["checks"] if c["name"] == "unknown_repo_bindings")
+    assert unknown_check["status"] == "warn"
+    assert {u["key"] for u in unknown_check["unknown"]} == {"T-1"}
+
+    skill_check = next(c for c in out["checks"] if c["name"] == "missing_reconcile_skill")
+    assert skill_check["status"] == "warn"
+    assert "default" in skill_check["missing"]
 
 
 # --- AC7: config knob + fail-open ---------------------------------------------

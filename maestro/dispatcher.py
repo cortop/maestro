@@ -390,9 +390,11 @@ _REPO_PREFLIGHT_SENTINELS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
 _REPO_PREFLIGHT_DIRS = ("rebase-merge", "rebase-apply")
 
 
-def repo_preflight(cfg: Config) -> dict:
-    """Read-only guard: is ``cfg.repo_path`` safe to fast-forward and spawn a
-    reconciler into right now?
+def _probe_repo_path(repo: str) -> dict:
+    """Read-only guard: is *repo* safe to fast-forward and spawn a reconciler
+    into right now? Pure git probe -- no config knob, no fail-open-on-unset
+    check (that's ``repo_preflight``/``repo_preflight_all``'s job); this is the
+    part that's identical whether there is one repo or N.
 
     Three probes, all read-only, all against the SAME repo the dispatcher fast-
     forwards in ``sync_worktrees`` and spawns bare-repo reconcilers into (see
@@ -403,17 +405,11 @@ def repo_preflight(cfg: Config) -> dict:
     block; see T-19 spec Notes on why ``--all-match`` is load-bearing).
 
     Fails OPEN — returns ``ok=True`` — on anything that makes the probe itself
-    unusable (git missing, ``repo_path`` unset/absent, unborn HEAD, a hung
-    subprocess): a flaky check that can permanently brick the fleet is a worse
-    failure mode than the one this guards against, so only positive evidence
-    of a real conflict blocks. Never raises into ``dispatch()``.
+    unusable (git missing, unborn HEAD, a hung subprocess): a flaky check that
+    can permanently brick the fleet is a worse failure mode than the one this
+    guards against, so only positive evidence of a real conflict blocks. Never
+    raises into ``dispatch()``.
     """
-    if not cfg.repo_preflight:
-        return {"ok": True, "blockers": []}
-    repo = cfg.repo_path
-    if not repo or not Path(repo).exists():
-        return {"ok": True, "blockers": ["preflight-unavailable"]}
-
     import subprocess
 
     def _run(args, timeout=10):
@@ -461,6 +457,75 @@ def repo_preflight(cfg: Config) -> dict:
         return {"ok": True, "blockers": ["preflight-unavailable"]}
 
 
+def repo_preflight(cfg: Config) -> dict:
+    """Back-compat single-repo verdict for ``cfg.repo_path`` only -- what
+    ``maestro doctor``'s top-level ``repo_preflight`` field and the pre-MR-5
+    test suite pin. Multi-repo sweeps use ``repo_preflight_all`` instead.
+    """
+    if not cfg.repo_preflight:
+        return {"ok": True, "blockers": []}
+    repo = cfg.repo_path
+    if not repo or not Path(repo).exists():
+        return {"ok": True, "blockers": ["preflight-unavailable"]}
+    return _probe_repo_path(repo)
+
+
+def referenced_repo_bindings(cfg: Config, home: Path, keys) -> dict:
+    """{name: RepoBinding} for every repo *keys* resolve to, plus the implicit
+    default (always included, even with an empty *keys* -- a 1-repo board
+    still gets exactly one binding). Two names resolving to the same repo
+    keep only the first-seen binding under each of their own names; callers
+    that need to dedup probes by realpath do so themselves (see
+    ``repo_preflight_all`` / ``sync_worktrees``, both of which already dedup
+    fetches this way)."""
+    from . import repos as repos_mod  # lazy: repos imports us at module load time
+
+    bindings: dict = {}
+    default = repos_mod.implicit_default(cfg)
+    bindings[default.name] = default
+    for key in keys:
+        binding = repos_mod.resolve(cfg, home, key)
+        bindings.setdefault(binding.name, binding)
+    return bindings
+
+
+def repo_preflight_all(cfg: Config, home: Path, keys) -> dict:
+    """Per-repo preflight across every repo *keys* (typically the due tickets)
+    resolve to, plus the implicit default — referenced-only, so a single-repo
+    board still runs exactly one probe. Probes are deduped by realpath (two
+    ``[repos.*]`` names pointing at one checkout cost one probe).
+
+    Returns ``ok`` (no referenced repo is blocked), ``blockers_by_repo``
+    ({name: [blockers]}, present only for genuinely blocked repos -- a repo
+    that fails OPEN because it's unset/absent/unusable never appears here,
+    exactly as a fail-open ``repo_preflight`` verdict never blocks a spawn
+    today), and ``blockers`` (the flat, order-stable union list existing
+    single-repo readers -- the heartbeat's ``repo_blockers`` key, ``cmd_dispatch``'s
+    ``repo_blocked``, ``_nudge`` — already tolerate).
+    """
+    if not cfg.repo_preflight:
+        return {"ok": True, "blockers_by_repo": {}, "blockers": []}
+    bindings = referenced_repo_bindings(cfg, home, keys)
+    verdict_by_realpath: dict[str, dict] = {}
+    blockers_by_repo: dict[str, list[str]] = {}
+    for name, binding in bindings.items():
+        path = binding.path
+        if not path or not Path(path).exists():
+            continue  # fails OPEN, same as repo_preflight on an unusable repo
+        real = str(Path(path).resolve())
+        if real not in verdict_by_realpath:
+            verdict_by_realpath[real] = _probe_repo_path(path)
+        verdict = verdict_by_realpath[real]
+        if not verdict["ok"]:
+            blockers_by_repo[name] = verdict["blockers"]
+    flat: list[str] = []
+    for blockers in blockers_by_repo.values():
+        for b in blockers:
+            if b not in flat:
+                flat.append(b)
+    return {"ok": not blockers_by_repo, "blockers_by_repo": blockers_by_repo, "blockers": flat}
+
+
 def sync_worktrees(cfg: Config) -> dict:
     """Keep other tickets' worktrees from drifting behind a just-merged base branch.
 
@@ -487,6 +552,13 @@ def sync_worktrees(cfg: Config) -> dict:
     mint/backup ticks. ``fetched`` mirrors the *default* repo's fetch outcome
     only, keeping the historical single-repo return contract byte-identical;
     per-repo detail (including failures) rides the additional ``errors`` key.
+
+    Each group is preflighted (``repo_preflight``/MR-5) before its fetch: a
+    mid-merge/conflicted repo is skipped entirely for THIS group only (no
+    fetch, no merge, no routing -- its ``FETCH_HEAD``/local branch are left
+    untouched) while every other group's sync proceeds unaffected. Blocked
+    groups land in the returned ``blocked`` map ({name: [blockers]}), never in
+    ``errors`` (that key stays reserved for a real git/network failure).
     """
     import subprocess
 
@@ -496,6 +568,7 @@ def sync_worktrees(cfg: Config) -> dict:
     home = cfg.home
     routed: list[str] = []
     errors: dict[str, str] = {}
+    blocked: dict[str, list[str]] = {}
 
     # (realpath, base_branch) -> {"binding": RepoBinding, "keys": [...]}. The
     # implicit default repo is always a group (even with no due tickets) so
@@ -535,6 +608,11 @@ def sync_worktrees(cfg: Config) -> dict:
         real, base = gkey
         binding = group["binding"]
         repo_path = binding.path
+        if cfg.repo_preflight:
+            verdict = _probe_repo_path(repo_path)
+            if not verdict["ok"]:
+                blocked[binding.name] = verdict["blockers"]
+                continue  # this group only -- siblings still fetch/route below
         try:
             fetch = subprocess.run(["git", "-C", repo_path, "fetch", "-q", "origin", base],
                                    capture_output=True, text=True)
@@ -567,7 +645,7 @@ def sync_worktrees(cfg: Config) -> dict:
             errors[f"{real}@{base}"] = f"{type(e).__name__}: {e}"
             continue
 
-    return {"fetched": fetched_default, "routed": routed, "errors": errors}
+    return {"fetched": fetched_default, "routed": routed, "errors": errors, "blocked": blocked}
 
 
 def _compact_cursor_path(home: Path) -> Path:
@@ -863,7 +941,8 @@ class DispatchReport:
     paused_until: float | None = None  # fleet-wide rate-limit gate deadline, if paused
     reaped: list[str] = field(default_factory=list)     # watchdog: killed for age or no-progress
     paused: bool = False            # the fleet.pause() kill switch was armed this sweep
-    repo_blockers: list[str] = field(default_factory=list)  # non-empty -> spawn step was skipped
+    repo_blockers: list[str] = field(default_factory=list)  # flat union; non-empty -> >=1 repo blocked
+    repo_blockers_by_repo: dict = field(default_factory=dict)  # {repo name: [blockers]}, MR-5
     hook_errors: dict = field(default_factory=dict)     # hook name -> "ExcType: message"
     worktree_removal_errors: dict = field(default_factory=dict)  # key -> git worktree remove stderr
 
@@ -976,16 +1055,16 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
     from . import health  # lazy: health -> dispatcher would cycle at import time
 
+    from . import repos as repos_mod  # lazy: repos imports us at module load time
+
     hook_errors: dict = {}
     minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
     _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
     scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
                                 cfg, now, default={"fired": []})["fired"]
-    preflight = repo_preflight(cfg)
-    repo_ok = preflight["ok"]
-    repo_blockers = list(preflight["blockers"]) if not repo_ok else []
-    if repo_ok:
-        _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg)
+    # sync_worktrees preflight-gates itself per repo group now (MR-5) -- no
+    # outer repo_ok gate needed here; a blocked repo skips only its own group.
+    _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg)
     vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
     worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
     _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
@@ -1040,16 +1119,21 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         due.append((key, res.reason))
         decisions[key] = {"outcome": "due", "reason": res.reason}
 
+    # Per-repo preflight, scoped to the repos this sweep's due tickets (plus the
+    # implicit default) actually reference -- a 1-repo board still runs exactly
+    # one probe. `repo_blockers` is the flat union, kept for existing readers
+    # (heartbeat/_nudge/cmd_dispatch); `repo_blockers_by_repo` is the new
+    # per-repo mapping the spawn gate below keys off of.
+    preflight = repo_preflight_all(cfg, home, [k for k, _ in due])
+    repo_blockers_by_repo = preflight["blockers_by_repo"]
+    repo_blockers = preflight["blockers"]
+    bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in due}
+
     # Fleet-wide rate-limit gate. Above the human-signal bypass below: an inbox
     # answer must not punch through a 429, since that spawn would be rejected too.
     # While paused, nothing spawns and the spawn ledger is left untouched.
-    # A conflict-marked/mid-merge repo (repo_ok is False) gates the spawn step the
-    # same way — it is NOT bypassable by an _UNTHROTTLED_REASONS human signal,
-    # because a human answering a question is exactly the moment you must not
-    # launch an agent into a half-merged tree. sync_worktrees() (the ff-only
-    # merge) was already skipped above for the same reason.
     paused_until_ts = ratelimit.paused_until(home, now)
-    if paused_until_ts is not None or not repo_ok:
+    if paused_until_ts is not None:
         spawned: list[str] = []
         throttled: list[str] = []
         capacity_skipped: list[str] = []
@@ -1076,6 +1160,40 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
                 eligible.append((key, reason))
         else:
             eligible = due
+
+        # Per-key repo-blocked gate. NOT bypassable by an _UNTHROTTLED_REASONS
+        # human signal — a human answering a question is exactly the moment you
+        # must not launch an agent into a half-merged tree. Skipped keys stay
+        # "due" (report.due is never filtered) so the very next sweep retries
+        # them once their repo is healthy again.
+        repo_gated: list[tuple[str, str]] = []
+        for key, reason in eligible:
+            binding = bindings_by_key.get(key)
+            if binding is not None and binding.name in repo_blockers_by_repo:
+                decisions[key]["outcome"] = "repo_blocked"
+                continue
+            repo_gated.append((key, reason))
+        eligible = repo_gated
+
+        # Per-repo max_spawns_per_sweep safety rail (MR-5): bounds one repo's
+        # blast radius on the sweep's spawn budget without touching the per-key
+        # min_spawn_interval floor, the max_spawn_attempts watchdog, or this
+        # fleet-wide rate gate -- all three still apply on top. None (default)
+        # is uncapped, i.e. today's behavior by construction.
+        per_repo_spawn_count: dict[str, int] = {}
+        capped: list[tuple[str, str]] = []
+        for key, reason in eligible:
+            binding = bindings_by_key.get(key)
+            cap = binding.max_spawns_per_sweep if binding is not None else None
+            if cap is not None:
+                name = binding.name
+                seen = per_repo_spawn_count.get(name, 0)
+                if seen >= cap:
+                    decisions[key]["outcome"] = "repo_capped"
+                    continue
+                per_repo_spawn_count[name] = seen + 1
+            capped.append((key, reason))
+        eligible = capped
 
         slots = max(0, cfg.max_concurrency - len(active))
         to_spawn = eligible[:slots]
@@ -1118,7 +1236,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
                              {k: v for k, v in attempts.items() if k in known})
 
     _write_heartbeat(home, now, len(spawned), len(active), len(throttled), len(due),
-                     repo_blockers=repo_blockers)
+                     repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo)
     _append_dispatch_ledger(home, {
         "ts": store.iso_now(), "epoch": now,
         "hook_errors": hook_errors, "decisions": decisions,
@@ -1129,7 +1247,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         scheduled_fired=scheduled_fired, throttled=throttled,
         pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
         paused_until=paused_until_ts, reaped=reaped,
-        repo_blockers=repo_blockers, hook_errors=hook_errors,
+        repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo,
+        hook_errors=hook_errors,
         worktree_removal_errors=worktree_removal_errors,
     )
 
@@ -1180,9 +1299,11 @@ def _worker_cwd(cfg: Config, key: str) -> Path:
 
 def _write_heartbeat(home: Path, now: float, spawned: int, active: int,
                      throttled: int = 0, due: int = 0, *, paused: bool = False,
-                     repo_blockers: list[str] | None = None) -> None:
+                     repo_blockers: list[str] | None = None,
+                     repo_blockers_by_repo: dict | None = None) -> None:
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"ts": store.iso_now(), "epoch": now,
                       "spawned": spawned, "active": active,
                       "throttled": throttled, "due": due, "paused": paused,
-                      "repo_blockers": repo_blockers or []})
+                      "repo_blockers": repo_blockers or [],
+                      "repo_blockers_by_repo": repo_blockers_by_repo or {}})
