@@ -196,7 +196,7 @@ Otherwise implement the spec's Acceptance criteria:
    step: it runs entirely via `Agent`-tool sub-agent spawns inside this session, not across
    dispatcher sweeps.
    ```bash
-   git -C "$WT" diff origin/main -- . > /tmp/$KEY-qa-diff.txt
+   git -C "$WT" diff origin/$BASE -- . > /tmp/$KEY-qa-diff.txt
    ```
    Spawn a **QA** sub-agent (`Agent` tool), briefed with only: the spec's Acceptance criteria
    list and the diff above — not your implementation reasoning. Its job, per AC: judge PASS or
