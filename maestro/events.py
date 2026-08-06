@@ -9,7 +9,7 @@ from __future__ import annotations
 TICKET_CREATED = "TicketCreated"        # {title, source, spec_hash, repo}
 TICKET_TRIAGED = "TicketTriaged"        # {tier, classification, phase}
 SPEC_OBSERVED = "SpecObserved"          # {spec_hash}  reconciler folded the current spec
-PHASE_CHANGED = "PhaseChanged"          # {phase, reason}
+PHASE_CHANGED = "PhaseChanged"          # {phase, reason, forced_by?}  forced_by: actor who used --force past the AC gate
 FINALIZED = "Finalized"                 # {}  tombstone -> swept to archive
 
 # Human-in-the-loop
@@ -26,7 +26,7 @@ IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-
 IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
 
 # Self-review
-AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  content-hash keyed AC attestation
+AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  evidence: {what, where, result}; content-hash keyed
 
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent

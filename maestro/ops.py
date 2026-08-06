@@ -30,32 +30,58 @@ def _append(cfg: Config, key: str, type: str, payload: dict, *, actor: str,
 
 
 def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: str = "reconciler",
-              requeue_in: int | None = None, expect: int | None = None) -> dict | None:
+              requeue_in: int | None = None, expect: int | None = None, force: bool = False) -> dict | None:
+    """Advance the ticket's phase.
+
+    Entering `awaiting-ci` is gated: a ticket with unattested ACs refuses (raises
+    `MaestroError`, non-zero exit, NO event appended) unless `force=True`. The
+    escape hatch is for a human overriding via `--force`; the event log still has
+    to show that they did, so a forced transition records `forced_by=<actor>` on
+    the PhaseChanged event plus a Note spelling out the count.
+    """
     snap = snap_mod.load(cfg.home, key)
+    unverified = _acs_unverified_count(cfg, key, snap) if phase == Phase.AWAITING_CI else 0
+    if unverified > 0 and not force:
+        raise store.MaestroError(
+            f"{key}: refusing awaiting-ci — {unverified} acceptance criteria unverified; "
+            f"run `maestro verify-ac` for each, or pass --force to override")
+    forced = unverified > 0 and force
+
     src = Phase(snap.phase)
     if src != phase and not can_transition(src, phase):
         # Not fatal — log it, but the engine trusts the agent's judgment.
         _append(cfg, key, E.NOTE, {"text": f"unusual transition {src.value}->{phase.value}"},
                 actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, f"note-transition-{phase.value}"))
         snap = snap_mod.load(cfg.home, key)
+
+    payload = {"phase": phase.value, "reason": reason}
+    if forced:
+        payload["forced_by"] = actor
     sid = step_id(key, snap.phase, snap.observed_seq, f"phase:{phase.value}")
-    ev = _append(cfg, key, E.PHASE_CHANGED, {"phase": phase.value, "reason": reason},
-                 actor=actor, sid=sid, expect=expect)
-    if phase == Phase.AWAITING_CI:
+    ev = _append(cfg, key, E.PHASE_CHANGED, payload, actor=actor, sid=sid, expect=expect)
+    if forced:
+        _append(cfg, key, E.NOTE,
+                {"text": f"forced past {unverified} unverified acceptance criteria by {actor}"},
+                actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "force-ac-override"))
+    elif phase == Phase.AWAITING_CI:
         _warn_unverified_acs(cfg, key, actor=actor)
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
     return ev
 
 
-def _warn_unverified_acs(cfg: Config, key: str, *, actor: str) -> None:
-    """Soft-warn (a Note event, non-blocking) when entering awaiting-ci with
-    unattested ACs — a nudge for the implementing step, not an enforced gate."""
+def _acs_unverified_count(cfg: Config, key: str, snap) -> int:
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
-        return
+        return 0
+    return snap.acs_unverified(spec_path.read_text(encoding="utf-8"))
+
+
+def _warn_unverified_acs(cfg: Config, key: str, *, actor: str) -> None:
+    """Soft-warn (a Note event) when entering awaiting-ci with unattested ACs left
+    (only reachable via `force`, since the gate above otherwise refuses first)."""
     snap = snap_mod.load(cfg.home, key)
-    n = snap.acs_unverified(spec_path.read_text(encoding="utf-8"))
+    n = _acs_unverified_count(cfg, key, snap)
     if n <= 0:
         return
     _append(cfg, key, E.NOTE,
@@ -63,13 +89,33 @@ def _warn_unverified_acs(cfg: Config, key: str, *, actor: str) -> None:
             actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "warn-acs-unverified"))
 
 
-def verify_ac(cfg: Config, key: str, ac_index: int, evidence: str, *, actor: str = "reconciler") -> str:
-    """Attest AC #ac_index (1-based, in spec order) with evidence text.
+# Structured evidence required by `verify_ac` — enough that a reviewer can tell
+# what was actually run without re-deriving it from a free-text sentence.
+EVIDENCE_FIELDS = ("what", "where", "result")
+
+
+def _validate_evidence(evidence: dict) -> None:
+    if not isinstance(evidence, dict):
+        raise store.MaestroError(
+            f"evidence must be structured with fields {EVIDENCE_FIELDS}, got {type(evidence).__name__}")
+    missing = [f for f in EVIDENCE_FIELDS if not str(evidence.get(f, "")).strip()]
+    if missing:
+        raise store.MaestroError(
+            f"evidence missing required field(s): {', '.join(missing)} (need {', '.join(EVIDENCE_FIELDS)})")
+
+
+def verify_ac(cfg: Config, key: str, ac_index: int, evidence: dict, *, actor: str = "reconciler") -> str:
+    """Attest AC #ac_index (1-based, in spec order) with structured evidence.
+
+    `evidence` must have non-empty `what` (what was run), `where` (file:line or
+    test name), and `result` (the observed outcome) fields — a call missing any
+    of them is rejected before anything is appended.
 
     Identified by content hash of the AC's own spec line, not by index, so a
     human edit to that line invalidates the attestation (`acs_unverified` counts
     it again) instead of silently mismatching a different AC at the same index.
     """
+    _validate_evidence(evidence)
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
         raise store.MaestroError(f"{key}: no spec.md to verify ACs against")

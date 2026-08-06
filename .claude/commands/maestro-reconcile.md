@@ -190,26 +190,32 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    If red, fix and re-run. Do not proceed until green. If you exceed ~`max_impl_turns`
    edit/test cycles without converging: `maestro fail "$KEY" "non-converging: <why>"` and exit.
-3. **Self-review gate — one evidence-citing attestation per spec AC, before opening the PR:**
-   for each `- [ ] ...` checkbox in the spec, `maestro verify-ac "$KEY" --ac <n> --evidence
-   "<file:line or test name proving it>"` (1-based, in spec order; content-hash keyed, so a
-   later spec edit to that line un-verifies it again — re-run verify-ac if that happens). This
-   is a structured self-attestation that saves the human reviewer time, not machine-verified
-   QA — cite the real evidence (a test name, a diff hunk), don't rubber-stamp.
+3. **Self-review gate — one structured attestation per spec AC, before opening the PR:**
+   for each `- [ ] ...` checkbox in the spec, `maestro verify-ac "$KEY" --ac <n> --what
+   "<what you ran>" --where "<file:line or test name>" --result "<the observed outcome>"`
+   (1-based, in spec order; content-hash keyed, so a later spec edit to that line un-verifies
+   it again — re-run verify-ac if that happens). All three fields are required — a call
+   missing any of them is rejected. This is a structured self-attestation that saves the human
+   reviewer time, not machine-verified QA — cite the real evidence (a test name, a diff hunk),
+   don't rubber-stamp. **`set-phase awaiting-ci` (step 4) refuses with a non-zero exit and
+   appends no event if any spec AC is still unverified** — verify all of them here, don't skip
+   this step. (A human can still force a ticket through with `--force` on `set-phase`, which
+   records `forced_by=<actor>` in the event log — that escape hatch is for a human override,
+   not something you should reach for yourself; if you truly cannot verify an AC, ask instead.)
 4. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently:
    ```bash
    git -C "$HOME/worktrees/$KEY" add -A && git -C "$HOME/worktrees/$KEY" commit -q -m "$KEY: <subject>"
    git -C "$HOME/worktrees/$KEY" push -q -u origin "${PREFIX}${KEY}"
    # Body includes a "| AC | Evidence |" table, one row per spec checkbox, sourced from the
-   # verify-ac calls above (or `maestro snapshot "$KEY"` -> ac_verified for the evidence text).
+   # verify-ac calls above (or `maestro snapshot "$KEY"` -> ac_verified for the what/where/result).
    PR_URL=$(gh pr create --repo "$SLUG" --base "$BASE" --head "${PREFIX}${KEY}" --draft \
             --title "$KEY: <subject>" \
             --body "<motivation/changes> ## AC-to-evidence
 
 | AC | Evidence |
 |----|----------|
-| <ac 1 text> | <evidence 1> |
-| <ac 2 text> | <evidence 2> |" 2>/dev/null \
+| <ac 1 text> | <what/where/result 1> |
+| <ac 2 text> | <what/where/result 2> |" 2>/dev/null \
             || gh pr view "${PREFIX}${KEY}" --repo "$SLUG" --json url -q .url)
    PR_NUM=$(gh pr view "${PREFIX}${KEY}" --repo "$SLUG" --json number -q .number)
    maestro append "$KEY" --type PrOpened --payload "{\"number\":$PR_NUM,\"url\":\"$PR_URL\",\"draft\":true}" --step-id "pr-$KEY"

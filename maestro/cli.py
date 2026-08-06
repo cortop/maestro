@@ -449,7 +449,7 @@ def cmd_append(args) -> int:
 def cmd_set_phase(args) -> int:
     cfg = _cfg(args)
     ev = ops.set_phase(cfg, args.key, Phase(args.phase), reason=args.reason or "",
-                       actor=args.actor, requeue_in=args.requeue)
+                       actor=args.actor, requeue_in=args.requeue, force=args.force)
     _print(ev or {"noop": "phase already set"})
     return 0
 
@@ -499,8 +499,9 @@ def cmd_check_conflicts(args) -> int:
 
 
 def cmd_verify_ac(args) -> int:
-    """[agent] attest AC #n with evidence — content-hash keyed, idempotent."""
-    h = ops.verify_ac(_cfg(args), args.key, args.ac, args.evidence, actor=args.actor)
+    """[agent] attest AC #n with structured evidence — content-hash keyed, idempotent."""
+    evidence = {"what": args.what, "where": args.where, "result": args.result}
+    h = ops.verify_ac(_cfg(args), args.key, args.ac, evidence, actor=args.actor)
     _print({"verified_ac_hash": h})
     return 0
 
@@ -891,6 +892,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("set-phase", cmd_set_phase, "[agent] advance phase")
     sp.add_argument("key"); sp.add_argument("phase", choices=[p.value for p in Phase])
     sp.add_argument("--reason"); sp.add_argument("--requeue", type=int); sp.add_argument("--actor", default="reconciler")
+    sp.add_argument("--force", action="store_true",
+                     help="override the AC-verification gate on awaiting-ci (records --actor as forced_by)")
 
     sp = add("ask", cmd_ask, "[agent] ask the human, go to awaiting-human")
     sp.add_argument("key"); sp.add_argument("text"); sp.add_argument("--qid"); sp.add_argument("--actor", default="reconciler")
@@ -904,9 +907,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key"); sp.add_argument("seconds", type=int); sp.add_argument("--actor", default="reconciler")
     sp = add("fail", cmd_fail, "[agent] record failure (backoff or dead-letter)")
     sp.add_argument("key"); sp.add_argument("error"); sp.add_argument("--actor", default="reconciler")
-    sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with evidence (content-hash keyed)")
+    sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with structured evidence (content-hash keyed)")
     sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")
-    sp.add_argument("--evidence", required=True); sp.add_argument("--actor", default="reconciler")
+    sp.add_argument("--what", required=True, help="what was run (e.g. a command or test)")
+    sp.add_argument("--where", required=True, help="where it ran (file:line or test name)")
+    sp.add_argument("--result", required=True, help="the observed result (e.g. PASSED, output excerpt)")
+    sp.add_argument("--actor", default="reconciler")
 
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")

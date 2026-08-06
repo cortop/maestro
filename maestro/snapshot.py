@@ -60,10 +60,11 @@ class Snapshot:
     kind: str = "implementation"
     proposal_path: str | None = None
     updated_ts: str | None = None
-    # ac_hash -> evidence text, from AcVerified events. Never reset by a phase
-    # change; only a spec edit that changes an AC's text invalidates an entry
-    # (its hash simply stops matching any current AC — see acs_unverified()).
-    ac_verified: dict[str, str] = field(default_factory=dict)
+    # ac_hash -> structured evidence dict ({what, where, result}), from
+    # AcVerified events. Never reset by a phase change; only a spec edit that
+    # changes an AC's text invalidates an entry (its hash simply stops matching
+    # any current AC — see acs_unverified()).
+    ac_verified: dict[str, dict] = field(default_factory=dict)
     # Set when a ticket originated from an external tracker (e.g. Jira) so the
     # dispatcher's sync tick knows which tickets to `refresh`.
     external_source: str | None = None
@@ -162,7 +163,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.AC_VERIFIED:
             h = p.get("ac_hash")
             if h:
-                s.ac_verified[h] = p.get("evidence", "")
+                s.ac_verified[h] = p.get("evidence", {})
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.REQUEUE_SCHEDULED:
