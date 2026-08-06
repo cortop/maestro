@@ -197,9 +197,10 @@ def test_old_snapshot_without_repo_field_round_trips(home):
     assert snap.phase == "ready"
 
 
-# --- AC6: a full dispatch sweep is data-plane only -- identical spawn tuples/cwd ---
+# --- AC6 (superseded by MR-3): once dispatcher.py consumes repo bindings for cwd,
+# a bound ticket's pre-worktree spawn lands in ITS repo, not cfg.repo_path ---
 
-def test_dispatch_spawn_tuples_unaffected_by_repo_binding(home):
+def test_dispatch_spawn_cwd_honors_repo_binding(home):
     cfg = _write_multi_repo_config(home)
     assert cli_main(["--home", str(home), "create", "Ticket X-5",
                      "--key", "X-5", "--no-nudge"]) == 0
@@ -209,8 +210,9 @@ def test_dispatch_spawn_tuples_unaffected_by_repo_binding(home):
     sessions = DryRunSessions()
     dispatch(cfg, sessions, now=1000)
 
-    # No worktree exists yet for either key, so _worker_cwd falls back to cfg.repo_path
-    # for BOTH -- the repo binding must have zero effect on today's spawn cwd/tuples,
-    # proving this ticket is data-plane only (worktree/cwd consumption is MR-3/4/5/6).
+    # No worktree exists yet for either key. X-5 is unbound -> falls back to
+    # cfg.repo_path exactly as before MR-3. X-6 is bound to alpha -> its
+    # resolved repo binding's path now wins over cfg.repo_path (MR-3).
     cwd_by_key = {k: c for k, _p, c, _m, _e in sessions.spawned}
-    assert cwd_by_key["X-5"] == cwd_by_key["X-6"] == cfg.repo_path
+    assert cwd_by_key["X-5"] == cfg.repo_path
+    assert cwd_by_key["X-6"] == "/repo/alpha"

@@ -462,58 +462,112 @@ def repo_preflight(cfg: Config) -> dict:
 
 
 def sync_worktrees(cfg: Config) -> dict:
-    """Keep other tickets' worktrees from drifting behind a just-merged main.
+    """Keep other tickets' worktrees from drifting behind a just-merged base branch.
 
-    Refreshes ``origin/main`` in the primary repo (fast-forwarding the local
-    ``main`` branch there too, when that's the checked-out branch), then for
-    every ticket sitting in ``awaiting-ci``/``in-review`` with a worktree that
-    is now behind, routes it back into ``implementing`` so the reconciler
-    rebases and resolves any conflict exactly as it already does for a
-    GitHub-reported CONFLICTING PR (see ``ops.route_conflict``). A ticket that's
-    already ``implementing`` needs no nudge — it re-syncs with ``origin/main``
-    on every turn on its own. Level-triggered and idempotent: no-op when nothing
-    is behind, and a no-op repo/network problem never raises.
+    Groups every ticket's worktree by its *resolved* repo (``repos.resolve`` --
+    unbound tickets and single-repo boards all resolve to the same implicit
+    default, so this is byte-identical to single-repo behavior when no
+    ``[repos.*]`` tables are configured), keyed on ``(realpath, base_branch)``
+    so two config entries pointing at one checkout with the SAME base branch
+    fetch only once, while a (contrived, but never silently wrong) checkout
+    tracking two different base branches still gets both fetched correctly.
+    Each repo is fetched against its OWN ``base_branch`` (fast-forwarding the
+    local branch of that name too, when it's checked out) at most once per
+    sweep; the implicit default repo is always included even with zero due
+    tickets, so a single-repo board's local ``main`` still tracks
+    ``origin/main`` every sweep. For every ticket sitting in
+    ``awaiting-ci``/``in-review`` whose worktree is now behind its own repo's
+    base, routes it back into ``implementing`` so the reconciler rebases and
+    resolves any conflict exactly as it already does for a GitHub-reported
+    CONFLICTING PR (see ``ops.route_conflict``). A ticket that's already
+    ``implementing`` needs no nudge — it re-syncs with its base branch on
+    every turn on its own. Level-triggered and idempotent: a no-op when
+    nothing is behind, and one repo's fetch/network failure is contained to
+    that repo -- it never stalls sibling repos' sync or this sweep's
+    mint/backup ticks. ``fetched`` mirrors the *default* repo's fetch outcome
+    only, keeping the historical single-repo return contract byte-identical;
+    per-repo detail (including failures) rides the additional ``errors`` key.
     """
     import subprocess
 
     from . import ops
+    from . import repos as repos_mod
 
     home = cfg.home
-    repo = cfg.repo_path
     routed: list[str] = []
-    if not repo or not Path(repo).exists():
-        return {"fetched": False, "routed": routed}
+    errors: dict[str, str] = {}
 
-    fetch = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", "main"],
-                           capture_output=True, text=True)
-    if fetch.returncode != 0:
-        return {"fetched": False, "routed": routed}
-    subprocess.run(["git", "-C", repo, "merge", "-q", "--ff-only", "origin/main"],
-                   capture_output=True, text=True)  # best-effort; no-op if main isn't checked out here
+    # (realpath, base_branch) -> {"binding": RepoBinding, "keys": [...]}. The
+    # implicit default repo is always a group (even with no due tickets) so
+    # its local base branch still tracks origin every sweep, matching
+    # historical behavior.
+    groups: dict[tuple[str, str], dict] = {}
+
+    def _group_for(binding) -> dict | None:
+        if not binding.path or not Path(binding.path).exists():
+            return None
+        real = str(Path(binding.path).resolve())
+        base = binding.base_branch or "main"
+        return groups.setdefault((real, base), {"binding": binding, "keys": []})
+
+    default_binding = repos_mod.implicit_default(cfg)
+    default_gkey = None
+    if default_binding.path and Path(default_binding.path).exists():
+        default_gkey = (str(Path(default_binding.path).resolve()),
+                        default_binding.base_branch or "main")
+        _group_for(default_binding)
 
     for key in list_keys(home):
-        wt = home / "worktrees" / key
+        wt = store.worktree_path(home, key)
         if not wt.exists():
             continue
         snap = snap_mod.load(home, key)
         if Phase(snap.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
             continue
-        behind = subprocess.run(
-            ["git", "-C", str(wt), "rev-list", "--count", "HEAD..origin/main"],
-            capture_output=True, text=True,
-        )
-        if behind.returncode != 0:
+        binding = repos_mod.resolve(cfg, home, key)
+        group = _group_for(binding)
+        if group is None:
             continue
-        try:
-            count = int((behind.stdout or "0").strip())
-        except ValueError:
-            count = 0
-        if count == 0:
-            continue
-        if ops.route_stale(cfg, key):
-            routed.append(key)
+        group["keys"].append(key)
 
-    return {"fetched": True, "routed": routed}
+    fetched_default = False
+    for gkey, group in groups.items():
+        real, base = gkey
+        binding = group["binding"]
+        repo_path = binding.path
+        try:
+            fetch = subprocess.run(["git", "-C", repo_path, "fetch", "-q", "origin", base],
+                                   capture_output=True, text=True)
+            if fetch.returncode != 0:
+                errors[f"{real}@{base}"] = (fetch.stderr or "fetch failed").strip()
+                continue
+            if gkey == default_gkey:
+                fetched_default = True
+            # best-effort; no-op if `base` isn't checked out here
+            subprocess.run(["git", "-C", repo_path, "merge", "-q", "--ff-only", f"origin/{base}"],
+                           capture_output=True, text=True)
+
+            for key in group["keys"]:
+                wt = store.worktree_path(home, key)
+                behind = subprocess.run(
+                    ["git", "-C", str(wt), "rev-list", "--count", f"HEAD..origin/{base}"],
+                    capture_output=True, text=True,
+                )
+                if behind.returncode != 0:
+                    continue
+                try:
+                    count = int((behind.stdout or "0").strip())
+                except ValueError:
+                    count = 0
+                if count == 0:
+                    continue
+                if ops.route_stale(cfg, key, base_branch=base):
+                    routed.append(key)
+        except Exception as e:  # noqa: BLE001 - one repo's failure must never stall siblings
+            errors[f"{real}@{base}"] = f"{type(e).__name__}: {e}"
+            continue
+
+    return {"fetched": fetched_default, "routed": routed, "errors": errors}
 
 
 def _compact_cursor_path(home: Path) -> Path:
@@ -602,6 +656,7 @@ def sync_vcs(cfg: Config, now: float) -> dict:
 
     vcs = providers.get_vcs(cfg)
     checked = 0
+    worktree_removal_errors: dict[str, str] = {}
     for key in list_keys(home):
         snap = snap_mod.load(home, key)
         phase = Phase(snap.phase)
@@ -610,7 +665,7 @@ def sync_vcs(cfg: Config, now: float) -> dict:
         checked += 1
         status = vcs.pr_status(snap.pr_number)
 
-        if _route_if_merged(cfg, key, status):
+        if _route_if_merged(cfg, key, status, worktree_removal_errors):
             continue
         if status.get("mergeable") == "CONFLICTING":
             from . import ops
@@ -622,18 +677,30 @@ def sync_vcs(cfg: Config, now: float) -> dict:
 
     cursor[vcs_name] = now
     store.write_json(cursor_path, cursor)
-    return {"checked": checked}
+    return {"checked": checked, "worktree_removal_errors": worktree_removal_errors}
 
 
-def _route_if_merged(cfg: Config, key: str, status: dict) -> bool:
+def _route_if_merged(cfg: Config, key: str, status: dict,
+                     worktree_removal_errors: dict | None = None) -> bool:
     from . import ops
+    from . import repos as repos_mod
     if not ops.check_merged(cfg, key, status.get("state", ""), actor="dispatcher"):
         return False
     import subprocess
-    wt = cfg.home / "worktrees" / key
-    if wt.exists() and cfg.repo_path:
-        subprocess.run(["git", "-C", cfg.repo_path, "worktree", "remove", str(wt), "--force"],
-                       capture_output=True, text=True)
+    wt = store.worktree_path(cfg.home, key)
+    if wt.exists():
+        # Removal must run in the ticket's OWNING repo -- `git -C <worktree>
+        # worktree remove` does not work; the repo's own git metadata is what
+        # tracks the worktree registration.
+        binding = repos_mod.resolve(cfg, cfg.home, key)
+        if binding.path:
+            result = subprocess.run(
+                ["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0 and worktree_removal_errors is not None:
+                worktree_removal_errors[key] = (result.stderr or result.stdout
+                                                or "worktree remove failed").strip()
     return True
 
 
@@ -797,6 +864,7 @@ class DispatchReport:
     paused: bool = False            # the fleet.pause() kill switch was armed this sweep
     repo_blockers: list[str] = field(default_factory=list)  # non-empty -> spawn step was skipped
     hook_errors: dict = field(default_factory=dict)     # hook name -> "ExcType: message"
+    worktree_removal_errors: dict = field(default_factory=dict)  # key -> git worktree remove stderr
 
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
@@ -917,7 +985,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     repo_blockers = list(preflight["blockers"]) if not repo_ok else []
     if repo_ok:
         _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg)
-    _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now)
+    vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
+    worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
     _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
     _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
     _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
@@ -1060,6 +1129,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
         paused_until=paused_until_ts, reaped=reaped,
         repo_blockers=repo_blockers, hook_errors=hook_errors,
+        worktree_removal_errors=worktree_removal_errors,
     )
 
 
@@ -1089,13 +1159,19 @@ def _resolve_model_effort(cfg: Config, key: str) -> tuple[str, str | None]:
 
 def _worker_cwd(cfg: Config, key: str) -> Path:
     """Where the reconciler runs. Prefer the ticket's own worktree; before one
-    exists (e.g. the first triage step) fall back to the repo so the
-    ``/maestro-reconcile`` command + skill resolve. Only if no repo is configured
-    do we land in ``home`` (which has no ``.claude/commands`` — the reconciler
-    would no-op there)."""
-    wt = cfg.home / "worktrees" / key
+    exists (e.g. the first triage step) fall back to the ticket's resolved repo
+    binding (``repos.resolve`` -- an unbound ticket resolves to ``cfg.repo_path``
+    unchanged) so the ``/maestro-reconcile`` command + skill resolve there. Only
+    if no repo is configured at all do we land in ``home`` (which has no
+    ``.claude/commands`` — the reconciler would no-op there)."""
+    wt = store.worktree_path(cfg.home, key)
     if wt.exists():
         return wt
+    from . import repos as repos_mod  # lazy: repos imports us at module load time
+
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.path:
+        return Path(binding.path)
     if cfg.repo_path:
         return Path(cfg.repo_path)
     return cfg.home

@@ -12,40 +12,21 @@ from maestro import event_log, snapshot as snap_mod, store
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
-
-def _git(*args, cwd):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+from conftest import git as _git, make_origin_and_repo as _make_origin_and_repo
 
 
-def _make_origin_and_repo(tmp_path):
-    """A bare origin plus a clone (standing in for the primary repo maestro builds in)."""
-    origin = tmp_path / "origin.git"
-    origin.mkdir()
-    _git("init", "-q", "--bare", "-b", "main", cwd=origin)
-
-    repo = tmp_path / "repo"
-    _git("clone", "-q", str(origin), str(repo), cwd=tmp_path)
-    _git("config", "user.email", "test@example.com", cwd=repo)
-    _git("config", "user.name", "Test", cwd=repo)
-    (repo / "README.md").write_text("hello\n")
-    _git("add", "-A", cwd=repo)
-    _git("commit", "-q", "-m", "initial", cwd=repo)
-    _git("push", "-q", "-u", "origin", "main", cwd=repo)
-    return origin, repo
-
-
-def _add_worktree(repo, home, key, branch):
+def _add_worktree(repo, home, key, branch, base="main"):
     wt = home / "worktrees" / key
-    _git("worktree", "add", "-q", "-b", branch, str(wt), "main", cwd=repo)
+    _git("worktree", "add", "-q", "-b", branch, str(wt), base, cwd=repo)
     return wt
 
 
-def _merge_new_commit_to_origin(repo, origin):
-    """Simulate another ticket's PR merging: a fresh commit lands on origin/main."""
+def _merge_new_commit_to_origin(repo, origin, base="main"):
+    """Simulate another ticket's PR merging: a fresh commit lands on origin/<base>."""
     (repo / "NEWS.md").write_text("merged change\n")
     _git("add", "-A", cwd=repo)
     _git("commit", "-q", "-m", "T-9: merged change", cwd=repo)
-    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("push", "-q", "origin", base, cwd=repo)
 
 
 def _seed(home, key, phase, pr=10):

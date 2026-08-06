@@ -355,7 +355,8 @@ def cmd_dispatch(args) -> int:
            "reaped": report.reaped,
            "due": [{"key": k, "reason": r} for k, r in report.due],
            "paused": report.paused,
-           "repo_blocked": report.repo_blockers}
+           "repo_blocked": report.repo_blockers,
+           "worktree_removal_errors": report.worktree_removal_errors}
     _print(out)
     return 0
 

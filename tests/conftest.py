@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,6 +8,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from maestro import event_log, snapshot as snap_mod, store  # noqa: E402
 from maestro.config import Config  # noqa: E402
+
+
+def git(*args, cwd):
+    """Run a real git command (never mocked) -- shared by worktree/preflight/
+    multi-repo dispatcher tests."""
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def make_origin_and_repo(tmp_path, name="repo", base_branch="main"):
+    """A bare origin plus a clone (standing in for a project repo maestro builds
+    in). Real git underneath, never mocked. `name`/`base_branch` let callers
+    build N independent repos under one `tmp_path` (multi-repo dispatcher
+    tests, MR-3+) -- the single-repo default matches the original
+    origin.git/repo shape."""
+    origin = tmp_path / f"{name}-origin.git"
+    origin.mkdir()
+    git("init", "-q", "--bare", "-b", base_branch, cwd=origin)
+
+    repo = tmp_path / name
+    git("clone", "-q", str(origin), str(repo), cwd=tmp_path)
+    git("config", "user.email", "test@example.com", cwd=repo)
+    git("config", "user.name", "Test", cwd=repo)
+    (repo / "README.md").write_text(f"{name}\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "initial", cwd=repo)
+    git("push", "-q", "-u", "origin", base_branch, cwd=repo)
+    return origin, repo
 
 
 @pytest.fixture
