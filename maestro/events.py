@@ -32,7 +32,13 @@ AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}
 APPROVED = "Approved"                   # {}  human clears the tier-2 implementing gate (`maestro approve`)
 
 # Independent QA (a separate agent that did not write the code re-checks the diff)
-AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, evidence}  verdict: "pass"|"fail"
+AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, evidence, axis}
+                                         # verdict: "pass"|"fail"; axis: "spec"|"standards" (T-23),
+                                         # default "spec" when omitted (pre-T-23 events). The two
+                                         # axes are folded into separate snapshot buckets and never
+                                         # reranked against each other -- only the "spec" axis gates
+                                         # `implementing -> awaiting-ci` (see ops._refuse_if_qa_failing);
+                                         # a "standards" verdict is advisory and recorded only.
 
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent

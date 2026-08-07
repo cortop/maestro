@@ -83,6 +83,14 @@ class Config:
     # Refuse to fast-forward/spawn into repo_path while it's mid-merge/rebase or carries
     # a real conflict hunk (see dispatcher.repo_preflight). Fails open on a broken probe.
     repo_preflight: bool = True
+    # T-23: gate a second, parallel QA sub-agent in the `implementing` reconcile step that
+    # checks CLAUDE.md conventions + a Fowler-smell baseline (the "standards" axis) alongside
+    # the existing AD-4 "spec" axis (does the diff satisfy the AC?). Default OFF -- it roughly
+    # doubles sub-agent spend per implementing step, and per the T-23 spec a mandatory second
+    # axis is explicitly not approved scope. A standards-axis fail is recorded (`maestro
+    # qa-verdict --axis standards`) but is advisory only: unlike a spec-axis fail, it does NOT
+    # block `set-phase awaiting-ci` (see ops._refuse_if_qa_failing).
+    qa_standards_axis: bool = False
     # Maintenance ticks (dispatcher.run_compact_tick / run_archive_tick).
     compact_interval: int = 0          # seconds between dispatcher-driven compact sweeps (0 disables)
     compact_min_events: int = 200      # only compact a key once its folded log reaches this many events
@@ -166,6 +174,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
         cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
         cfg.repo_preflight = bool(m.get("repo_preflight", cfg.repo_preflight))
+        cfg.qa_standards_axis = bool(m.get("qa_standards_axis", cfg.qa_standards_axis))
         cfg.compact_interval = int(m.get("compact_interval", cfg.compact_interval))
         cfg.compact_min_events = int(m.get("compact_min_events", cfg.compact_min_events))
         raw_archive_after = m.get("archive_after", cfg.archive_after)
@@ -219,6 +228,9 @@ max_impl_turns = 20
 # session_log_retention_days = 14 # delete session logs older than N days (0/None = keep all)
 # session_log_max_per_ticket = 200 # keep at most N session logs per ticket (0/None = unlimited)
 # repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
+# qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `implementing` that
+                                  # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
+                                  # only (does not block awaiting-ci), roughly doubles QA spend
 # compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
                                   # (0 disables; a manual `maestro compact <key>` always works)
 # compact_min_events = 200        # skip compacting a key until its folded log reaches this size

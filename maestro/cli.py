@@ -523,9 +523,12 @@ def cmd_verify_ac(args) -> int:
 
 
 def cmd_qa_verdict(args) -> int:
-    """[agent] record an independent QA verdict (pass/fail) for AC #n with evidence."""
-    h = ops.record_qa_verdict(_cfg(args), args.key, args.ac, args.verdict, args.evidence, actor=args.actor)
-    _print({"qa_verdict_ac_hash": h, "verdict": args.verdict})
+    """[agent] record an independent QA verdict (pass/fail) for AC #n with evidence,
+    on either the "spec" axis (default; gates awaiting-ci) or the T-23 "standards"
+    axis (advisory only, config-gated by qa_standards_axis)."""
+    h = ops.record_qa_verdict(_cfg(args), args.key, args.ac, args.verdict, args.evidence,
+                              axis=args.axis, actor=args.actor)
+    _print({"qa_verdict_ac_hash": h, "verdict": args.verdict, "axis": args.axis})
     return 0
 
 
@@ -809,7 +812,7 @@ def cmd_env(args) -> int:
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
             "max_concurrency": cfg.max_concurrency, "max_impl_turns": cfg.max_impl_turns,
-            "providers": cfg.providers})
+            "qa_standards_axis": cfg.qa_standards_axis, "providers": cfg.providers})
     return 0
 
 
@@ -964,6 +967,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")
     sp.add_argument("--verdict", required=True, choices=sorted(ops.QA_VERDICTS))
     sp.add_argument("--evidence", required=True); sp.add_argument("--actor", default="reconciler-qa")
+    sp.add_argument("--axis", default="spec", choices=sorted(ops.QA_AXES),
+                    help="which QA axis this verdict belongs to (default: spec, gates "
+                         "awaiting-ci; standards is advisory-only, T-23)")
 
     sp = add("finalize", cmd_finalize, "[agent] tombstone a finished ticket"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
