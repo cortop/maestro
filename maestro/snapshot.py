@@ -70,11 +70,22 @@ class Snapshot:
     # for the ticket's lifetime, not a per-visit checkpoint.
     approved: bool = False
     # ac_hash -> {"verdict": "pass"|"fail", "evidence": str}, from AcQaVerdict
-    # events — an independent QA agent's re-check, distinct from ac_verified's
-    # self-attestation. Latest verdict per hash wins (a re-check after a fix
-    # overwrites the earlier fail), same content-hash-keyed invalidation as
-    # ac_verified.
+    # events with axis "spec" (or no axis, for pre-T-23 events) — an independent
+    # QA agent's re-check of "does the diff satisfy this AC?", distinct from
+    # ac_verified's self-attestation. Latest verdict per hash wins (a re-check
+    # after a fix overwrites the earlier fail), same content-hash-keyed
+    # invalidation as ac_verified. This is the ONLY axis that gates
+    # `implementing -> awaiting-ci` (see qa_failing_acs / ops._refuse_if_qa_failing) —
+    # its meaning is unchanged by the standards axis below (T-23).
     qa_verdicts: dict[str, dict] = field(default_factory=dict)
+    # ac_hash -> {"verdict": "pass"|"fail", "evidence": str}, from AcQaVerdict
+    # events with axis "standards" (T-23) — a second, independent QA agent's
+    # re-check of CLAUDE.md conventions + a Fowler-smell baseline, kept in a
+    # separate bucket so it is never reranked against `qa_verdicts` (the spec
+    # axis). Advisory only: a "standards" fail is visible (standards_failing_acs)
+    # but, unlike a "spec" fail, does NOT block `set-phase awaiting-ci` -- an
+    # explicit choice (see T-23 spec + ops._refuse_if_qa_failing).
+    qa_verdicts_standards: dict[str, dict] = field(default_factory=dict)
     # Set when a ticket originated from an external tracker (e.g. Jira) so the
     # dispatcher's sync tick knows which tickets to `refresh`.
     external_source: str | None = None
@@ -99,12 +110,26 @@ class Snapshot:
         return len(hashes - set(self.ac_verified.keys()))
 
     def qa_failing_acs(self, spec_text: str) -> list[str]:
-        """AC texts (in spec order) whose latest independent QA verdict is
-        "fail" — a current AC (matched by content hash) recorded as failing
-        with no later passing re-check overwriting it."""
+        """AC texts (in spec order) whose latest independent spec-axis QA verdict
+        is "fail" — a current AC (matched by content hash) recorded as failing
+        with no later passing re-check overwriting it. This is the axis that
+        gates `implementing -> awaiting-ci`; the standards axis (T-23) does not
+        (see standards_failing_acs)."""
         out = []
         for t in parse_acs(spec_text):
             v = self.qa_verdicts.get(ac_hash(t))
+            if v and v.get("verdict") == "fail":
+                out.append(t)
+        return out
+
+    def standards_failing_acs(self, spec_text: str) -> list[str]:
+        """AC texts (in spec order) whose latest independent standards-axis QA
+        verdict is "fail" (T-23, config-gated by `qa_standards_axis`). Advisory
+        only — deliberately NOT consulted by `set_phase`'s awaiting-ci gate, so
+        it never blocks a ticket the way qa_failing_acs does."""
+        out = []
+        for t in parse_acs(spec_text):
+            v = self.qa_verdicts_standards.get(ac_hash(t))
             if v and v.get("verdict") == "fail":
                 out.append(t)
         return out
@@ -188,7 +213,11 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.AC_QA_VERDICT:
             h = p.get("ac_hash")
             if h:
-                s.qa_verdicts[h] = {"verdict": p.get("verdict"), "evidence": p.get("evidence", "")}
+                entry = {"verdict": p.get("verdict"), "evidence": p.get("evidence", "")}
+                if p.get("axis") == "standards":
+                    s.qa_verdicts_standards[h] = entry
+                else:
+                    s.qa_verdicts[h] = entry  # axis "spec", or absent (pre-T-23 events)
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.APPROVED:

@@ -85,11 +85,17 @@ def _acs_unverified_count(cfg: Config, key: str, snap) -> int:
 
 
 def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
-    """Block `implementing -> awaiting-ci` while an independent QA verdict on a
-    current AC is still `fail` — the enforced half of the adversarial loop: a
-    failing verdict must send the ticket back to `implementing`, not let it
-    coast onward to review. Raises (no event appended) rather than warning, so
-    a reconciler that tries anyway gets a hard, actionable stop."""
+    """Block `implementing -> awaiting-ci` while an independent *spec-axis* QA
+    verdict on a current AC is still `fail` — the enforced half of the
+    adversarial loop: a failing verdict must send the ticket back to
+    `implementing`, not let it coast onward to review. Raises (no event
+    appended) rather than warning, so a reconciler that tries anyway gets a
+    hard, actionable stop.
+
+    Deliberately checks `qa_failing_acs` (spec axis) only, never
+    `standards_failing_acs` (T-23) — a Standards-axis fail is advisory and
+    must NOT gate this transition; that is an explicit, tested choice, not an
+    oversight (see tests/test_standards_qa_axis.py)."""
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
         return
@@ -183,13 +189,22 @@ def verify_ac(cfg: Config, key: str, ac_index: int, evidence: dict, *, actor: st
 
 
 QA_VERDICTS = {"pass", "fail"}
+QA_AXES = {"spec", "standards"}
 
 
 def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, evidence: str, *,
-                       actor: str = "reconciler-qa") -> str:
+                       axis: str = "spec", actor: str = "reconciler-qa") -> str:
     """Record an *independent* QA re-check of AC #ac_index (1-based, in spec
     order) — the counterpart to `verify_ac`'s self-attestation, meant to be
     called by a separate agent that did not write the implementation.
+
+    `axis` (T-23) distinguishes *what* was re-checked: "spec" (default — does
+    the diff satisfy this AC? the AD-4 behavior, unchanged) or "standards" (does
+    the diff follow CLAUDE.md conventions + a Fowler-smell baseline? config-gated
+    by `qa_standards_axis`, advisory only). The two axes fold into separate
+    snapshot buckets (see snapshot.Snapshot.qa_verdicts / qa_verdicts_standards)
+    and are never reranked against each other; only a "spec" fail blocks
+    `set-phase awaiting-ci` (see `_refuse_if_qa_failing`).
 
     Content-hash keyed like `verify_ac`, but the step id also folds in the
     current `observed_seq`: unlike a self-attestation, the *same* AC is
@@ -199,6 +214,8 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
     """
     if verdict not in QA_VERDICTS:
         raise store.MaestroError(f"{key}: --verdict must be one of {sorted(QA_VERDICTS)}, got {verdict!r}")
+    if axis not in QA_AXES:
+        raise store.MaestroError(f"{key}: --axis must be one of {sorted(QA_AXES)}, got {axis!r}")
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
         raise store.MaestroError(f"{key}: no spec.md to verify ACs against")
@@ -208,9 +225,10 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
     ac_text = acs[ac_index - 1]
     h = snap_mod.ac_hash(ac_text)
     snap = snap_mod.load(cfg.home, key)
-    sid = step_id(key, snap.phase, snap.observed_seq, f"qaverdict-{h}-{verdict}")
+    sid = step_id(key, snap.phase, snap.observed_seq, f"qaverdict-{axis}-{h}-{verdict}")
     _append(cfg, key, E.AC_QA_VERDICT,
-            {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "verdict": verdict, "evidence": evidence},
+            {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "verdict": verdict,
+             "evidence": evidence, "axis": axis},
             actor=actor, sid=sid)
     return h
 

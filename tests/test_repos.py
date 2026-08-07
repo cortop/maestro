@@ -172,7 +172,8 @@ def test_bare_env_unchanged_key_set(home, capsys):
     import json
     printed = json.loads(out)
     assert set(printed.keys()) == {"home", "repo_path", "branch_prefix", "reconcile_command",
-                                    "max_concurrency", "max_impl_turns", "providers"}
+                                    "max_concurrency", "max_impl_turns", "qa_standards_axis",
+                                    "providers"}
 
 
 # --- AC5: unknown --repo fails fast at create; old snapshots round-trip ---

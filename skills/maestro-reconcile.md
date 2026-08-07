@@ -22,7 +22,7 @@ explicitly wherever it changes what you do):
 ```bash
 KEY="$1"
 eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+(d["repo_path"] or "")+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"]+"\nMODE="+d["mode"])')"
-eval "$(maestro env | python3 -c 'import sys,json;print("HOME="+json.load(sys.stdin)["home"])')"
+eval "$(maestro env | python3 -c 'import sys,json;d=json.load(sys.stdin);print("HOME="+d["home"]+"\nQA_STANDARDS_AXIS="+str(bool(d.get("qa_standards_axis"))).lower())')"
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
 sed -n '1,200p' "$HOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
@@ -235,8 +235,27 @@ Otherwise implement the spec's Acceptance criteria:
    FAIL strictly against what the diff actually does, then record a verdict itself (it must not
    edit code):
    `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --evidence "<what it checked, what
-   it saw in the diff>"` (1-based, in spec order — same indexing as `verify-ac`).
-   - **Every AC verdict PASS** → continue to step 4.
+   it saw in the diff>"` (1-based, in spec order — same indexing as `verify-ac`; this defaults
+   to `--axis spec`, i.e. "does the diff satisfy this AC?").
+
+   **Standards axis (T-23, config-gated by `qa_standards_axis`, default off).** If
+   `QA_STANDARDS_AXIS == true`, spawn a second **Standards QA** sub-agent (`Agent` tool) in the
+   *same batch* as the Spec-axis QA agent above, so they run in parallel — briefed with CLAUDE.md's
+   conventions (one-line module docstrings, stdlib-only core, never hand-edit `derived/`, QA proves
+   the feature with the real app and mocks only the external boundary, mount the real app for TUI
+   changes) plus a Fowler-smell baseline (long methods, duplicated code, large classes, feature
+   envy, shotgun surgery), and the same diff — not the AC list, and not the Spec-axis agent's
+   findings. Its job, per spec AC touched by the diff: judge PASS or FAIL against those standards,
+   independent of whether the Spec-axis agent passed it. Record with
+   `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --axis standards --evidence "<smell or
+   convention violated, or why it's clean>"`. Standards findings are recorded but **never reranked
+   against, or merged with, the Spec-axis findings** — they land in a separate snapshot bucket
+   (`qa_verdicts_standards`) and are advisory only: unlike a Spec-axis fail, a Standards-axis fail
+   does **not** block `set-phase awaiting-ci` (explicit, tested choice — see
+   `ops._refuse_if_qa_failing`). Fix any cheap, clearly-right Standards findings alongside the
+   Spec-axis fixes below; for the rest, leave a `maestro append --type Note` breadcrumb summarizing
+   what a human reviewer should look at and proceed — do not loop or block on this axis.
+   - **Every AC verdict PASS** (spec axis) → continue to step 4.
    - **Any AC verdict FAIL** → you (the implementer) fix the code per the QA evidence, append a
      turn breadcrumb (`maestro append "$KEY" --type ImplTurnRecorded --payload
      "{\"turn\":<n>,\"role\":\"implementer\"}" --step-id "turn-$KEY-<n>-impl"`), re-run tests,
