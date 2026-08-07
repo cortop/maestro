@@ -32,13 +32,38 @@ cat "$HOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, ph
 If the snapshot shows pending inbox commands, fold them before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
+## Asking the human: frontier rounds, never one at a time
+Two rules apply whenever you reach for `maestro ask`:
+
+**(a) Ask the whole settled frontier in one round.** If you have more than one question whose
+prerequisites are already met, post them together in a single `maestro ask` call via the
+repeatable `--question TEXT RECOMMENDED QID` flag (one triple per question; pass `""` for
+RECOMMENDED when you have no recommendation, and `""` for QID to auto-derive it — only pin an
+explicit QID when a later step routes on its prefix, e.g. `research-approval-<key>`):
+```bash
+maestro ask "$KEY" \
+  --question "<question 1>" "<your recommended answer, or \"\">" "" \
+  --question "<question 2>" "<your recommended answer, or \"\">" ""
+```
+One question per round is the most expensive schedule available here: each round costs a
+dispatcher wake, an hours-long human round-trip, and a full reconciler spawn — pay that once
+per round, not once per question. A single settled question is still fine as one `--question`
+(or the plain `maestro ask "$KEY" "<text>"` form).
+
+**(b) Never ask something a sub-agent could find in the codebase.** Before asking the human
+anything, check: is this greppable, readable from existing code/docs, or otherwise discoverable
+without a judgment call? If so, dispatch an `Agent`-tool sub-agent to find it — do not spend a
+human round-trip on it. Only put a question in the round if a sub-agent genuinely cannot resolve
+it: a product/scope decision, an ambiguous intent, or an explicit approval gate.
+
 ## `researching`: explore, cite primary sources, propose
 You are exploring to produce a research proposal. You are a top-level session, so you may use
 the `Agent` tool to fan out exploration. Do not create a git worktree — this phase never edits
 code.
 
 1. **Explore the codebase** (Read/Grep/Glob/Agent) — understand relevant code, patterns, and
-   constraints. Focus on the spec's Intent to know what to research.
+   constraints. Focus on the spec's Intent to know what to research. Anything discoverable this
+   way belongs here, never in the question you ask at the end (rule (b) above).
 2. **Follow every claim back to the source that owns it.** A claim about how a library, API, or
    protocol behaves is only as credible as the primary source that defines that behavior — its
    own docs, source code, RFC/spec, or changelog — not a blog post's secondhand summary of it.
@@ -64,19 +89,24 @@ code.
    - <file:line> — <why relevant>
    - <https://url-to-the-primary-source> — <why relevant>
    ```
-4. **Record and ask**:
+4. **Record and ask** — the proposal-approval question plus any other genuinely open question
+   (rule (b): nothing discoverable belongs here) that surfaced during research, all in ONE round
+   (rule (a)). The approval question keeps its fixed `research-approval-<key>` qid — the
+   `awaiting-human` reconciler routes on that prefix — any extra questions auto-derive theirs:
    ```bash
    PROP_PATH="tickets/$KEY/proposal.md"
    maestro append "$KEY" --type ResearchProposed \
      --payload "{\"proposal_path\":\"$PROP_PATH\",\"alternatives\":[\"Alternative 1\",\"Alternative 2\"]}" \
      --step-id "research-proposed-$KEY"
    maestro ask "$KEY" \
-     "Proposal for $KEY is ready at $PROP_PATH. Approve the recommended approach, reply 'alternative N' to select an alternative, or 'needs more' to continue." \
-     --qid "research-approval-$KEY"
+     --question "Proposal for $KEY is ready at $PROP_PATH. Approve the recommended approach, reply 'alternative N' to select an alternative, or 'needs more' to continue." \
+       "Approve — <one-line why Recommended is the right pick>" "research-approval-$KEY"
+     # add more --question "<text>" "<recommendation or \"\">" "" triples here for any other
+     # genuinely open question that surfaced during research
    ```
    Then exit — the dispatcher re-wakes you when the human answers.
 
 **Done when:** `$HOME/tickets/$KEY/proposal.md` exists with a Recommended section, at least one
 Alternative, and a Sources section citing primary sources; `ResearchProposed` has been appended;
-`maestro ask` has recorded a `research-approval-$KEY` question; and `maestro release "$KEY"` has
-run.
+`maestro ask` has recorded a `research-approval-$KEY` question (plus any other settled-frontier
+questions in the same round); and `maestro release "$KEY"` has run.

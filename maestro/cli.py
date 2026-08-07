@@ -465,7 +465,18 @@ def cmd_set_phase(args) -> int:
 
 
 def cmd_ask(args) -> int:
-    qid = ops.ask(_cfg(args), args.key, args.text, qid=args.qid, actor=args.actor)
+    cfg = _cfg(args)
+    if args.questions:
+        if args.text:
+            raise store.MaestroError(
+                "maestro ask: pass either TEXT or --question (repeatable), not both")
+        triples = [(text, recommend or None, qid or None) for text, recommend, qid in args.questions]
+        qids = ops.ask_round(cfg, args.key, triples, actor=args.actor)
+        _print({"asked": qids})
+        return 0
+    if not args.text:
+        raise store.MaestroError("maestro ask: TEXT or --question is required")
+    qid = ops.ask(cfg, args.key, args.text, qid=args.qid, actor=args.actor)
     _print({"asked": qid})
     return 0
 
@@ -942,7 +953,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="override the AC-verification gate on awaiting-ci (records --actor as forced_by)")
 
     sp = add("ask", cmd_ask, "[agent] ask the human, go to awaiting-human")
-    sp.add_argument("key"); sp.add_argument("text"); sp.add_argument("--qid"); sp.add_argument("--actor", default="reconciler")
+    sp.add_argument("key")
+    sp.add_argument("text", nargs="?", default=None,
+                     help="single-question text (omit when using --question)")
+    sp.add_argument("--qid")
+    sp.add_argument("--question", dest="questions", action="append", nargs=3,
+                     metavar=("TEXT", "RECOMMENDED", "QID"),
+                     help="repeatable: post one question of a multi-question frontier round "
+                          "in this single call -- pass '' for RECOMMENDED when that question "
+                          "has no recommended answer, and '' for QID to auto-derive it (only "
+                          "give an explicit QID when a later step routes on its prefix, e.g. "
+                          "research-approval-<key>). Mutually exclusive with TEXT/--qid.")
+    sp.add_argument("--actor", default="reconciler")
 
     sp = add("fold-inbox", cmd_fold_inbox, "[agent] fold pending human commands into events")
     sp.add_argument("key")

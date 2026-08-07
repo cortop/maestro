@@ -35,7 +35,9 @@ If the snapshot shows pending inbox commands, fold them before deciding:
 ## `awaiting-human`: apply the answer, then route onward
 You only ran because an answer arrived (already folded above). Read `answered_questions` from
 the snapshot — it persists across crashes, so it's reliable even if `observed_seq` has already
-advanced past the `QuestionAnswered` events:
+advanced past the `QuestionAnswered` events. A frontier round answered only in part wakes you on
+the first answer — act only on the qids present in `answered_questions` below; anything still in
+`open_questions` just stays open for a later wake:
 ```bash
 SNAP=$(maestro snapshot "$KEY")
 KIND=$(echo "$SNAP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('kind','implementation'))")
