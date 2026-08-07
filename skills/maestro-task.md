@@ -29,9 +29,14 @@ Apply the quality rubric:
    flag it and suggest splitting.
 
 **If ANY criterion fails**: do NOT create a ticket. Instead, ask the user 1–3 targeted
-questions to fill the gaps. Present the questions as a short numbered list. Wait for
-their reply, then re-evaluate. Loop until the rubric passes or the user explicitly says
-"cancel" / "abort".
+questions to fill the gaps — the whole settled frontier in one round, not one question
+at a time: present them together as a short numbered list, each with your recommended
+answer attached, so the user can just say "go with your recommendations" instead of
+answering each individually. Before asking, check whether you could resolve a gap
+yourself — by reading the codebase, existing tickets, or this project's docs — instead
+of spending the user's time on it; only ask what genuinely needs their judgment. Wait
+for their reply, then re-evaluate. Loop until the rubric passes or the user explicitly
+says "cancel" / "abort".
 
 **If ALL criteria pass**: proceed to Step 2.
 

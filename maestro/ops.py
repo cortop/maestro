@@ -241,6 +241,44 @@ def ask(cfg: Config, key: str, text: str, *, qid: str | None = None, actor: str 
     return qid
 
 
+def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str | None]], *,
+             actor: str = "reconciler") -> list[str]:
+    """Ask the whole settled frontier in one round: N questions, numbered, each
+    optionally carrying a recommended answer -- one dispatcher wake and one
+    human round-trip instead of N, since a reconciler holding a settled
+    question back to ask it alone next round is the most expensive schedule
+    available here (a dispatcher wake + an hours-long human round-trip +
+    a full reconciler spawn, paid once per question instead of once per round).
+
+    Each item is `(text, recommend, qid)`; `recommend`/`qid` may be None to
+    auto-derive (qid defaults to `content_hash(text)`, same as plain `ask`) --
+    an explicit qid is only needed for a question a later reconcile step
+    routes on by qid prefix (e.g. `research-approval-<key>`).
+
+    `open_questions` is already a qid-keyed dict (`ask` above), so this needs
+    no event-shape change: one QuestionAsked per question, numbered in the
+    human-facing text, with the recommendation folded into that same text
+    field -- every existing open_questions reader (notify, projection, tui,
+    context) already treats it as an opaque display string. One phase
+    transition for the whole round, not one per question.
+    """
+    if not questions:
+        raise store.MaestroError(f"{key}: ask_round needs at least one question")
+    qids = []
+    total = len(questions)
+    for i, (text, recommend, qid) in enumerate(questions, start=1):
+        qid = qid or content_hash(text)
+        numbered = f"{i}/{total}. {text}" if total > 1 else text
+        if recommend:
+            numbered += f"\n   Recommended: {recommend}"
+        _append(cfg, key, E.QUESTION_ASKED, {"qid": qid, "text": numbered},
+                actor=actor, sid=f"ask-{key}-{qid}")
+        qids.append(qid)
+    set_phase(cfg, key, Phase.AWAITING_HUMAN,
+              reason=f"asked human ({total} question(s) this round)", actor=actor)
+    return qids
+
+
 def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:
     """Route a CONFLICTING PR back into `implementing` so the agent rebases onto
     the base branch, resolves the conflicts, and pushes — auto-resolution that

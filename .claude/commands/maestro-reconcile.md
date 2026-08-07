@@ -38,18 +38,52 @@ maestro fold-inbox "$KEY"
 ```
 **On every exit path below, finish with `maestro release "$KEY"`** (drop your claim).
 
+## Asking the human: frontier rounds, never one at a time
+Two rules apply everywhere below you'd reach for `maestro ask` (triaging, researching, an
+implementing escalation):
+
+**(a) Ask the whole settled frontier in one round.** If you have more than one question whose
+prerequisites are already met, post them together in a single `maestro ask` call via the
+repeatable `--question TEXT RECOMMENDED QID` flag (one triple per question; pass `""` for
+RECOMMENDED when you have no recommendation, and `""` for QID to auto-derive it — only pin an
+explicit QID when a later step routes on its prefix, e.g. `research-approval-<key>`):
+```bash
+maestro ask "$KEY" \
+  --question "<question 1>" "<your recommended answer, or \"\">" "" \
+  --question "<question 2>" "<your recommended answer, or \"\">" ""
+```
+One question per round is the most expensive schedule available here: each round costs a
+dispatcher wake, an hours-long human round-trip, and a full reconciler spawn — pay that once
+per round, not once per question. A single settled question is still fine as one `--question`
+(or the plain `maestro ask "$KEY" "<text>"` form).
+
+**(b) Never ask something a sub-agent could find in the codebase.** Before asking the human
+anything, check: is this greppable, readable from existing code/docs, or otherwise discoverable
+without a judgment call? If so, dispatch an `Agent`-tool sub-agent to find it — do not spend a
+human round-trip on it. Only put a question in the round if a sub-agent genuinely cannot resolve
+it: a product/scope decision, an ambiguous intent, or an explicit approval gate.
+
 ## Act on `snapshot.phase` — ONE step only
 
 ### `triaging`
 Read the spec. Take `approval_tier` from its frontmatter.
 - tier 0 → `maestro set-phase "$KEY" ready --reason "tier-0 auto-approved"`
-- tier ≥1 → write a crisp pickup question and sleep:
-  `maestro ask "$KEY" "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?"`
+- tier ≥1 → resolve anything discoverable yourself first (rule (b) above — dispatch a sub-agent
+  rather than asking), then ask the whole settled frontier in one round (rule (a)): the pickup/plan
+  approval question, plus any other genuinely open design questions, each numbered with your
+  recommended answer:
+  ```bash
+  maestro ask "$KEY" \
+    --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?" "<your recommendation>" "" \
+    --question "<other settled question, if any>" "<your recommendation>" ""
+  ```
 
 ### `awaiting-human`
 You only ran because an answer arrived (already folded above). Read `answered_questions` from
 the snapshot — it persists across crashes, so it's reliable even if `observed_seq` has already
-advanced past the `QuestionAnswered` events:
+advanced past the `QuestionAnswered` events. A frontier round answered only in part wakes you on
+the first answer — act only on the qids present in `answered_questions` below; anything still
+in `open_questions` just stays open for a later wake:
 ```bash
 SNAP=$(maestro snapshot "$KEY")
 KIND=$(echo "$SNAP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('kind','implementation'))")
@@ -129,7 +163,8 @@ maestro set-phase "$KEY" researching --reason "research ticket: beginning explor
 You are exploring to produce a research proposal. Do **not** create a git worktree.
 
 1. **Explore the codebase** (Read/Grep/Glob/Agent) — understand relevant code, patterns, and
-   constraints. Focus on the spec's Intent to know what to research.
+   constraints. Focus on the spec's Intent to know what to research. Anything discoverable this
+   way belongs here, never in the question you ask at the end (rule (b) above).
 2. **Search the web** — use WebSearch/WebFetch or the `/deep-research` skill to find
    state-of-the-art approaches, libraries, prior art, and relevant citations.
    (If web tools are unavailable in this session, note that and fall back to codebase-only.)
@@ -150,15 +185,20 @@ You are exploring to produce a research proposal. Do **not** create a git worktr
    - <file:line> — <why relevant>
    - <https://url> — <why relevant>
    ```
-4. **Record and ask**:
+4. **Record and ask** — the proposal-approval question plus any other genuinely open question
+   (rule (b): nothing discoverable belongs here) that surfaced during research, all in ONE round
+   (rule (a)). The approval question keeps its fixed `research-approval-<key>` qid — the
+   `awaiting-human` handler below routes on that prefix — any extra questions auto-derive theirs:
    ```bash
    PROP_PATH="tickets/$KEY/proposal.md"
    maestro append "$KEY" --type ResearchProposed \
      --payload "{\"proposal_path\":\"$PROP_PATH\",\"alternatives\":[\"Alternative 1\",\"Alternative 2\"]}" \
      --step-id "research-proposed-$KEY"
    maestro ask "$KEY" \
-     "Proposal for $KEY is ready at $PROP_PATH. Approve the recommended approach, reply 'alternative N' to select an alternative, or 'needs more' to continue." \
-     --qid "research-approval-$KEY"
+     --question "Proposal for $KEY is ready at $PROP_PATH. Approve the recommended approach, reply 'alternative N' to select an alternative, or 'needs more' to continue." \
+       "Approve — <one-line why Recommended is the right pick>" "research-approval-$KEY"
+     # add more --question "<text>" "<recommendation or \"\">" "" triples here for any other
+     # genuinely open question that surfaced during research
    ```
 Then exit — the dispatcher re-wakes you when the human answers.
 
