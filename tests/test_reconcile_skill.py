@@ -20,8 +20,9 @@ import tempfile
 from pathlib import Path
 
 from maestro import config as config_mod
+from maestro import inbox, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
-from maestro.dispatcher import dispatch, resolve_reconcile_command
+from maestro.dispatcher import dispatch, is_due, resolve_reconcile_command
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
@@ -241,6 +242,123 @@ def test_implementing_conflict_resolution_recovers_intent_first():
         assert "recover the intent on" in text.lower()
         assert "git log -1" in text  # reads the originating commit
         assert "gh pr view" in text  # and the originating PR, when named
+
+
+# ---------------------------------------------------------------------------
+# Inbox drain: a pending human command is a wake signal in EVERY phase, and only
+# `maestro inbox-ack` clears it. The T-22 split dropped the fold step from the
+# "passive" file, so a `msg` to an in-review ticket re-woke it on every sweep
+# forever -- 17 no-op spawns/hour on T-24 (2026-08-07) until the watchdog fired.
+# The skill is markdown, so the regression is only catchable statically: these
+# assert the contract, and the dispatcher tests below prove why it matters.
+# ---------------------------------------------------------------------------
+
+def test_every_phase_file_folds_the_inbox():
+    """`is_due` treats inbox_pending as a wake reason in every non-terminal phase,
+    so every spawnable phase file must fold -- a file that skips it swallows human
+    input and (in a phase where nothing else changes) spins."""
+    for phase in PHASE_FILES:
+        for path in (_commands_path(phase), _skills_path(phase)):
+            assert 'maestro fold-inbox "$KEY"' in path.read_text(), \
+                f"{path} never folds the inbox -- human commands are swallowed here"
+
+
+def test_passive_file_acks_the_inbox_on_every_consuming_path():
+    """The regression itself: passive covers the sleeping phases, where an unacked
+    command is an unbounded spawn loop (nothing else about the ticket changes
+    between sweeps). It must both fold and ack, and say why."""
+    for path in (_commands_path("passive"), _skills_path("passive")):
+        text = path.read_text()
+        assert 'maestro inbox-ack "$KEY"' in text, f"{path} folds but never acks"
+        # Ack-last ordering is what makes a mid-step crash safe (re-read, not lose).
+        assert "Ack last" in text or "ack last" in text.lower(), \
+            f"{path} does not state the ack-last ordering rule"
+        # Every phase branch in the file must reach an ack, not just the preamble.
+        for branch in ("degraded", "terminating"):
+            assert f"## `{branch}`" in text
+
+
+def test_reconcile_command_files_are_readable_from_a_worktree_checkout():
+    """T-22 resolves the command *name* from the dispatcher (main's code) but Claude
+    resolves the command *file* from the cwd it spawns in -- a worktree. Every
+    resolvable command must therefore exist under .claude/commands/ at the repo
+    root, which is what a fresh worktree inherits."""
+    for phase in Phase:
+        if phase == Phase.DONE:
+            continue
+        cfg = config_mod.Config(home=REPO_ROOT, repo_path=str(REPO_ROOT))
+        command = resolve_reconcile_command(cfg, phase.value)
+        suffix = command.removeprefix(cfg.reconcile_command + "-")
+        assert (COMMANDS_DIR / f"maestro-reconcile-{suffix}.md").is_file(), (
+            f"{phase.value} spawns {command!r}; a worktree without that file "
+            f"gets 'Unknown command' and no-ops forever")
+
+
+def test_unacked_inbox_command_rewakes_a_sleeping_ticket_every_sweep(home):
+    """The spin, end-to-end through the real dispatcher: an in-review ticket (a
+    SLEEPING phase) with a pending command is due on 'inbox' every sweep, and stays
+    due no matter how many times it is swept -- because nothing but an ack clears it."""
+    from conftest import seed_ticket
+
+    seed_ticket(home, "S-1", "in review with a human message", phase="in-review", pr=42)
+    cfg = config_mod.Config(home=home, max_concurrency=5, backoff_base=10, max_failures=99)
+    assert cli_main(["--home", str(home), "observe-spec", "S-1"]) == 0  # settle spec_hash
+    assert cli_main(["--home", str(home), "cmd", "S-1", "msg",
+                     "it should cover the tui too", "--no-nudge"]) == 0
+
+    for sweep in range(3):
+        sessions = DryRunSessions()
+        dispatch(cfg, sessions, now=1000 + sweep)
+        spawned = {key for key, *_ in sessions.spawned}
+        assert "S-1" in spawned, f"sweep {sweep}: sleeping ticket should wake on the inbox"
+        assert sessions.spawned[0][1] == "/maestro-reconcile-passive S-1"
+
+
+def test_acking_the_inbox_puts_the_sleeping_ticket_back_to_sleep(home):
+    """...and the ack is what stops it -- the contract the passive skill now honors."""
+    from conftest import seed_ticket
+
+    seed_ticket(home, "S-2", "in review with a human message", phase="in-review", pr=43)
+    cfg = config_mod.Config(home=home, max_concurrency=5, backoff_base=10, max_failures=99)
+    assert cli_main(["--home", str(home), "observe-spec", "S-2"]) == 0
+    assert cli_main(["--home", str(home), "cmd", "S-2", "msg", "cover the tui", "--no-nudge"]) == 0
+
+    sessions = DryRunSessions()
+    dispatch(cfg, sessions, now=1000)
+    assert "S-2" in {key for key, *_ in sessions.spawned}
+
+    # What the skill does: fold, route, ack last.
+    assert cli_main(["--home", str(home), "fold-inbox", "S-2"]) == 0
+    assert cli_main(["--home", str(home), "set-phase", "S-2", "implementing",
+                     "--reason", "human: cover the tui"]) == 0
+    assert cli_main(["--home", str(home), "inbox-ack", "S-2"]) == 0
+
+    # The message survived as an event (not swallowed) and the spin is over.
+    events = store.read_jsonl(store.events_path(home, "S-2"))
+    assert any(e["type"] == "CommandReceived"
+               and e["payload"]["args"]["text"] == "cover the tui" for e in events)
+    snap = snap_mod.rebuild(home, "S-2")
+    assert snap.phase == "implementing"
+    assert not inbox.has_pending(home, "S-2")
+
+
+def test_acked_in_review_ticket_stops_spawning(home):
+    """A ticket left in-review after its command is acked goes quiet: the inbox no
+    longer forces it due, so backoff/sleeping applies again."""
+    from conftest import seed_ticket
+
+    seed_ticket(home, "S-3", "in review, message already handled", phase="in-review", pr=44)
+    cfg = config_mod.Config(home=home, max_concurrency=5, backoff_base=10, max_failures=99)
+    assert cli_main(["--home", str(home), "observe-spec", "S-3"]) == 0
+    assert cli_main(["--home", str(home), "cmd", "S-3", "msg", "noted", "--no-nudge"]) == 0
+    assert cli_main(["--home", str(home), "fold-inbox", "S-3"]) == 0
+    assert cli_main(["--home", str(home), "inbox-ack", "S-3"]) == 0
+
+    snap = snap_mod.rebuild(home, "S-3")
+    due = is_due(snap, inbox_pending=inbox.has_pending(home, "S-3"),
+                 current_spec_hash=snap.spec_hash, now=1000)
+    assert not due.due and due.reason != "inbox", \
+        f"acked in-review ticket still due ({due.reason}) -- the spin is not fixed"
 
 
 # ---------------------------------------------------------------------------
