@@ -11,7 +11,7 @@ PRs against the ticket's bound repo (see below) for you to review and merge.
 | `maestro` CLI | `~/.local/bin/maestro` → `.venv/bin/maestro` (editable install) |
 | State home | `~/.maestro/maestro-dev/` (outside the repo, so worktrees don't nest) |
 | Config | `~/.maestro/maestro-dev/config.toml` — `repo_path` = this repo, `vcs = github_cli` (`cortop/maestro`) |
-| Reconcile command | `.claude/commands/maestro-reconcile.md` (tracked → every worktree inherits it) |
+| Reconcile command | `.claude/commands/maestro-reconcile-<phase>.md`, one per phase (tracked → every worktree inherits them) |
 | Permissions | `.claude/settings.json` — allowlist so unattended reconcilers don't stall |
 | Seed backlog | `M-1` (fleet CLI), `M-2` (log compaction), `M-3` (dependsOn gating) |
 
@@ -99,9 +99,11 @@ commented example block in `config.toml`. A ticket with no binding keeps using t
 **Activation checklist** — binding a *second* real repo to a live board is a human config step,
 permitted only once MR-1 through MR-6 have all merged to `main`:
 
-1. Vendor `.claude/commands/maestro-reconcile.md` into the new repo's checkout — every bound
-   repo needs it, since the reconciler's cwd becomes that repo (via `maestro env --key`) and
-   `/maestro-reconcile` only resolves from a checkout that has it under `.claude/commands/`.
+1. Vendor the `.claude/commands/maestro-reconcile-*.md` files into the new repo's checkout —
+   every bound repo needs them, since the reconciler's cwd becomes that repo (via `maestro env
+   --key`) and each `/maestro-reconcile-<phase>` command (the dispatcher routes to the one
+   matching the ticket's current phase — see `dispatcher.resolve_reconcile_command`) only
+   resolves from a checkout that has it under `.claude/commands/`.
    (There is no automated distribution yet; this is a manual, documented step.)
 2. Add a `[repos.<name>]` table for it to `config.toml` (`path` + `slug` at minimum).
 3. Add its `owner/repo` slug to the VCS provider's repo list (`[vcs.github_cli] repos = [...]`)

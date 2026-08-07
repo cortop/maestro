@@ -165,8 +165,8 @@ def test_no_qa_verdicts_recorded_does_not_block(cfg):
 def test_reconcile_skill_documents_the_qa_loop():
     import pathlib
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    skill = (repo_root / "skills" / "maestro-reconcile.md").read_text(encoding="utf-8")
-    mirror = (repo_root / ".claude" / "commands" / "maestro-reconcile.md").read_text(encoding="utf-8")
+    skill = (repo_root / "skills" / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
+    mirror = (repo_root / ".claude" / "commands" / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
 
     for text in (skill, mirror):
         assert "QA" in text

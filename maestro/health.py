@@ -235,8 +235,10 @@ def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
 
 def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     """WARN (never blocks a spawn) when a repo bound by a current ticket is
-    missing ``.claude/commands/maestro-reconcile.md`` -- a reconciler spawned
-    into that repo's worktree would silently no-op the ``/maestro-reconcile``
+    missing the per-phase reconcile commands under ``.claude/commands/`` (T-22
+    split the single ``maestro-reconcile.md`` into
+    ``maestro-reconcile-<phase>.md`` files for progressive disclosure) -- a
+    reconciler spawned into that repo's worktree would hit an undefined slash
     command every turn."""
     home = cfg.home
     bindings = dispatcher.referenced_repo_bindings(cfg, home, dispatcher.list_keys(home))
@@ -244,11 +246,11 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     for name, binding in bindings.items():
         if not binding.path or not Path(binding.path).exists():
             continue
-        skill_path = Path(binding.path) / ".claude" / "commands" / "maestro-reconcile.md"
-        if not skill_path.exists():
+        commands_dir = Path(binding.path) / ".claude" / "commands"
+        if not any(commands_dir.glob("maestro-reconcile-*.md")):
             missing.append(name)
     status = "warn" if missing else "ok"
-    detail = f"missing maestro-reconcile.md in: {', '.join(missing)}" if missing else "none"
+    detail = f"missing maestro-reconcile-*.md in: {', '.join(missing)}" if missing else "none"
     return {"name": "missing_reconcile_skill", "status": status, "detail": detail,
             "missing": missing}
 
