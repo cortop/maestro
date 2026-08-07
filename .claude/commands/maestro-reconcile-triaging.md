@@ -15,16 +15,16 @@ to whichever phase file matches the ticket's phase at that time — this file on
 ## Always: load state first
 Resolve this ticket's bound repo — REPO/SLUG/BASE/PREFIX/MODE come from `maestro env --key`, which
 can differ per ticket in a multi-repo home (single-repo homes fall back to the legacy
-`repo_path`/`branch_prefix` config, so this is unchanged there) — plus HOME, which is board-wide
+`repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME, which is board-wide
 and comes from the key-less `maestro env`:
 ```bash
 KEY="$1"
 eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+(d["repo_path"] or "")+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"]+"\nMODE="+d["mode"])')"
-eval "$(maestro env | python3 -c 'import sys,json;print("HOME="+json.load(sys.stdin)["home"])')"
+eval "$(maestro env | python3 -c 'import sys,json;print("MHOME="+json.load(sys.stdin)["home"])')"
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
-sed -n '1,200p' "$HOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
-cat "$HOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
+sed -n '1,200p' "$MHOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
+cat "$MHOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
                                                     # failures, CI history, recent impl steps,
                                                     # dependsOn phases — read this before acting,
                                                     # it saves re-deriving context from raw events

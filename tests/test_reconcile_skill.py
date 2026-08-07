@@ -35,7 +35,7 @@ SKILLS_DIR = REPO_ROOT / "skills"
 # reconciler, so they share one file instead of four near-empty ones.
 PHASE_FILES = ["triaging", "awaiting-human", "ready", "researching", "implementing", "passive"]
 # Phases whose file needs the full REPO/SLUG/BASE/PREFIX/MODE preamble (they touch the
-# bound repo); "passive" is the one exception -- it never reads the repo, only HOME.
+# bound repo); "passive" is the one exception -- it never reads the repo, only MHOME.
 REPO_AWARE_PHASE_FILES = ["triaging", "awaiting-human", "ready", "researching", "implementing"]
 
 
@@ -60,7 +60,7 @@ def _strip_frontmatter(text: str) -> str:
 
 def _preamble_block(text: str) -> str:
     """The bash code block under '## Always: load state first', where
-    REPO/SLUG/BASE/PREFIX/HOME get resolved."""
+    REPO/SLUG/BASE/PREFIX/MHOME get resolved."""
     m = re.search(r"## Always: load state first\n.*?```bash\n(.*?)```", text, re.DOTALL)
     assert m, "could not find the preamble bash block"
     return m.group(1)
@@ -170,17 +170,28 @@ def test_preamble_resolves_via_env_key_for_repo_aware_phases():
         for path in (_commands_path(phase), _skills_path(phase)):
             preamble = _preamble_block(_strip_frontmatter(path.read_text()))
             assert "maestro env --key" in preamble
-            for var in ("REPO=", "SLUG=", "BASE=", "PREFIX=", "HOME="):
+            for var in ("REPO=", "SLUG=", "BASE=", "PREFIX=", "MHOME="):
                 assert var in preamble, f"{path}: preamble never assigns {var.rstrip('=')}"
+
+
+def test_preamble_never_shadows_the_real_home():
+    """The maestro home lands in MHOME, never HOME. HOME is already exported, so
+    assigning it detaches ~/.gitconfig and ~/.config/gh from every git/gh child in
+    that shell -- no commit identity, no gh auth, no PR."""
+    for phase in PHASE_FILES:
+        for path in (_commands_path(phase), _skills_path(phase)):
+            preamble = _preamble_block(_strip_frontmatter(path.read_text()))
+            assert not re.search(r"(?<![A-Z_])HOME=", preamble), \
+                f"{path}: preamble assigns HOME, shadowing the user's real home"
 
 
 def test_passive_phase_preamble_skips_unused_repo_vars():
     """No-op pruning (AC3): awaiting-ci/in-review/degraded/terminating never touch the
-    bound repo, so their shared file's preamble resolves only HOME, not
+    bound repo, so their shared file's preamble resolves only MHOME, not
     REPO/SLUG/BASE/PREFIX -- lines that would never change what the file does."""
     for path in (_commands_path("passive"), _skills_path("passive")):
         preamble = _preamble_block(_strip_frontmatter(path.read_text()))
-        assert "HOME=" in preamble
+        assert "MHOME=" in preamble
         for var in ("REPO=", "SLUG=", "BASE=", "PREFIX="):
             assert var not in preamble, f"{path}: preamble resolves unused {var.rstrip('=')}"
 
@@ -429,7 +440,7 @@ branch_prefix = "legacy/"
 def test_preamble_eval_back_compat_single_repo_home(home, capsys):
     """No [repos.*] tables at all -- just the legacy single-repo config fields.
     An unbound ticket must still resolve REPO/PREFIX (from env --key, falling back
-    to the legacy fields) and HOME (from the key-less env call) exactly as before."""
+    to the legacy fields) and MHOME (from the key-less env call) exactly as before."""
     (home / "config.toml").write_text(LEGACY_SINGLE_REPO_TOML, encoding="utf-8")
     cfg = config_mod.load(str(home))
     assert cfg.repos == {}, "this home must have no [repos.*] tables (legacy shape)"
@@ -451,11 +462,11 @@ def test_preamble_eval_back_compat_single_repo_home(home, capsys):
     home_transform = _extract_transformer(preamble, "maestro env |")
 
     key_result = _run_preamble_eval(key_transform, env_key_json, ["REPO", "PREFIX"])
-    home_result = _run_preamble_eval(home_transform, env_json, ["HOME"])
+    home_result = _run_preamble_eval(home_transform, env_json, ["MHOME"])
 
     assert key_result["REPO"] == cfg.repo_path
     assert key_result["PREFIX"] == cfg.branch_prefix
-    assert home_result["HOME"] == str(home)
+    assert home_result["MHOME"] == str(home)
 
 
 # ---------------------------------------------------------------------------

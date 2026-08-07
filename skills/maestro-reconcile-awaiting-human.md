@@ -14,16 +14,16 @@ handles `awaiting-human`.
 ## Always: load state first
 Resolve this ticket's bound repo — REPO/SLUG/BASE/PREFIX/MODE come from `maestro env --key`, which
 can differ per ticket in a multi-repo home (single-repo homes fall back to the legacy
-`repo_path`/`branch_prefix` config, so this is unchanged there) — plus HOME, which is board-wide
+`repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME, which is board-wide
 and comes from the key-less `maestro env`:
 ```bash
 KEY="$1"
 eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+(d["repo_path"] or "")+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"]+"\nMODE="+d["mode"])')"
-eval "$(maestro env | python3 -c 'import sys,json;print("HOME="+json.load(sys.stdin)["home"])')"
+eval "$(maestro env | python3 -c 'import sys,json;print("MHOME="+json.load(sys.stdin)["home"])')"
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
-sed -n '1,200p' "$HOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
-cat "$HOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
+sed -n '1,200p' "$MHOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
+cat "$MHOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
                                                     # failures, CI history, recent impl steps,
                                                     # dependsOn phases — read this before acting,
                                                     # it saves re-deriving context from raw events
@@ -47,7 +47,7 @@ Inspect each qid key in `answered_questions`:
   `maestro set-phase "$KEY" implementing --reason "retry conflict resolution: <verbatim>"`
 
 **If `KIND == research`** (research approval question — qid starts with `research-approval-`):
-Read the proposal at `$HOME/tickets/$KEY/proposal.md`. Inspect the answer:
+Read the proposal at `$MHOME/tickets/$KEY/proposal.md`. Inspect the answer:
 - **"needs more"** → route back to researching:
   `maestro set-phase "$KEY" researching --reason "needs more research per human"`
 - **"alternative N"** (e.g. "alternative 2") → extract the Nth alternative's section from proposal.md
@@ -66,7 +66,7 @@ The new ticket key is auto-assigned (T-N). Append a breadcrumb linking the two, 
 # Derive the impl key: last entry in the _new inbox
 IMPL_KEY=$(python3 -c "
 import json, pathlib
-home = pathlib.Path('$HOME')
+home = pathlib.Path('$MHOME')
 entries = [json.loads(l) for l in (home/'inbox/_new.jsonl').read_text().splitlines() if l.strip()]
 print(entries[-1].get('key') or 'unknown')
 " 2>/dev/null || echo "unknown")

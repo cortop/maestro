@@ -33,9 +33,21 @@ def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str) if not isinstance(obj, str) else obj)
 
 
-def _web_tools_extra_args(cfg: Config) -> list[str]:
-    """--allowedTools flag granting spawned reconcilers WebSearch/WebFetch, if enabled."""
-    return ["--allowedTools", "WebSearch,WebFetch"] if cfg.reconcile_web_tools else []
+def _reconciler_tool_grants(cfg: Config) -> list[str]:
+    """--allowedTools flag for spawned reconcilers.
+
+    `Bash(maestro:*)` is unconditional: every phase skill records its one step
+    through the maestro CLI, so a reconciler that cannot run `maestro` cannot
+    reconcile at all -- it stalls asking a human to approve its own bookkeeping.
+    Only the maestro repo carries a checked-in allow list, so in any *other*
+    bound repo this flag is the sole thing that grants it.
+
+    WebSearch/WebFetch stay behind `reconcile_web_tools`.
+    """
+    tools = ["Bash(maestro:*)"]
+    if cfg.reconcile_web_tools:
+        tools += ["WebSearch", "WebFetch"]
+    return ["--allowedTools", ",".join(tools)]
 
 
 def _nudge(cfg: Config) -> disp.DispatchReport:
@@ -49,7 +61,7 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     sessions = ClaudeCliSessions(
         cfg.home, model=cfg.reconcile_model,
         permission_mode=cfg.permission_mode,
-        extra_args=_web_tools_extra_args(cfg),
+        extra_args=_reconciler_tool_grants(cfg),
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
         unverified_claim_max_age=cfg.unverified_claim_max_age,
@@ -356,7 +368,7 @@ def cmd_dispatch(args) -> int:
         sessions = ClaudeCliSessions(
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
-            extra_args=_web_tools_extra_args(cfg),
+            extra_args=_reconciler_tool_grants(cfg),
             session_log_format=cfg.session_log_format,
             unverified_claim_max_age=cfg.unverified_claim_max_age)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())

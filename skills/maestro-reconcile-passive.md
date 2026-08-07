@@ -13,7 +13,7 @@ CLI, then exit.
 ## Always: load state first
 ```bash
 KEY="$1"
-eval "$(maestro env | python3 -c 'import sys,json;print("HOME="+json.load(sys.stdin)["home"])')"
+eval "$(maestro env | python3 -c 'import sys,json;print("MHOME="+json.load(sys.stdin)["home"])')"
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"   # -> phase, pr, ci, failure_count, open_questions
 ```

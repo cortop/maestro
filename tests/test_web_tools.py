@@ -47,10 +47,16 @@ def test_dispatch_spawn_command_includes_web_search_and_fetch(home):
     assert len(captured) == 1
     cmd = captured[0]
     idx = cmd.index("--allowedTools")
-    assert cmd[idx + 1] == "WebSearch,WebFetch"
+    assert cmd[idx + 1] == "Bash(maestro:*),WebSearch,WebFetch"
 
 
-def test_dispatch_omits_allowed_tools_when_disabled(home):
+def test_dispatch_still_grants_the_maestro_cli_when_web_tools_disabled(home):
+    """Turning off web tools must not disarm the reconciler's own bookkeeping.
+
+    Every phase skill records its step through the maestro CLI, so without this
+    grant a reconciler spawned into a repo with no checked-in allow list stalls
+    on a permission prompt no one is there to answer.
+    """
     (home / "config.toml").write_text("[maestro]\nreconcile_web_tools = false\n")
     _seed_ready(home)
     captured, capture_popen = _capture_popen_cmds()
@@ -58,7 +64,9 @@ def test_dispatch_omits_allowed_tools_when_disabled(home):
         rc = cli.main(["--home", str(home), "dispatch"])
     assert rc == 0
     assert len(captured) == 1
-    assert "--allowedTools" not in captured[0]
+    cmd = captured[0]
+    idx = cmd.index("--allowedTools")
+    assert cmd[idx + 1] == "Bash(maestro:*)"
 
 
 def test_nudge_spawn_command_includes_web_search_and_fetch(home):
@@ -77,4 +85,4 @@ def test_nudge_spawn_command_includes_web_search_and_fetch(home):
     assert len(captured) == 1
     cmd = captured[0]
     idx = cmd.index("--allowedTools")
-    assert cmd[idx + 1] == "WebSearch,WebFetch"
+    assert cmd[idx + 1] == "Bash(maestro:*),WebSearch,WebFetch"
