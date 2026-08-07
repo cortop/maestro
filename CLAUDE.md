@@ -119,9 +119,12 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   or modal must be covered by the binding sweep and `test_every_binding_action_resolves` (a missing
   action is a silent no-op at runtime, so the static check is what catches it). `make test` must
   stay green; the runtime tests need the `tui` extra, so install `.[dev,tui]`.
-- Reconciler behavior lives in the `/maestro-reconcile` skill (`.claude/commands/maestro-reconcile.md`,
-  mirrored in `skills/`; tracked so every worktree inherits it). Agents drive state exclusively
-  via `maestro` verbs.
+- Reconciler behavior lives in per-phase `/maestro-reconcile-<phase>` skills
+  (`.claude/commands/maestro-reconcile-<phase>.md`, mirrored in `skills/`; tracked so every
+  worktree inherits them) — progressive disclosure, so a reconciler only loads the branch its
+  current phase needs. The dispatcher resolves which one to spawn per-key at spawn time
+  (`dispatcher.resolve_reconcile_command`, beside `_resolve_model_effort`/`tier_denylist`).
+  Agents drive state exclusively via `maestro` verbs.
 - Ticket specs follow a fixed format (front-matter `approval_tier` / `priority` / optional
   `dependsOn`, then `## Intent`, `## Notes`, `## Acceptance criteria` as `- [ ]` checkboxes) —
   match existing tickets, don't invent fields.

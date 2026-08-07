@@ -816,9 +816,11 @@ def cmd_env(args) -> int:
                   f"table is configured", file=sys.stderr)
             return 1
         binding = repos_mod.resolve(cfg, cfg.home, key)
+        snap = snap_mod.load(cfg.home, key)
         _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
                 "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
-                "mode": binding.mode})
+                "mode": binding.mode,
+                "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase)})
         return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,

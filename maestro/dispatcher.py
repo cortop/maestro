@@ -1141,6 +1141,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     claimed: list[str] = []
     observed_seq_by_key: dict[str, int] = {}
     tier_by_key: dict[str, int] = {}
+    phase_by_key: dict[str, str] = {}
     decisions: dict[str, dict] = {}
 
     for key in list_keys(home):
@@ -1149,6 +1150,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         if event_log.last_seq(home, key) > snap.observed_seq:
             snap = snap_mod.rebuild(home, key)
         observed_seq_by_key[key] = snap.observed_seq
+        phase_by_key[key] = snap.phase
         blocked_dep = _has_unmet_deps(home, key)
         tier = spec_tier(home, key)
         tier_by_key[key] = tier
@@ -1265,7 +1267,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
                 continue
             attempts_changed = True
             cwd = _worker_cwd(cfg, key)
-            prompt = f"{cfg.reconcile_command} {key}"
+            command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
+            prompt = f"{command} {key}"
             model, effort = _resolve_model_effort(cfg, key)
             disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
             sessions.spawn(key, prompt, cwd, model=model, effort=effort,
@@ -1304,6 +1307,39 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         hook_errors=hook_errors,
         worktree_removal_errors=worktree_removal_errors,
     )
+
+
+# T-22: progressive disclosure -- one reconcile skill per phase, instead of a
+# single file every reconciler loaded in full regardless of what its phase
+# needed. Phases whose reconciler step is dispatcher-owned or a no-op share
+# the "passive" file; an unrecognized phase also lands there rather than on
+# a nonexistent command.
+_PHASE_COMMAND_SUFFIX = {
+    Phase.TRIAGING: "triaging",
+    Phase.AWAITING_HUMAN: "awaiting-human",
+    Phase.READY: "ready",
+    Phase.RESEARCHING: "researching",
+    Phase.IMPLEMENTING: "implementing",
+    Phase.AWAITING_CI: "passive",
+    Phase.IN_REVIEW: "passive",
+    Phase.DEGRADED: "passive",
+    Phase.TERMINATING: "passive",
+}
+
+
+def resolve_reconcile_command(cfg: Config, phase: str) -> str:
+    """The ``claude -p`` command to spawn for *phase* (T-22): resolved once,
+    here, beside ``_resolve_model_effort``/``tier_denylist`` -- the dispatcher
+    already resolves per-key spawn state at this point, so per-phase command
+    routing is the same shape, not a new mechanism. ``maestro env --key`` also
+    surfaces this (see ``cli.cmd_env``) so ``make reconcile`` routes identically
+    to a real dispatcher spawn instead of re-deriving the mapping in Make/bash.
+    """
+    try:
+        suffix = _PHASE_COMMAND_SUFFIX[Phase(phase)]
+    except (ValueError, KeyError):
+        suffix = "passive"
+    return f"{cfg.reconcile_command}-{suffix}"
 
 
 def _resolve_model_effort(cfg: Config, key: str) -> tuple[str, str | None]:

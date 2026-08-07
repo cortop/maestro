@@ -52,12 +52,17 @@ project:
 	maestro project
 
 # Run one reconcile in the foreground, cd'd into KEY's bound repo (multi-repo homes: the
-# [repos.*] table it's bound to; single-repo homes: the legacy repo_path) so
-# /maestro-reconcile resolves (needs .claude/commands/ vendored in that repo's checkout).
+# [repos.*] table it's bound to; single-repo homes: the legacy repo_path), routed to the
+# per-phase reconcile command (T-22) exactly as a real dispatcher spawn would be -- both
+# read it off `maestro env --key`, so there is one source of truth for the mapping
+# (dispatcher.resolve_reconcile_command), not a second copy re-derived in Make/bash. Needs
+# .claude/commands/ vendored in that repo's checkout.
 reconcile:
 	@test -n "$(KEY)" || (echo "usage: make reconcile KEY=M-1" && exit 1)
-	@REPO=$$(maestro env --key "$(KEY)" | $(PY) -c 'import sys,json;print(json.load(sys.stdin)["repo_path"])'); \
-	cd "$$REPO" && claude -p "/maestro-reconcile $(KEY)" --permission-mode acceptEdits
+	@ENV_JSON=$$(maestro env --key "$(KEY)"); \
+	REPO=$$(echo "$$ENV_JSON" | $(PY) -c 'import sys,json;print(json.load(sys.stdin)["repo_path"])'); \
+	COMMAND=$$(echo "$$ENV_JSON" | $(PY) -c 'import sys,json;print(json.load(sys.stdin)["reconcile_command"])'); \
+	cd "$$REPO" && claude -p "$$COMMAND $(KEY)" --permission-mode acceptEdits
 
 backup:
 	maestro backup
