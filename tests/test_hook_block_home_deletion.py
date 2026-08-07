@@ -75,10 +75,73 @@ def test_blocks_relative_path_qualified_binary(home):
     assert result.returncode == 2
 
 
+def test_blocks_bare_rm_with_no_path_argument_at_home_root(home):
+    """Regression: a bare `rm -rf` (no explicit path token) run with cwd exactly
+    MAESTRO_HOME must still block -- caught by adversarial QA. The verb token
+    ("rm") itself was leaking into the candidate-paths list, which made the
+    "no path token -> check cwd" fallback never fire."""
+    result = run_hook("rm -rf", cwd=home, home=home)
+    assert result.returncode == 2
+
+
+def test_blocks_wildcard_rm_at_home_root(home):
+    """Regression: `rm -rf *` from MAESTRO_HOME itself is equivalent in effect
+    to `rm -rf $MAESTRO_HOME` (a real shell expands "*" to everything in cwd)
+    and must block, even though "*" doesn't literally equal the home path."""
+    result = run_hook("rm -rf *", cwd=home, home=home)
+    assert result.returncode == 2
+
+
+def test_blocks_wildcard_rm_inside_protected_subdir(home):
+    result = run_hook("rm -rf *", cwd=home / "events", home=home)
+    assert result.returncode == 2
+
+
+def test_wildcard_rm_outside_home_is_allowed(tmp_path, home):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    result = run_hook("rm -rf *", cwd=scratch, home=home)
+    assert result.returncode == 0
+
+
+def test_verb_named_argument_after_the_leading_verb_is_still_checked(home):
+    """The skip_leading fix only drops the clause's *first* token when it
+    equals the matched verb -- a later literal argument that happens to equal
+    the verb name (e.g. deleting a file actually named "rm") must still be
+    treated as a real candidate path, not silently dropped too."""
+    result = run_hook("rm rm", cwd=home / "events", home=home)
+    assert result.returncode == 2
+
+
 def test_blocks_inside_compound_command(home):
     # The dangerous clause isn't first -- must still be caught.
     result = run_hook(f"cd /tmp && rm -rf {home}/events", cwd="/tmp", home=home)
     assert result.returncode == 2
+
+
+def test_blocks_path_qualified_wildcard_at_home_root(home):
+    """Regression: `rm -rf $MAESTRO_HOME/*` deletes events/tickets/inbox/
+    config.toml just as thoroughly as `rm -rf $MAESTRO_HOME` -- caught by
+    adversarial QA. The literal string never equals the home path, so it
+    needs its trailing wildcard stripped before the exact-match check."""
+    result = run_hook("rm -rf $MAESTRO_HOME/*", cwd="/tmp", home=home)
+    assert result.returncode == 2
+
+
+def test_blocks_path_qualified_double_star(home):
+    result = run_hook("rm -rf $MAESTRO_HOME/**", cwd="/tmp", home=home)
+    assert result.returncode == 2
+
+
+def test_blocks_wildcard_inside_protected_subdir_by_literal_path(home):
+    result = run_hook("rm -rf $MAESTRO_HOME/events/*", cwd="/tmp", home=home)
+    assert result.returncode == 2
+
+
+def test_wildcard_of_unprotected_subdir_is_allowed(home):
+    # conftest's `home` fixture already creates derived/snapshots.
+    result = run_hook("rm -rf $MAESTRO_HOME/derived/snapshots/*", cwd="/tmp", home=home)
+    assert result.returncode == 0
 
 
 def test_legitimate_unrelated_rm_is_allowed(home):
