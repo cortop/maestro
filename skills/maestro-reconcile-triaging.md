@@ -31,11 +31,42 @@ cat "$HOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, ph
 If the snapshot shows pending inbox commands, fold them before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
+## Asking the human: frontier rounds, never one at a time
+Two rules apply whenever you reach for `maestro ask`:
+
+**(a) Ask the whole settled frontier in one round.** If you have more than one question whose
+prerequisites are already met, post them together in a single `maestro ask` call via the
+repeatable `--question TEXT RECOMMENDED QID` flag (one triple per question; pass `""` for
+RECOMMENDED when you have no recommendation, and `""` for QID to auto-derive it — only pin an
+explicit QID when a later step routes on its prefix, e.g. `research-approval-<key>`):
+```bash
+maestro ask "$KEY" \
+  --question "<question 1>" "<your recommended answer, or \"\">" "" \
+  --question "<question 2>" "<your recommended answer, or \"\">" ""
+```
+One question per round is the most expensive schedule available here: each round costs a
+dispatcher wake, an hours-long human round-trip, and a full reconciler spawn — pay that once
+per round, not once per question. A single settled question is still fine as one `--question`
+(or the plain `maestro ask "$KEY" "<text>"` form).
+
+**(b) Never ask something a sub-agent could find in the codebase.** Before asking the human
+anything, check: is this greppable, readable from existing code/docs, or otherwise discoverable
+without a judgment call? If so, dispatch an `Agent`-tool sub-agent to find it — do not spend a
+human round-trip on it. Only put a question in the round if a sub-agent genuinely cannot resolve
+it: a product/scope decision, an ambiguous intent, or an explicit approval gate.
+
 ## `triaging`: classify tier, then route
 Read `approval_tier` from the spec's frontmatter:
 - **tier 0** → auto-approve: `maestro set-phase "$KEY" ready --reason "tier-0 auto-approved"`
-- **tier ≥1** → ask for pickup approval, then sleep:
-  `maestro ask "$KEY" "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?"`
+- **tier ≥1** → resolve anything discoverable yourself first (rule (b) above — dispatch a
+  sub-agent rather than asking), then ask the whole settled frontier in one round (rule (a)):
+  the pickup/plan approval question, plus any other genuinely open design questions, each
+  numbered with your recommended answer:
+  ```bash
+  maestro ask "$KEY" \
+    --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?" "<your recommendation>" "" \
+    --question "<other settled question, if any>" "<your recommendation>" ""
+  ```
 
 **Done when:** exactly one of the two `maestro` calls above has appended its event, and
 `maestro release "$KEY"` has run — that is the whole step, nothing else to check.
