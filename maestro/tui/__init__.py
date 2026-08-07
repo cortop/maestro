@@ -8,6 +8,7 @@ change without breaking importers.
 """
 from .app import MaestroTUI, main, _FILTERS, _NEEDS_YOU_PHASES
 from .modals import (
+    _ACCEPT_ALL,
     _AnswerModal,
     _CmdModal,
     _ConfirmModal,
@@ -49,6 +50,7 @@ __all__ = [
     "ProposalScreen",
     "ScheduleScreen",
     "SpecScreen",
+    "_ACCEPT_ALL",
     "_AnswerModal",
     "_CmdModal",
     "_ConfirmModal",

@@ -16,7 +16,7 @@ from ..projection import ticket_rows
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
-from .modals import _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal, _InboxModal
+from .modals import _ACCEPT_ALL, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal, _InboxModal
 from .render import _render_badge, _styled_row
 from .screens import (
     DetailScreen,
@@ -252,7 +252,17 @@ class MaestroTUI(App):
         if not snap.open_questions:
             self.notify("No open questions for this ticket", severity="warning")
             return
-        self._walk_questions(key, list(snap.open_questions.items()), 0, 0)
+        # `open_questions` round-trips through a sort_keys=True JSON snapshot, so
+        # the dict comes back qid-alphabetical, not round order -- walk it in the
+        # round's own 1..N order (via the text's own "N/total." prefix) instead,
+        # else the "N of M" position shown per-question would visibly scramble.
+        # Plain (non-round) questions carry no position; a stable sort leaves
+        # those in their existing (alphabetical) relative order, at the end.
+        questions = sorted(
+            snap.open_questions.items(),
+            key=lambda qt: ops_mod.parse_round_question(qt[1])[0] or float("inf"),
+        )
+        self._walk_questions(key, questions, 0, 0)
 
     def _walk_questions(
         self, key: str, questions: list[tuple[str, str]], idx: int, answered: int
@@ -265,14 +275,37 @@ class MaestroTUI(App):
             return
         qid, text = questions[idx]
         remaining = len(questions) - idx
+        position, total, body, recommend = ops_mod.parse_round_question(text)
 
-        def _on_dismiss(answer: str | None) -> None:
+        def _on_dismiss(answer: object) -> None:
             if answer is None:
+                return
+            if answer is _ACCEPT_ALL:
+                # Queue the recommendation for every remaining question that has
+                # one; keep walking (via modal, one at a time) only the ones that
+                # don't -- fast-tracks the recommended ones without silently
+                # skipping the ones that still need a typed answer.
+                queued = 0
+                unanswered: list[tuple[str, str]] = []
+                for q_qid, q_text in questions[idx:]:
+                    _, _, _, q_recommend = ops_mod.parse_round_question(q_text)
+                    if q_recommend:
+                        inbox.append_command(self._home, key, "ans",
+                                             {"qid": q_qid, "text": q_recommend})
+                        queued += 1
+                    else:
+                        unanswered.append((q_qid, q_text))
+                if queued:
+                    self.notify(f"{queued} recommendation(s) queued for {key}")
+                self._walk_questions(key, unanswered, 0, answered + queued)
                 return
             inbox.append_command(self._home, key, "ans", {"qid": qid, "text": answer})
             self._walk_questions(key, questions, idx + 1, answered + 1)
 
-        self.push_screen(_AnswerModal(key, qid, text, remaining, self._home), _on_dismiss)
+        self.push_screen(
+            _AnswerModal(key, qid, position, total, body, recommend, remaining, self._home),
+            _on_dismiss,
+        )
 
     def action_compact(self) -> None:
         key = self._selected_key

@@ -377,6 +377,37 @@ def test_render_detail_escapes_brackets_in_dynamic_fields():
     assert "KeyError['nope']" in out.replace("\\", "")
 
 
+def test_render_detail_round_question_legible_and_markup_safe(home):
+    """T-25 AC1/AC4: a real `maestro ask` round's numbered/recommended text renders
+    with the round position pulled out (not squashed into the raw '1/2. ...' string)
+    and the recommendation on its own line -- and stays valid, uncorrupted markup
+    even when the question and recommendation both carry literal '[...]' (the
+    historical crasher for this pane)."""
+    store.atomic_write(store.spec_path(home, "T-7"), "# T-7\napproval_tier: 1\n")
+    event_log.append(home, "T-7", "TicketCreated", {"title": "T-7"}, actor="d")
+    snap_mod.rebuild(home, "T-7")
+    rc = main([
+        "--home", str(home), "ask", "T-7",
+        "--question", "Use [Foo] or [Bar]?", "go with [Foo]", "",
+        "--question", "Ship it now?", "", "",
+    ])
+    assert rc == 0
+
+    snap = snap_mod.load(home, "T-7")
+    out = _render_detail(snap)
+    _assert_valid_markup(out)
+
+    unescaped = out.replace("\\", "")
+    assert "1/2." not in unescaped, "raw round prefix leaked into the pane unparsed"
+    assert "(1/2)" in unescaped  # round position rendered legibly instead
+    assert "(2/2)" in unescaped
+    assert "Use [Foo] or [Bar]?" in unescaped
+    assert "Recommended:" in unescaped
+    assert "go with [Foo]" in unescaped
+    # the no-recommendation question carries no stray "Recommended:" of its own
+    assert unescaped.count("Recommended:") == 1
+
+
 # --- 'a' / answer modal (data-layer tests, no textual event loop required) -------
 
 from maestro.tui import MaestroTUI, _AnswerModal, _CmdModal, _CreateModal, _FILTERS  # noqa: E402
