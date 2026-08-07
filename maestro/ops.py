@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -277,6 +278,28 @@ def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str 
     set_phase(cfg, key, Phase.AWAITING_HUMAN,
               reason=f"asked human ({total} question(s) this round)", actor=actor)
     return qids
+
+
+_ROUND_PREFIX_RE = re.compile(r"^(\d+)/(\d+)\. ")
+_RECOMMEND_SEP = "\n   Recommended: "
+
+
+def parse_round_question(text: str) -> tuple[int | None, int | None, str, str | None]:
+    """Split one `open_questions` display string -- built by `ask`/`ask_round` above
+    -- back into `(position, total, body, recommend)`. `position`/`total` are None
+    for a plain single question (`ask`, or a one-question round); `recommend` is
+    None when the question carries no recommendation. Never raises: a string that
+    doesn't match the round format round-trips as `(None, None, text, None)`, so
+    every existing reader that already treats `open_questions` values as opaque
+    display strings is unaffected -- this is purely additive, for a reader (the
+    TUI) that wants the structured pieces back out."""
+    position = total = None
+    m = _ROUND_PREFIX_RE.match(text)
+    if m:
+        position, total = int(m.group(1)), int(m.group(2))
+        text = text[m.end():]
+    body, sep, recommend = text.partition(_RECOMMEND_SEP)
+    return position, total, body, (recommend if sep else None)
 
 
 def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:

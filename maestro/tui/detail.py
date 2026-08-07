@@ -1,6 +1,7 @@
 """Detail-pane rendering — no textual dependency, importable in tests."""
 from __future__ import annotations
 
+from .. import ops as ops_mod
 from .. import snapshot as snap_mod
 
 _EM = "—"  # em-dash for missing values
@@ -24,10 +25,17 @@ def render(snap: snap_mod.Snapshot) -> str:
 
     questions = _EM
     if snap.open_questions:
-        questions = "\n  ".join(
-            f"[yellow]{_esc(qid)}[/yellow]: {_esc(text)}"
-            for qid, text in snap.open_questions.items()
-        )
+        lines = []
+        for qid, text in snap.open_questions.items():
+            position, total, body, recommend = ops_mod.parse_round_question(text)
+            head = f"[yellow]{_esc(qid)}[/yellow]"
+            if position and total:
+                head += f" [dim]({position}/{total})[/dim]"
+            line = f"{head}: {_esc(body)}"
+            if recommend:
+                line += f"\n    [dim]Recommended:[/dim] {_esc(recommend)}"
+            lines.append(line)
+        questions = "\n  ".join(lines)
 
     return (
         f"[bold]{v(snap.title)}[/bold]\n\n"

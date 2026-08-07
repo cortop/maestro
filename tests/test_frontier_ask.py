@@ -8,7 +8,7 @@ that a multi-question round lands N entries in open_questions, that answering
 a subset leaves the rest open, and that the reconciler is woken on the first
 answer.
 """
-from maestro import event_log, inbox, snapshot as snap_mod, store
+from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
 from maestro.dispatcher import dispatch
 from maestro.sessions import DryRunSessions
@@ -145,3 +145,35 @@ def test_explicit_qid_in_a_round_survives_for_prefix_routing(cfg):
     snap = snap_mod.load(cfg.home, "T-6")
     assert "research-approval-T-6" in snap.open_questions
     assert len(snap.open_questions) == 2
+
+
+# T-25: `ops.parse_round_question` splits the display strings ask_round builds
+# above back into their structured pieces -- the TUI's read side of this format.
+
+def test_parse_round_question_splits_position_body_and_recommendation():
+    assert ops.parse_round_question(
+        "2/5. Use Postgres or SQLite?\n   Recommended: Postgres (matches prod)"
+    ) == (2, 5, "Use Postgres or SQLite?", "Postgres (matches prod)")
+
+
+def test_parse_round_question_without_recommendation():
+    assert ops.parse_round_question("3/5. Cut a v2 API or extend v1?") == (
+        3, 5, "Cut a v2 API or extend v1?", None,
+    )
+
+
+def test_parse_round_question_plain_single_question_round_trips():
+    """A one-question round (or the old plain `ask`) carries no 'N/M.' prefix --
+    position/total come back None, and the text is returned unchanged."""
+    assert ops.parse_round_question("Plain single question?") == (
+        None, None, "Plain single question?", None,
+    )
+
+
+def test_parse_round_question_never_raises_on_unexpected_text():
+    # A qid-looking prefix that doesn't actually match "N/M. " must not confuse
+    # the parser into thinking it found a round position.
+    position, total, body, recommend = ops.parse_round_question("1/x. weird")
+    assert position is None and total is None
+    assert body == "1/x. weird"
+    assert recommend is None

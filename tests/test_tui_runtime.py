@@ -37,7 +37,9 @@ from textual.widgets import DataTable, Input, Select, Static, TextArea  # noqa: 
 from rich.text import Text  # noqa: E402
 
 from conftest import seed_ticket  # noqa: E402
-from maestro import claims, config as config_mod, store  # noqa: E402
+from maestro import claims, config as config_mod, event_log, inbox  # noqa: E402
+from maestro import ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
+from maestro.cli import main as cli_main  # noqa: E402
 from maestro.tui import (  # noqa: E402
     DetailScreen,
     EventsScreen,
@@ -1292,3 +1294,189 @@ def test_schedule_toggle_task_flips_enabled(seeded_home):
     asyncio.run(_inner())
     cfg = config_mod.load(str(seeded_home))
     assert cfg.scheduled[0]["enabled"] is False
+
+
+# --------------------------------------------------------------------------- #
+# T-25: frontier rounds in the TUI (answer flow + recommendations)            #
+# --------------------------------------------------------------------------- #
+
+def _seed_round(home, key, questions):
+    """Seed `key` with a REAL multi-question `maestro ask` round, driven through
+    the actual CLI (T-24's `--question` flag over `ops.ask_round`) rather than
+    hand-built event payloads -- `questions` is a list of `(text, recommend)`
+    pairs, `recommend` may be None."""
+    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 1\n")
+    event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+    snap_mod.rebuild(home, key)
+    args = ["--home", str(home), "ask", key]
+    for text, recommend in questions:
+        args += ["--question", text, recommend or "", ""]
+    rc = cli_main(args)
+    assert rc == 0
+
+
+def _qid_for(home, key, body_prefix):
+    """Look up the qid of the open question whose parsed body starts with
+    `body_prefix` -- `open_questions` round-trips through a sort_keys=True JSON
+    snapshot, so its dict order is qid-alphabetical, not round order; tests must
+    not assume `list(...items())` order matches the questions as seeded."""
+    snap = snap_mod.load(home, key)
+    for qid, text in snap.open_questions.items():
+        _, _, body, _ = ops_mod.parse_round_question(text)
+        if body.startswith(body_prefix):
+            return qid
+    raise AssertionError(f"no open question in {key} starts with {body_prefix!r}")
+
+
+def test_answer_modal_shows_round_position_and_recommendation(home):
+    """AC1: the modal shows the question's position in the round ('N of M') and
+    surfaces the recommendation as its own labeled section, not squashed into
+    the raw '1/2. ...\\n   Recommended: ...' string."""
+    _seed_round(home, "T-1", [
+        ("Use Postgres or SQLite?", "Postgres (matches prod)"),
+        ("Cut a v2 API or extend v1?", None),
+    ])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-1"
+            await app.run_action("answer")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _AnswerModal)
+            assert (modal._position, modal._total) == (1, 2)
+            assert modal._recommend == "Postgres (matches prod)"
+
+            header = str(modal.query_one("#answer-dialog Label").content)
+            assert "1 of 2" in header
+
+            recommend_static = modal.query_one("#recommend-scroll Static")
+            assert "Postgres (matches prod)" in str(recommend_static.content)
+            # the raw wire-format prefix/suffix must not leak into either widget
+            question_static = modal.query_one("#question-scroll Static")
+            assert "1/2." not in str(question_static.content)
+            assert "Recommended:" not in str(question_static.content)
+
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+
+    asyncio.run(_inner())
+
+
+def test_answer_modal_hides_recommend_section_when_absent(home):
+    """A question with no recommendation renders no '── Recommended ──' section."""
+    _seed_round(home, "T-2", [("Cut a v2 API or extend v1?", None)])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-2"
+            await app.run_action("answer")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert modal._recommend is None
+            assert not modal.query("#recommend-scroll")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_answer_flow_ctrl_r_accepts_recommendation_without_retyping(home):
+    """AC2: a single keystroke (Ctrl+R) accepts the shown recommendation as the
+    answer, without retyping it; a question with no recommendation is unaffected
+    -- Ctrl+R there warns and leaves the modal open for a typed answer."""
+    _seed_round(home, "T-3", [
+        ("Use Postgres or SQLite?", "Postgres (matches prod)"),
+        ("Cut a v2 API or extend v1?", None),
+        ("Who owns the migration script?", "the reconciler"),
+    ])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("answer")
+            await pilot.pause()
+
+            # Q1 carries a recommendation -- Ctrl+R accepts it and advances.
+            assert app.screen_stack[-1]._recommend == "Postgres (matches prod)"
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 2  # main screen + Q2 modal
+
+            # Q2 carries none -- Ctrl+R is a no-op (still open), so type an answer.
+            modal2 = app.screen_stack[-1]
+            assert modal2._recommend is None
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            assert app.screen_stack[-1] is modal2, "Ctrl+R with no recommendation must not advance"
+            await pilot.press("e", "x", "t", "e", "n", "d", " ", "v", "1")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 2  # Q3 modal now open
+
+            # Q3 carries a recommendation -- accept it too.
+            assert app.screen_stack[-1]._recommend == "the reconciler"
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1  # walk finished, modal closed
+
+    asyncio.run(_inner())
+
+    pending = inbox.pending(home, "T-3")
+    assert len(pending) == 3
+    answers = {p["args"]["qid"]: p["args"]["text"] for p in pending}
+    assert answers[_qid_for(home, "T-3", "Use Postgres")] == "Postgres (matches prod)"
+    assert answers[_qid_for(home, "T-3", "Cut a v2 API")] == "extend v1"
+    assert answers[_qid_for(home, "T-3", "Who owns")] == "the reconciler"
+
+
+def test_answer_flow_ctrl_g_accepts_all_remaining_recommendations(home):
+    """AC3: Ctrl+G queues answers for every remaining question in the round that
+    carries a recommendation, in one action, skipping the one that carries none
+    (which stays open for a normal typed answer)."""
+    _seed_round(home, "T-4", [
+        ("Use Postgres or SQLite?", "Postgres (matches prod)"),
+        ("Cut a v2 API or extend v1?", None),
+        ("Who owns the migration script?", "the reconciler"),
+    ])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-4"
+            await app.run_action("answer")
+            await pilot.pause()
+
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            assert app._exception is None
+
+            # Only the no-recommendation question is left to walk through.
+            assert len(app.screen_stack) == 2
+            remaining_modal = app.screen_stack[-1]
+            assert remaining_modal._recommend is None
+
+            await pilot.press("e", "x", "t", "e", "n", "d", " ", "v", "1")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1  # walk finished
+
+    asyncio.run(_inner())
+
+    pending = inbox.pending(home, "T-4")
+    assert len(pending) == 3
+    answers = {p["args"]["qid"]: p["args"]["text"] for p in pending}
+    assert answers[_qid_for(home, "T-4", "Use Postgres")] == "Postgres (matches prod)"
+    assert answers[_qid_for(home, "T-4", "Cut a v2 API")] == "extend v1"
+    assert answers[_qid_for(home, "T-4", "Who owns")] == "the reconciler"

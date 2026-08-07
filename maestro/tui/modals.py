@@ -12,10 +12,23 @@ from .. import schedule
 from ..statemachine import Phase
 
 
-class _AnswerModal(ModalScreen):
-    """Single-question input modal; dismisses with the answer string or None on cancel."""
+# Sentinel dismissal value meaning "accept the shown recommendation for every
+# remaining question in the round that carries one" -- distinct from a normal
+# typed-answer string (which is always non-empty, see on_input_submitted) or
+# None (cancel), so the caller (`MaestroTUI._walk_questions`) can tell the three
+# apart without a wrapper type.
+_ACCEPT_ALL = object()
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+
+class _AnswerModal(ModalScreen):
+    """Single-question input modal; dismisses with the answer string, `_ACCEPT_ALL`,
+    or None on cancel."""
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+r", "accept_recommendation", "Accept recommendation"),
+        ("ctrl+g", "accept_all_remaining", "Accept all remaining"),
+    ]
 
     DEFAULT_CSS = """
     _AnswerModal {
@@ -37,18 +50,29 @@ class _AnswerModal(ModalScreen):
         max-height: 8;
         margin-bottom: 1;
     }
+    #recommend-scroll {
+        max-height: 4;
+        margin-bottom: 1;
+    }
     """
 
-    def __init__(self, key: str, qid: str, question_text: str, remaining: int, home: Path) -> None:
+    def __init__(self, key: str, qid: str, position: int | None, total: int | None,
+                 question_text: str, recommend: str | None, remaining: int, home: Path) -> None:
         super().__init__()
         self._key = key
         self._qid = qid
+        self._position = position
+        self._total = total
         self._question_text = question_text
+        self._recommend = recommend
         self._remaining = remaining
         self._home = home
 
     def compose(self) -> ComposeResult:
-        header = f"[bold]{self._key}[/bold] ({self._remaining} remaining)"
+        header = f"[bold]{self._key}[/bold]"
+        if self._position and self._total:
+            header += f" — {self._position} of {self._total}"
+        header += f" ({self._remaining} remaining)"
         spec_path = self._home / "tickets" / self._key / "spec.md"
         spec_text = spec_path.read_text() if spec_path.exists() else ""
         with Vertical(id="answer-dialog"):
@@ -60,6 +84,14 @@ class _AnswerModal(ModalScreen):
             yield Label("[dim]── Question ──[/dim]")
             with VerticalScroll(id="question-scroll"):
                 yield Static(self._question_text, markup=False)
+            if self._recommend:
+                yield Label("[dim]── Recommended ──[/dim]")
+                with VerticalScroll(id="recommend-scroll"):
+                    yield Static(self._recommend, markup=False)
+                yield Label(
+                    "[dim]Ctrl+R accept this recommendation · "
+                    "Ctrl+G accept all remaining recommendations[/dim]"
+                )
             yield Input(placeholder="Answer (Enter to submit, Esc to cancel)", id="answer-input")
 
     def on_mount(self) -> None:
@@ -72,6 +104,15 @@ class _AnswerModal(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def action_accept_recommendation(self) -> None:
+        if not self._recommend:
+            self.notify("No recommendation for this question", severity="warning")
+            return
+        self.dismiss(self._recommend)
+
+    def action_accept_all_remaining(self) -> None:
+        self.dismiss(_ACCEPT_ALL)
 
 
 # Phase-aware command reference shown in _CmdModal.
