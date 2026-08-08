@@ -1329,7 +1329,11 @@ def test_schedule_modal_add_task_writes_config(seeded_home):
 def test_schedule_add_edit_toggle_roundtrips_title_and_repo(seeded_home):
     """GA-9 mounted-app QA: drives the real ScheduleScreen through add -> edit
     -> toggle via real key presses, asserting title/repo survive each step and
-    that toggling one task never strips another task's fields (blast radius)."""
+    that toggling one task never strips another task's fields (blast radius).
+    GA-13: these three actions now call `ops.schedule_add`/`schedule_edit`/
+    `schedule_set_enabled` instead of inlining load -> mutate -> write_scheduled,
+    so this same real-key-press walk is this ticket's mounted-app proof that
+    the ops refactor didn't change observable behavior."""
     _write_scheduled_config(seeded_home, name="other", title="Other title", repo="beta")
 
     async def _inner():
@@ -1427,6 +1431,41 @@ def test_schedule_toggle_task_flips_enabled(seeded_home):
     asyncio.run(_inner())
     cfg = config_mod.load(str(seeded_home))
     assert cfg.scheduled[0]["enabled"] is False
+
+
+# --- GA-13: TUI schedule verbs route through ops.schedule_* -----------------
+
+def test_schedule_add_duplicate_name_notifies_without_writing(seeded_home):
+    """GA-13 AC: the ops-owned duplicate-name check fires through the TUI too --
+    submitting the add modal with a name that already exists must notify (not
+    crash) and must leave config.toml's one existing task exactly as it was."""
+    original = _write_scheduled_config(seeded_home, name="digest", every="1h")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("schedule_panel")
+            await pilot.pause()
+            screen = app.screen_stack[-1]
+            await screen.run_action("add_task")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ScheduleModal)
+            modal.query_one("#sched-name", Input).value = "digest"  # duplicate
+            modal.query_one("#sched-prompt", TextArea).text = "A different prompt"
+            modal.query_one("#sched-every", Input).value = "6h"
+            notifs_before = len(app._notifications)
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app._notifications) > notifs_before
+            # the modal is gone (it always dismisses itself); the screen underneath is live
+            assert app.screen_stack[-1] is screen
+
+    asyncio.run(_inner())
+    cfg = config_mod.load(str(seeded_home))
+    assert cfg.scheduled == [original]  # untouched -- no second task, original fields intact
 
 
 # --------------------------------------------------------------------------- #
