@@ -33,9 +33,48 @@ def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str) if not isinstance(obj, str) else obj)
 
 
-def _web_tools_extra_args(cfg: Config) -> list[str]:
-    """--allowedTools flag granting spawned reconcilers WebSearch/WebFetch, if enabled."""
-    return ["--allowedTools", "WebSearch,WebFetch"] if cfg.reconcile_web_tools else []
+# Verbs a spawned reconciler may invoke via the maestro CLI, rendered into
+# `Bash(maestro <verb>:*)` rules by `_reconciler_tool_grants` below. Kept as an
+# explicit constant rather than derived from build_parser()'s "[agent]" help
+# tags at runtime -- reading argparse's per-choice help strings means reaching
+# into a private API (`_SubParsersAction._choices_actions`), fine for a test's
+# drift guard but too fragile to depend on in production code. See
+# tests/test_web_tools.py::test_agent_grant_matches_cli_agent_tags, which walks
+# build_parser() with that private API and fails if this list and the
+# "[agent]"-tagged verbs there ever drift apart.
+#
+# NEVER add "approve" (self-clears the tier-2 gate AD-1 exists to enforce),
+# "restore" (the one irreversible verb), "fleet" (launchd + the pause kill
+# switch), or any other human-only verb here -- and never collapse this to
+# the bare wildcard "maestro:*", which grants all of those at once.
+_AGENT_TOOL_VERBS = (
+    # The 19 "[agent]"-tagged verbs registered in build_parser().
+    "local-backup", "snapshot", "events", "append", "set-phase", "ask",
+    "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
+    "verify-ac", "qa-verdict", "finalize", "release", "check-conflicts",
+    "check-merged", "fold-steps",
+    # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
+    "env",     # every phase preamble's first command, all phase files
+    "show",    # maestro-reconcile-passive.md reads pending_inbox through it
+    "create",  # maestro-reconcile-awaiting-human.md mints implementation tickets
+)
+
+
+def _reconciler_tool_grants(cfg: Config) -> list[str]:
+    """--allowedTools flag for spawned reconcilers.
+
+    Always grants the maestro CLI verbs in _AGENT_TOOL_VERBS -- unconditionally,
+    not gated behind reconcile_web_tools (that used to also disarm a
+    reconciler's own bookkeeping whenever web tools were turned off). Adds
+    WebSearch/WebFetch to the same comma-joined value when reconcile_web_tools
+    is enabled. Per-verb rules are prefix matches on the literal command
+    string, so this only ever matches spawns that omit --home (they do --
+    the home is pinned via the MAESTRO_HOME env var instead, sessions.py).
+    """
+    rules = [f"Bash(maestro {verb}:*)" for verb in _AGENT_TOOL_VERBS]
+    if cfg.reconcile_web_tools:
+        rules += ["WebSearch", "WebFetch"]
+    return ["--allowedTools", ",".join(rules)]
 
 
 def _nudge(cfg: Config) -> disp.DispatchReport:
@@ -49,7 +88,7 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     sessions = ClaudeCliSessions(
         cfg.home, model=cfg.reconcile_model,
         permission_mode=cfg.permission_mode,
-        extra_args=_web_tools_extra_args(cfg),
+        extra_args=_reconciler_tool_grants(cfg),
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
         unverified_claim_max_age=cfg.unverified_claim_max_age,
@@ -356,7 +395,7 @@ def cmd_dispatch(args) -> int:
         sessions = ClaudeCliSessions(
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
-            extra_args=_web_tools_extra_args(cfg),
+            extra_args=_reconciler_tool_grants(cfg),
             session_log_format=cfg.session_log_format,
             unverified_claim_max_age=cfg.unverified_claim_max_age)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
