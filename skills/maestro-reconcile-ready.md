@@ -53,8 +53,39 @@ maestro set-phase "$KEY" researching --reason "research ticket: beginning explor
   git -C "$REPO" fetch -q origin "$BASE"
   git -C "$REPO" worktree add "$MHOME/worktrees/$KEY" -b "${PREFIX}${KEY}" "origin/$BASE" 2>/dev/null \
     || git -C "$REPO" worktree add "$MHOME/worktrees/$KEY" "${PREFIX}${KEY}"   # adopt if branch exists
+  # Prime it. `worktree add` brings tracked files only, so a fresh worktree silently lacks
+  # gitignored repo guidance and any installed dependency tree. Exclude the primed names
+  # first -- `--git-path` resolves info/exclude to the *shared* common dir even for a linked
+  # worktree, so the append must be idempotent -- then mirror each from the source checkout.
+  # Every step is a no-op when the source doesn't have it.
+  WT="$MHOME/worktrees/$KEY"
+  EXC="$(git -C "$WT" rev-parse --git-path info/exclude)"
+  for name in "CLAUDE.local.md" ".claude/settings.local.json" "node_modules/"; do
+    grep -qxF "$name" "$EXC" || cat >> "$EXC" <<< "$name"
+  done
+  if [ -f "$REPO/CLAUDE.local.md" ]; then
+    cp "$REPO/CLAUDE.local.md" "$WT/CLAUDE.local.md"
+  fi
+  if [ -f "$REPO/.claude/settings.local.json" ]; then
+    mkdir -p "$WT/.claude"
+    cp "$REPO/.claude/settings.local.json" "$WT/.claude/settings.local.json"
+  fi
+  if [ -d "$REPO/node_modules" ] && [ ! -e "$WT/node_modules" ]; then
+    # cp -c is an APFS copy-on-write clone (write-isolated, near-instant); cp -al is a
+    # hardlink tree for filesystems without clone support; cp -R is the last-resort deep
+    # copy. The trailing "/." copies node_modules' *contents* into place instead of nesting
+    # a second node_modules inside it, so a rung that half-ran before failing still leaves a
+    # correct tree for the next rung to finish.
+    cp -c -R "$REPO/node_modules/." "$WT/node_modules" 2>/dev/null \
+      || cp -al "$REPO/node_modules/." "$WT/node_modules" 2>/dev/null \
+      || cp -R "$REPO/node_modules/." "$WT/node_modules"
+  fi
   maestro set-phase "$KEY" implementing --reason "worktree ready"
   ```
+  The primed `node_modules` is a real, isolated copy, not a shared symlink -- an install run
+  inside this worktree never writes through into `$REPO` or a sibling worktree. It does mean
+  a ticket that edits `package.json` or a lockfile is priming against a tree that predates its
+  own change; re-run the real install inside the worktree first in that case.
 
 **Done when:** either you slept via `maestro requeue "$KEY" 300` (an unmet dependency — nothing
 else runs this step), or you appended exactly one `set-phase` event (`researching`, or
