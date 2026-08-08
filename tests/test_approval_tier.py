@@ -4,7 +4,7 @@ Two enforcement points, per the spec: (1) the tool surface a spawned reconciler
 gets (`--disallowedTools`), and (2) whether a tier-2 ticket is even due for the
 `implementing` phase before a human runs `maestro approve`.
 """
-from maestro import dispatcher as disp, event_log, ops, snapshot as snap_mod, store
+from maestro import cli, dispatcher as disp, event_log, ops, projection, snapshot as snap_mod, store
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
@@ -126,3 +126,56 @@ def test_approval_persists_across_reentry_into_implementing(home, cfg):
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert key in report.spawned
+
+
+# --- GA-18: Tier column rendered from spec_tier, not the dead snapshot field ---
+
+def test_tier_column_renders_from_spec_tier_end_to_end(home, cfg):
+    """QA per CLAUDE.md, real CLI over a temp home: tickets with approval_tier
+    0, 2, absent, and malformed all render the correct Tier in both
+    `ticket_rows` and WORKSTATE.md after a real sweep + a real `project`
+    regeneration -- and the tier-2 ticket's gate behavior (still needs-approval
+    before `maestro approve`, still spawned with the `gh pr merge` denylist
+    once approved) is unchanged. Mocks only the `claude -p` spawn (DryRunSessions)."""
+    seed_ticket(home, "Z-0", "auto-approved", phase="ready", tier=0)
+    ops.observe_spec(cfg, "Z-0")
+    seed_ticket(home, "Z-2", "risky change", phase="implementing", tier=2)
+    ops.observe_spec(cfg, "Z-2")
+    seed_ticket(home, "Z-A", "no tier field")
+    store.atomic_write(store.spec_path(home, "Z-A"), "# Z-A\n\n## Intent\nno tier field\n")
+    ops.observe_spec(cfg, "Z-A")
+    seed_ticket(home, "Z-M", "malformed tier")
+    store.atomic_write(store.spec_path(home, "Z-M"), "# Z-M\napproval_tier: not-a-number\n")
+    ops.observe_spec(cfg, "Z-M")
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+    assert "Z-0" in report.spawned
+    assert "Z-2" not in report.spawned  # tier-2 implementing: needs-approval
+
+    rc = cli.main(["--home", str(home), "project"])
+    assert rc == 0
+
+    rows = {r[0]: r[5] for r in projection.ticket_rows(home)}
+    assert rows["Z-0"] == "0"   # falsy-0 bug fixed: not "—"
+    assert rows["Z-2"] == "2"
+    assert rows["Z-A"] == "1"   # missing approval_tier -> documented fallback
+    assert rows["Z-M"] == "1"   # malformed approval_tier -> documented fallback
+
+    workstate = (home / "derived" / "WORKSTATE.md").read_text()
+    for key, expected in (("Z-0", "0"), ("Z-2", "2"), ("Z-A", "1"), ("Z-M", "1")):
+        line = next(l for l in workstate.splitlines() if l.startswith(f"| {key} "))
+        cells = [c.strip() for c in line.split("|")]
+        assert cells[6] == expected, f"{key}: expected tier {expected!r}, row was {line!r}"
+
+    # Gate behavior is unchanged by this rendering-only change.
+    rc = cli.main(["--home", str(home), "approve", "Z-2", "--no-nudge"])
+    assert rc == 0
+    from dataclasses import replace
+    # A wide concurrency ceiling so the other 3 seeded tickets never crowd Z-2
+    # out of this sweep -- capacity is not what this assertion is about.
+    wide_cfg = replace(cfg, max_concurrency=10)
+    report2 = disp.dispatch(wide_cfg, sessions, now=2000)
+    assert "Z-2" in report2.spawned
+    spawned_by_key = {k: (m, e, d) for k, _p, _c, m, e, d in sessions.spawned}
+    assert "Bash(gh pr merge:*)" in spawned_by_key["Z-2"][2]

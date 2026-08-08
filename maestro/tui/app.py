@@ -11,7 +11,7 @@ from textual.worker import Worker, WorkerState
 
 from .. import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod
 from ..config import Config
-from ..dispatcher import existing_prefixes
+from ..dispatcher import existing_prefixes, spec_tier
 from ..projection import ticket_rows
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
@@ -147,7 +147,7 @@ class MaestroTUI(App):
             self.query_one("#events", RichLog).clear()
             return
         snap = snap_mod.load(self._home, key)
-        detail.update(_render_detail(snap))
+        detail.update(_render_detail(snap, spec_tier(self._home, key)))
         self._refresh_events()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -271,7 +271,8 @@ class MaestroTUI(App):
             if answered:
                 self.notify(f"{answered} answer(s) queued for {key}")
                 snap = snap_mod.load(self._home, key)
-                self.query_one("#detail", Static).update(_render_detail(snap))
+                self.query_one("#detail", Static).update(
+                    _render_detail(snap, spec_tier(self._home, key)))
             return
         qid, text = questions[idx]
         remaining = len(questions) - idx

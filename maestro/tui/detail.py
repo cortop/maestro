@@ -13,8 +13,15 @@ def _esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace("[", "\\[")
 
 
-def render(snap: snap_mod.Snapshot) -> str:
-    """Build Rich markup string for the snapshot detail pane."""
+def render(snap: snap_mod.Snapshot, tier: int | None = None) -> str:
+    """Build Rich markup string for the snapshot detail pane.
+
+    `tier` comes from the caller (`dispatcher.spec_tier`) -- the snapshot itself
+    carries no tier field, so display and the approval gate read the same source
+    by construction. `tier` is total once read from disk and never None in
+    practice, but 0 is a real (auto-approved) tier, so it's rendered via
+    `str(tier)` unconditionally rather than the `v()` falsy-check helper below.
+    """
     def v(val: object) -> str:
         return _esc(str(val)) if val is not None and val != "" else _EM
 
@@ -41,7 +48,7 @@ def render(snap: snap_mod.Snapshot) -> str:
         f"[bold]{v(snap.title)}[/bold]\n\n"
         f"[dim]Key[/dim]           {v(snap.key)}\n"
         f"[dim]Phase[/dim]         {v(snap.phase)}\n"
-        f"[dim]Tier[/dim]          {v(snap.tier)}\n"
+        f"[dim]Tier[/dim]          {str(tier) if tier is not None else _EM}\n"
         f"[dim]Source[/dim]        {v(snap.source)}\n"
         f"[dim]PR[/dim]            {pr_info}\n"
         f"[dim]CI[/dim]            {v(snap.ci_state)}\n"
