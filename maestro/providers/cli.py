@@ -13,8 +13,57 @@ def _run(cmd: list[str], timeout: int = 60) -> tuple[int, str, str]:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return 1, "", str(e)
+    except FileNotFoundError as e:
+        # The executable itself is missing (e.g. `gh` not installed) -- a config
+        # problem, not something a retry fixes. Sentinel rc=127 (shell convention
+        # for "command not found") plus distinguishing text; `classify_gh_failure`
+        # keys primarily on the text so this stays symmetric with real `gh` output.
+        return 127, "", f"maestro: executable not found: {e}"
+    except subprocess.TimeoutExpired as e:
+        # The process itself never returned -- a transient/retryable condition
+        # (network blip, slow host), unlike a FileNotFoundError. Sentinel rc=124
+        # (shell convention for "command timed out").
+        return 124, "", f"maestro: command timed out after {timeout}s: {e}"
+
+
+# Verbatim substrings from real `gh` 2.94.0 stderr (measured, not guessed) --
+# matched lowercase. Order matters: SAML enforcement reads like a 403/not-found
+# to a human but is an auth problem (the token needs the org's blessing), so the
+# auth check must win over any accidental "not found" phrasing.
+_AUTH_MARKERS = (
+    "bad credentials",
+    "must grant your oauth token access",
+    "protected by organization saml enforcement",
+    "executable not found",  # gh itself missing: a human must fix the environment
+)
+_NOT_FOUND_MARKERS = (
+    "could not resolve to a repository",
+    "could not resolve to a pullrequest",
+)
+_TRANSIENT_MARKERS = (
+    "timed out",
+    "connection reset",
+    "could not resolve host",
+    "temporary failure in name resolution",
+)
+
+
+def classify_gh_failure(rc: int, stdout: str, stderr: str) -> str:
+    """Classify a failed `gh` invocation into "auth" | "not_found" | "transient"
+    | "unknown", from stderr TEXT -- real `gh` exits 1 for auth failures,
+    not-found errors, and everything else alike, so the exit code alone can
+    never be the signal (`rc`/`stdout` are accepted for a stable signature and
+    future use, but only `stderr` text is matched today). Unmatched text
+    degrades to "unknown" -- today's behavior -- rather than a guess.
+    """
+    text = stderr.lower()
+    if any(m in text for m in _AUTH_MARKERS):
+        return "auth"
+    if any(m in text for m in _NOT_FOUND_MARKERS):
+        return "not_found"
+    if any(m in text for m in _TRANSIENT_MARKERS):
+        return "transient"
+    return "unknown"
 
 
 class JiraCliTracker:
@@ -70,10 +119,11 @@ class GitHubCliVCS:
                "state,mergeable,headRefOid,statusCheckRollup"]
         if repo:
             cmd += ["--repo", repo]
-        rc, out, _ = _run(cmd)
+        rc, out, err = _run(cmd)
         if rc != 0 or not out.strip():
             return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
-                    "ci_state": "unknown", "failing_checks": []}
+                    "ci_state": "unknown", "failing_checks": [],
+                    "error": classify_gh_failure(rc, out, err)}
         data = json.loads(out)
         checks = data.get("statusCheckRollup") or []
         failing, pending = [], False

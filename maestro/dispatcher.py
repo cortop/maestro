@@ -798,7 +798,7 @@ def sync_vcs(cfg: Config, now: float) -> dict:
             ops.route_conflict(cfg, key, snap.pr_number, actor="dispatcher")
             continue
 
-        _observe_ci(cfg, key, status, phase)
+        _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number)
         _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug)
 
     cursor[vcs_name] = now
@@ -830,21 +830,41 @@ def _route_if_merged(cfg: Config, key: str, status: dict,
     return True
 
 
-def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase) -> None:
+def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
+                repo_slug: str | None = None, pr_number: int | None = None) -> None:
+    error = status.get("error")
+    if error == "transient":
+        # A retryable gh-side blip (timeout, network hiccup): not observed at
+        # all. No event, no phase change, no failure_count spend, and — since
+        # nothing is appended — no risk of overwriting an already-known
+        # ci_state with "unknown". Free retry on the next poll.
+        return
+
     ci_state = status.get("ci_state", "unknown")
     failing = sorted(status.get("failing_checks") or [])
     head_sha = status.get("head_sha") or "unknown"
-    check_key = content_hash(ci_state + ":" + ",".join(failing))
+    # `error` participates in the check-key so a genuine auth/not_found result
+    # is never deduped against a pre-existing bare {"state": "unknown"}
+    # CiObserved (minted before this classification existed, or by an
+    # "unknown"-class result) — it always hashes differently and so always
+    # gets a fresh event to route on. Repeats of the SAME error still dedupe
+    # by construction (same hash in -> same step-id -> `ops.fail` runs once).
+    check_key = content_hash(ci_state + ":" + ",".join(failing) + ":" + (error or ""))
     sid = f"ci-{key}-{head_sha}-{check_key}"
     detail = f"{len(failing)} check(s) failing: {', '.join(failing)}" if failing else ""
-    ev = event_log.append(cfg.home, key, E.CI_OBSERVED,
-                          {"state": ci_state, "failing_checks": failing, "detail": detail},
+    payload = {"state": ci_state, "failing_checks": failing, "detail": detail}
+    if error:
+        payload["error"] = error
+    ev = event_log.append(cfg.home, key, E.CI_OBSERVED, payload,
                           actor="dispatcher", step_id=sid)
     if ev is None:
         return  # unchanged since the last poll — nothing to route
     snap_mod.rebuild(cfg.home, key)
     from . import ops
-    if ci_state == "failing":
+    if error in ("auth", "not_found"):
+        where = f"{repo_slug or '?'}#{pr_number if pr_number is not None else '?'}"
+        ops.fail(cfg, key, f"gh {error}: could not read PR {where}", actor="dispatcher")
+    elif ci_state == "failing":
         ops.set_phase(cfg, key, Phase.IMPLEMENTING,
                       reason=f"CI failing: {', '.join(failing)}", actor="dispatcher")
     elif ci_state == "passing" and phase == Phase.AWAITING_CI:

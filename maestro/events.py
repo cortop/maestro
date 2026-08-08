@@ -20,7 +20,10 @@ COMMAND_RECEIVED = "CommandReceived"    # {command, args}  folded from the inbox
 # Implementation / VCS
 PR_OPENED = "PrOpened"                  # {number, url, draft}
 PR_UPDATED = "PrUpdated"                # {number, draft, merged}
-CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail}  state: "passing"|"failing"|"pending"|"unknown"
+CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, error?}  state: "passing"|"failing"|"pending"|"unknown"
+                                         # error (optional): "auth"|"not_found"|"unknown" -- WHY a poll couldn't read
+                                         # the PR (state stays "unknown"); a "transient" classification is a free
+                                         # retry and appends no event at all. See providers/base.py VCS.pr_status.
 REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body, author}  one PR review; idempotent per comment_id
 IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-off
 IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
