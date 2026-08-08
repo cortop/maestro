@@ -186,7 +186,9 @@ def test_spawn_floor_defaults_to_reconcile_steady_interval(home):
 
 
 def test_dispatch_cli_reports_throttled(home):
-    """Real `maestro dispatch --dry-run` twice in a row surfaces the throttle."""
+    """GA-4: `dispatch --dry-run` is read-only and never writes the spawn ledger
+    itself, but it still READS it -- a key a prior REAL spawn floored stays
+    reported as throttled, not would_spawn, in the preview."""
     import json
 
     from maestro import cli
@@ -194,6 +196,12 @@ def test_dispatch_cli_reports_throttled(home):
     (home / "config.toml").write_text(
         "[maestro]\nmax_concurrency = 3\nmin_spawn_interval = 300\n")
     _seed(home, "T-1", Phase.READY)
+    # Seed the ledger directly, standing in for a prior REAL spawn (the pattern
+    # at test_legacy_bare_float_ledger_still_throttles above) -- a preview must
+    # never be the one to write this entry. The CLI drives dispatch() off the
+    # real wall clock, so "recent" has to mean "close to time.time()", not an
+    # arbitrary fixed epoch.
+    store.write_json(disp._spawn_ledger_path(home), {"T-1": time.time()})
 
     def _sweep():
         buf = io.StringIO()
@@ -205,9 +213,11 @@ def test_dispatch_cli_reports_throttled(home):
             sys.stdout = old
         return json.loads(buf.getvalue())
 
-    assert _sweep()["would_spawn"] == ["T-1"]
-    second = _sweep()
-    assert second["would_spawn"] == [] and second["throttled"] == ["T-1"]
+    ledger_before = disp._spawn_ledger_path(home).read_bytes()
+    out = _sweep()
+    assert out["would_spawn"] == [] and out["throttled"] == ["T-1"]
+    # The preview only READ the ledger -- confirm it's still byte-identical.
+    assert disp._spawn_ledger_path(home).read_bytes() == ledger_before
 
 
 def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
@@ -901,8 +911,20 @@ def test_schedule_status_cron_task_next_due_is_a_real_timestamp(home, cfg):
     assert rows[0]["tz"] == "UTC"
 
 
-def test_dispatch_cli_reports_scheduled_fired(home):
-    """Real 'maestro dispatch --dry-run' CLI surfaces scheduled_fired in the report."""
+def test_dispatch_cli_reports_scheduled_fired(home, cfg):
+    """A real sweep surfaces scheduled_fired in the report. GA-4: `dispatch
+    --dry-run`'s CLI preview is read-only and no longer runs run_scheduled_tasks
+    at all (a preview firing a real scheduled task -- appending to inbox/_new
+    and advancing .schedule_cursor.json -- is exactly the class of undocumented
+    mutation this ticket stops); a real sweep still fires it, same as ever."""
+    _sched_cfg(cfg, every="24h")
+    report = disp.dispatch(cfg, DryRunSessions(), now=1_000_000)
+    assert report.scheduled_fired == ["digest"]
+
+
+def test_dispatch_cli_dry_run_does_not_fire_scheduled_tasks(home):
+    """The CLI preview counterpart to the test above: --dry-run reports an empty
+    scheduled_fired and leaves .schedule_cursor.json untouched."""
     import json
 
     from maestro import cli
@@ -914,6 +936,8 @@ def test_dispatch_cli_reports_scheduled_fired(home):
         'prompt = "Summarize things"\n'
         'every = "24h"\n'
     )
+    cursor_path = home / "derived" / ".schedule_cursor.json"
+    assert not cursor_path.exists()
     buf = io.StringIO()
     old_stdout = sys.stdout
     sys.stdout = buf
@@ -923,7 +947,8 @@ def test_dispatch_cli_reports_scheduled_fired(home):
         sys.stdout = old_stdout
     assert rc == 0
     out = json.loads(buf.getvalue())
-    assert out["scheduled_fired"] == ["digest"]
+    assert out["scheduled_fired"] == []
+    assert not cursor_path.exists()
 
 
 def test_schedule_list_cli(home):

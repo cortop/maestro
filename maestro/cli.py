@@ -403,9 +403,10 @@ def cmd_dispatch(args) -> int:
             base_allowed_tools=_reconciler_tool_grants(cfg),
             session_log_format=cfg.session_log_format,
             unverified_claim_max_age=cfg.unverified_claim_max_age)
-    report = disp.dispatch(cfg, sessions, now=store.now_epoch())
+    report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run)
     projection.write(cfg.home)
-    out = {"minted": report.minted,
+    out = {"minted" if not args.dry_run else "would_mint":
+               report.minted if not args.dry_run else report.would_mint,
            "spawned" if not args.dry_run else "would_spawn": report.spawned,
            "claimed": report.claimed, "capacity_skipped": report.capacity_skipped,
            "throttled": report.throttled,
@@ -1020,7 +1021,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--clear", action="store_true", help="remove any active pause")
 
     sp = add("dispatch", cmd_dispatch, "one dispatcher sweep (launchd calls this)")
-    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="preview only: report would_mint/would_spawn, no writes "
+                         "except regenerated dashboards (see what WOULD happen, no "
+                         "sessions launched, nothing minted, ledger/attempts untouched)")
     sp.add_argument("--model", default=None, help="override reconcile_model from config")
     add("project", cmd_project, "regenerate dashboards")
     sp = add("env", cmd_env, "resolved config (home, repo_path, ...)")
