@@ -45,7 +45,18 @@ class VCS(Protocol):
         Returns {"state": "OPEN"|"MERGED"|"CLOSED"|"unknown",
         "mergeable": "MERGEABLE"|"CONFLICTING"|"UNKNOWN", "head_sha": str|None,
         "ci_state": "passing"|"failing"|"pending"|"unknown",
-        "failing_checks": [str, ...]}.
+        "failing_checks": [str, ...],
+        "error": "auth"|"not_found"|"transient"|"unknown" (optional)}.
+
+        ``error`` is a NEW field, absent (or ``None``) on a successful poll --
+        callers must read it with ``.get("error")`` so implementations/fakes that
+        predate it keep behaving as "no error". When the poll itself couldn't be
+        completed (the underlying `gh`/host-CLI call failed), ``ci_state`` still
+        collapses to its existing four values -- it is never overloaded -- and
+        ``error`` carries WHY: "auth" (bad/expired credentials, SSO not granted),
+        "not_found" (repo or PR doesn't resolve), "transient" (timeout/network --
+        retry, don't spend failure budget), or "unknown" (unrecognized failure --
+        today's behavior, unchanged).
         """
         ...
 

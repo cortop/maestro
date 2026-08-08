@@ -146,6 +146,249 @@ def test_sync_vcs_ci_observed_is_idempotent_on_unchanged_state(cfg, monkeypatch)
     assert len(evs) == n_after_phase  # no new events at all this tick (still failing -> already implementing... )
 
 
+# --- GA-6: classify gh failures instead of flattening them to ci_state=unknown --
+# `FakeVCS` statuses may now carry an "error" key ("auth"|"not_found"|"transient"
+# |"unknown") the way a real `GitHubCliVCS.pr_status` failure would -- exactly
+# the new field this ticket adds (`.get`-read, so every OTHER FakeVCS status
+# above, with no "error" key at all, keeps behaving exactly as before).
+
+def test_sync_vcs_transient_error_is_a_true_no_op(cfg, monkeypatch):
+    """A transient gh failure (timeout/network blip) must not spend the failure
+    budget, change phase, or clobber an already-known ci_state -- it changes
+    NOTHING, so the next poll is a completely free retry."""
+    fake = FakeVCS(statuses={42: {
+        "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha1",
+        "ci_state": "passing", "failing_checks": [],
+    }})
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed(cfg, "T-5", Phase.AWAITING_CI)
+    disp.sync_vcs(cfg, now=1000)  # establishes a known-good ci_state=passing
+    before = snap_mod.load(cfg.home, "T-5").to_dict()
+    assert before["ci_state"] == "passing"
+    assert before["phase"] == Phase.IN_REVIEW.value
+
+    fake.statuses[42] = {
+        "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha1",
+        "ci_state": "unknown", "failing_checks": [], "error": "transient",
+    }
+    disp.sync_vcs(cfg, now=2000)
+
+    after = snap_mod.load(cfg.home, "T-5").to_dict()
+    assert after == before  # completely unchanged, not just ci_state
+    assert not [e for e in event_log.read(cfg.home, "T-5") if e["type"] == "CiObserved"][1:]
+    assert not [e for e in event_log.read(cfg.home, "T-5") if e["type"] == "Failed"]
+
+
+def test_sync_vcs_unknown_classified_error_reproduces_todays_behavior(cfg, monkeypatch):
+    """An `error: "unknown"` result (real GitHubCliVCS's genuinely-unrecognized-
+    stderr case) must reproduce today's behavior exactly: a plain CiObserved
+    with state "unknown" and no routing -- same as the pre-existing FakeVCS
+    default (ci_state="unknown", no "error" key at all) other tests rely on."""
+    fake = FakeVCS(statuses={42: {
+        "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha1",
+        "ci_state": "unknown", "failing_checks": [], "error": "unknown",
+    }})
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.AWAITING_CI)
+
+    disp.sync_vcs(cfg, now=1000)
+
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.AWAITING_CI.value  # no routing
+    assert snap.ci_state == "unknown"
+    evs = event_log.read(cfg.home, "T-5")
+    ci = [e for e in evs if e["type"] == "CiObserved"]
+    assert len(ci) == 1
+    assert ci[0]["payload"]["state"] == "unknown"
+    assert not [e for e in evs if e["type"] == "Failed"]
+
+
+def test_sync_vcs_auth_failure_routes_to_visible_failure_naming_class_repo_and_pr(cfg, monkeypatch):
+    fake = FakeVCS(statuses={42: {
+        "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": None,
+        "ci_state": "unknown", "failing_checks": [], "error": "auth",
+    }})
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.AWAITING_CI)  # _seed's pr_url is https://github.com/x/y/pull/42
+
+    disp.sync_vcs(cfg, now=1000)
+
+    evs = event_log.read(cfg.home, "T-5")
+    failed = [e for e in evs if e["type"] == "Failed"]
+    assert len(failed) == 1
+    error_text = failed[0]["payload"]["error"]
+    assert "auth" in error_text and "x/y" in error_text and "42" in error_text
+
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.failure_count == 1
+    assert snap.last_error and "auth" in snap.last_error
+
+    # `maestro show` surfaces the failure without reading the raw log.
+    out = main(["--home", str(cfg.home), "show", "T-5"])
+    assert out == 0
+
+
+def test_sync_vcs_not_found_failure_routes_to_visible_failure(cfg, monkeypatch):
+    fake = FakeVCS(statuses={42: {
+        "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": None,
+        "ci_state": "unknown", "failing_checks": [], "error": "not_found",
+    }})
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.AWAITING_CI)
+
+    disp.sync_vcs(cfg, now=1000)
+
+    evs = event_log.read(cfg.home, "T-5")
+    failed = [e for e in evs if e["type"] == "Failed"]
+    assert len(failed) == 1
+    assert "not_found" in failed[0]["payload"]["error"]
+
+
+def test_sync_vcs_auth_failure_dedupes_ops_fail_across_repeated_polls(cfg, monkeypatch):
+    """Repeats of the SAME error still dedupe by construction (same check-key ->
+    same step-id): exactly one CiObserved and one `ops.fail` across two ticks."""
+    fake = FakeVCS(statuses={42: {
+        "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": None,
+        "ci_state": "unknown", "failing_checks": [], "error": "auth",
+    }})
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed(cfg, "T-5", Phase.AWAITING_CI)
+
+    disp.sync_vcs(cfg, now=1000)
+    disp.sync_vcs(cfg, now=2000)  # same auth failure re-observed
+
+    evs = event_log.read(cfg.home, "T-5")
+    assert len([e for e in evs if e["type"] == "CiObserved"]) == 1
+    assert len([e for e in evs if e["type"] == "Failed"]) == 1
+
+
+def test_sync_vcs_auth_failure_routes_even_with_preexisting_bare_unknown_event(cfg, monkeypatch):
+    """A ticket already carrying a legacy CiObserved{state:"unknown"} (minted by
+    the OLD step-id formula, before this ticket's classification existed) must
+    still route on the next poll -- the error class changes the check-key so a
+    genuine auth/not_found result is never deduped against that stale event."""
+    from maestro.idempotency import content_hash
+
+    fake = FakeVCS(statuses={42: {
+        "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": None,
+        "ci_state": "unknown", "failing_checks": [], "error": "auth",
+    }})
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.AWAITING_CI)
+    legacy_check_key = content_hash("unknown" + ":" + "")
+    event_log.append(cfg.home, "T-5", "CiObserved",
+                     {"state": "unknown", "failing_checks": [], "detail": ""},
+                     actor="dispatcher", step_id=f"ci-T-5-unknown-{legacy_check_key}")
+
+    disp.sync_vcs(cfg, now=1000)
+
+    evs = event_log.read(cfg.home, "T-5")
+    ci = [e for e in evs if e["type"] == "CiObserved"]
+    assert len(ci) == 2  # the legacy bare one, plus this ticket's freshly-keyed one
+    assert [e for e in evs if e["type"] == "Failed"]
+
+
+# --- GA-6 AC9: the REAL GitHubCliVCS end-to-end through a full dispatch() sweep,
+# with `_run` (the actual `gh` subprocess boundary) as the ONLY mock -- GitHubCliVCS,
+# _observe_ci and ops all run for real. Everything above this uses FakeVCS (a mock
+# of GitHubCliVCS itself, one layer higher); these four prove the real classifier
+# integration wires all the way through pr_status -> _observe_ci -> dispatch().
+
+def _use_real_github_cli_vcs(cfg, monkeypatch, view_response):
+    """Configures the real `github_cli` vcs provider and monkeypatches only
+    `maestro.providers.cli._run` -- the gh subprocess boundary -- so the
+    resulting GitHubCliVCS instance is the genuine article. `view_response` is
+    the (rc, stdout, stderr) `_run` would have returned for `gh pr view ...
+    --json state,mergeable,headRefOid,statusCheckRollup`; the `--json reviews`
+    call (from `_observe_reviews`) is stubbed to a harmless empty result so
+    only the CI-observation path under test is exercised."""
+    from maestro.providers import cli as cli_mod
+
+    cfg.providers["vcs"] = "github_cli"
+    cfg.provider_config = {"vcs": {"github_cli": {"sync_interval": 0}}}
+
+    def fake_run(cmd, timeout=60):
+        if "reviews" in cmd:
+            return 0, '{"reviews": []}', ""
+        return view_response
+
+    monkeypatch.setattr(cli_mod, "_run", fake_run)
+
+
+def test_real_githubclivcs_auth_failure_through_full_dispatch_sweep(cfg, monkeypatch):
+    _use_real_github_cli_vcs(cfg, monkeypatch, (
+        1, "", "HTTP 401: Bad credentials (https://api.github.com/graphql)\n"
+               "Try authenticating with:  gh auth login -h github.com"))
+    _seed(cfg, "T-9", Phase.AWAITING_CI)
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    evs = event_log.read(cfg.home, "T-9")
+    ci = [e for e in evs if e["type"] == "CiObserved"]
+    assert len(ci) == 1 and ci[0]["payload"]["state"] == "unknown"
+    assert ci[0]["payload"]["error"] == "auth"
+    failed = [e for e in evs if e["type"] == "Failed"]
+    assert len(failed) == 1 and "auth" in failed[0]["payload"]["error"]
+
+    snap = snap_mod.load(cfg.home, "T-9")
+    assert snap.failure_count == 1
+    assert main(["--home", str(cfg.home), "show", "T-9"]) == 0
+
+
+def test_real_githubclivcs_not_found_failure_through_full_dispatch_sweep(cfg, monkeypatch):
+    _use_real_github_cli_vcs(cfg, monkeypatch, (
+        1, "", "GraphQL: Could not resolve to a Repository with the name "
+               "'owner/repo'. (repository)"))
+    _seed(cfg, "T-9", Phase.AWAITING_CI)
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    evs = event_log.read(cfg.home, "T-9")
+    ci = [e for e in evs if e["type"] == "CiObserved"]
+    assert len(ci) == 1 and ci[0]["payload"]["error"] == "not_found"
+    failed = [e for e in evs if e["type"] == "Failed"]
+    assert len(failed) == 1 and "not_found" in failed[0]["payload"]["error"]
+
+    snap = snap_mod.load(cfg.home, "T-9")
+    assert snap.failure_count == 1
+    assert main(["--home", str(cfg.home), "show", "T-9"]) == 0
+
+
+def test_real_githubclivcs_transient_failure_through_full_dispatch_sweep(cfg, monkeypatch):
+    # The exact (rc, stderr) shape `_run` itself produces on a real
+    # subprocess.TimeoutExpired (see test_run_timeout_expired_is_transient).
+    _use_real_github_cli_vcs(cfg, monkeypatch, (
+        124, "", "maestro: command timed out after 60s: Command '[\'gh\']' "
+                 "timed out after 60 seconds"))
+    _seed(cfg, "T-9", Phase.AWAITING_CI)
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    evs = event_log.read(cfg.home, "T-9")
+    assert not [e for e in evs if e["type"] == "CiObserved"]
+    assert not [e for e in evs if e["type"] == "Failed"]
+    snap = snap_mod.load(cfg.home, "T-9")
+    assert snap.phase == Phase.AWAITING_CI.value
+    assert snap.failure_count == 0
+
+
+def test_real_githubclivcs_unknown_failure_through_full_dispatch_sweep(cfg, monkeypatch):
+    _use_real_github_cli_vcs(cfg, monkeypatch,
+        (1, "", "gh: some brand new error format this classifier has never seen"))
+    _seed(cfg, "T-9", Phase.AWAITING_CI)
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    evs = event_log.read(cfg.home, "T-9")
+    ci = [e for e in evs if e["type"] == "CiObserved"]
+    assert len(ci) == 1 and ci[0]["payload"]["state"] == "unknown"
+    assert ci[0]["payload"]["error"] == "unknown"
+    assert not [e for e in evs if e["type"] == "Failed"]
+    snap = snap_mod.load(cfg.home, "T-9")
+    assert snap.phase == Phase.AWAITING_CI.value
+    assert snap.failure_count == 0
+
+
 def test_sync_vcs_passing_ci_moves_awaiting_ci_to_in_review(cfg, monkeypatch):
     fake = FakeVCS(statuses={42: {
         "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha2",
