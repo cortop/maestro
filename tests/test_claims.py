@@ -53,16 +53,38 @@ def test_confirmed_when_epoch_matches_true_start(home, child_process):
     assert claims.claim_path(home, "T-1").exists()
 
 
-def test_denied_when_pid_was_reused(home, child_process):
+class _ReusedPidProc:
+    """A fake `ps` response: pid 4242 has been alive for 2h — long after
+    `old_epoch` below, so it can only be a reused pid."""
+    returncode = 0
+    stdout = "4242 02:00:00 python -c sleep\n"
+    stderr = ""
+
+
+def _reused_pid_run(cmd, **kw):
+    return _ReusedPidProc()
+
+
+def test_denied_when_pid_was_reused(home):
     """A claim whose recorded epoch predates the live process's true start time
     can only mean pid reuse: the real reconciler is gone, this is someone else's
-    process — denied, and released immediately (no kill)."""
-    old_epoch = store.now_epoch() - 3600
+    process — denied, and released immediately (no kill).
+
+    Injects `ps`'s response instead of deriving "old" from two real
+    `store.now_epoch()` reads 3600s apart around a real spawned process + real `ps`
+    call: that round trip was seen flaking on CI (`AssertionError: 'confirmed' ==
+    'denied'`), almost certainly a clock/scheduling hiccup on the runner landing
+    between the two reads. The real parsing path (`probe_processes`/`_parse_etime`)
+    still runs unmodified here; only the OS's actual wall clock is taken out of the
+    loop, which was never what this test means to prove — that's
+    `test_confirmed_when_epoch_matches_true_start`'s job, with a real process and a
+    tight, correct-by-construction epoch."""
+    old_epoch = 1_700_000_000.0  # arbitrary fixed instant, long before "now"
     store.write_json(claims.claim_path(home, "T-1"),
-                     {"pid": child_process.pid, "name": "reconcile-T-1",
+                     {"pid": 4242, "name": "reconcile-T-1",
                       "ts": store.iso_now(), "epoch": old_epoch})
-    assert claims.verify_claim(home, "T-1") == "denied"
-    assert not claims.is_claimed(home, "T-1")
+    assert claims.verify_claim(home, "T-1", run=_reused_pid_run) == "denied"
+    assert not claims.is_claimed(home, "T-1", run=_reused_pid_run)
     assert not claims.claim_path(home, "T-1").exists()
 
 
