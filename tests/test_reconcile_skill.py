@@ -577,3 +577,19 @@ def test_claude_md_rewords_pr_target_for_repo_binding():
     text = (REPO_ROOT / "CLAUDE.md").read_text()
     assert "open PRs on `cortop/maestro`" not in text
     assert "repo binding" in text or "env --key" in text
+
+
+def test_docs_state_dry_run_is_a_read_only_preview():
+    """GA-4: `--dry-run` is a strictly read-only preview -- README, Makefile, and
+    the zsh completion script must say so, not the old "mints + would-spawn"
+    real-sweep-with-null-launcher framing."""
+    readme = (REPO_ROOT / "README.md").read_text()
+    assert "read-only preview" in readme
+    assert "would_mint" in readme or "would-mint" in readme
+
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    assert "read-only preview" in makefile
+    assert "would_mint" in makefile
+
+    completions = (REPO_ROOT / "maestro" / "_assets" / "completions" / "_maestro").read_text()
+    assert "read-only preview" in completions

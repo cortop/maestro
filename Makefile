@@ -9,7 +9,7 @@ PY := .venv/bin/python
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
 	@echo "make test        run the test suite"
-	@echo "make dry         one dispatcher sweep, dry-run (mints + would-spawn)"
+	@echo "make dry         one dispatcher sweep, read-only preview (would_mint + would_spawn)"
 	@echo "make dispatch    one REAL sweep (spawns claude reconcilers for due tickets)"
 	@echo "make loop        foreground dispatch every 5 min (Ctrl-C to stop)"
 	@echo "make status      ticket counts by phase"

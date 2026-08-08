@@ -32,10 +32,16 @@ def _reset_backups(cfg):
 
 
 def _populate(home, capsys):
-    """A home with one real, minted ticket (T-1) driven through the CLI."""
+    """A home with one real, minted ticket (T-1): `init`/`create` through the real
+    CLI, then a real sweep (dispatch() directly with DryRunSessions -- GA-4 made
+    the CLI's `--dry-run` a strictly read-only preview that no longer mints, so
+    minting a ticket for these tests now goes through the same production
+    dispatch() call the CLI itself makes, just without the launchd process
+    wrapper, and DryRunSessions still means no real session launches)."""
     _run(home, "init")
     _run(home, "create", "First ticket", "--tier", "1", "--no-nudge", capsys=capsys)
-    _run(home, "dispatch", "--dry-run", capsys=capsys)  # mints T-1 (DryRun: no spawn)
+    cfg = load(str(home))
+    disp.dispatch(cfg, DryRunSessions(), now=store.now_epoch())  # mints T-1
     assert (home / "events" / "T-1.jsonl").exists()
     assert (home / "tickets" / "T-1" / "spec.md").exists()
 

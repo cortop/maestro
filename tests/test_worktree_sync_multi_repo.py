@@ -248,13 +248,16 @@ def test_route_if_merged_removes_worktree_via_owning_repo(home, cfg, monkeypatch
     assert snap_mod.load(home, "M-1").phase == Phase.DONE.value
 
 
-def test_forced_worktree_removal_failure_surfaces_in_report_and_cli_json(
-        home, monkeypatch, tmp_path, capsys):
+def test_forced_worktree_removal_failure_surfaces_in_report(
+        home, cfg, monkeypatch, tmp_path):
+    """GA-4: sync_vcs (and the worktree removal it drives) is one of the twelve
+    hooks a `--dry-run` preview no longer runs, so this exercises it via a real
+    sweep (dispatch(cfg, DryRunSessions(), now=...)) instead of the CLI preview."""
     _, beta_repo = make_origin_and_repo(tmp_path, "beta", base_branch="main")
-    _write_config(home, repos={"beta": _repo_table(beta_repo)}, vcs_sync_interval=0)
+    cfg.repos = {"beta": _repo_table(beta_repo)}
     fake = FakeVCS(statuses={88: {"state": "MERGED", "mergeable": "MERGEABLE",
                                     "head_sha": "sha1", "ci_state": "passing", "failing_checks": []}})
-    monkeypatch.setattr(providers, "get_vcs", lambda c: fake)
+    _use_fake_vcs(cfg, monkeypatch, fake)
 
     _seed(home, "M-2", Phase.AWAITING_CI, repo_name="beta", pr=88)
     # A plain directory git never registered via `worktree add` -- `worktree
@@ -262,15 +265,34 @@ def test_forced_worktree_removal_failure_surfaces_in_report_and_cli_json(
     wt = store.worktree_path(home, "M-2")
     wt.mkdir(parents=True)
 
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    assert "M-2" in report.worktree_removal_errors
+    assert report.worktree_removal_errors["M-2"]  # non-empty message, not vanished
+    # The removal failure must not block the merge outcome itself.
+    assert snap_mod.load(home, "M-2").phase == Phase.DONE.value
+
+
+def test_dispatch_cli_dry_run_never_syncs_vcs_or_removes_worktrees(
+        home, tmp_path, capsys):
+    """The CLI preview counterpart: --dry-run must not touch a merged ticket's
+    worktree or its phase at all -- sync_vcs simply never runs."""
+    _, beta_repo = make_origin_and_repo(tmp_path, "beta", base_branch="main")
+    _write_config(home, repos={"beta": _repo_table(beta_repo)}, vcs_sync_interval=0)
+    _seed(home, "M-2", Phase.AWAITING_CI, repo_name="beta", pr=88)
+    wt = store.worktree_path(home, "M-2")
+    wt.mkdir(parents=True)
+    cursor_path = home / "derived" / ".vcs_cursor.json"
+
     capsys.readouterr()
     rc = cli.main(["--home", str(home), "dispatch", "--dry-run"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
 
-    assert "M-2" in out["worktree_removal_errors"]
-    assert out["worktree_removal_errors"]["M-2"]  # non-empty message, not vanished
-    # The removal failure must not block the merge outcome itself.
-    assert snap_mod.load(home, "M-2").phase == Phase.DONE.value
+    assert out["worktree_removal_errors"] == {}
+    assert wt.exists()  # untouched -- sync_vcs never ran to try (and fail) removing it
+    assert snap_mod.load(home, "M-2").phase == Phase.AWAITING_CI.value  # unchanged
+    assert not cursor_path.exists()
 
 
 # --- AC5: one repo's fetch failure never stalls sibling sync or the sweep ---
