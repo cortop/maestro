@@ -72,13 +72,17 @@ maestro set-phase "$KEY" researching --reason "research ticket: beginning explor
     cp "$REPO/.claude/settings.local.json" "$WT/.claude/settings.local.json"
   fi
   if [ -d "$REPO/node_modules" ] && [ ! -e "$WT/node_modules" ]; then
-    # cp -c is an APFS copy-on-write clone (write-isolated, near-instant); cp -al is a
-    # hardlink tree for filesystems without clone support; cp -R is the last-resort deep
-    # copy. The trailing "/." copies node_modules' *contents* into place instead of nesting
-    # a second node_modules inside it, so a rung that half-ran before failing still leaves a
-    # correct tree for the next rung to finish.
+    # cp -c is an APFS copy-on-write clone (write-isolated, near-instant); --reflink=auto is
+    # its GNU/Linux equivalent (CoW on btrfs/xfs, and coreutils falls back to a normal deep
+    # copy itself when the filesystem doesn't support it); cp -R is the last-resort deep copy
+    # for any other cp. Deliberately no hardlink rung: a hardlink shares one inode, so a plain
+    # in-place write (the common case, not just an atomic rename-into-place) mutates both the
+    # worktree's and the source checkout's copies at once -- not write-isolated. The trailing
+    # "/." copies node_modules' *contents* into place instead of nesting a second node_modules
+    # inside it, so a rung that half-ran before failing still leaves a correct tree for the
+    # next rung to finish.
     cp -c -R "$REPO/node_modules/." "$WT/node_modules" 2>/dev/null \
-      || cp -al "$REPO/node_modules/." "$WT/node_modules" 2>/dev/null \
+      || cp --reflink=auto -R "$REPO/node_modules/." "$WT/node_modules" 2>/dev/null \
       || cp -R "$REPO/node_modules/." "$WT/node_modules"
   fi
   maestro set-phase "$KEY" implementing --reason "worktree ready"

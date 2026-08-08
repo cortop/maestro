@@ -73,10 +73,12 @@ def test_no_symlink_and_cp_ladder_guarded_on_both_conditions():
         assert "ln -s" not in text, f"{path}: node_modules symlink is still present"
 
         git_block = _ready_git_block(text)
-        assert 'cp -c -R' in git_block and 'cp -al' in git_block and 'cp -R' in git_block
-        assert git_block.count(" || cp ") + git_block.count("\n    || cp ") >= 1 or \
-            re.search(r"cp -c -R.*?\|\|.*?cp -al.*?\|\|.*?cp -R", git_block, re.DOTALL), \
-            f"{path}: cp -c -R / cp -al / cp -R don't read as one ladder"
+        assert 'cp -c -R' in git_block and 'cp --reflink=auto -R' in git_block and 'cp -R' in git_block
+        assert 'cp -al' not in git_block, \
+            f"{path}: hardlink rung is back -- a hardlink shares one inode, so an in-place " \
+            "write mutates both the worktree's and the source checkout's copies (not write-isolated)"
+        assert re.search(r"cp -c -R.*?\|\|.*?cp --reflink=auto -R.*?\|\|.*?cp -R", git_block, re.DOTALL), \
+            f"{path}: cp -c -R / cp --reflink=auto -R / cp -R don't read as one ladder"
         assert '[ -d "$REPO/node_modules" ]' in git_block
         assert '[ ! -e "$WT/node_modules" ]' in git_block
 
