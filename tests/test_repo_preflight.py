@@ -489,7 +489,12 @@ def test_no_cap_set_spawns_all_four_in_one_sweep(home, tmp_path):
 
 # --- MR-5 AC6: unknown-repo-name + missing-reconcile-skill are WARNINGS -----
 
-def test_doctor_warns_on_unknown_repo_name_and_missing_reconcile_skill(home, tmp_path, capsys):
+def test_doctor_warns_on_unknown_repo_name_and_missing_reconcile_skill(
+        home, tmp_path, capsys, monkeypatch):
+    # GA-15: point the user-scope fallback at an empty tmp dir -- otherwise this
+    # test's outcome would depend on whatever's actually in the developer's real
+    # ~/.claude/commands (e.g. after they ran `install-commands --user` for real).
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "empty-user-commands"))
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True,

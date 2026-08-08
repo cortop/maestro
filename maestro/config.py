@@ -43,6 +43,10 @@ class Config:
     runaway_spawns_per_hour: int | None = None
     repo_path: str | None = None           # primary repo the reconciler builds in
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
+    # GA-15: override for `maestro install-commands --user` / the doctor check's
+    # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
+    # env var takes precedence over this when set -- see skills_install.user_commands_dir).
+    user_commands_dir: str | None = None
     # [repos.<name>] tables: name -> {path, slug, base_branch, branch_prefix, default}.
     # Optional -- when empty, repos.resolve() synthesizes an implicit default binding
     # from repo_path/branch_prefix so every existing single-repo config works untouched.
@@ -135,6 +139,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
+        cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         raw_repos = data.get("repos", {})
         if isinstance(raw_repos, dict):
             for name, table in raw_repos.items():

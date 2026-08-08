@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, event_log, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -797,6 +797,23 @@ def cmd_local_backup(args) -> int:
     return 0
 
 
+def cmd_install_commands(args) -> int:
+    """GA-15: idempotently install the six per-phase reconcile command files —
+    ``--repo <name>`` copies them into a configured repo's checkout,
+    ``--user`` symlinks them into the user commands directory instead (for a
+    repo the board doesn't own). Replaces DOGFOOD.md's old "vendor by hand"
+    step."""
+    cfg = _cfg(args)
+    if bool(args.repo) == bool(args.user):
+        print("error: exactly one of --repo <name> or --user is required", file=sys.stderr)
+        return 2
+    if args.user:
+        _print(skills_install.install_user(cfg))
+    else:
+        _print(skills_install.install_repo(cfg, args.repo))
+    return 0
+
+
 def cmd_restore(args) -> int:
     """Restore a backup tarball into the home, then refold snapshots + dashboards."""
     cfg = _cfg(args)
@@ -917,6 +934,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("local-backup", cmd_local_backup,
              "[agent] back up a mode=\"local\" ticket's target dir before writing in place")
     sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
+    sp = add("install-commands", cmd_install_commands,
+             "install the six per-phase maestro-reconcile-*.md commands into a repo or user dir")
+    sp.add_argument("--repo", default=None,
+                    help="[repos.<name>] (or 'default' for the legacy repo_path) to copy into")
+    sp.add_argument("--user", action="store_true",
+                    help="symlink into the user commands directory instead of a repo checkout")
+
     sp = add("restore", cmd_restore, "restore a backup tarball into the home")
     sp.add_argument("archive", nargs="?", default=None,
                     help="tarball path to restore (default: latest)")

@@ -19,6 +19,10 @@ tui = ["textual>=0.50"]
 maestro = "maestro.cli:main"
 
 [tool.hatch.build.targets.wheel]
+# `maestro/_skill_commands/` holds symlinks into `.claude/commands/` (the
+# `install-commands` verb's payload, GA-15) -- packaging "maestro" carries them
+# into the wheel automatically; hatchling dereferences symlinks into real file
+# content when it builds, so `importlib.resources` finds real files either way.
 packages = ["maestro"]
 
 [tool.pytest.ini_options]
