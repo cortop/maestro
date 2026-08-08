@@ -44,16 +44,16 @@ If the snapshot shows pending inbox commands, fold them before deciding:
 ## `implementing`: code the ACs, prove them, open a PR
 
 **If `MODE == local`** (AD-6 — a plain, non-git target directory): you are (or the dispatcher
-cd'd you) directly in `$REPO`, the resolved target dir itself — no worktree, no branch, no PR.
-1. Read the spec's Intent + AC and the relevant files in `$REPO`.
+cd'd you) directly in `<REPO>`, the resolved target dir itself — no worktree, no branch, no PR.
+1. Read the spec's Intent + AC and the relevant files in `<REPO>`.
 2. **Before writing anything**, back up the target — the compensating control for skipping the
    PR review checkpoint (idempotent per reconcile step; a crash-and-respawn mid-step does not
    create a second tarball):
    ```bash
    maestro local-backup "$KEY"
    ```
-3. Make the edits directly in `$REPO`.
-4. **Prove it.** Where `$REPO` has a real test/lint surface, run it exactly as the `git` path
+3. Make the edits directly in `<REPO>`.
+4. **Prove it.** Where `<REPO>` has a real test/lint surface, run it exactly as the `git` path
    does below and don't proceed until green. A plain-file target (a notes vault, a skill dir)
    usually has none — for those, cite the concrete evidence instead: the diff you made, or a
    read-back of the written file confirming its content matches the AC.
@@ -66,22 +66,28 @@ cd'd you) directly in `$REPO`, the resolved target dir itself — no worktree, n
    **Done when:** `maestro local-backup` ran before the first edit, every spec AC has a
    `verify-ac` attestation, and `maestro finalize "$KEY"` has appended its event. Then exit.
 
-**If `MODE == git`** (default): you are (or the dispatcher cd'd you) in `$MHOME/worktrees/$KEY`
-(if the worktree is missing, recreate it as in the `ready` phase file — `worktree add` adopts
-the existing `${PREFIX}${KEY}` branch).
+**If `MODE == git`** (default): you are (or the dispatcher cd'd you) in `<MHOME>/worktrees/<KEY>`
+— call this directory **`<WT>`** for the rest of this file (if the worktree is missing, recreate
+it as in the `ready` phase file — `worktree add` adopts the existing `<PREFIX>$KEY` branch).
+`<REPO>`, `<BASE>`, `<PREFIX>`, `<SLUG>` and `<WT>` are, exactly like `<MHOME>`/`<KEY>` above,
+literal values you already hold from the preamble's two `maestro env` calls — every command below
+substitutes them directly when you type it; none is a shell variable a fenced line expands.
 
 **Step 0 — sync with the base branch (also how conflicts get resolved).** You may have landed
 here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` says so). Always
 rebase onto the latest base first, then resolve any conflicts — always resolve, never
 `git rebase --abort`:
 ```bash
-WT="$MHOME/worktrees/$KEY"
-git -C "$REPO" fetch -q origin "$BASE"
-git -C "$WT" rebase "origin/$BASE" || true   # resolve conflicts, then: git -C "$WT" rebase --continue
+git -C <REPO> fetch -q origin "<BASE>"
+git -C <WT> rebase "origin/<BASE>"
 ```
+A conflicting rebase exits non-zero and leaves conflict markers in the tree — resolve them, then
+continue with `git -C <WT> rebase --continue` (its own, single invocation; never
+`git rebase --abort`).
+
 Before resolving a conflicting hunk, recover the intent on **both** sides — read the commit(s)
 (and, if the subject references one, the PR/ticket) that introduced the conflicting lines on
-`origin/$BASE` (`git log -1 --format='%H %s' <sha>`, `gh pr view <n>` if it names a PR number),
+`origin/<BASE>` (`git log -1 --format='%H %s' <sha>`, `gh pr view <n>` if it names a PR number),
 alongside this ticket's own spec Intent — so the merge reconciles what both sides were actually
 trying to do, not just a textual splice.
 
@@ -103,11 +109,21 @@ Otherwise implement the spec's Acceptance criteria:
    **mount the real app** — extend `tests/test_tui_runtime.py` (`async with app.run_test() as
    pilot:` + the binding sweep / `test_every_binding_action_resolves`). Mock only the external
    `claude -p` / network / `launchctl` boundary — test the real thing under review everywhere
-   else. Then (install the `tui` extra too, so TUI runtime tests run instead of skipping):
+   else. The Bash tool's cwd is already `<WT>` (the dispatcher spawns this session there), so the
+   bootstrap below needs no `cd` — install the `tui` extra too, so TUI runtime tests run instead
+   of skipping:
    ```bash
-   cd "$MHOME/worktrees/$KEY" && python3 -m venv .venv 2>/dev/null; .venv/bin/pip -q install -e ".[dev,tui]" >/dev/null 2>&1
+   python3 -m venv .venv
+   .venv/bin/pip install -q -e ".[dev,tui]"
    .venv/bin/python -m pytest -q
    ```
+   **Pytest's permission story, decided:** `.venv/bin/python` and `.venv/bin/pip` stay
+   cwd-anchored above, never absolutized to an absolute path rooted at `<WT>` — `.claude/settings.json` grants
+   only the *relative* prefix `Bash(.venv/bin/:*)`, which matches the command string solely while
+   the shell's cwd is the worktree, and `dispatcher._worker_cwd`
+   (`maestro/dispatcher.py:1369`) already runs this session with `<WT>` as cwd — so the relative
+   form is both correct and the only one that avoids a permission prompt. Do not "fix" this back
+   to an absolute path.
    If red, fix and re-run — stay on this step until green. If you exceed ~`max_impl_turns`
    edit/test cycles without converging: `maestro fail "$KEY" "non-converging: <why>"` and exit.
 3. **Adversarial QA loop — an agent that did not write the code independently re-checks each
@@ -116,12 +132,13 @@ Otherwise implement the spec's Acceptance criteria:
    step: it runs entirely via `Agent`-tool sub-agent spawns inside this session, not across
    dispatcher sweeps.
    ```bash
-   git -C "$WT" diff "origin/$BASE" -- . > /tmp/$KEY-qa-diff.txt
+   git -C <WT> diff "origin/<BASE>" -- .
    ```
-   Spawn a **QA** sub-agent (`Agent` tool), briefed with only: the spec's Acceptance criteria
-   list and the diff above — not your implementation reasoning. Its job, per AC: judge PASS or
-   FAIL strictly against what the diff actually does, then record a verdict itself (it must not
-   edit code):
+   The command's own output *is* the diff — read it from the Bash tool's result; never write it
+   to a file. Spawn a **QA** sub-agent (`Agent` tool), briefed with only: the spec's Acceptance
+   criteria list and that diff text — not your implementation reasoning. Its job, per AC: judge
+   PASS or FAIL strictly against what the diff actually does, then record a verdict itself (it
+   must not edit code):
    `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --evidence "<what it checked, what
    it saw in the diff>"` (1-based, in spec order — same indexing as `verify-ac`; this defaults
    to `--axis spec`, i.e. "does the diff satisfy this AC?").
@@ -169,23 +186,34 @@ Otherwise implement the spec's Acceptance criteria:
    `forced_by=<actor>` in the event log — that escape hatch overrides only the unverified-ACs
    gate, not a failing QA verdict, and is for a human override; if you truly cannot verify an
    AC, ask instead of reaching for it yourself.)
-5. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently:
+5. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently.
+   The body's table is sourced from the `verify-ac` calls above (or `maestro snapshot "$KEY"` ->
+   `ac_verified` for the what/where/result):
    ```bash
-   git -C "$MHOME/worktrees/$KEY" add -A && git -C "$MHOME/worktrees/$KEY" commit -q -m "$KEY: <subject>"
-   git -C "$MHOME/worktrees/$KEY" push -q -u origin "${PREFIX}${KEY}"
-   # Body includes a "| AC | Evidence |" table, one row per spec checkbox, sourced from the
-   # verify-ac calls above (or `maestro snapshot "$KEY"` -> ac_verified for the what/where/result).
-   PR_URL=$(gh pr create --repo "$SLUG" --base "$BASE" --head "${PREFIX}${KEY}" --draft \
-            --title "$KEY: <subject>" \
-            --body "<motivation/changes> ## AC-to-evidence
+   git -C <WT> add -A
+   git -C <WT> commit -q -m "$KEY: <subject>"
+   git -C <WT> push -q -u origin "<PREFIX>$KEY"
+   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY" --draft --title "$KEY: <subject>" --body "<motivation/changes> ## AC-to-evidence
 
 | AC | Evidence |
 |----|----------|
 | <ac 1 text> | <what/where/result 1> |
-| <ac 2 text> | <what/where/result 2> |" 2>/dev/null \
-            || gh pr view "${PREFIX}${KEY}" --repo "$SLUG" --json url -q .url)
-   PR_NUM=$(gh pr view "${PREFIX}${KEY}" --repo "$SLUG" --json number -q .number)
-   maestro append "$KEY" --type PrOpened --payload "{\"number\":$PR_NUM,\"url\":\"$PR_URL\",\"draft\":true}" --step-id "pr-$KEY"
+| <ac 2 text> | <what/where/result 2> |"
+   ```
+   If that fails because a PR already exists for this branch (`gh` says so), the PR is already
+   open — fetch its URL instead of retrying the create:
+   ```bash
+   gh pr view "<PREFIX>$KEY" --repo "<SLUG>" --json url -q .url
+   ```
+   Either way, read the PR number next:
+   ```bash
+   gh pr view "<PREFIX>$KEY" --repo "<SLUG>" --json number -q .number
+   ```
+   Neither the URL nor the number is captured into a shell variable — type the values you just
+   read directly into the payload (`<pr-number>`/`<pr-url>` below are exactly that, not a token
+   resolved from `maestro env --key`):
+   ```bash
+   maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr-number>,\"url\":\"<pr-url>\",\"draft\":true}" --step-id "pr-$KEY"
    maestro set-phase "$KEY" awaiting-ci --requeue 300
    ```
    Push normally — never force-push. Let hooks run — never skip them. Test the real behavior,
