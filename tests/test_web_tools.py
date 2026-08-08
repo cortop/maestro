@@ -44,6 +44,33 @@ def test_config_reconcile_web_tools_can_be_disabled(home):
     assert cfg.reconcile_web_tools is False
 
 
+# --- GA-10: reconcile_allowed_tools (board-wide + per-repo) --------------------------
+
+def test_config_reconcile_allowed_tools_defaults_empty(home):
+    cfg = load(str(home))
+    assert cfg.reconcile_allowed_tools == []
+
+
+def test_config_reconcile_allowed_tools_parses_board_wide_list(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nreconcile_allowed_tools = ["Bash(npm test:*)"]\n')
+    cfg = load(str(home))
+    assert cfg.reconcile_allowed_tools == ["Bash(npm test:*)"]
+
+
+def test_config_repos_table_parses_reconcile_allowed_tools(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\n'
+        'reconcile_allowed_tools = ["Bash(cargo test:*)"]\n\n'
+        '[repos.beta]\npath = "/repo/beta"\n')
+    cfg = load(str(home))
+    assert cfg.repos["alpha"]["reconcile_allowed_tools"] == ["Bash(cargo test:*)"]
+    # Unset inherits the board-wide list (it's unioned in at spawn time, not replaced) --
+    # an absent [repos.*] key means "nothing extra", not "no tools at all".
+    assert cfg.repos["beta"]["reconcile_allowed_tools"] == []
+
+
 def _expected_grant(*, web_tools: bool) -> str:
     rules = [f"Bash(maestro {verb}:*)" for verb in _AGENT_TOOL_VERBS]
     if web_tools:
@@ -164,3 +191,67 @@ def test_dispatch_allowed_tools_composes_with_tier_denylist(home):
     assert deny_value == ",".join(tier_denylist(1))
     allow_value = cmd[cmd.index("--allowedTools") + 1]
     assert not (set(deny_value.split(",")) & set(allow_value.split(",")))
+
+
+# --- GA-10: per-repo reconcile_allowed_tools reaches the spawn argv per key ----------
+
+_TWO_REPO_TOML = """\
+[repos.alpha]
+path = "{alpha}"
+reconcile_allowed_tools = ["Bash(cargo test:*)"]
+
+[repos.beta]
+path = "{beta}"
+reconcile_allowed_tools = ["Bash(npm test:*)"]
+"""
+
+
+def _seed_ready_bound(home, key, repo_name, tier=0):
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: {tier}\nrepo: {repo_name}\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": key, "spec_hash": "x", "repo": repo_name}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": Phase.READY.value}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def test_dispatch_per_repo_allowed_tools_reach_their_own_spawn_argv_only(home):
+    """Real-surface QA over a temp MAESTRO_HOME (AD-4): two [repos.*] tables declaring
+    different reconcile_allowed_tools, one ticket bound to each, driven through the real
+    `maestro dispatch` with ONLY subprocess.Popen patched. Each key's captured argv must
+    carry its own repo's tools (plus the board-wide GA-3 grant + WebSearch/WebFetch), not
+    the other repo's, and exactly one --allowedTools flag -- never two."""
+    alpha = home / "alpha-repo"
+    beta = home / "beta-repo"
+    alpha.mkdir()
+    beta.mkdir()
+    (home / "config.toml").write_text(
+        _TWO_REPO_TOML.format(alpha=alpha, beta=beta), encoding="utf-8")
+
+    _seed_ready_bound(home, "A-1", "alpha")
+    _seed_ready_bound(home, "B-1", "beta")
+
+    captured, capture_popen = _capture_popen_cmds()
+    with patch("subprocess.Popen", side_effect=capture_popen):
+        rc = cli.main(["--home", str(home), "dispatch"])
+    assert rc == 0
+    # alpha/beta aren't real git checkouts, so the dispatcher's own repo-preflight/sync
+    # machinery also shells out via subprocess.Popen -- filter down to the two `claude`
+    # reconciler spawns this test actually cares about.
+    claude_cmds = [cmd for cmd in captured if cmd[0] == "claude"]
+    assert len(claude_cmds) == 2
+
+    by_key = {cmd[cmd.index("-n") + 1].removeprefix("reconcile-"): cmd for cmd in claude_cmds}
+    assert set(by_key) == {"A-1", "B-1"}
+
+    for key, other_tool in (("A-1", "Bash(npm test:*)"), ("B-1", "Bash(cargo test:*)")):
+        cmd = by_key[key]
+        assert cmd.count("--allowedTools") == 1, f"{key}: expected exactly one --allowedTools flag"
+        value = cmd[cmd.index("--allowedTools") + 1].split(",")
+        for verb in _AGENT_TOOL_VERBS:
+            assert f"Bash(maestro {verb}:*)" in value
+        assert "WebSearch" in value and "WebFetch" in value
+        assert other_tool not in value, f"{key}'s argv leaked the other repo's tool"
+
+    assert "Bash(cargo test:*)" in by_key["A-1"][by_key["A-1"].index("--allowedTools") + 1]
+    assert "Bash(npm test:*)" in by_key["B-1"][by_key["B-1"].index("--allowedTools") + 1]

@@ -13,10 +13,13 @@ CLI, then exit.
 ## Always: load state first
 ```bash
 KEY="$1"
-eval "$(maestro env | python3 -c 'import sys,json;print("MHOME="+json.load(sys.stdin)["home"])')"
+maestro env               # -> home (board-wide; keyless -- no bound repo to resolve here)
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"   # -> phase, pr, ci, failure_count, open_questions
 ```
+Read the JSON above and hold `home` as MHOME for the rest of this file — no shell variable
+assignment; this preamble runs no `eval`, `python3`, `sed`, or `cat`.
+
 Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
 ## Always: drain the inbox before anything else

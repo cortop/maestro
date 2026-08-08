@@ -560,7 +560,7 @@ def test_dispatch_spawns_with_spec_model_and_effort(home, cfg):
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert "T-1" in report.spawned
-    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d in sessions.spawned}
+    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d, *_ in sessions.spawned}
     assert spawned_map["T-1"] == ("opus", "high")
 
 
@@ -569,7 +569,7 @@ def test_dispatch_spawns_with_config_defaults_when_no_spec_overrides(home, cfg):
     _seed_with_overrides(home, "T-1")
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d in sessions.spawned}
+    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d, *_ in sessions.spawned}
     assert spawned_map["T-1"] == (cfg.reconcile_model, None)
 
 
@@ -581,7 +581,7 @@ def test_dispatch_research_ticket_uses_research_defaults(home):
     _seed_with_overrides(home, "T-1", kind="research")
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d in sessions.spawned}
+    spawned_map = {k: (m, e) for k, _p, _c, m, e, _d, *_ in sessions.spawned}
     assert spawned_map["T-1"] == ("opus", "high")
 
 

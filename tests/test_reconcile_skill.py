@@ -2,22 +2,29 @@
 disclosure) -- one command per phase instead of a single ~17KB file every reconciler
 loaded in full regardless of what its phase needed.
 
-The preamble resolves REPO/SLUG/BASE/PREFIX per-ticket via `maestro env --key` (falling
-back to the legacy repo_path/branch_prefix fields for unbound tickets / single-repo
-homes) instead of one global `maestro env` eval; every worktree/rebase `origin/main` and
-every hardcoded `--repo cortop/maestro` gh call is gone. These tests cover: (1) a static
-hardcode ban over every phase file's both copies, (2) mirror-sync between them per phase,
-(3)/(4) the real env --key contract for two-repo and legacy single-repo shapes -- proven
-by running the preamble's *actual* extracted eval code, not a re-typed copy, (5) the
-Makefile `reconcile:` recipe, and (6) the dispatcher's per-phase command routing.
+GA-10: the preamble is eval-free. It still resolves REPO/SLUG/BASE/PREFIX/MODE per-ticket
+via the real `maestro env --key` (falling back to the legacy repo_path/branch_prefix
+fields for unbound tickets / single-repo homes) and MHOME via the key-less `maestro env`,
+but no longer pipes either through `eval "$(... | python3 -c '...')"` to bind shell
+variables -- a reconciler in a bound repo would otherwise stall on line 1 unless that
+repo granted `Bash(eval:*)`/`Bash(python3:*)`/`Bash(sed:*)`/`Bash(cat:*)`, and
+`Bash(eval:*)` structurally voids both the tier denylist (AD-1) and the T-21
+home-deletion hook (neither matches inside a command substitution). The preamble instead
+names the exact JSON field keys the two `maestro env` calls print and tells the agent to
+hold them as literals, then loads spec.md/context.md with the Read tool -- no shell
+command reads a file in any preamble any more either. Every worktree/rebase
+`origin/main` and every hardcoded `--repo cortop/maestro` gh call is still gone (T-22's
+original MR-6 guarantee, untouched by this rewrite). These tests cover: (1) a static
+hardcode/eval/python3/sed/cat ban over every phase file's both copies, (2) mirror-sync
+between them per phase, (3)/(4) the real env --key contract for two-repo and legacy
+single-repo shapes -- proven against the real CLI, not a re-typed copy of its logic,
+(5) the Makefile `reconcile:` recipe, and (6) the dispatcher's per-phase command routing.
 """
 from __future__ import annotations
 
-import os
+import json
 import re
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from maestro import config as config_mod
@@ -60,42 +67,14 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def _preamble_block(text: str) -> str:
-    """The bash code block under '## Always: load state first', where
-    REPO/SLUG/BASE/PREFIX/MHOME get resolved."""
+    """The bash code block under '## Always: load state first' -- the real `maestro
+    env`/`maestro env --key`/`observe-spec`/`snapshot` calls the agent runs; it contains
+    no `eval`/`python3`/`sed`/`cat` any more (GA-10) -- REPO/SLUG/BASE/PREFIX/MODE/MHOME
+    are held as literals the agent reads out of the JSON these commands print, not shell
+    variables a preamble line assigns."""
     m = re.search(r"## Always: load state first\n.*?```bash\n(.*?)```", text, re.DOTALL)
     assert m, "could not find the preamble bash block"
     return m.group(1)
-
-
-def _extract_transformer(preamble: str, needle: str) -> str:
-    """Pull the python3 -c '...' script out of the one `eval "$(...)"` line in
-    *preamble* containing *needle* -- the real code, not a re-typed copy."""
-    for line in preamble.splitlines():
-        if needle in line and "python3 -c" in line:
-            m = re.search(r"python3 -c '(.*)'\)\"\s*$", line)
-            assert m, f"could not parse the python3 transform out of: {line!r}"
-            return m.group(1)
-    raise AssertionError(f"no eval line containing {needle!r} found in preamble:\n{preamble}")
-
-
-def _run_preamble_eval(script: str, json_text: str, var_names: list[str]) -> dict:
-    """Actually `eval "$(cat <json> | python3 <script>)"` in a real bash subprocess
-    (the same construct the skill uses) and echo back the resulting shell vars."""
-    workdir = Path(tempfile.mkdtemp())
-    try:
-        json_file = workdir / "cli_output.json"
-        json_file.write_text(json_text, encoding="utf-8")
-        py_file = workdir / "transform.py"
-        py_file.write_text(script, encoding="utf-8")
-        echoes = "\n".join(f'echo "{v}=${{{v}}}"' for v in var_names)
-        bash_script = workdir / "eval_test.sh"
-        bash_script.write_text(
-            f'eval "$(cat {json_file} | python3 {py_file})"\n{echoes}\n', encoding="utf-8")
-        proc = subprocess.run(["bash", str(bash_script)], capture_output=True, text=True,
-                              check=True)
-        return dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +146,24 @@ def test_gh_pr_calls_use_repo_slug_and_base():
 
 
 def test_preamble_resolves_via_env_key_for_repo_aware_phases():
+    """GA-10: no `eval`/`python3`/`sed`/`cat` anywhere in the preamble block, and no
+    `VAR=` shell assignment either -- `maestro env --key`/`maestro env` are still run for
+    real, but REPO/SLUG/BASE/PREFIX/MODE/MHOME are named as the JSON field keys
+    (repo_path/slug/base_branch/branch_prefix/mode/home) the agent reads with the Read
+    tool and holds as literals, not variables a preamble line binds."""
     for phase in REPO_AWARE_PHASE_FILES:
         for path in (_commands_path(phase), _skills_path(phase)):
-            preamble = _preamble_block(_strip_frontmatter(path.read_text()))
+            text = path.read_text()
+            preamble = _preamble_block(_strip_frontmatter(text))
             assert "maestro env --key" in preamble
+            assert "maestro env" in preamble  # the key-less, board-wide call
+            for banned in ("eval", "python3", "sed", "cat"):
+                assert banned not in preamble, f"{path}: preamble still shells out to {banned}"
             for var in ("REPO=", "SLUG=", "BASE=", "PREFIX=", "MHOME="):
-                assert var in preamble, f"{path}: preamble never assigns {var.rstrip('=')}"
+                assert var not in preamble, f"{path}: preamble still assigns {var} via shell"
+            for field in ("repo_path", "slug", "base_branch", "branch_prefix", "mode", "home"):
+                assert f"`{field}`" in text, \
+                    f"{path}: never names the `{field}` JSON field the agent must read"
 
 
 def test_preamble_never_shadows_the_real_home():
@@ -198,13 +189,22 @@ def test_preamble_never_shadows_the_real_home():
 
 def test_passive_phase_preamble_skips_unused_repo_vars():
     """No-op pruning (AC3): awaiting-ci/in-review/degraded/terminating never touch the
-    bound repo, so their shared file's preamble resolves only MHOME, not
-    REPO/SLUG/BASE/PREFIX -- lines that would never change what the file does."""
+    bound repo, so their shared file's preamble resolves only MHOME (the key-less
+    `maestro env`), never calls `maestro env --key`, and never names
+    REPO/SLUG/BASE/PREFIX -- lines that would never change what the file does. GA-10:
+    also no `eval`/`python3`/`sed`/`cat`, and no `VAR=` shell assignment."""
     for path in (_commands_path("passive"), _skills_path("passive")):
-        preamble = _preamble_block(_strip_frontmatter(path.read_text()))
-        assert "MHOME=" in preamble
-        for var in ("REPO=", "SLUG=", "BASE=", "PREFIX="):
+        text = path.read_text()
+        preamble = _preamble_block(_strip_frontmatter(text))
+        assert "maestro env" in preamble
+        assert "maestro env --key" not in preamble
+        for banned in ("eval", "python3", "sed", "cat"):
+            assert banned not in preamble, f"{path}: preamble still shells out to {banned}"
+        for var in ("REPO=", "SLUG=", "BASE=", "PREFIX=", "MHOME="):
             assert var not in preamble, f"{path}: preamble resolves unused {var.rstrip('=')}"
+        for name in ("REPO", "SLUG", "BASE", "PREFIX"):
+            assert name not in preamble, f"{path}: preamble resolves unused {name}"
+        assert "`home`" in text, f"{path}: never names the `home` JSON field"
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +427,11 @@ slug = "acme/beta"
 """
 
 
-def test_preamble_eval_resolves_bound_repo_for_two_repo_home(home, capsys):
+def test_preamble_env_key_resolves_bound_repo_for_two_repo_home(home, capsys):
+    """GA-10: the preamble names `maestro env --key`'s real JSON field keys
+    (repo_path/slug/base_branch/branch_prefix) as the literals REPO/SLUG/BASE/PREFIX --
+    proven here against the real CLI output, not a re-typed copy of its logic (there is
+    no shell transform left to extract and run; the agent reads this JSON directly)."""
     (home / "config.toml").write_text(MULTI_REPO_TOML, encoding="utf-8")
     cfg = config_mod.load(str(home))
     assert cli_main(["--home", str(home), "create", "Multi-repo reconcile test",
@@ -436,16 +440,17 @@ def test_preamble_eval_resolves_bound_repo_for_two_repo_home(home, capsys):
 
     capsys.readouterr()
     assert cli_main(["--home", str(home), "env", "--key", "X-3"]) == 0
-    env_key_json = capsys.readouterr().out
+    result = json.loads(capsys.readouterr().out)
 
+    # The exact field names the triaging preamble's prose tells the agent to hold as
+    # REPO/SLUG/BASE/PREFIX -- every other repo-aware phase file names the same fields.
     preamble = _preamble_block(_strip_frontmatter(_commands_path("triaging").read_text()))
-    transform = _extract_transformer(preamble, "maestro env --key")
-    result = _run_preamble_eval(transform, env_key_json, ["REPO", "SLUG", "BASE", "PREFIX"])
+    assert "maestro env --key" in preamble
 
-    assert result["REPO"] == "/repo/beta"
-    assert result["SLUG"] == "acme/beta"
-    assert result["BASE"] == "main"
-    assert result["PREFIX"] == "maestro/"
+    assert result["repo_path"] == "/repo/beta"
+    assert result["slug"] == "acme/beta"
+    assert result["base_branch"] == "main"
+    assert result["branch_prefix"] == "maestro/"
 
 
 # ---------------------------------------------------------------------------
@@ -459,13 +464,14 @@ branch_prefix = "legacy/"
 """
 
 
-def test_preamble_eval_back_compat_single_repo_home(home, capsys):
+def test_preamble_env_key_back_compat_single_repo_home(home, capsys):
     """No [repos.*] tables at all -- just the legacy single-repo config fields.
-    An unbound ticket must still resolve REPO/PREFIX (from env --key, falling back
-    to the legacy fields) and MHOME (from the key-less env call) exactly as before --
-    and, since the preamble no longer assigns HOME=, the shell's real $HOME must
-    survive untouched (the GA-1 fix: a shadowed HOME detaches git/gh from
-    ~/.gitconfig / ~/.config/gh inside the same bash block)."""
+    An unbound ticket must still resolve REPO/PREFIX (from `maestro env --key`,
+    falling back to the legacy fields) and MHOME (from the key-less `maestro env`
+    call) exactly as before, proven against the real CLI output. GA-10: the preamble
+    no longer assigns a shell `HOME=` at all (nothing to shadow the real $HOME with
+    any more) -- that structural guarantee is covered by
+    test_preamble_never_shadows_the_real_home, not re-proven here."""
     (home / "config.toml").write_text(LEGACY_SINGLE_REPO_TOML, encoding="utf-8")
     cfg = config_mod.load(str(home))
     assert cfg.repos == {}, "this home must have no [repos.*] tables (legacy shape)"
@@ -476,25 +482,15 @@ def test_preamble_eval_back_compat_single_repo_home(home, capsys):
 
     capsys.readouterr()
     assert cli_main(["--home", str(home), "env", "--key", "X-9"]) == 0
-    env_key_json = capsys.readouterr().out
+    key_result = json.loads(capsys.readouterr().out)
 
     capsys.readouterr()
     assert cli_main(["--home", str(home), "env"]) == 0
-    env_json = capsys.readouterr().out
+    home_result = json.loads(capsys.readouterr().out)
 
-    preamble = _preamble_block(_strip_frontmatter(_commands_path("triaging").read_text()))
-    key_transform = _extract_transformer(preamble, "maestro env --key")
-    home_transform = _extract_transformer(preamble, "maestro env |")
-
-    key_result = _run_preamble_eval(key_transform, env_key_json, ["REPO", "PREFIX"])
-    home_result = _run_preamble_eval(home_transform, env_json, ["MHOME", "HOME"])
-
-    assert key_result["REPO"] == cfg.repo_path
-    assert key_result["PREFIX"] == cfg.branch_prefix
-    assert home_result["MHOME"] == str(home)
-    # The preamble never assigns HOME= any more -- the subprocess's $HOME must still be
-    # the real ambient one, not the maestro home.
-    assert home_result["HOME"] == os.environ["HOME"]
+    assert key_result["repo_path"] == cfg.repo_path
+    assert key_result["branch_prefix"] == cfg.branch_prefix
+    assert home_result["home"] == str(home)
 
 
 # ---------------------------------------------------------------------------

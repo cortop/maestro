@@ -12,7 +12,9 @@ from conftest import seed_ticket
 
 
 def _spawned_by_key(sessions):
-    return {k: (m, e, d) for k, _p, _c, m, e, d in sessions.spawned}
+    # GA-10 appended a 7th (allowed_tools) element -- *_ swallows it without pinning
+    # this unpack to a fixed tuple length.
+    return {k: (m, e, d) for k, _p, _c, m, e, d, *_ in sessions.spawned}
 
 
 def _seed(cfg, key, title, *, phase, tier):
@@ -177,5 +179,5 @@ def test_tier_column_renders_from_spec_tier_end_to_end(home, cfg):
     wide_cfg = replace(cfg, max_concurrency=10)
     report2 = disp.dispatch(wide_cfg, sessions, now=2000)
     assert "Z-2" in report2.spawned
-    spawned_by_key = {k: (m, e, d) for k, _p, _c, m, e, d in sessions.spawned}
+    spawned_by_key = {k: (m, e, d) for k, _p, _c, m, e, d, *_ in sessions.spawned}
     assert "Bash(gh pr merge:*)" in spawned_by_key["Z-2"][2]

@@ -113,6 +113,24 @@ def tier_denylist(tier: int) -> list[str]:
     return ["Bash(gh pr merge:*)"] if tier >= 1 else []
 
 
+def resolved_allowed_tools(cfg: Config, binding) -> list[str]:
+    """Per-key --allowedTools additions (GA-10): the board-wide
+    ``reconcile_allowed_tools`` list unioned with *binding*'s own
+    ``reconcile_allowed_tools`` -- an unset/empty repo list simply contributes
+    nothing extra, so it inherits the board-wide list rather than replacing it.
+    Threaded through ``sessions.spawn`` per key, beside ``tier_denylist``, and
+    merged by the session backend with the process-wide base grant (maestro CLI
+    verbs + ``reconcile_web_tools``) into exactly ONE ``--allowedTools`` flag
+    (see ``sessions.ClaudeCliSessions.spawn``).
+    """
+    merged = list(cfg.reconcile_allowed_tools)
+    if binding is not None:
+        for tool in binding.reconcile_allowed_tools:
+            if tool not in merged:
+                merged.append(tool)
+    return merged
+
+
 def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
            current_spec_hash: str | None, now: float,
            blocked_dep: bool = False, tier: int = 1) -> DueResult:
@@ -1311,8 +1329,9 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
             prompt = f"{command} {key}"
             model, effort = _resolve_model_effort(cfg, key)
             disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
+            allowed_tools = resolved_allowed_tools(cfg, bindings_by_key.get(key))
             sessions.spawn(key, prompt, cwd, model=model, effort=effort,
-                           disallowed_tools=disallowed_tools)
+                           disallowed_tools=disallowed_tools, allowed_tools=allowed_tools)
             spawned.append(key)
             decisions[key]["outcome"] = "spawned"
             prev = ledger.get(key)

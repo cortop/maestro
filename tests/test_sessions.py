@@ -153,7 +153,9 @@ def test_dryrun_records_model_and_effort():
     from pathlib import Path
     s = DryRunSessions()
     s.spawn("T-1", "prompt", Path("/tmp"), model="opus", effort="high")
-    key, prompt, cwd, model, effort, disallowed = s.spawned[0]
+    # GA-10 appended a 7th (allowed_tools) element -- swallow it with *_ rather than
+    # pin this unpack to a fixed tuple length (see DryRunSessions.spawned's docstring).
+    key, prompt, cwd, model, effort, disallowed, *_ = s.spawned[0]
     assert key == "T-1"
     assert model == "opus"
     assert effort == "high"

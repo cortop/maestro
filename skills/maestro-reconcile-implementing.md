@@ -13,25 +13,31 @@ handles `implementing`. You are a top-level session, so you may use the `Agent` 
 how the Implementer↔QA loop below runs.
 
 ## Always: load state first
-Resolve this ticket's bound repo — REPO/SLUG/BASE/PREFIX/MODE come from `maestro env --key`, which
+Resolve this ticket's bound repo and the board-wide home as literals — this preamble runs no
+`eval`, `python3`, `sed`, or `cat`. REPO/SLUG/BASE/PREFIX/MODE come from `maestro env --key`, which
 can differ per ticket in a multi-repo home (single-repo homes fall back to the legacy
-`repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME, which is board-wide
-and comes from the key-less `maestro env`. `MODE` is `git` (default — worktree/branch/PR, the
-rest of this doc unless said otherwise) or `local` (AD-6 — a plain directory, e.g. a notes vault
-or `~/.claude` for self-editing skills, with no branch/PR path; called out explicitly below
-wherever it changes what you do):
+`repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME and
+QA_STANDARDS_AXIS, which are board-wide and come from the key-less `maestro env`. `MODE` is `git`
+(default — worktree/branch/PR, the rest of this doc unless said otherwise) or `local` (AD-6 — a
+plain directory, e.g. a notes vault or `~/.claude` for self-editing skills, with no branch/PR
+path; called out explicitly below wherever it changes what you do):
 ```bash
 KEY="$1"
-eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+(d["repo_path"] or "")+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"]+"\nMODE="+d["mode"])')"
-eval "$(maestro env | python3 -c 'import sys,json;d=json.load(sys.stdin);print("MHOME="+d["home"]+"\nQA_STANDARDS_AXIS="+str(bool(d.get("qa_standards_axis"))).lower())')"
+maestro env --key "$KEY"   # -> repo_path/slug/base_branch/branch_prefix/mode/reconcile_command
+maestro env                # -> home/qa_standards_axis (board-wide; keyless)
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
-sed -n '1,200p' "$MHOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
-cat "$MHOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
-                                                    # failures, CI history, recent impl steps,
-                                                    # dependsOn phases — read this before acting,
-                                                    # it saves re-deriving context from raw events
 ```
+Read the two JSON outputs above and hold their fields as literals for the rest of this file: REPO
+(`repo_path`), SLUG (`slug`), BASE (`base_branch`), PREFIX (`branch_prefix`), MODE (`mode`) from
+the first call; MHOME (`home`) and QA_STANDARDS_AXIS (`qa_standards_axis`) from the second. Then,
+with the **Read** tool — never `cat`/`sed`, this preamble reads no file via the shell — load:
+- `<MHOME>/tickets/<KEY>/spec.md` — desired state (you never edit this)
+- `<MHOME>/derived/context/<KEY>.md` — folded log: verbatim Q&A, phase reasons, failures, CI
+  history, recent impl steps, dependsOn phases — read this before acting, it saves re-deriving
+  context from raw events. It may not exist yet for a brand-new ticket; a Read error there just
+  means no context has been folded yet, not a failure.
+
 If the snapshot shows pending inbox commands, fold them before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
