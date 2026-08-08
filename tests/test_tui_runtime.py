@@ -346,6 +346,56 @@ def test_cmd_modal_shows_phase_commands(seeded_home):
         _check(phase, cmds)
 
 
+def test_needs_you_filter_and_command_modal_offer_approve_for_gated_ticket(home):
+    """GA-21 mounted-app QA: a tier-2 unapproved ticket parked in `implementing`
+    surfaces on the real needs-you filter -- cycled to with real `f` presses,
+    not just relying on it being the default -- and its command modal offers
+    `approve`. An ordinary tier-1 implementing ticket does neither."""
+    seed_ticket(home, "G-1", "gated change", phase="implementing", tier=2)
+    seed_ticket(home, "G-2", "ordinary change", phase="implementing", tier=1)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()  # first _populate()
+
+            # Cycle all the way around with real keypresses -- proves `f` actually
+            # lands back on needs-you, not just that index 0 defaults to it.
+            for _ in range(len(_FILTERS)):
+                await pilot.press("f")
+                await pilot.pause()
+            assert _FILTERS[app._filter_idx][0] == "needs-you"
+            assert app._exception is None
+
+            table = app.query_one("#tickets", DataTable)
+            keys = [str(table.get_row_at(r)[0]) for r in range(table.row_count)]
+            assert "G-1" in keys, f"gated ticket missing from needs-you filter: {keys}"
+            assert "G-2" not in keys, f"ungated ticket wrongly in needs-you filter: {keys}"
+
+            # Open the command modal on the gated ticket -- `approve` must be offered.
+            app._selected_key = "G-1"
+            await app.run_action("cmd")
+            await pilot.pause()
+            assert app._exception is None
+            rows = [str(lbl.content) for lbl in app.screen.query("Label.cmd-row")]
+            assert any("approve" in t for t in rows), f"approve not offered: {rows}"
+            await pilot.press("escape")
+            await pilot.pause()
+
+            # Same modal on the ungated ticket must NOT offer it.
+            app._selected_key = "G-2"
+            await app.run_action("cmd")
+            await pilot.pause()
+            rows2 = [str(lbl.content) for lbl in app.screen.query("Label.cmd-row")]
+            assert not any("approve" in t for t in rows2), f"approve wrongly offered: {rows2}"
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_answer_modal_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-1", "answer", _AnswerModal)  # has open questions
 
@@ -1007,6 +1057,40 @@ def test_notification_fires_on_phase_transition(seeded_home):
             assert len(app._notifications) > notifications_before, (
                 "Expected a warning notification after T-5 entered awaiting-human"
             )
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_notification_fires_once_on_needs_approval_transition(seeded_home):
+    """A ticket entering the tier-2 approval gate (GA-21) toasts exactly once,
+    matching the once-per-transition behavior above -- even though `phase`
+    itself never changes (stays "implementing"), since the gated bit rides
+    along in `_prev_phases` as a second signal per key."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()  # first populate; sets baseline
+            assert app._prev_phases is not None
+
+            # T-3 is already "implementing" (tier 1 by default) in seeded_home;
+            # bumping it to tier 2 on disk gates it without any new event, matching
+            # `gates.spec_tier`'s "a spec edit takes effect next sweep" contract.
+            store.atomic_write(store.spec_path(seeded_home, "T-3"),
+                               "# T-3\napproval_tier: 2\n\n## Intent\nx\n")
+
+            notifications_before = len(app._notifications)
+            app._populate()
+            await pilot.pause()
+            assert len(app._notifications) > notifications_before, (
+                "Expected a warning notification after T-3 entered needs-approval"
+            )
+
+            # A second populate with no further change fires nothing new.
+            count_after_first = len(app._notifications)
+            app._populate()
+            await pilot.pause()
+            assert len(app._notifications) == count_after_first
             assert app._exception is None
 
     asyncio.run(_inner())

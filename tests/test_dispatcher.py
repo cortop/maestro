@@ -26,7 +26,7 @@ def _seed(home, key, phase=Phase.READY):
 def test_active_phase_is_due(home):
     _seed(home, "T-1", Phase.READY)
     snap = snap_mod.load(home, "T-1")
-    res = disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000)
+    res = disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000)
     assert res.due and res.reason == "active"
 
 
@@ -40,16 +40,16 @@ def test_sleeping_phase_not_due_until_signal(home):
     _seed(home, "T-1", Phase.AWAITING_HUMAN)
     _ask(home, "T-1")  # an open question is what makes awaiting-human legitimately sleep
     snap = snap_mod.load(home, "T-1")
-    assert not disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000).due
+    assert not disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000).due
     # inbox arrival wakes it
-    assert disp.is_due(snap, inbox_pending=True, current_spec_hash=snap.spec_hash, now=1000).due
+    assert disp.is_due(home, "T-1", snap, inbox_pending=True, current_spec_hash=snap.spec_hash, now=1000).due
 
 
 def test_spec_edit_wakes_sleeping_ticket(home):
     _seed(home, "T-1", Phase.AWAITING_HUMAN)
     _ask(home, "T-1")
     snap = snap_mod.load(home, "T-1")
-    res = disp.is_due(snap, inbox_pending=False, current_spec_hash="DIFFERENT", now=1000)
+    res = disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash="DIFFERENT", now=1000)
     assert res.due and res.reason == "spec-changed"
 
 
@@ -59,7 +59,7 @@ def test_stranded_awaiting_human_is_due(home, cfg):
     _seed(home, "T-1", Phase.AWAITING_HUMAN)  # bare phase set, never asked
     snap = snap_mod.load(home, "T-1")
     assert not snap.open_questions and not snap.answered_questions
-    res = disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000)
+    res = disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000)
     assert res.due and res.reason == "stranded"
     # A real sweep spawns a reconciler for the stranded ticket (recovery happens there).
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
@@ -71,8 +71,8 @@ def test_requeue_timer_wakes_awaiting_ci(home, cfg):
     ops.requeue(cfg, "T-1", 100)
     snap = snap_mod.load(home, "T-1")
     base = snap.next_requeue_at
-    assert not disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base - 1).due
-    assert disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base + 1).due
+    assert not disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base - 1).due
+    assert disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base + 1).due
 
 
 # --- runaway regression (2026-07-19): a requeue must hold an ACTIVE phase too -----
@@ -102,11 +102,11 @@ def test_requeue_timer_holds_any_non_terminal_phase(home, cfg, phase):
     snap = snap_mod.load(home, "T-1")
     base = snap.next_requeue_at
 
-    held = disp.is_due(snap, inbox_pending=False,
+    held = disp.is_due(home, "T-1", snap, inbox_pending=False,
                        current_spec_hash=snap.spec_hash, now=base - 1)
     assert not held.due and held.reason == "backoff"
 
-    woke = disp.is_due(snap, inbox_pending=False,
+    woke = disp.is_due(home, "T-1", snap, inbox_pending=False,
                        current_spec_hash=snap.spec_hash, now=base + 1)
     assert woke.due and woke.reason == "timer"
 
@@ -372,7 +372,7 @@ def test_ready_ticket_blocked_when_dep_not_done(home, cfg):
     _seed_with_deps(home, "T-dep", Phase.IMPLEMENTING)
     _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
     snap = snap_mod.load(home, "T-1")
-    res = disp.is_due(snap, inbox_pending=False,
+    res = disp.is_due(home, "T-1", snap, inbox_pending=False,
                       current_spec_hash=snap.spec_hash, now=1000, blocked_dep=True)
     assert not res.due
     assert res.reason == "blocked-dep"
@@ -382,7 +382,7 @@ def test_ready_ticket_unblocked_when_dep_done(home, cfg):
     _seed_with_deps(home, "T-dep", Phase.DONE)
     _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
     snap = snap_mod.load(home, "T-1")
-    res = disp.is_due(snap, inbox_pending=False,
+    res = disp.is_due(home, "T-1", snap, inbox_pending=False,
                       current_spec_hash=snap.spec_hash, now=1000, blocked_dep=False)
     assert res.due
     assert res.reason == "active"

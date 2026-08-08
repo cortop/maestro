@@ -362,6 +362,11 @@ def cmd_status(args) -> int:
         counts[s.phase] = counts.get(s.phase, 0) + 1
         if s.phase in {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}:
             waiting.append((k, s.phase, list(s.open_questions.values())))
+        elif disp.needs_approval(cfg.home, k, s):
+            # Not a phase (still "implementing") -- the second field carries the
+            # *reason* it needs you instead, so it's distinguishable from a real
+            # phase value at a glance, same vocabulary as `is_due`'s own reason.
+            waiting.append((k, "needs-approval", []))
     _print({"tickets": len(keys), "by_phase": counts, "needs_you": waiting})
     return 0
 

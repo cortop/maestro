@@ -17,7 +17,7 @@ def test_ask_then_answer_flow(cfg):
     # reconcile #1: triage -> ask -> sleep
     ops.ask(cfg, "T-1", "Can I pick this up?", qid="q1")
     assert snap_mod.load(home, "T-1").phase == Phase.AWAITING_HUMAN.value
-    assert not disp.is_due(snap_mod.load(home, "T-1"), inbox_pending=False,
+    assert not disp.is_due(home, "T-1", snap_mod.load(home, "T-1"), inbox_pending=False,
                            current_spec_hash=disp.spec_hash_on_disk(home, "T-1"), now=1).due
 
     # human answers

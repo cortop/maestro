@@ -181,7 +181,8 @@ def test_is_due_answered_pending_wakes_stuck_ticket(cfg):
     assert snap.phase == Phase.AWAITING_HUMAN.value
     assert snap.answered_questions  # populated by fold
     # Dispatcher must treat this as due even with inbox_pending=False
-    result = is_due(snap, inbox_pending=False, current_spec_hash=None, now=time.time())
+    result = is_due(cfg.home, "T-5", snap, inbox_pending=False, current_spec_hash=None,
+                    now=time.time())
     assert result.due is True
     assert result.reason == "answered-pending"
 
