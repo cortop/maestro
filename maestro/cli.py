@@ -430,10 +430,51 @@ def cmd_ratelimit(args) -> int:
     return 0
 
 
+_SCHEDULE_TASK_FLAGS = ("prompt", "every", "kind", "approval_tier", "priority",
+                        "prefix", "title", "repo", "model", "effort", "notes",
+                        "depends_on", "enabled")
+
+
 def cmd_schedule(args) -> int:
+    """[[scheduled]] tasks: `list` (read-only, the historic default) plus the
+    write actions add/edit/rm/enable/disable, all funneled through
+    `ops.schedule_*` -- this function itself does no load/mutate/write of
+    config.toml, only translates argv into the ops call.
+    """
     cfg = _cfg(args)
-    rows = disp.schedule_status(cfg, store.now_epoch())
-    _print({"scheduled": rows})
+    if args.action == "list":
+        rows = disp.schedule_status(cfg, store.now_epoch())
+        _print({"scheduled": rows})
+        return 0
+    if not args.name:
+        print(f"error: schedule {args.action} requires a task name", file=sys.stderr)
+        return 2
+    try:
+        if args.action == "add":
+            if not args.prompt or not args.every:
+                print("error: schedule add requires --prompt and --every", file=sys.stderr)
+                return 2
+            task = {"name": args.name, "prompt": args.prompt, "every": args.every,
+                    "kind": args.kind or "implementation",
+                    "approval_tier": args.approval_tier if args.approval_tier is not None else 1,
+                    "priority": args.priority if args.priority is not None else 3,
+                    "enabled": args.enabled if args.enabled is not None else True}
+            for field in ("prefix", "title", "repo", "model", "effort", "notes", "depends_on"):
+                task[field] = getattr(args, field)
+            result = ops.schedule_add(cfg, task)
+        elif args.action == "edit":
+            updates = {f: getattr(args, f) for f in _SCHEDULE_TASK_FLAGS if getattr(args, f) is not None}
+            result = ops.schedule_edit(cfg, args.name, updates)
+        elif args.action == "rm":
+            result = ops.schedule_remove(cfg, args.name)
+        elif args.action == "enable":
+            result = ops.schedule_set_enabled(cfg, args.name, True)
+        else:  # "disable"
+            result = ops.schedule_set_enabled(cfg, args.name, False)
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print(result)
     return 0
 
 
@@ -979,8 +1020,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--key", default=None,
                     help="resolve one ticket's repo binding instead of the bare config")
 
-    sp = add("schedule", cmd_schedule, "list config-declared scheduled tasks (name/cadence/last_fired/next_due)")
-    sp.add_argument("action", choices=["list"], nargs="?", default="list")
+    sp = add("schedule", cmd_schedule,
+             "list/add/edit/rm/enable/disable config-declared [[scheduled]] tasks")
+    sp.add_argument("action", choices=["list", "add", "edit", "rm", "enable", "disable"],
+                    nargs="?", default="list")
+    sp.add_argument("name", nargs="?", default=None,
+                    help="task name (required for add/edit/rm/enable/disable)")
+    sp.add_argument("--prompt", default=None, help="add/edit: the minted ticket's intent")
+    sp.add_argument("--every", default=None, help="add/edit: cadence, e.g. 30m/6h/24h/seconds")
+    sp.add_argument("--kind", default=None, choices=["implementation", "research"])
+    sp.add_argument("--approval-tier", dest="approval_tier", type=int, default=None)
+    sp.add_argument("--priority", type=int, default=None)
+    sp.add_argument("--prefix", default=None, help="minted keys become PREFIX-1, PREFIX-2, …")
+    sp.add_argument("--title", default=None)
+    sp.add_argument("--repo", default=None, help="must match a [repos.<name>] table")
+    sp.add_argument("--model", default=None)
+    sp.add_argument("--effort", default=None)
+    sp.add_argument("--notes", default=None)
+    sp.add_argument("--depends-on", dest="depends_on", nargs="+", default=None, metavar="KEY")
+    sp.add_argument("--enabled", dest="enabled", action="store_true", default=None)
+    sp.add_argument("--disabled", dest="enabled", action="store_false", default=None)
 
     sp = add("prune-logs", cmd_prune_logs, "[human] delete stale session logs per retention settings")
     sp.add_argument("key", nargs="?", default=None, help="prune only this ticket's logs")

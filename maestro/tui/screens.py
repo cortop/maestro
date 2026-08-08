@@ -12,7 +12,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ratelimit, snapshot as snap_mod, store
+from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
 from ..dispatcher import schedule_status, spec_tier
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
@@ -489,13 +489,12 @@ class ScheduleScreen(Screen):
             if result is None:
                 return
             cfg = config_mod.load(str(self._home))
-            tasks = self._tasks(cfg)
-            if any(t.get("name") == result["name"] for t in tasks):
-                self.notify(f"A task named {result['name']!r} already exists", severity="warning")
+            try:
+                added = ops.schedule_add(cfg, result)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
                 return
-            tasks.append(result)
-            config_mod.write_scheduled(self._home, tasks)
-            self.notify(f"Added scheduled task {result['name']!r}")
+            self.notify(f"Added scheduled task {added['name']!r}")
             self._refresh()
 
         self.app.push_screen(_ScheduleModal(), _on_dismiss)
@@ -514,13 +513,17 @@ class ScheduleScreen(Screen):
         def _on_dismiss(result: dict | None) -> None:
             if result is None:
                 return
-            # Merge, don't substitute: the modal only renders a subset of a task's
-            # fields, so a wholesale swap would silently drop anything the modal
-            # doesn't know about (e.g. model/effort/notes/depends_on set by hand).
-            merged = {**existing, **result}
-            new_tasks = [merged if t.get("name") == existing.get("name") else t for t in tasks]
-            config_mod.write_scheduled(self._home, new_tasks)
-            self.notify(f"Updated scheduled task {merged['name']!r}")
+            # ops.schedule_edit merges `result` onto the existing task itself --
+            # the modal only renders a subset of a task's fields, so a wholesale
+            # swap would silently drop anything the modal doesn't know about
+            # (e.g. model/effort/notes/depends_on set by hand).
+            cfg2 = config_mod.load(str(self._home))
+            try:
+                updated = ops.schedule_edit(cfg2, self._selected_name, result)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
+            self.notify(f"Updated scheduled task {updated['name']!r}")
             self._refresh()
 
         self.app.push_screen(_ScheduleModal(existing), _on_dismiss)
@@ -530,15 +533,14 @@ class ScheduleScreen(Screen):
             self.notify("Select a task first", severity="warning")
             return
         cfg = config_mod.load(str(self._home))
-        tasks = self._tasks(cfg)
-        found = False
-        for t in tasks:
-            if t.get("name") == self._selected_name:
-                t["enabled"] = not t.get("enabled", True)
-                found = True
-        if not found:
+        existing = next((t for t in self._tasks(cfg) if t.get("name") == self._selected_name), None)
+        if existing is None:
             self.notify("Task not found (config may have changed)", severity="warning")
             return
-        config_mod.write_scheduled(self._home, tasks)
+        try:
+            ops.schedule_set_enabled(cfg, self._selected_name, not existing.get("enabled", True))
+        except store.MaestroError as e:
+            self.notify(str(e), severity="warning")
+            return
         self.notify(f"Toggled {self._selected_name}")
         self._refresh()

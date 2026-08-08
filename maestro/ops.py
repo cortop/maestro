@@ -13,7 +13,8 @@ from pathlib import Path
 from . import backup
 from . import events as E
 from . import context as context_mod
-from . import event_log, inbox, repos as repos_mod, snapshot as snap_mod, store
+from . import config as config_mod
+from . import event_log, inbox, repos as repos_mod, schedule as schedule_mod, snapshot as snap_mod, store
 from .config import Config
 from .dispatcher import spec_hash_on_disk
 from .idempotency import content_hash, step_id
@@ -719,3 +720,102 @@ def archive_done(cfg: Config, *, after: float | None = None, now: float | None =
         _archive_key_files(cfg.home, key)
         moved.append(key)
     return moved
+
+
+# --- schedule (GA-13): the single path to config.write_scheduled ------------
+# Board-wide, not per-ticket-key: these mutate `[[scheduled]]` tasks in
+# config.toml rather than a ticket's event log. Both the CLI `schedule` verbs
+# and the TUI's ScheduleScreen bindings (add/edit/toggle) call these -- neither
+# surface loads/mutates/writes `cfg.scheduled` itself anymore, so the
+# duplicate-name and task-not-found handling can't drift between them.
+
+def _find_scheduled(tasks: list[dict], name: str) -> int:
+    for i, t in enumerate(tasks):
+        if t.get("name") == name:
+            return i
+    return -1
+
+
+def schedule_add(cfg: Config, task: dict) -> dict:
+    """Append a new `[[scheduled]]` task and rewrite config.toml.
+
+    Owns the validation both surfaces need: `name`/`prompt`/`every` are
+    required, `every` must parse (`schedule.parse_every`), and `name` must not
+    already be taken. Raises `store.MaestroError` (never a bare exception) on
+    any of those, so the CLI and TUI can both catch one error type and surface
+    its message as-is.
+    """
+    name = (task.get("name") or "").strip()
+    if not name:
+        raise store.MaestroError("schedule add: 'name' is required")
+    if not task.get("prompt"):
+        raise store.MaestroError("schedule add: 'prompt' is required")
+    every = task.get("every")
+    if not every:
+        raise store.MaestroError("schedule add: 'every' is required")
+    try:
+        schedule_mod.parse_every(every)
+    except ValueError as e:
+        raise store.MaestroError(f"schedule add: {e}") from e
+    tasks = list(cfg.scheduled)
+    if _find_scheduled(tasks, name) >= 0:
+        raise store.MaestroError(f"schedule add: a task named {name!r} already exists")
+    new_task = {**task, "name": name}
+    tasks.append(new_task)
+    config_mod.write_scheduled(cfg.home, tasks)
+    return new_task
+
+
+def schedule_edit(cfg: Config, name: str, updates: dict) -> dict:
+    """Merge `updates` onto the task currently named `name` and rewrite
+    config.toml. A changed `name` in `updates` renames the task (the TUI's edit
+    modal always submits the full field set, `name` included, so this is what
+    makes an in-place rename through it safe). Raises `store.MaestroError` if
+    no task is named `name`, the merged `every` fails to parse, or the merged
+    name is blank or already taken by a different task.
+    """
+    tasks = list(cfg.scheduled)
+    idx = _find_scheduled(tasks, name)
+    if idx < 0:
+        raise store.MaestroError(f"schedule edit: no task named {name!r}")
+    merged = {**tasks[idx], **updates}
+    new_name = (merged.get("name") or "").strip()
+    if not new_name:
+        raise store.MaestroError("schedule edit: 'name' cannot be blank")
+    if merged.get("every"):
+        try:
+            schedule_mod.parse_every(merged["every"])
+        except ValueError as e:
+            raise store.MaestroError(f"schedule edit: {e}") from e
+    for i, t in enumerate(tasks):
+        if i != idx and t.get("name") == new_name:
+            raise store.MaestroError(f"schedule edit: a task named {new_name!r} already exists")
+    merged["name"] = new_name
+    tasks[idx] = merged
+    config_mod.write_scheduled(cfg.home, tasks)
+    return merged
+
+
+def schedule_remove(cfg: Config, name: str) -> dict:
+    """Remove the task named `name` and rewrite config.toml. Raises
+    `store.MaestroError` if no task is named `name`."""
+    tasks = list(cfg.scheduled)
+    idx = _find_scheduled(tasks, name)
+    if idx < 0:
+        raise store.MaestroError(f"schedule rm: no task named {name!r}")
+    removed = tasks.pop(idx)
+    config_mod.write_scheduled(cfg.home, tasks)
+    return removed
+
+
+def schedule_set_enabled(cfg: Config, name: str, enabled: bool) -> dict:
+    """Set `enabled` on the task named `name` in place and rewrite
+    config.toml. Raises `store.MaestroError` if no task is named `name`."""
+    tasks = list(cfg.scheduled)
+    idx = _find_scheduled(tasks, name)
+    if idx < 0:
+        verb = "enable" if enabled else "disable"
+        raise store.MaestroError(f"schedule {verb}: no task named {name!r}")
+    tasks[idx] = {**tasks[idx], "enabled": enabled}
+    config_mod.write_scheduled(cfg.home, tasks)
+    return tasks[idx]

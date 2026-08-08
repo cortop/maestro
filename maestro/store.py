@@ -143,20 +143,42 @@ def file_lock(target: Path) -> Iterator[None]:
             os.close(fd)
 
 
-def atomic_write(target: Path, data: str) -> None:
+def atomic_write(target: Path, data: str, *, follow_symlinks: bool = False) -> None:
     """Write whole-file atomically: temp -> fsync -> rename -> fsync(dir).
 
     A reader (Obsidian, the dispatcher, another agent) always observes either the
     complete old file or the complete new one, never a torn write. See
     https://calvin.loncaric.us/articles/CreateFile.html
+
+    ``follow_symlinks=True`` is opt-in, used only by ``config.write_scheduled``
+    (GA-13 Part B). It resolves a symlinked ``target`` to its real file first, so
+    the temp file lands beside -- and the rename replaces -- the symlink's TARGET,
+    leaving the symlink itself intact. The default (False) is unchanged for every
+    other caller: plain ``os.replace`` unlinks a destination symlink and replaces
+    it with a real file in the symlink's own directory, which is what every other
+    write site (derived/*, cursors, snapshots, claims, dashboards, the
+    deadletter) wants -- resolving symlinks there would move the temp file into
+    someone else's directory and turn a same-filesystem rename into a
+    potentially cross-filesystem one. When ``follow_symlinks=True``, a failed
+    replace (e.g. EXDEV from a cross-filesystem target) is re-raised as a
+    `MaestroError` with a clear message instead of a bare `OSError`, so it can't
+    escape uncaught into a TUI callback.
     """
+    if follow_symlinks and target.is_symlink():
+        target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.parent / f".{target.name}.tmp.{os.getpid()}"
     with tmp.open("w", encoding="utf-8") as f:
         f.write(data)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, target)
+    try:
+        os.replace(tmp, target)
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        if follow_symlinks:
+            raise MaestroError(f"atomic_write: could not replace {target}: {e}") from e
+        raise
     dfd = os.open(str(target.parent), os.O_RDONLY)
     try:
         os.fsync(dfd)

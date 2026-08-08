@@ -320,7 +320,15 @@ implementer = "claude_skill"
 # allowlist here can never drift from the mint-args allowlist in dispatcher.py.
 _SCHEDULED_FIELDS = ("name", "prompt", "every", "approval_tier", "kind", "priority",
                      "prefix", "enabled", "title") + schedule.OPTIONAL_MINT_FIELDS
-_SCHEDULED_BLOCK_RE = re.compile(r"(?ms)^\[\[scheduled\]\]\n(?:(?!^\[).)*")
+# Matches a `[[scheduled]]` header plus ONLY its immediately-following contiguous
+# `key = value` lines -- never blank lines, comments, or another table header.
+# `_serialize_task` never emits a blank line or comment inside one task's block,
+# so this always swallows a machine-written block whole, but stops the instant it
+# hits anything a human added around/between blocks (GA-13 Part C: the old
+# `(?:(?!^\[).)*` body ran all the way to the next `[`-prefixed line, eating any
+# comment written inside or after a trailing scheduled block).
+_SCHEDULED_BLOCK_RE = re.compile(
+    r"(?m)^\[\[scheduled\]\]\n(?:^[A-Za-z_][A-Za-z0-9_]*[ \t]*=[^\n]*\n?)*")
 
 
 def _toml_scalar(v) -> str | None:
@@ -354,8 +362,17 @@ def _serialize_task(task: dict) -> str:
 
 def write_scheduled(home: Path, tasks: list[dict]) -> None:
     """Rewrite the `[[scheduled]]` array-of-tables in config.toml, leaving every
-    other section untouched. The TUI schedule panel's only write path — humans
-    editing config.toml by hand still works, this just re-derives the same blocks.
+    other section — and every comment outside a scheduled block's key/value
+    lines (GA-13 Part C) — untouched. The single write path behind
+    `ops.schedule_*`, used by both the CLI `schedule` verbs and the TUI schedule
+    panel; humans editing config.toml by hand still works, this just re-derives
+    the same blocks.
+
+    Symlink-safe (GA-13 Part B): writes via `store.atomic_write(...,
+    follow_symlinks=True)`, an opt-in kept scoped to this one call site rather
+    than made the default for `atomic_write`'s ~26 other callers — see that
+    function's docstring for the full rationale. A symlinked config.toml keeps
+    its symlink; the write lands in the target file.
     """
     path = config_path(home)
     text = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_CONFIG_TOML
@@ -363,4 +380,5 @@ def write_scheduled(home: Path, tasks: list[dict]) -> None:
     text = text.rstrip("\n") + "\n"
     if tasks:
         text += "\n" + "\n".join(_serialize_task(t) for t in tasks)
-    store.atomic_write(path, text if text.endswith("\n") else text + "\n")
+    store.atomic_write(path, text if text.endswith("\n") else text + "\n",
+                        follow_symlinks=True)
