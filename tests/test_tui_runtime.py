@@ -824,6 +824,30 @@ def test_fleet_screen_reports_spawn_rate_from_health_report(seeded_home):
             content = str(status.content)
             assert "Spawns/hr" in content
             assert "Runaway" in content
+            assert "Spawn floor" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_screen_shows_disabled_spawn_floor_distinguishably(seeded_home):
+    """GA-8: the effective spawn floor renders beside Spawns/hr / Runaway, and a
+    disabled (0) floor reads as an explicit disabled state, not a bare '0'."""
+    (seeded_home / "config.toml").write_text("[maestro]\nmin_spawn_interval = 0\n")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status = app.screen_stack[-1].query_one("#fleet-status", Static)
+            content = str(status.content)
+            assert "Spawn floor" in content
+            assert "disabled" in content
             assert app._exception is None
 
     asyncio.run(_inner())

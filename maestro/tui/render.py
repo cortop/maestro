@@ -74,6 +74,9 @@ def _render_fleet(status: dict, doctor: dict) -> str:
     rate = doctor.get("spawns_last_hour") or {}
     spawns_total = rate.get("total", 0)
     budget = doctor.get("spawn_budget_per_hour", 0)
+    floor = doctor.get("spawn_floor_s")
+    floor_str = ("[yellow]0 (disabled)[/yellow]" if floor == 0
+                 else "—" if floor is None else f"{floor}s")
     runaway = doctor.get("runaway", False)
     runaway_str = ("[red bold]RUNAWAY[/red bold]" if runaway
                    else "[green]ok[/green]")
@@ -103,6 +106,7 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         f"  Stale:           {stale_str}",
         f"  Dead letters:    {dead_str}",
         f"  Spawns/hr:       {spawns_str} / budget {budget}",
+        f"  Spawn floor:     {floor_str}",
         f"  Runaway:         {runaway_str}",
     ]
     rl = doctor.get("rate_limit") or {}

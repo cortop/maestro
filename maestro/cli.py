@@ -955,7 +955,8 @@ def cmd_env(args) -> int:
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
             "max_concurrency": cfg.max_concurrency, "max_impl_turns": cfg.max_impl_turns,
-            "qa_standards_axis": cfg.qa_standards_axis, "providers": cfg.providers})
+            "qa_standards_axis": cfg.qa_standards_axis, "providers": cfg.providers,
+            "spawn_floor_s": disp.spawn_floor(cfg)})
     return 0
 
 
