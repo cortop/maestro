@@ -76,12 +76,19 @@ class SessionManager(Protocol):
 
     def spawn(self, key: str, prompt: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
-              disallowed_tools: list[str] | None = None) -> int | None:
+              disallowed_tools: list[str] | None = None,
+              allowed_tools: list[str] | None = None) -> int | None:
         """Launch a detached reconciler for ``key``; return its pid (or None).
 
         *model* and *effort* override instance defaults when provided.
         *disallowed_tools* is the per-tier tool-surface denylist (see
         ``dispatcher.tier_denylist``) rendered as a ``--disallowedTools`` flag.
+        *allowed_tools* (GA-10) is the per-key --allowedTools additions
+        (``dispatcher.resolved_allowed_tools`` -- the board-wide
+        ``reconcile_allowed_tools`` list unioned with the resolved repo binding's
+        own list); the implementation merges this with its own process-wide base
+        grant (maestro CLI verbs + reconcile_web_tools) into exactly ONE
+        ``--allowedTools`` flag, never two.
         """
 
 
@@ -91,6 +98,7 @@ class ClaudeCliSessions:
     def __init__(self, home: Path, model: str = "sonnet",
                  permission_mode: str | None = "acceptEdits",
                  extra_args: list[str] | None = None,
+                 base_allowed_tools: list[str] | None = None,
                  capture_session_logs: bool = True,
                  session_log_format: str = "stream-json",
                  clock: Callable[[], float] | None = None,
@@ -100,6 +108,11 @@ class ClaudeCliSessions:
         self.model = model
         self.permission_mode = permission_mode
         self.extra_args = extra_args or []
+        # GA-10: the process-wide "always-on" --allowedTools rules (maestro CLI verbs +
+        # reconcile_web_tools, see cli._reconciler_tool_grants) -- bare rules, not a
+        # pre-built "--allowedTools <value>" pair, so spawn() can merge in the per-key
+        # allowed_tools argument and still emit exactly ONE --allowedTools flag.
+        self.base_allowed_tools = base_allowed_tools or []
         self.capture_session_logs = capture_session_logs
         self.session_log_format = session_log_format
         self._clock: Callable[[], float] = clock or store.now_epoch
@@ -112,7 +125,8 @@ class ClaudeCliSessions:
 
     def spawn(self, key: str, prompt: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
-              disallowed_tools: list[str] | None = None) -> int | None:
+              disallowed_tools: list[str] | None = None,
+              allowed_tools: list[str] | None = None) -> int | None:
         session_id = f"{session_name(key)}-{self._clock():.6f}"
         effective_model = model or self.model
         cmd = ["claude", "-p", prompt, "--model", effective_model, "-n", session_name(key)]
@@ -122,7 +136,20 @@ class ClaudeCliSessions:
             cmd += ["--permission-mode", self.permission_mode]
         if disallowed_tools:
             cmd += ["--disallowedTools", ",".join(disallowed_tools)]
+        # GA-10: merge the process-wide base grant with this key's per-repo/board-wide
+        # additions into exactly ONE --allowedTools flag -- never two (an "eval" wrapped
+        # around a second flag, or a genuinely duplicated flag, would silently let the
+        # LAST one win and could widen the grant unintentionally).
+        merged_allowed: list[str] = list(self.base_allowed_tools)
+        for tool in allowed_tools or []:
+            if tool not in merged_allowed:
+                merged_allowed.append(tool)
+        assert "--allowedTools" not in self.extra_args, \
+            "extra_args must never carry --allowedTools -- use base_allowed_tools instead"
+        if merged_allowed:
+            cmd += ["--allowedTools", ",".join(merged_allowed)]
         cmd += self.extra_args
+        assert cmd.count("--allowedTools") <= 1, "spawn argv must carry at most one --allowedTools flag"
         env = dict(os.environ)
         env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
 
@@ -161,14 +188,21 @@ class DryRunSessions:
 
     def __init__(self, active: set[str] | None = None):
         self._active = set(active or set())   # KEYS
-        self.spawned: list[tuple[str, str, str, str | None, str | None, list[str]]] = []
+        # 7-tuple: (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools).
+        # GA-10 appended allowed_tools LAST, after the prior 6-tuple shape -- any later
+        # per-key spawn input (e.g. GA-17's env overlay) appends here too, rather than
+        # opening a second per-key channel. Unpack by name or by negative index, never
+        # assume this stays exactly 7 long.
+        self.spawned: list[tuple[str, str, str, str | None, str | None, list[str], list[str]]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
 
     def spawn(self, key: str, prompt: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
-              disallowed_tools: list[str] | None = None) -> int | None:
-        self.spawned.append((key, prompt, str(cwd), model, effort, list(disallowed_tools or [])))
+              disallowed_tools: list[str] | None = None,
+              allowed_tools: list[str] | None = None) -> int | None:
+        self.spawned.append((key, prompt, str(cwd), model, effort,
+                             list(disallowed_tools or []), list(allowed_tools or [])))
         self._active.add(key)
         return None

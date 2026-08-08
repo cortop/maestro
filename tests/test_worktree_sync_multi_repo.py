@@ -120,7 +120,7 @@ def test_dispatch_spawn_cwd_is_owning_repo_for_bound_pre_worktree_ticket(home, t
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
 
-    cwd_by_key = {k: c for k, _p, c, _m, _e, _d in sessions.spawned}
+    cwd_by_key = {k: c for k, _p, c, _m, _e, _d, *_ in sessions.spawned}
     assert cwd_by_key["U-1"] == str(default_repo)   # unbound -> cfg.repo_path, unchanged
     assert cwd_by_key["B-1"] == str(beta_repo)       # bound -> its own repo, not the default
 

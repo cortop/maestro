@@ -61,20 +61,25 @@ _AGENT_TOOL_VERBS = (
 
 
 def _reconciler_tool_grants(cfg: Config) -> list[str]:
-    """--allowedTools flag for spawned reconcilers.
+    """The process-wide, "always-on" --allowedTools rules for spawned reconcilers.
 
     Always grants the maestro CLI verbs in _AGENT_TOOL_VERBS -- unconditionally,
     not gated behind reconcile_web_tools (that used to also disarm a
     reconciler's own bookkeeping whenever web tools were turned off). Adds
-    WebSearch/WebFetch to the same comma-joined value when reconcile_web_tools
-    is enabled. Per-verb rules are prefix matches on the literal command
-    string, so this only ever matches spawns that omit --home (they do --
-    the home is pinned via the MAESTRO_HOME env var instead, sessions.py).
+    WebSearch/WebFetch when reconcile_web_tools is enabled. Per-verb rules are
+    prefix matches on the literal command string, so this only ever matches
+    spawns that omit --home (they do -- the home is pinned via the
+    MAESTRO_HOME env var instead, sessions.py).
+
+    Returns the bare rule list, NOT a "--allowedTools <value>" pair -- GA-10's
+    per-key reconcile_allowed_tools (dispatcher.resolved_allowed_tools) merges
+    into this same list at spawn time (ClaudeCliSessions.base_allowed_tools),
+    so there is exactly one --allowedTools flag in the final argv, never two.
     """
     rules = [f"Bash(maestro {verb}:*)" for verb in _AGENT_TOOL_VERBS]
     if cfg.reconcile_web_tools:
         rules += ["WebSearch", "WebFetch"]
-    return ["--allowedTools", ",".join(rules)]
+    return rules
 
 
 def _nudge(cfg: Config) -> disp.DispatchReport:
@@ -88,7 +93,7 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     sessions = ClaudeCliSessions(
         cfg.home, model=cfg.reconcile_model,
         permission_mode=cfg.permission_mode,
-        extra_args=_reconciler_tool_grants(cfg),
+        base_allowed_tools=_reconciler_tool_grants(cfg),
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
         unverified_claim_max_age=cfg.unverified_claim_max_age,
@@ -395,7 +400,7 @@ def cmd_dispatch(args) -> int:
         sessions = ClaudeCliSessions(
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
-            extra_args=_reconciler_tool_grants(cfg),
+            base_allowed_tools=_reconciler_tool_grants(cfg),
             session_log_format=cfg.session_log_format,
             unverified_claim_max_age=cfg.unverified_claim_max_age)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run)

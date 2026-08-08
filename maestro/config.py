@@ -74,6 +74,12 @@ class Config:
     research_effort: str = "high"      # effort for kind=research tickets
     default_effort: str | None = None  # global effort default; None = omit --effort entirely
     reconcile_web_tools: bool = True   # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
+    # GA-10: board-wide --allowedTools additions beyond the maestro-verb grant (cli.py's
+    # _AGENT_TOOL_VERBS) and reconcile_web_tools -- e.g. a repo's own git/gh/test surface.
+    # Threaded per key through sessions.spawn (see dispatcher.resolved_allowed_tools), unioned
+    # with the resolved repo's own [repos.<name>] reconcile_allowed_tools, into ONE
+    # --allowedTools flag. Default [] -- today's behavior for every existing home.
+    reconcile_allowed_tools: list = field(default_factory=list)
     # Declarative recurring triggers: [[scheduled]] array-of-tables, each a dict with
     # name/prompt/every (+ optional approval_tier/kind/priority/prefix/enabled).
     scheduled: list = field(default_factory=list)
@@ -147,6 +153,7 @@ def load(home_arg: str | None = None) -> Config:
                     continue
                 raw_cap = table.get("max_spawns_per_sweep")
                 raw_mode = table.get("mode", "git")
+                raw_repo_tools = table.get("reconcile_allowed_tools", [])
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -155,6 +162,10 @@ def load(home_arg: str | None = None) -> Config:
                     "default": bool(table.get("default", False)),
                     "max_spawns_per_sweep": int(raw_cap) if raw_cap is not None else None,
                     "mode": raw_mode if raw_mode in ("git", "local") else "git",
+                    # GA-10: unset (absent from the table) inherits the board-wide
+                    # reconcile_allowed_tools list -- this is unioned in, never a replacement,
+                    # so [] here means "nothing extra beyond board-wide", not "no tools at all".
+                    "reconcile_allowed_tools": raw_repo_tools if isinstance(raw_repo_tools, list) else [],
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -170,6 +181,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.research_effort = m.get("research_effort", cfg.research_effort)
         cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
         cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
+        raw_allowed = m.get("reconcile_allowed_tools", cfg.reconcile_allowed_tools)
+        cfg.reconcile_allowed_tools = raw_allowed if isinstance(raw_allowed, list) else cfg.reconcile_allowed_tools
         cfg.unverified_claim_max_age = int(
             m.get("unverified_claim_max_age", cfg.unverified_claim_max_age))
         raw_scheduled = data.get("scheduled", [])
@@ -224,6 +237,9 @@ max_impl_turns = 20
                                   # spawns/hour (default: derived from the spawn floor
                                   # itself; 0 disables the check)
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
+# reconcile_allowed_tools = ["Bash(npm test:*)"]   # board-wide --allowedTools additions, unioned
+                                  # with the resolved repo's own [repos.<name>]
+                                  # reconcile_allowed_tools (default [] -- no extra grant)
 # unverified_claim_max_age = 86400  # ceiling (s) for honoring an unverifiable ("unknown"
                                     # identity) claim by raw pid liveness before releasing it
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
@@ -293,6 +309,9 @@ implementer = "claude_skill"
                                      # directory (a notes vault, `~/.claude` for self-editing
                                      # skills) with no branch/PR path; the reconciler writes in
                                      # place, backing up the target first (`maestro local-backup`).
+# reconcile_allowed_tools = ["Bash(npm test:*)"]   # this repo's own git/gh/test --allowedTools
+                                     # surface; unset inherits just the board-wide list (unioned,
+                                     # never replaces it)
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""
