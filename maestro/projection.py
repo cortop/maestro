@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import fleet, snapshot as snap_mod, store
-from .dispatcher import list_keys, split_key
+from .dispatcher import list_keys, spec_tier, split_key
 from .statemachine import Phase
 
 _BANNER = (
@@ -64,7 +64,7 @@ def ticket_rows(home: Path, phases: frozenset | None = None) -> list[tuple[str, 
     snaps.sort(key=lambda s: (_PHASE_RANK.get(s.phase, 99), _sort_secondary(s)))
     return [
         (s.key, s.phase, (s.title or "")[:64], _pr_cell(s),
-         s.ci_state or "—", s.tier or "—", str(s.failure_count), s.key)
+         s.ci_state or "—", str(spec_tier(home, s.key)), str(s.failure_count), s.key)
         for s in snaps
     ]
 
@@ -92,7 +92,7 @@ def render(home: Path) -> dict[str, str]:
         for s in sorted(by_phase.get(p.value, []), key=lambda x: split_key(x.key)):
             lines.append(
                 f"| {s.key} | {s.phase} | {(s.title or '')[:64]} | {_link(s)} "
-                f"| {s.ci_state or '—'} | {s.tier or '—'} | {s.failure_count} |"
+                f"| {s.ci_state or '—'} | {spec_tier(home, s.key)} | {s.failure_count} |"
             )
     workstate = "\n".join(lines) + "\n"
 

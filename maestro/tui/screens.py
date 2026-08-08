@@ -13,7 +13,7 @@ from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
 from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ratelimit, snapshot as snap_mod, store
-from ..dispatcher import schedule_status
+from ..dispatcher import schedule_status, spec_tier
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import render_log, render_log_line
@@ -392,7 +392,8 @@ class DetailScreen(Screen):
 
     def _refresh(self) -> None:
         snap = snap_mod.load(self._home, self._key)
-        self.query_one("#ds-detail", Static).update(_render_detail(snap))
+        self.query_one("#ds-detail", Static).update(
+            _render_detail(snap, spec_tier(self._home, self._key)))
         events = event_log.read(self._home, self._key)
         log = self.query_one("#ds-events", RichLog)
         log.clear()

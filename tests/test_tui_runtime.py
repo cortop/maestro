@@ -618,6 +618,56 @@ def test_detail_screen_shows_detail_and_events(seeded_home):
     asyncio.run(_inner())
 
 
+def test_detail_pane_and_screen_render_tier_from_spec(home):
+    """GA-18: the Tier shown in both the compact #detail pane and the full
+    DetailScreen (#ds-detail) comes from `dispatcher.spec_tier` -- including
+    the tier-0 case (the falsy-0 bug: 0 must render '0', never '—') -- not
+    from any snapshot field."""
+    seed_ticket(home, "T-1", "auto-approved change", phase="ready", tier=0)
+    seed_ticket(home, "T-2", "risky change", phase="ready", tier=2)
+
+    def _tier_line(static: Static) -> str:
+        return next(l for l in static.render().plain.splitlines() if "Tier" in l)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+
+            table = app.query_one("#tickets", DataTable)
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            assert app._selected_key == "T-1"
+            line = _tier_line(app.query_one("#detail", Static))
+            assert "0" in line and "—" not in line
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            line = _tier_line(app.screen_stack[-1].query_one("#ds-detail", Static))
+            assert "0" in line and "—" not in line
+            await pilot.press("escape")
+            await pilot.pause()
+
+            table.move_cursor(row=1)
+            await pilot.pause()
+            assert app._selected_key == "T-2"
+            line = _tier_line(app.query_one("#detail", Static))
+            assert "2" in line
+
+            await pilot.press("enter")
+            await pilot.pause()
+            line = _tier_line(app.screen_stack[-1].query_one("#ds-detail", Static))
+            assert "2" in line
+
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_events_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-3", "view_events", EventsScreen)
 

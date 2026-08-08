@@ -126,7 +126,33 @@ def test_ticket_rows_lists_ticket_columns(home):
     assert title == "My feature"
     assert pr == "—"
     assert ci == "—"
+    assert tier == "1"  # no spec.md on disk -> spec_tier's documented fallback
     assert row_key == "T-1"
+
+
+def test_ticket_rows_tier_sourced_from_spec_not_snapshot(home):
+    """The Tier column is rendered from `dispatcher.spec_tier` (the spec on disk),
+    not any snapshot field -- 0/2/malformed all render per spec_tier's contract,
+    with the falsy-0 bug fixed (0 must render as "0", not "—")."""
+    store.atomic_write(store.spec_path(home, "Z-0"), "# Z-0\napproval_tier: 0\n")
+    store.atomic_write(store.spec_path(home, "Z-2"), "# Z-2\napproval_tier: 2\n")
+    store.atomic_write(store.spec_path(home, "Z-3"), "# Z-3\napproval_tier: nope\n")
+    for key in ("Z-0", "Z-2", "Z-3"):
+        event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+        snap_mod.rebuild(home, key)
+
+    rows = {r[0]: r[5] for r in ticket_rows(home)}
+    assert rows["Z-0"] == "0"       # falsy-0 bug: must not render "—"
+    assert rows["Z-2"] == "2"
+    assert rows["Z-3"] == "1"       # malformed -> spec_tier's safe fallback
+
+    # Editing the spec on disk (no new event) changes the rendered tier on the
+    # very next projection read -- the fold never saw a tier-carrying event.
+    events_before = len(event_log.read(home, "Z-0"))
+    store.atomic_write(store.spec_path(home, "Z-0"), "# Z-0\napproval_tier: 2\n")
+    rows = {r[0]: r[5] for r in ticket_rows(home)}
+    assert rows["Z-0"] == "2"
+    assert len(event_log.read(home, "Z-0")) == events_before  # no new event appended
 
 
 def test_ticket_rows_pr_label(home):
@@ -251,12 +277,12 @@ from maestro.tui.detail import render as _render_detail  # noqa: E402
 
 
 def test_render_detail_all_fields_present():
-    """All snapshot fields appear in the detail output."""
+    """All snapshot fields appear in the detail output; tier is passed in by the
+    caller (dispatcher.spec_tier), not read off the snapshot."""
     snap = snap_mod.Snapshot(
         key="T-1",
         phase="implementing",
         title="My feature",
-        tier="1",
         source="inbox/_new",
         pr_number=7,
         pr_url="https://github.com/x/y/pull/7",
@@ -268,7 +294,7 @@ def test_render_detail_all_fields_present():
         open_questions={"q1": "Is this OK?"},
         updated_ts="2026-06-25T00:00:00+00:00",
     )
-    out = _render_detail(snap)
+    out = _render_detail(snap, tier=1)
     assert "My feature" in out
     assert "implementing" in out
     assert "1" in out          # tier
@@ -280,6 +306,16 @@ def test_render_detail_all_fields_present():
     assert "boom" in out
     assert "Is this OK?" in out
     assert "2026-06-25" in out
+
+
+def test_render_detail_tier_zero_renders_as_zero_not_emdash():
+    """The falsy-0 bug: tier 0 (auto-approved) must render '0', never '—'."""
+    snap = snap_mod.Snapshot(key="T-1", phase="ready")
+    out = _render_detail(snap, tier=0)
+    lines = [l for l in out.splitlines() if "Tier" in l]
+    assert lines
+    assert "0" in lines[0]
+    assert "—" not in lines[0]
 
 
 def test_render_detail_missing_values_show_emdash():
@@ -340,7 +376,6 @@ def test_render_detail_valid_markup_with_pr_every_phase(phase):
         key="T-1",
         phase=phase,
         title="My feature",
-        tier="1",
         source="inbox/_new",
         pr_number=15,
         pr_url="https://github.com/cortop/maestro/pull/15",
@@ -352,7 +387,7 @@ def test_render_detail_valid_markup_with_pr_every_phase(phase):
         open_questions={"q1": "Is this OK?"},
         updated_ts="2026-06-25T00:00:00+00:00",
     )
-    _assert_valid_markup(_render_detail(snap))
+    _assert_valid_markup(_render_detail(snap, tier=1))
 
 
 @pytest.mark.parametrize("phase", [p.value for p in Phase])

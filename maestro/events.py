@@ -7,7 +7,6 @@ from __future__ import annotations
 
 # Lifecycle
 TICKET_CREATED = "TicketCreated"        # {title, source, spec_hash, repo}
-TICKET_TRIAGED = "TicketTriaged"        # {tier, classification, phase}
 SPEC_OBSERVED = "SpecObserved"          # {spec_hash}  reconciler folded the current spec
 PHASE_CHANGED = "PhaseChanged"          # {phase, reason, forced_by?}  forced_by: actor who used --force past the AC gate
 FINALIZED = "Finalized"                 # {}  tombstone -> swept to archive

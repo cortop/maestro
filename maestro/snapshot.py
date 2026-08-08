@@ -37,7 +37,6 @@ class Snapshot:
     phase: str = Phase.TRIAGING.value
     observed_seq: int = 0
     spec_hash: str | None = None
-    tier: str | None = None
     title: str | None = None
     source: str | None = None
     pr_number: int | None = None
@@ -167,10 +166,6 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.phase = Phase.TRIAGING.value
         elif t == E.SPEC_OBSERVED:
             s.spec_hash = p.get("spec_hash", s.spec_hash)
-        elif t == E.TICKET_TRIAGED:
-            s.tier = p.get("tier", s.tier)
-            if p.get("phase"):
-                s.phase = Phase(p["phase"]).value
         elif t == E.PHASE_CHANGED:
             s.phase = Phase(p["phase"]).value
             s.failure_count = 0
