@@ -129,7 +129,7 @@ _maestro() {
         dispatch)
           _arguments \
             '(-h --help)'{-h,--help}'[show help]' \
-            '--dry-run[dry run — no sessions launched]' \
+            '--dry-run[read-only preview — no writes except regenerated dashboards]' \
             '--model=[override reconcile_model from config]:model:'
           ;;
         snapshot|events|fold-inbox|inbox-ack|observe-spec|compact|release)

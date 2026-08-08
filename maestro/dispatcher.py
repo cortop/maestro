@@ -262,6 +262,41 @@ def mint_new_tickets(cfg: Config) -> list[str]:
     return minted
 
 
+def _would_mint_keys(home: Path) -> list[str]:
+    """Read-only echo of what ``mint_new_tickets`` would create, for a preview's
+    ``would_mint`` -- reads ``inbox/_new`` (via ``inbox.pending_new``, which does
+    not drain it) and ``.schedule_minted.json``, mirrors the same dedup/existing-
+    key skip rules, but writes nothing: no ``TicketCreated``, no cursor advance,
+    no ``.schedule_minted.json`` update. Two un-keyed pending entries sharing a
+    prefix would collide on the same auto-key if resolved independently (neither
+    has created a ticket dir yet) -- ``claimed`` tracks this preview's own
+    would-be keys so they don't stomp each other."""
+    minted_dedup = store.read_json(home / "derived" / ".schedule_minted.json", {}) or {}
+    would: list[str] = []
+    claimed: set[str] = set()
+    for _idx, entry in inbox.pending_new(home):
+        ticket_args = entry.get("args") or {}
+        dedup = ticket_args.get("dedup")
+        if dedup and dedup in minted_dedup:
+            continue  # already minted this period — guaranteed no-op
+        key = entry.get("key")
+        if not key:
+            prefix = entry.get("prefix") or "T"
+            n = 1
+            while (home / "tickets" / f"{prefix}-{n}").exists() or f"{prefix}-{n}" in claimed:
+                n += 1
+            key = f"{prefix}-{n}"
+        try:
+            store.validate_key(key)
+        except store.MaestroError:
+            continue
+        if event_log.last_seq(home, key) > 0:
+            continue  # already has events -- not a fresh mint (see mint_new_tickets)
+        claimed.add(key)
+        would.append(key)
+    return would
+
+
 def _auto_key(home: Path, prefix: str = "T") -> str:
     n = 1
     while (home / "tickets" / f"{prefix}-{n}").exists():
@@ -1032,6 +1067,7 @@ class DispatchReport:
     repo_blockers_by_repo: dict = field(default_factory=dict)  # {repo name: [blockers]}, MR-5
     hook_errors: dict = field(default_factory=dict)     # hook name -> "ExcType: message"
     worktree_removal_errors: dict = field(default_factory=dict)  # key -> git worktree remove stderr
+    would_mint: list[str] = field(default_factory=list)  # dry_run only: pending_new keys, unminted
 
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
@@ -1120,10 +1156,25 @@ def key_decisions(home: Path, key: str, *, tail: int = 20) -> list[dict]:
     return out[-tail:] if tail else out
 
 
-def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchReport:
+def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = False) -> DispatchReport:
     """One sweep. ``sessions`` decides whether spawns actually launch (use
     ``DryRunSessions`` to record-without-launch). Always idempotent and safe to
     run on a timer — minting and folding are no-ops when nothing changed.
+
+    ``dry_run`` (GA-4) makes the sweep strictly read-only: no ``TicketCreated``
+    (``would_mint`` reports what mint_new_tickets would have minted, read via
+    ``inbox.pending_new`` without draining it), no external-source sync, no
+    scheduled-task fire, no worktree/VCS sync, no backup, no compact/archive/
+    prune, no rate-limit probe or notify, no watchdog reap, and no spawn-ledger
+    or spawn-attempts write (so it can never trip ``max_spawn_attempts`` into a
+    real ``Failed``/``RequeueScheduled``, and never throttles the next real
+    sweep). ``dry_run`` is an explicit, separate flag from the ``sessions``
+    argument -- NEVER infer it from the ``SessionManager`` type: existing direct
+    ``dispatch(cfg, DryRunSessions(), now=...)`` callers (most of this test
+    suite) keep getting a full real sweep, only ``sessions.spawn()`` is a no-op.
+    Only the snapshot refold and ``derived/*`` dashboards (heartbeat, the
+    per-sweep decision ledger) are written either way -- both idempotent/
+    regenerable, never the sole source of truth.
     """
     home = cfg.home
 
@@ -1145,36 +1196,53 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
     from . import repos as repos_mod  # lazy: repos imports us at module load time
 
     hook_errors: dict = {}
-    minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
-    _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
-    scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
-                                cfg, now, default={"fired": []})["fired"]
-    # sync_worktrees preflight-gates itself per repo group now (MR-5) -- no
-    # outer repo_ok gate needed here; a blocked repo skips only its own group.
-    _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg)
-    vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
-    worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
-    _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
-    _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
-    _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
-    _run_hook("ratelimit_probe", hook_errors, ratelimit.probe, cfg, now)
-    _run_hook("notify", hook_errors, notify.maybe_notify, cfg, now)
+    if dry_run:
+        # Strictly read-only (GA-4 option (a)): none of the twelve hooks below
+        # run -- each one either mutates the event log, drains/advances a
+        # cursor, or touches the outside world (network, worktrees, backup
+        # tarballs, notifications). `would_mint` is the one hook-shaped value a
+        # preview still owes the caller, computed by reading (not draining)
+        # inbox/_new instead of calling mint_new_tickets.
+        minted: list[str] = []
+        would_mint = _would_mint_keys(home)
+        scheduled_fired: list[str] = []
+        worktree_removal_errors: dict = {}
+        reaped: list[str] = []
+        pruned_logs = 0
+        pruned_bytes = 0
+        errors: dict = {}
+    else:
+        minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
+        would_mint = []
+        _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
+        scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
+                                    cfg, now, default={"fired": []})["fired"]
+        # sync_worktrees preflight-gates itself per repo group now (MR-5) -- no
+        # outer repo_ok gate needed here; a blocked repo skips only its own group.
+        _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg)
+        vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
+        worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
+        _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
+        _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
+        _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
+        _run_hook("ratelimit_probe", hook_errors, ratelimit.probe, cfg, now)
+        _run_hook("notify", hook_errors, notify.maybe_notify, cfg, now)
 
-    # Watchdog runs before `active` is computed: a hung claim must not count
-    # toward concurrency, and a reaped key needs to be re-fold-visible (fail
-    # appends an event) before this sweep's due-check reads its snapshot.
-    reaped = _run_hook("watchdog", hook_errors, run_watchdog, cfg, now, default=[])
+        # Watchdog runs before `active` is computed: a hung claim must not count
+        # toward concurrency, and a reaped key needs to be re-fold-visible (fail
+        # appends an event) before this sweep's due-check reads its snapshot.
+        reaped = _run_hook("watchdog", hook_errors, run_watchdog, cfg, now, default=[])
 
-    pruned_logs = 0
-    pruned_bytes = 0
-    errors: dict = {}
-    prune_result = _run_hook("prune_tick", hook_errors, prune_logs_tick, cfg, now, default=None)
-    if prune_result:
-        pruned_logs = prune_result.get("pruned_logs", 0)
-        pruned_bytes = prune_result.get("pruned_bytes", 0)
-        per_key_errors = prune_result.get("errors") or {}
-        if per_key_errors:
-            errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
+        pruned_logs = 0
+        pruned_bytes = 0
+        errors = {}
+        prune_result = _run_hook("prune_tick", hook_errors, prune_logs_tick, cfg, now, default=None)
+        if prune_result:
+            pruned_logs = prune_result.get("pruned_logs", 0)
+            pruned_bytes = prune_result.get("pruned_bytes", 0)
+            per_key_errors = prune_result.get("errors") or {}
+            if per_key_errors:
+                errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
 
     active = sessions.list_active()
     due: list[tuple[str, str]] = []
@@ -1294,44 +1362,63 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         for key in capacity_skipped:
             decisions[key]["outcome"] = "capacity_skipped"
 
-        attempts_path = _spawn_attempts_path(home)
-        attempts = store.read_json(attempts_path, {}) or {}
-        attempts_changed = False
+        if dry_run:
+            # No _allow_spawn (it can call ops.fail -> Failed/RequeueScheduled
+            # events, exactly the bug this ticket exists to stop), no real
+            # sessions.spawn(), no ledger/attempts write. Every to_spawn key is
+            # reported as would-spawn; the next REAL sweep decides for itself.
+            spawned = []
+            for key, _reason in to_spawn:
+                spawned.append(key)
+                decisions[key]["outcome"] = "would_spawn"
+        else:
+            attempts_path = _spawn_attempts_path(home)
+            attempts = store.read_json(attempts_path, {}) or {}
+            attempts_changed = False
 
-        spawned = []
-        for key, _reason in to_spawn:
-            if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
+            spawned = []
+            for key, _reason in to_spawn:
+                if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
+                    attempts_changed = True
+                    reaped.append(key)
+                    decisions[key]["outcome"] = "attempts_exhausted"
+                    continue
                 attempts_changed = True
-                reaped.append(key)
-                decisions[key]["outcome"] = "attempts_exhausted"
-                continue
-            attempts_changed = True
-            cwd = _worker_cwd(cfg, key)
-            command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
-            prompt = f"{command} {key}"
-            model, effort = _resolve_model_effort(cfg, key)
-            disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
-            sessions.spawn(key, prompt, cwd, model=model, effort=effort,
-                           disallowed_tools=disallowed_tools)
-            spawned.append(key)
-            decisions[key]["outcome"] = "spawned"
-            prev = ledger.get(key)
-            recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
-            recent.append(now)
-            recent = [t for t in recent if now - t <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
-            ledger[key] = {"last": now, "recent": recent}
+                cwd = _worker_cwd(cfg, key)
+                command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
+                prompt = f"{command} {key}"
+                model, effort = _resolve_model_effort(cfg, key)
+                disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
+                sessions.spawn(key, prompt, cwd, model=model, effort=effort,
+                               disallowed_tools=disallowed_tools)
+                spawned.append(key)
+                decisions[key]["outcome"] = "spawned"
+                prev = ledger.get(key)
+                recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
+                recent.append(now)
+                recent = [t for t in recent if now - t <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
+                ledger[key] = {"last": now, "recent": recent}
 
-        if spawned:
-            # Keep the ledger from growing without bound as keys come and go.
-            known = set(list_keys(home))
-            store.write_json(ledger_path,
-                             {k: v for k, v in ledger.items() if k in known})
-        if attempts_changed:
-            known = set(list_keys(home))
-            store.write_json(attempts_path,
-                             {k: v for k, v in attempts.items() if k in known})
+            if spawned:
+                # Keep the ledger from growing without bound as keys come and go.
+                known = set(list_keys(home))
+                store.write_json(ledger_path,
+                                 {k: v for k, v in ledger.items() if k in known})
+            if attempts_changed:
+                known = set(list_keys(home))
+                store.write_json(attempts_path,
+                                 {k: v for k, v in attempts.items() if k in known})
 
-    _write_heartbeat(home, now, len(spawned), len(active), len(throttled), len(due),
+    # Heartbeat/decision-ledger writes are dashboards, not the source of truth --
+    # both regenerate from state, so they're written either way. Under dry_run,
+    # `spawned` holds would-spawn keys for the REPORT (report.spawned is the
+    # whole point of a preview) but the heartbeat's "spawned" count -- read by
+    # fleet-health/runaway detection as "N sessions actually launched this
+    # sweep" -- must stay 0, not the phantom would-spawn count; likewise
+    # `decisions[key]["outcome"]` is "would_spawn", never "spawned", so
+    # `maestro why` can't report a spawn that never happened either.
+    _write_heartbeat(home, now, 0 if dry_run else len(spawned), len(active),
+                     len(throttled), len(due),
                      repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo)
     _append_dispatch_ledger(home, {
         "ts": store.iso_now(), "epoch": now,
@@ -1346,6 +1433,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float) -> DispatchRepor
         repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo,
         hook_errors=hook_errors,
         worktree_removal_errors=worktree_removal_errors,
+        would_mint=would_mint,
     )
 
 
