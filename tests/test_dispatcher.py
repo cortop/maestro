@@ -253,6 +253,11 @@ def test_spawn_ledger_recent_hard_capped(home, cfg):
     cfg.min_spawn_interval = 0
     cfg.max_spawn_attempts = 0  # no-progress watchdog would otherwise fail this
     # never-progressing ticket long before `recent` reaches the cap.
+    # This exercises the ledger's own cap, not the GA-5 runaway brake -- with
+    # the floor off, the default budget (ceil(3600/300) * 1 key == 12/h) would
+    # otherwise trip the brake long before `n` spawns land and cut this test's
+    # loop short at G1.
+    cfg.runaway_pause_cooldown = 0
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     n = disp._LEDGER_RECENT_CAP + 50
@@ -1713,6 +1718,11 @@ def test_ledger_records_every_decision_kind(home, cfg):
 def test_ledger_is_size_capped(home, cfg):
     _seed(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 0
+    # Exercises the dispatch ledger's own line cap, not the GA-5 runaway brake --
+    # with the floor off, the default budget (12/h) would otherwise trip the
+    # brake and short-circuit most of this loop's sweeps at G1, which append no
+    # ledger line at all.
+    cfg.runaway_pause_cooldown = 0
     n = disp._DISPATCH_LEDGER_MAX_LINES + 25
     for i in range(n):
         disp.dispatch(cfg, DryRunSessions(), now=1000 + i)

@@ -1076,6 +1076,63 @@ def spawn_floor(cfg: Config) -> int:
     return max(0, int(floor))
 
 
+def _runaway_brake_state_path(home: Path) -> Path:
+    return home / "derived" / ".runaway_brake.json"
+
+
+def _maybe_trip_runaway_brake(cfg: Config, home: Path, now: float, health_mod) -> str | None:
+    """GA-5: the auto-brake beside G4 (the ratelimit gate below). Arms
+    ``fleet.pause`` on exactly the signal ``maestro doctor``'s ``runaway`` field
+    reports -- ``health.spawn_rate(home, now)["total"] > health.spawn_budget(cfg)``
+    and nothing else -- so doctor's verdict and the brake's verdict always agree
+    (no human-signal exclusion, no second threshold). Called only when no
+    fleet-wide pause is already active (G1 already returned early otherwise) and
+    never during ``dry_run`` (arming a pause is a write, like ``ratelimit.probe``,
+    which ``dry_run`` also skips).
+
+    ``runaway_pause_cooldown == 0`` disables the auto-brake while leaving
+    doctor's advisory intact; ``runaway_spawns_per_hour == 0`` disables both
+    (``spawn_budget()`` returns 0, mirrored from ``health.report()``'s own
+    ``bool(budget)`` guard).
+
+    The resume wedge: ``health.spawn_rate`` reads a trailing ``WINDOW_SECONDS ==
+    3600`` window, which almost always still exceeds the budget the moment a
+    pause ends -- whether it expired naturally (G1's ``fleet.pause_state``
+    auto-unlinks an elapsed ``until``) or was lifted early via ``maestro fleet
+    resume`` (which touches neither this state nor the spawn ledger). A naive
+    re-check right then re-arms on the spot, so the "next sweep spawns
+    normally" AC would never actually hold and a human resume would be undone
+    one sweep later. Fixed with our own small persisted marker
+    (``derived/.runaway_brake.json``, holding the LAST armed ``until``):
+    suppressed until ``prior_until + cooldown``, regardless of how that prior
+    pause ended. Bounded and self-healing either way -- if the rate is still
+    over budget once the grace period itself elapses, the brake fires again,
+    exactly as it should for a genuinely still-runaway board.
+
+    Returns the reason string if it armed a NEW pause this sweep, else ``None``.
+    """
+    cooldown = cfg.runaway_pause_cooldown
+    if not cooldown:
+        return None
+    budget = health_mod.spawn_budget(cfg)
+    if not budget:
+        return None
+    total = health_mod.spawn_rate(home, now)["total"]
+    if total <= budget:
+        return None
+    state_path = _runaway_brake_state_path(home)
+    prior = store.read_json(state_path, None)
+    prior_until = prior.get("until") if isinstance(prior, dict) else None
+    if isinstance(prior_until, (int, float)) and now < prior_until + cooldown:
+        return None
+    until = now + cooldown
+    reason = (f"auto-pause: runaway spawn rate {total}/hour exceeds "
+              f"budget {budget}/hour")
+    fleet.pause(home, until=until, reason=reason)
+    store.write_json(state_path, {"until": until, "armed_at": now})
+    return reason
+
+
 def _run_hook(name: str, hook_errors: dict, fn, *args, default=None, **kwargs):
     """Run one dispatch hook, recording (not raising) any exception.
 
@@ -1273,7 +1330,14 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     # answer must not punch through a 429, since that spawn would be rejected too.
     # While paused, nothing spawns and the spawn ledger is left untouched.
     paused_until_ts = ratelimit.paused_until(home, now)
-    if paused_until_ts is not None:
+    # GA-5: the runaway auto-brake, beside the rate-limit gate above. Only
+    # evaluated when the rate-limit gate didn't already decide this sweep spawns
+    # nothing, and never during dry_run (a strictly read-only preview must not
+    # arm a pause). Arming it also makes THIS sweep spawn nothing -- mirroring
+    # the rate-limit gate exactly -- while the next sweep short-circuits at G1.
+    runaway_armed = (None if paused_until_ts is not None or dry_run
+                     else _maybe_trip_runaway_brake(cfg, home, now, health))
+    if paused_until_ts is not None or runaway_armed is not None:
         spawned: list[str] = []
         throttled: list[str] = []
         capacity_skipped: list[str] = []
