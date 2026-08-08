@@ -1274,6 +1274,89 @@ def test_schedule_modal_add_task_writes_config(seeded_home):
     assert cfg.scheduled[0]["every"] == "6h"
 
 
+# --- GA-9: title/repo round-trip through add/edit/toggle, mounted app -------
+
+def test_schedule_add_edit_toggle_roundtrips_title_and_repo(seeded_home):
+    """GA-9 mounted-app QA: drives the real ScheduleScreen through add -> edit
+    -> toggle via real key presses, asserting title/repo survive each step and
+    that toggling one task never strips another task's fields (blast radius)."""
+    _write_scheduled_config(seeded_home, name="other", title="Other title", repo="beta")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("S")  # schedule_panel
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ScheduleScreen)
+
+            # --- add: a new titled+repo-bound task -------------------------
+            await pilot.press("n")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ScheduleModal)
+            modal.query_one("#sched-name", Input).value = "digest"
+            modal.query_one("#sched-prompt", TextArea).text = "Summarize things"
+            modal.query_one("#sched-every", Input).value = "1h"
+            modal.query_one("#sched-title", Input).value = "Morning digest"
+            modal.query_one("#sched-repo", Input).value = "alpha"
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+
+            cfg = config_mod.load(str(seeded_home))
+            added = next(t for t in cfg.scheduled if t["name"] == "digest")
+            assert added["title"] == "Morning digest"
+            assert added["repo"] == "alpha"
+
+            # --- edit: select the new task, change its title, keep repo ----
+            screen = app.screen_stack[-1]
+            table = screen.query_one("#schedule-table", DataTable)
+            for row_idx in range(table.row_count):
+                if str(table.get_row_at(row_idx)[0]) == "digest":
+                    table.move_cursor(row=row_idx)
+                    break
+            await pilot.pause()
+            await pilot.press("e")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ScheduleModal)
+            assert modal.query_one("#sched-title", Input).value == "Morning digest"
+            assert modal.query_one("#sched-repo", Input).value == "alpha"
+            modal.query_one("#sched-title", Input).value = "Morning digest (edited)"
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+
+            cfg = config_mod.load(str(seeded_home))
+            edited = next(t for t in cfg.scheduled if t["name"] == "digest")
+            assert edited["title"] == "Morning digest (edited)"
+            assert edited["repo"] == "alpha"  # untouched field survives the merge
+
+            # --- toggle: flip "digest" and prove "other" is untouched -------
+            screen = app.screen_stack[-1]
+            table = screen.query_one("#schedule-table", DataTable)
+            for row_idx in range(table.row_count):
+                if str(table.get_row_at(row_idx)[0]) == "digest":
+                    table.move_cursor(row=row_idx)
+                    break
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    cfg = config_mod.load(str(seeded_home))
+    digest = next(t for t in cfg.scheduled if t["name"] == "digest")
+    other = next(t for t in cfg.scheduled if t["name"] == "other")
+    assert digest["enabled"] is False
+    assert digest["title"] == "Morning digest (edited)"
+    assert digest["repo"] == "alpha"
+    # blast radius: toggling "digest" must not strip "other"'s fields
+    assert other["title"] == "Other title"
+    assert other["repo"] == "beta"
+
+
 def test_schedule_toggle_task_flips_enabled(seeded_home):
     _write_scheduled_config(seeded_home, enabled=True)
 

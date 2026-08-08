@@ -667,6 +667,68 @@ def test_run_scheduled_tasks_disabled_never_fires(home, cfg):
     assert inbox.pending_new(home) == []
 
 
+def test_run_scheduled_tasks_mint_args_pass_optional_fields_when_set(home, cfg):
+    """GA-9 AC1: repo/model/effort/notes/depends_on flow into the mint args when
+    the [[scheduled]] block sets them, and the four task-only fields (name/every/
+    enabled/prefix) never leak into the ticket args."""
+    _sched_cfg(cfg, repo="alpha", model="sonnet", effort="high",
+              notes="Skip weekends.", depends_on=["T-1"])
+    disp.run_scheduled_tasks(cfg, now=1_000_000)
+    args = inbox.pending_new(home)[0][1]["args"]
+    assert args["repo"] == "alpha"
+    assert args["model"] == "sonnet"
+    assert args["effort"] == "high"
+    assert args["notes"] == "Skip weekends."
+    assert args["depends_on"] == ["T-1"]
+    for leaked in ("name", "every", "enabled", "prefix"):
+        assert leaked not in args
+
+
+def test_run_scheduled_tasks_mint_args_omit_unset_optional_fields(home, cfg):
+    """The complement of the above: when a [[scheduled]] block doesn't set an
+    optional field, the mint args omit the key entirely rather than passing None."""
+    _sched_cfg(cfg)  # no repo/model/effort/notes/depends_on
+    disp.run_scheduled_tasks(cfg, now=1_000_000)
+    args = inbox.pending_new(home)[0][1]["args"]
+    for field in ("repo", "model", "effort", "notes", "depends_on"):
+        assert field not in args
+
+
+def test_run_scheduled_tasks_cursor_anchors_to_elapsed_boundary_not_sweep_clock(home, cfg):
+    """GA-9 AC5: a late fire advances the cursor to the elapsed slot boundary
+    derived from the previous cursor, not to the sweep clock -- so the task's
+    cadence doesn't drift forward by however late each fire happened to be."""
+    _sched_cfg(cfg, every="1h")
+    period = 3600
+    first = 1_000_000
+    disp.run_scheduled_tasks(cfg, now=first)
+    cursor = store.read_json(home / "derived" / ".schedule_cursor.json", {})
+    assert cursor["digest"] == first  # first-ever fire anchors at `now`
+
+    late_fire = first + period + 300  # due at first+period, fires 5min late
+    disp.run_scheduled_tasks(cfg, now=late_fire)
+    cursor = store.read_json(home / "derived" / ".schedule_cursor.json", {})
+    assert cursor["digest"] == first + period  # anchored, not dragged to late_fire
+
+
+def test_run_scheduled_tasks_long_outage_fires_once_then_stays_quiet(home, cfg):
+    """GA-9: the level-triggered no-catch-up property survives the anchor fix --
+    after many missed periods, one sweep fires exactly once, and the next sweep
+    within one period fires zero times."""
+    _sched_cfg(cfg, every="1h")
+    period = 3600
+    first = 1_000_000
+    disp.run_scheduled_tasks(cfg, now=first)
+
+    after_outage = first + 50 * period + 100  # ~50 periods of downtime
+    result = disp.run_scheduled_tasks(cfg, now=after_outage)
+    assert result["fired"] == ["digest"]
+
+    soon_after = after_outage + 100  # well within one period
+    result = disp.run_scheduled_tasks(cfg, now=soon_after)
+    assert result["fired"] == []
+
+
 def test_dispatch_mints_scheduled_ticket_exactly_once_per_interval(home, cfg):
     """The QA scenario from the T-10 spec: drive dispatch() over a temp home with a
     [[scheduled]] config, advance now past the interval, and assert a ticket mints
@@ -736,7 +798,8 @@ def test_schedule_status_reports_cadence_and_cursor(home, cfg):
     assert rows == [{
         "name": "digest", "prompt": "Summarize things", "every": "1h",
         "kind": "implementation", "approval_tier": 0, "priority": 3,
-        "prefix": "S", "enabled": True, "last_fired": now, "next_due": now + 3600,
+        "prefix": "S", "enabled": True, "repo": None, "title": None,
+        "last_fired": now, "next_due": now + 3600,
     }]
 
 
@@ -794,6 +857,72 @@ def test_schedule_list_cli(home):
     out = json.loads(buf.getvalue())
     assert out["scheduled"][0]["name"] == "digest"
     assert out["scheduled"][0]["last_fired"] is None
+
+
+def test_schedule_list_cli_includes_repo_and_title(home):
+    """GA-9 QA over the real CLI: `maestro schedule list`'s JSON surfaces a
+    task's repo and title (the --home flag is mandatory here -- store.resolve_home
+    otherwise falls back to $MAESTRO_HOME, the live dogfood board)."""
+    import json
+
+    from maestro import cli
+
+    (home / "config.toml").write_text(
+        "[[scheduled]]\n"
+        'name = "digest"\n'
+        'title = "Morning digest"\n'
+        'repo = "alpha"\n'
+        'prompt = "Summarize things"\n'
+        'every = "24h"\n'
+    )
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cli.main(["--home", str(home), "schedule", "list"])
+    finally:
+        sys.stdout = old_stdout
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["scheduled"][0]["repo"] == "alpha"
+    assert out["scheduled"][0]["title"] == "Morning digest"
+
+
+def test_dispatch_scheduled_task_mints_ticket_with_repo_and_title(home, cfg):
+    """GA-9 QA over the real app: over a temp MAESTRO_HOME, a real dispatcher
+    sweep on a [[scheduled]] task carrying repo+title mints a ticket whose spec
+    carries the `repo:` frontmatter line, whose TicketCreated payload carries
+    repo + the prose title, and for which repos.bound_repo_name resolves the
+    declared repo. The only mocked boundary is the `claude` spawn (DryRunSessions)."""
+    from maestro import repos as repos_mod
+
+    _sched_cfg(cfg, title="Morning digest", repo="alpha")
+    now = 1_000_000
+    r1 = disp.dispatch(cfg, DryRunSessions(), now=now)
+    assert r1.scheduled_fired == ["digest"]
+    r2 = disp.dispatch(cfg, DryRunSessions(), now=now + 5)
+    assert r2.minted == ["S-1"]
+
+    spec_text = store.spec_path(home, "S-1").read_text()
+    assert "repo: alpha" in spec_text
+
+    events = event_log.read(home, "S-1")
+    created = next(e for e in events if e["type"] == "TicketCreated")
+    assert created["payload"]["repo"] == "alpha"
+    assert created["payload"]["title"] == "Morning digest"
+
+    assert repos_mod.bound_repo_name(home, "S-1") == "alpha"
+
+
+def test_doctor_warns_on_unconfigured_repo_in_scheduled_task(home, cfg):
+    """GA-9 AC: a typo'd/unconfigured repo in a [[scheduled]] block is surfaced
+    as a WARN via health.check_unknown_repo_bindings, not silently swallowed."""
+    from maestro import health
+
+    _sched_cfg(cfg, repo="typo-repo")
+    result = health.check_unknown_repo_bindings(cfg, now=1_000_000)
+    assert result["status"] == "warn"
+    assert {u["repo"] for u in result["unknown"]} == {"typo-repo"}
 
 
 # ---------------------------------------------------------------------------

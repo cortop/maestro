@@ -435,10 +435,14 @@ class _ScheduleModal(ModalScreen):
             yield Label("[bold]Scheduled task[/bold]")
             yield Label("Name [bold red]*[/bold red]")
             yield Input(value=t.get("name", ""), placeholder="required, stable id", id="sched-name")
+            yield Label("Title (optional; falls back to name)")
+            yield Input(value=t.get("title") or "", placeholder="e.g. Morning PR digest", id="sched-title")
             yield Label("Prompt [bold red]*[/bold red]")
             yield TextArea(t.get("prompt", ""), id="sched-prompt")
             yield Label("Every (e.g. 30m / 6h / 24h / seconds) [bold red]*[/bold red]")
             yield Input(value=str(t.get("every", "")), placeholder="30m", id="sched-every")
+            yield Label("Repo (optional; must match a [repos.<name>] table)")
+            yield Input(value=t.get("repo") or "", placeholder="e.g. alpha", id="sched-repo")
             yield Label("Kind")
             yield Select(options=[("implementation", "implementation"), ("research", "research")],
                         id="sched-kind", allow_blank=False, value=t.get("kind", "implementation"))
@@ -493,8 +497,10 @@ class _ScheduleModal(ModalScreen):
         prefix = self.query_one("#sched-prefix", Input).value.strip() or None
         enabled_sel = self.query_one("#sched-enabled", Select)
         enabled = str(enabled_sel.value) == "true"
+        title = self.query_one("#sched-title", Input).value.strip() or None
+        repo = self.query_one("#sched-repo", Input).value.strip() or None
         self.dismiss({
             "name": name, "prompt": prompt, "every": every, "kind": kind,
             "approval_tier": tier, "priority": priority, "prefix": prefix,
-            "enabled": enabled,
+            "enabled": enabled, "title": title, "repo": repo,
         })

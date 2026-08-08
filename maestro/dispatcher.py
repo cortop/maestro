@@ -372,8 +372,9 @@ def run_scheduled_tasks(cfg: Config, now: float) -> dict:
     for each enabled+due ``[[scheduled]]`` task, mint one create-request into the
     ``_new`` inbox and advance a single ``derived/.schedule_cursor.json``
     ({name: last_fired_ts}). Level-triggered, not edge-accumulating: a task fires
-    ONCE on the next sweep after a long downtime, resetting its cursor to ``now``
-    rather than catching up.
+    ONCE on the next sweep after a long downtime, and the cursor advances to the
+    elapsed slot boundary (``schedule.advance_cursor``) rather than to the sweep
+    clock, so a late fire never drags the task's whole cadence forward with it.
     """
     home = cfg.home
     cursor_path = _schedule_cursor_path(home)
@@ -389,20 +390,25 @@ def run_scheduled_tasks(cfg: Config, now: float) -> dict:
         if not schedule.is_due(task, last, now):
             continue
         bucket = int(now // schedule.period(task))
+        args = {
+            "intent": task["prompt"],
+            "kind": task.get("kind", "implementation"),
+            "approval_tier": task.get("approval_tier", 1),
+            "priority": task.get("priority", 3),
+            "scheduled_by": name,
+            "dedup": f"{name}:{bucket}",
+        }
+        for opt_field in schedule.OPTIONAL_MINT_FIELDS:
+            val = task.get(opt_field)
+            if val:
+                args[opt_field] = val
         inbox.append_new(
             home,
             title=task.get("title") or name,
             prefix=task.get("prefix"),
-            args={
-                "intent": task["prompt"],
-                "kind": task.get("kind", "implementation"),
-                "approval_tier": task.get("approval_tier", 1),
-                "priority": task.get("priority", 3),
-                "scheduled_by": name,
-                "dedup": f"{name}:{bucket}",
-            },
+            args=args,
         )
-        cursor[name] = now
+        cursor[name] = schedule.advance_cursor(last, now, schedule.period(task))
         fired.append(name)
     if fired:
         store.write_json(cursor_path, cursor)
@@ -427,6 +433,8 @@ def schedule_status(cfg: Config, now: float) -> list[dict]:
             "priority": task.get("priority", 3),
             "prefix": task.get("prefix"),
             "enabled": enabled,
+            "repo": task.get("repo"),
+            "title": task.get("title"),
             "last_fired": last,
             "next_due": schedule.next_due(task, last or 0) if enabled and task.get("every") else None,
         })
