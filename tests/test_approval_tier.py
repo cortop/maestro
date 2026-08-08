@@ -4,6 +4,10 @@ Two enforcement points, per the spec: (1) the tool surface a spawned reconciler
 gets (`--disallowedTools`), and (2) whether a tier-2 ticket is even due for the
 `implementing` phase before a human runs `maestro approve`.
 """
+import io
+import json
+from contextlib import redirect_stdout
+
 from maestro import cli, dispatcher as disp, event_log, ops, projection, snapshot as snap_mod, store
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
@@ -73,8 +77,8 @@ def test_tier2_implementing_blocked_until_approved_then_unblocked(home, cfg):
     snap = _seed(cfg, key, "risky change", phase="implementing", tier=2)
 
     # Not due: is_due directly names the reason...
-    res = disp.is_due(snap, inbox_pending=False, current_spec_hash=snap.spec_hash,
-                      now=1000, tier=disp.spec_tier(home, key))
+    res = disp.is_due(home, key, snap, inbox_pending=False, current_spec_hash=snap.spec_hash,
+                      now=1000)
     assert res == disp.DueResult(False, "needs-approval")
 
     # ...and a real dry-run sweep never spawns it.
@@ -128,6 +132,88 @@ def test_approval_persists_across_reentry_into_implementing(home, cfg):
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert key in report.spawned
+
+
+# --- GA-21: needs_approval is THE ONE gate definition, and is_due calls it ---
+
+def test_needs_approval_and_is_due_agree_across_tier_approved_phase(home, cfg):
+    """`dispatcher.is_due` calls `gates.needs_approval` directly (GA-21), so the
+    two can never disagree by construction -- this proves the wiring across the
+    full tier x approved x phase matrix: `is_due` reports not_due/"needs-
+    approval" exactly when `needs_approval` says True, and never otherwise."""
+    from maestro import gates
+
+    for tier in (0, 1, 2):
+        for approved in (False, True):
+            for phase in (Phase.IMPLEMENTING, Phase.READY):
+                key = f"M-{tier}-{int(approved)}-{phase.value}"
+                snap = _seed(cfg, key, "matrix", phase=phase.value, tier=tier)
+                if approved:
+                    ops.approve(cfg, key)
+                    snap = snap_mod.load(home, key)
+
+                gated = gates.needs_approval(home, key, snap)
+                res = disp.is_due(home, key, snap, inbox_pending=False,
+                                  current_spec_hash=snap.spec_hash, now=1000)
+                case = f"tier={tier} approved={approved} phase={phase.value}"
+
+                if gated:
+                    assert res == disp.DueResult(False, "needs-approval"), case
+                else:
+                    assert res.reason != "needs-approval", case
+                # And the predicate itself matches the spec's literal rule.
+                assert gated == (phase == Phase.IMPLEMENTING and tier >= 2
+                                 and not approved), case
+
+
+def test_needs_you_surfaces_agree_on_a_gated_ticket_then_clear_on_approve(home, cfg):
+    """Real-CLI QA over a temp home (CLAUDE.md): a tier-2 unapproved ticket
+    parked in `implementing` shows up on every needs-you surface -- a real
+    sweep reports not_due/needs-approval, `maestro status` lists it in
+    `needs_you`, and `projection.write` puts it in NEEDS-YOU.md with the
+    `maestro approve` remedy -- then `maestro approve` + a re-sweep drops it
+    off every one of them."""
+    key = "G-21"
+    _seed(cfg, key, "risky change", phase="implementing", tier=2)
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+    assert key not in report.spawned
+    assert key not in [k for k, _r in report.due]
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli.main(["--home", str(home), "status"])
+    assert rc == 0
+    status = json.loads(buf.getvalue())
+    needs_you = {row[0]: row[1] for row in status["needs_you"]}
+    assert needs_you.get(key) == "needs-approval"
+
+    rc = cli.main(["--home", str(home), "project"])
+    assert rc == 0
+    needs_you_md = (home / "derived" / "NEEDS-YOU.md").read_text()
+    assert "## Needs approval" in needs_you_md
+    assert key in needs_you_md
+    assert f"maestro approve {key}" in needs_you_md
+    assert "Nothing is waiting on you" not in needs_you_md
+
+    # Approve, re-sweep: the gate clears and the ticket drops off every surface.
+    rc = cli.main(["--home", str(home), "approve", key, "--no-nudge"])
+    assert rc == 0
+    report2 = disp.dispatch(cfg, sessions, now=2000)
+    assert key in report2.spawned
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli.main(["--home", str(home), "status"])
+    assert rc == 0
+    status2 = json.loads(buf.getvalue())
+    assert key not in {row[0] for row in status2["needs_you"]}
+
+    rc = cli.main(["--home", str(home), "project"])
+    assert rc == 0
+    needs_you_md2 = (home / "derived" / "NEEDS-YOU.md").read_text()
+    assert key not in needs_you_md2
 
 
 # --- GA-18: Tier column rendered from spec_tier, not the dead snapshot field ---

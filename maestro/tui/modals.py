@@ -137,6 +137,18 @@ _DEFAULT_COMMANDS: list[tuple[str, str]] = [
 ]
 
 
+def _commands_for(phase: str, gated: bool) -> list[tuple[str, str]]:
+    """The reference list `_CmdModal` shows for *phase*, with `approve`
+    prepended when the ticket is parked at the tier-2 approval gate (GA-21) --
+    phase alone can't tell a gated `implementing` ticket from an ungated one
+    (both are phase=="implementing"), so the caller passes the already-computed
+    `gates.needs_approval` verdict in."""
+    commands = _PHASE_COMMANDS.get(phase, _DEFAULT_COMMANDS)
+    if gated:
+        commands = [("approve", "clear the tier-2 approval gate")] + commands
+    return commands
+
+
 class _CmdModal(ModalScreen):
     """Command palette modal; dismisses with (command, args_text) or None on cancel."""
 
@@ -154,14 +166,15 @@ class _CmdModal(ModalScreen):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, key: str, phase: str) -> None:
+    def __init__(self, key: str, phase: str, *, gated: bool = False) -> None:
         super().__init__()
         self._key = key
         self._phase = phase
+        self._gated = gated
 
     def compose(self) -> ComposeResult:
         header = f"[bold]{self._key}[/bold] — {self._phase}"
-        commands = _PHASE_COMMANDS.get(self._phase, _DEFAULT_COMMANDS)
+        commands = _commands_for(self._phase, self._gated)
         with Vertical(id="cmd-dialog"):
             yield Label(header)
             yield Label("[dim]── Commands ──[/dim]")

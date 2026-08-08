@@ -25,6 +25,7 @@ from pathlib import Path
 from . import claims, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, store
 from .config import Config
+from .gates import needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
 from .idempotency import content_hash
 from .sessions import SessionManager
 from .statemachine import Phase, SLEEPING_PHASES, TERMINAL_PHASES
@@ -45,7 +46,6 @@ def spec_hash_on_disk(home: Path, key: str) -> str | None:
 
 _DEPENDS_ON_RE = re.compile(r"^\s*dependsOn\s*:\s*\[([^\]]*)\]", re.MULTILINE)
 _KEY_RE = re.compile(r"^([A-Za-z]+)-(\d+)$")
-_FRONTMATTER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
 
 
 def split_key(key: str) -> tuple:
@@ -63,45 +63,6 @@ def parse_depends_on(spec_text: str) -> list[str]:
         return []
     raw = m.group(1)
     return [k.strip() for k in raw.split(",") if k.strip()]
-
-
-def parse_spec_overrides(spec_text: str) -> dict:
-    """Extract optional kind/model/effort/repo/approval_tier from a spec's loose
-    frontmatter. Stops at the first ## section header. Returns only keys that
-    are present. ``approval_tier`` is parsed to int; a malformed value (not an
-    int) is simply omitted -- callers fall back to the safe, more-restrictive
-    default (see ``spec_tier``) rather than this function ever raising.
-    """
-    result: dict = {}
-    for line in spec_text.splitlines():
-        if line.startswith("##"):
-            break
-        m = _FRONTMATTER_FIELD_RE.match(line)
-        if not m:
-            continue
-        field, val = m.group(1), m.group(2).strip()
-        if field in ("kind", "model", "effort", "repo"):
-            result[field] = val
-        elif field == "approval_tier":
-            try:
-                result[field] = int(val)
-            except ValueError:
-                pass
-    return result
-
-
-def spec_tier(home: Path, key: str) -> int:
-    """*key*'s approval tier, read straight from the spec file on disk (not the
-    snapshot, so a human edit takes effect the very next sweep). Missing file,
-    missing field, or a malformed value all fall back to 1 -- the same
-    more-restrictive default used at mint (``args.get("approval_tier") or 1``)
-    -- so ``is_due``/spawn-arg construction can stay total and never wedge on a
-    bad spec."""
-    spec_file = store.spec_path(home, key)
-    if not spec_file.exists():
-        return 1
-    overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
-    return overrides.get("approval_tier", 1)
 
 
 def tier_denylist(tier: int) -> list[str]:
@@ -131,9 +92,9 @@ def resolved_allowed_tools(cfg: Config, binding) -> list[str]:
     return merged
 
 
-def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
+def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool,
            current_spec_hash: str | None, now: float,
-           blocked_dep: bool = False, tier: int = 1) -> DueResult:
+           blocked_dep: bool = False) -> DueResult:
     phase = Phase(snap.phase)
     if phase in TERMINAL_PHASES:
         return DueResult(False, "terminal")
@@ -170,10 +131,11 @@ def is_due(snap: snap_mod.Snapshot, *, inbox_pending: bool,
         return DueResult(False, "sleeping")
     # Tier-2 implementing gate: a high-tier ticket sits in `implementing` (the
     # worktree is set up, phase already transitioned) but is not due for the
-    # actual coding step until a human runs `maestro approve`. Persists across
-    # re-entries into implementing (e.g. a CI-failure retry) since `approved`
-    # is never reset by a PhaseChanged.
-    if phase == Phase.IMPLEMENTING and tier >= 2 and not snap.approved:
+    # actual coding step until a human runs `maestro approve`. `needs_approval`
+    # (gates.py) is the ONE definition of this rule -- every human-facing
+    # surface calls the same function, so none of them can drift from what
+    # actually gates a spawn here.
+    if needs_approval(home, key, snap):
         return DueResult(False, "needs-approval")
     return DueResult(True, "active")
 
@@ -1281,12 +1243,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         tier = spec_tier(home, key)
         tier_by_key[key] = tier
         res = is_due(
-            snap,
+            home, key, snap,
             inbox_pending=inbox.has_pending(home, key),
             current_spec_hash=spec_hash_on_disk(home, key),
             now=now,
             blocked_dep=blocked_dep,
-            tier=tier,
         )
         if not res.due:
             decisions[key] = {"outcome": "not_due", "reason": res.reason}

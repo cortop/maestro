@@ -388,7 +388,7 @@ def test_acked_in_review_ticket_stops_spawning(home):
     assert cli_main(["--home", str(home), "inbox-ack", "S-3"]) == 0
 
     snap = snap_mod.rebuild(home, "S-3")
-    due = is_due(snap, inbox_pending=inbox.has_pending(home, "S-3"),
+    due = is_due(home, "S-3", snap, inbox_pending=inbox.has_pending(home, "S-3"),
                  current_spec_hash=snap.spec_hash, now=1000)
     assert not due.due and due.reason != "inbox", \
         f"acked in-review ticket still due ({due.reason}) -- the spin is not fixed"

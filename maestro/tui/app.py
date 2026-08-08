@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -11,8 +12,8 @@ from textual.worker import Worker, WorkerState
 
 from .. import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod
 from ..config import Config
-from ..dispatcher import existing_prefixes, spec_tier
-from ..projection import ticket_rows
+from ..dispatcher import existing_prefixes, needs_approval, spec_tier
+from ..projection import phase_predicate, ticket_rows
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
@@ -29,11 +30,22 @@ from .screens import (
 )
 
 _NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
+_NEEDS_YOU_PHASE_VALUES = {p.value for p in _NEEDS_YOU_PHASES}
 
-# Named filters: (display_name, phase_set) — None phase_set means no filtering (show all)
-_FILTERS: list[tuple[str, frozenset | None]] = [
-    ("needs-you", _NEEDS_YOU_PHASES),
-    ("active", ACTIVE_PHASES),
+
+def _needs_you_predicate(home: Path, s: snap_mod.Snapshot) -> bool:
+    """The needs-you filter: the two sleeping-and-stuck phases, plus the
+    tier-2 approval gate (GA-21) -- a ticket that's still "implementing" but
+    not due until `maestro approve`, so it can't be expressed as a phase."""
+    return s.phase in _NEEDS_YOU_PHASE_VALUES or needs_approval(home, s.key, s)
+
+
+# Named filters: (display_name, row_predicate) — None predicate means no
+# filtering (show all). A predicate takes (home, Snapshot) -> bool; wider than
+# a bare phase set since needs-you (above) can't be expressed as one.
+_FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
+    ("needs-you", _needs_you_predicate),
+    ("active", phase_predicate(ACTIVE_PHASES)),
     ("all", None),
 ]
 
@@ -89,7 +101,8 @@ class MaestroTUI(App):
         self._home = Path(home)
         self._selected_key: str | None = None
         self._filter_idx: int = 0
-        self._prev_phases: dict[str, str] | None = None  # None = first poll (no notifications)
+        # key -> (phase, gated); None = first poll (no notifications)
+        self._prev_phases: dict[str, tuple[str, bool]] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -171,16 +184,26 @@ class MaestroTUI(App):
             self.notify("Select a ticket first", severity="warning")
             return
         snap = snap_mod.load(self._home, key)
+        gated = needs_approval(self._home, key, snap)
 
         def _on_dismiss(result: tuple[str, str] | None) -> None:
             if result is None:
                 return
             command, args_text = result
+            if command == "approve" and gated:
+                # The tier-2 gate clears via its own dedicated event (`ops.approve`
+                # / `maestro approve`), not the inbox-command path below -- a
+                # queued "approve" command would just no-op here (this ticket has
+                # no open_questions for ANSWER_COMMANDS to attach an answer to).
+                cfg = Config(home=self._home)
+                ops_mod.approve(cfg, key)
+                self.notify(f"approved {key}")
+                return
             args = {"text": args_text} if args_text else {}
             inbox.append_command(self._home, key, command, args)
             self.notify(f"'{command}' queued for {key}")
 
-        self.push_screen(_CmdModal(key, snap.phase), _on_dismiss)
+        self.push_screen(_CmdModal(key, snap.phase, gated=gated), _on_dismiss)
 
     def action_retry(self) -> None:
         self._send_degraded_cmd("retry")
@@ -383,28 +406,38 @@ class MaestroTUI(App):
             self.push_screen(LogsScreen(self._home, self._selected_key))
 
     def _populate(self) -> None:
-        _name, phases = _FILTERS[self._filter_idx]
+        _name, predicate = _FILTERS[self._filter_idx]
+        home = self._home
 
         # Load all rows once for counting and filtering
-        all_rows = ticket_rows(self._home)
+        all_rows = ticket_rows(home)
 
-        # Detect tickets newly entering awaiting-human / degraded and toast once.
-        new_phases = {row[-1]: row[1] for row in all_rows}  # row_key (last) -> phase (index 1)
+        # Snapshot-level state for filtering/toasting: the row tuples above
+        # don't carry `.approved`, which the needs-you predicate needs.
+        snaps_by_key = {row[-1]: snap_mod.load(home, row[-1]) for row in all_rows}
+
+        # Detect tickets newly entering awaiting-human/degraded, OR newly
+        # gated by the tier-2 approval gate (GA-21) -- the latter leaves
+        # `phase` unchanged ("implementing"), so it's tracked as a second
+        # signal per key rather than folded into the phase comparison.
+        new_state = {key: (s.phase, needs_approval(home, key, s))
+                     for key, s in snaps_by_key.items()}
         if self._prev_phases is not None:
-            _notify_phases = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}
-            for key, phase in new_phases.items():
-                if phase in _notify_phases and self._prev_phases.get(key) != phase:
+            for key, (phase, gated) in new_state.items():
+                prev_phase, prev_gated = self._prev_phases.get(key, (None, False))
+                if phase in _NEEDS_YOU_PHASE_VALUES and prev_phase != phase:
                     self.notify(f"{key}: {phase}", severity="warning", timeout=6)
-        self._prev_phases = new_phases
+                elif gated and not prev_gated:
+                    self.notify(f"{key}: needs-approval", severity="warning", timeout=6)
+        self._prev_phases = new_state
 
         # Build filter bar: show counts per filter, bold the active one
         parts = []
-        for i, (fname, fphases) in enumerate(_FILTERS):
-            if fphases is None:
+        for i, (fname, fpred) in enumerate(_FILTERS):
+            if fpred is None:
                 count = len(all_rows)
             else:
-                fvals = {p.value for p in fphases}
-                count = sum(1 for r in all_rows if r[1] in fvals)
+                count = sum(1 for s in snaps_by_key.values() if fpred(home, s))
             label = f"{fname}({count})"
             if i == self._filter_idx:
                 label = f"[reverse bold] {label} [/reverse bold]"
@@ -414,9 +447,8 @@ class MaestroTUI(App):
         self.query_one("#filter-bar", Static).update("  " + "  |  ".join(parts))
 
         # Apply current filter
-        if phases is not None:
-            phase_vals = {p.value for p in phases}
-            visible = [r for r in all_rows if r[1] in phase_vals]
+        if predicate is not None:
+            visible = [r for r in all_rows if predicate(home, snaps_by_key[r[-1]])]
         else:
             visible = all_rows
 
