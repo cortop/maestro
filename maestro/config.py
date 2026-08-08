@@ -12,7 +12,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import store
+from . import schedule, store
 
 
 @dataclass
@@ -302,11 +302,19 @@ implementer = "claude_skill"
 # priority = 3
 # prefix = "S"                     # minted keys become S-1, S-2, ...
 # enabled = true
+# title = "Morning PR digest"      # optional; falls back to `name` when unset
+# repo = "alpha"                   # optional; unconfigured names still mint (WARNed by `doctor`)
+# model = "sonnet"                 # optional; passed through to the minted ticket
+# effort = "high"                  # optional; passed through to the minted ticket
+# notes = "Skip weekends."         # optional; passed through to the minted ticket's ## Notes
+# depends_on = ["T-1"]             # optional; passed through to the minted ticket's dependsOn
 """
 
 # Field order used when serializing a task back to config.toml (see write_scheduled).
+# `title`/`repo` plus every ``schedule.OPTIONAL_MINT_FIELDS`` entry, so the round-trip
+# allowlist here can never drift from the mint-args allowlist in dispatcher.py.
 _SCHEDULED_FIELDS = ("name", "prompt", "every", "approval_tier", "kind", "priority",
-                     "prefix", "enabled")
+                     "prefix", "enabled", "title") + schedule.OPTIONAL_MINT_FIELDS
 _SCHEDULED_BLOCK_RE = re.compile(r"(?ms)^\[\[scheduled\]\]\n(?:(?!^\[).)*")
 
 
@@ -317,6 +325,14 @@ def _toml_scalar(v) -> str | None:
         return "true" if v else "false"
     if isinstance(v, int):
         return str(v)
+    if isinstance(v, list):
+        # depends_on is the only list-valued field today. Round-trip it as a real
+        # TOML array of strings -- never fall through to str(v), which would
+        # serialize a Python list repr as a quoted string and silently corrupt it
+        # on the next TUI write (see the correction in GA-9's spec).
+        if not v:
+            return None
+        return "[" + ", ".join(_toml_scalar(x) for x in v) + "]"
     s = str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return f'"{s}"'
 

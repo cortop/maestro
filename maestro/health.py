@@ -213,11 +213,12 @@ def check_repo_preflight(cfg: Config, now: float) -> dict:
 
 
 def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
-    """WARN (never blocks a spawn) when a ticket's spec/TicketCreated names a
-    repo that isn't a configured ``[repos.<name>]`` table -- e.g. a human typo
-    in the ``repo:`` frontmatter line. ``repos.resolve()`` silently falls back
-    to the implicit default so the dispatcher can never wedge on this; this
-    check surfaces the typo instead of letting it hide forever."""
+    """WARN (never blocks a spawn) when a ticket's spec/TicketCreated, or a
+    ``[[scheduled]]`` task's ``repo`` field, names a repo that isn't a configured
+    ``[repos.<name>]`` table -- e.g. a human typo in the ``repo:`` frontmatter
+    line or a scheduled task. ``repos.resolve()`` silently falls back to the
+    implicit default so the dispatcher can never wedge on this; this check
+    surfaces the typo instead of letting it hide forever."""
     from . import repos as repos_mod
 
     home = cfg.home
@@ -226,6 +227,10 @@ def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
         name = repos_mod.bound_repo_name(home, key)
         if name and name not in cfg.repos:
             unknown.append({"key": key, "repo": name})
+    for task in cfg.scheduled:
+        name = task.get("repo")
+        if name and name not in cfg.repos:
+            unknown.append({"key": f"scheduled:{task.get('name')}", "repo": name})
     status = "warn" if unknown else "ok"
     detail = (f"{len(unknown)} ticket(s) bound to an unconfigured repo name"
               if unknown else "none")

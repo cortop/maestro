@@ -450,6 +450,8 @@ class ScheduleScreen(Screen):
         table = self.query_one("#schedule-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Name")
+        table.add_column("Title")
+        table.add_column("Repo")
         table.add_column("Every")
         table.add_column("Kind")
         table.add_column("Tier")
@@ -468,7 +470,8 @@ class ScheduleScreen(Screen):
         table.clear()
         for row in rows:
             table.add_row(
-                row["name"], str(row["every"]), row["kind"], str(row["approval_tier"]),
+                row["name"], row.get("title") or "", row.get("repo") or "",
+                str(row["every"]), row["kind"], str(row["approval_tier"]),
                 "yes" if row["enabled"] else "no",
                 _fmt_epoch(row["last_fired"]), _fmt_epoch(row["next_due"]),
                 key=row["name"],
@@ -510,9 +513,13 @@ class ScheduleScreen(Screen):
         def _on_dismiss(result: dict | None) -> None:
             if result is None:
                 return
-            new_tasks = [result if t.get("name") == existing.get("name") else t for t in tasks]
+            # Merge, don't substitute: the modal only renders a subset of a task's
+            # fields, so a wholesale swap would silently drop anything the modal
+            # doesn't know about (e.g. model/effort/notes/depends_on set by hand).
+            merged = {**existing, **result}
+            new_tasks = [merged if t.get("name") == existing.get("name") else t for t in tasks]
             config_mod.write_scheduled(self._home, new_tasks)
-            self.notify(f"Updated scheduled task {result['name']!r}")
+            self.notify(f"Updated scheduled task {merged['name']!r}")
             self._refresh()
 
         self.app.push_screen(_ScheduleModal(existing), _on_dismiss)
