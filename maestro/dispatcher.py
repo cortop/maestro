@@ -372,9 +372,15 @@ def run_scheduled_tasks(cfg: Config, now: float) -> dict:
     for each enabled+due ``[[scheduled]]`` task, mint one create-request into the
     ``_new`` inbox and advance a single ``derived/.schedule_cursor.json``
     ({name: last_fired_ts}). Level-triggered, not edge-accumulating: a task fires
-    ONCE on the next sweep after a long downtime, and the cursor advances to the
-    elapsed slot boundary (``schedule.advance_cursor``) rather than to the sweep
-    clock, so a late fire never drags the task's whole cadence forward with it.
+    ONCE on the next sweep after a long downtime.
+
+    Two cadence shapes (GA-19), both behind ``schedule.is_due``/``dedup_bucket``,
+    so this function never branches on 'every' vs 'cron' for anything but the
+    cursor-advance: an interval task's cursor snaps to the elapsed slot boundary
+    (``schedule.advance_cursor``), so a late fire never drags its whole cadence
+    forward with it; a cron task's cursor snaps to the exact matched wall-clock
+    slot (``schedule.cron_due_slot``), which is what makes the DST fall-back rule
+    (fires exactly once across the repeated hour) hold across sweeps.
     """
     home = cfg.home
     cursor_path = _schedule_cursor_path(home)
@@ -384,19 +390,18 @@ def run_scheduled_tasks(cfg: Config, now: float) -> dict:
         if not task.get("enabled", True):
             continue
         name = task.get("name")
-        if not name or not task.get("prompt") or not task.get("every"):
+        if not name or not task.get("prompt") or not (task.get("every") or task.get("cron")):
             continue
         last = cursor.get(name, 0)
         if not schedule.is_due(task, last, now):
             continue
-        bucket = int(now // schedule.period(task))
         args = {
             "intent": task["prompt"],
             "kind": task.get("kind", "implementation"),
             "approval_tier": task.get("approval_tier", 1),
             "priority": task.get("priority", 3),
             "scheduled_by": name,
-            "dedup": f"{name}:{bucket}",
+            "dedup": f"{name}:{schedule.dedup_bucket(task, now)}",
         }
         for opt_field in schedule.OPTIONAL_MINT_FIELDS:
             val = task.get(opt_field)
@@ -408,7 +413,11 @@ def run_scheduled_tasks(cfg: Config, now: float) -> dict:
             prefix=task.get("prefix"),
             args=args,
         )
-        cursor[name] = schedule.advance_cursor(last, now, schedule.period(task))
+        if task.get("cron"):
+            slot = schedule.cron_due_slot(task, last, now)
+            cursor[name] = slot if slot is not None else now
+        else:
+            cursor[name] = schedule.advance_cursor(last, now, schedule.period(task))
         fired.append(name)
     if fired:
         store.write_json(cursor_path, cursor)
@@ -424,10 +433,13 @@ def schedule_status(cfg: Config, now: float) -> list[dict]:
         name = task.get("name")
         last = cursor.get(name, 0) or None
         enabled = task.get("enabled", True)
+        has_cadence = bool(task.get("every") or task.get("cron"))
         rows.append({
             "name": name,
             "prompt": task.get("prompt"),
             "every": task.get("every"),
+            "cron": task.get("cron"),
+            "tz": task.get("tz") or "UTC",
             "kind": task.get("kind", "implementation"),
             "approval_tier": task.get("approval_tier", 1),
             "priority": task.get("priority", 3),
@@ -436,7 +448,7 @@ def schedule_status(cfg: Config, now: float) -> list[dict]:
             "repo": task.get("repo"),
             "title": task.get("title"),
             "last_fired": last,
-            "next_due": schedule.next_due(task, last or 0) if enabled and task.get("every") else None,
+            "next_due": schedule.next_due(task, last or 0, now) if enabled and has_cadence else None,
         })
     return rows
 

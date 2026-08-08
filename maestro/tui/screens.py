@@ -453,7 +453,7 @@ class ScheduleScreen(Screen):
         table.add_column("Name")
         table.add_column("Title")
         table.add_column("Repo")
-        table.add_column("Every")
+        table.add_column("Cadence")
         table.add_column("Kind")
         table.add_column("Tier")
         table.add_column("Enabled")
@@ -470,9 +470,10 @@ class ScheduleScreen(Screen):
         table = self.query_one("#schedule-table", DataTable)
         table.clear()
         for row in rows:
+            cadence = f"{row['cron']} ({row['tz']})" if row.get("cron") else str(row["every"])
             table.add_row(
                 row["name"], row.get("title") or "", row.get("repo") or "",
-                str(row["every"]), row["kind"], str(row["approval_tier"]),
+                cadence, row["kind"], str(row["approval_tier"]),
                 "yes" if row["enabled"] else "no",
                 _fmt_epoch(row["last_fired"]), _fmt_epoch(row["next_due"]),
                 key=row["name"],

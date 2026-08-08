@@ -301,7 +301,25 @@ implementer = "claude_skill"
 # [[scheduled]]                    # recurring, prompt-defined triggers (optional, repeatable)
 # name = "morning-pr-digest"       # stable id -> cursor key + dedup token
 # prompt = "Summarize PRs merged to main in the last 24h and open a note ticket."
-# every = "24h"                    # "30m" | "6h" | "24h" | a bare integer of seconds
+# every = "24h"                    # "30m" | "6h" | "24h" | a bare integer of seconds --
+                                    # exactly one of every/cron is required, never both
+# cron = "0 9 * * 1"               # 5-field cron (minute hour dom month dow); wall-clock
+                                    # cadence instead of an elapsed-seconds interval, e.g.
+                                    # "Monday 09:00" rather than "604800 seconds from
+                                    # whenever it last fired"
+# tz = "America/New_York"          # IANA zone the cron fields are evaluated in; default
+                                    # "UTC" -- UTC never has a DST transition and never
+                                    # depends on the host, so a task that never sets this
+                                    # can't hit either DST edge below. Resolved via
+                                    # datetime.fromtimestamp(now, ZoneInfo(tz)), never the
+                                    # machine's local wall clock (that would make a laptop
+                                    # crossing timezones, or a launchd job whose TZ differs
+                                    # from your shell, silently move the schedule). An
+                                    # unknown/unloadable zone is rejected at add/edit time,
+                                    # never falls back to UTC silently at fire time.
+                                    # Spring-forward (a local instant that doesn't exist)
+                                    # fires at the next valid instant; fall-back (a local
+                                    # instant that occurs twice) fires exactly once.
 # approval_tier = 1
 # kind = "implementation"          # or "research"
 # priority = 3
@@ -318,8 +336,10 @@ implementer = "claude_skill"
 # Field order used when serializing a task back to config.toml (see write_scheduled).
 # `title`/`repo` plus every ``schedule.OPTIONAL_MINT_FIELDS`` entry, so the round-trip
 # allowlist here can never drift from the mint-args allowlist in dispatcher.py.
-_SCHEDULED_FIELDS = ("name", "prompt", "every", "approval_tier", "kind", "priority",
-                     "prefix", "enabled", "title") + schedule.OPTIONAL_MINT_FIELDS
+# `cron`/`tz` (GA-19) round-trip too but are NOT mint fields -- they configure the
+# cadence itself, so they live in the base tuple, not OPTIONAL_MINT_FIELDS.
+_SCHEDULED_FIELDS = ("name", "prompt", "every", "cron", "tz", "approval_tier", "kind",
+                     "priority", "prefix", "enabled", "title") + schedule.OPTIONAL_MINT_FIELDS
 # Matches a `[[scheduled]]` header plus ONLY its immediately-following contiguous
 # `key = value` lines -- never blank lines, comments, or another table header.
 # `_serialize_task` never emits a blank line or comment inside one task's block,
