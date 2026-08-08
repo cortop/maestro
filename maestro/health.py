@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from . import claims, dispatcher, fleet, store
+from . import claims, dispatcher, fleet, skills_install, store
 from .config import Config
 
 WINDOW_SECONDS = 3600
@@ -244,16 +244,28 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     split the single ``maestro-reconcile.md`` into
     ``maestro-reconcile-<phase>.md`` files for progressive disclosure) -- a
     reconciler spawned into that repo's worktree would hit an undefined slash
-    command every turn."""
+    command every turn.
+
+    GA-15: a repo-local miss isn't necessarily a real gap -- ``maestro
+    install-commands --user`` (the alternative to vendoring into a repo this
+    board doesn't own) puts the files in the user commands directory instead,
+    which resolves from any cwd. Check there before flagging, via the same
+    injectable ``skills_install.user_commands_dir`` the doctor tests override.
+    """
     home = cfg.home
     bindings = dispatcher.referenced_repo_bindings(cfg, home, dispatcher.list_keys(home))
+    user_dir = skills_install.user_commands_dir(cfg)
+    user_has_skill = any(user_dir.glob("maestro-reconcile-*.md"))
     missing = []
     for name, binding in bindings.items():
         if not binding.path or not Path(binding.path).exists():
             continue
         commands_dir = Path(binding.path) / ".claude" / "commands"
-        if not any(commands_dir.glob("maestro-reconcile-*.md")):
-            missing.append(name)
+        if any(commands_dir.glob("maestro-reconcile-*.md")):
+            continue
+        if user_has_skill:
+            continue
+        missing.append(name)
     status = "warn" if missing else "ok"
     detail = f"missing maestro-reconcile-*.md in: {', '.join(missing)}" if missing else "none"
     return {"name": "missing_reconcile_skill", "status": status, "detail": detail,
