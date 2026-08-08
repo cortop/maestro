@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, event_log, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
+from . import backup, claims, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -484,7 +484,27 @@ def cmd_events(args) -> int:
     return 0
 
 
+# Types owned by an ops verb -- a raw `maestro append` of one of these would
+# bypass the invariant that verb enforces (a ceiling, a gate, evidence
+# validation, an audit trail). Denylist, not allowlist: `events.SIDE_EFFECTING`
+# (PrOpened/PrUpdated/Finalized/QuestionAsked) and ad-hoc types like Note or
+# ResearchProposed record an action that already happened and stay appendable.
+_APPEND_DENYLIST = {
+    events.IMPL_TURN: "impl-turn",
+    events.PHASE_CHANGED: "set-phase",
+    events.APPROVED: "approve",
+    events.AC_VERIFIED: "verify-ac",
+    events.AC_QA_VERDICT: "qa-verdict",
+    events.FAILED: "fail",
+    events.STALLED: "fail",
+}
+
+
 def cmd_append(args) -> int:
+    verb = _APPEND_DENYLIST.get(args.type)
+    if verb is not None:
+        raise store.MaestroError(
+            f"maestro append: {args.type!r} is ops-owned -- use `maestro {verb}` instead")
     cfg = _cfg(args)
     payload = json.loads(args.payload) if args.payload else {}
     ev = event_log.append(cfg.home, args.key, args.type, payload, actor=args.actor,
