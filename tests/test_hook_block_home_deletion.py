@@ -61,6 +61,33 @@ def test_blocks_via_shell_variable_expansion(home):
     assert result.returncode == 2
 
 
+def test_blocks_via_mhome_shell_variable_expansion(home):
+    """The phase skills mint $MHOME (not $MAESTRO_HOME) -- the hook must
+    expand it too, or the rename silently blinds this guard."""
+    result = run_hook("rm -rf $MHOME/events", cwd=home, home=home)
+    assert result.returncode == 2
+    assert str(home) in result.stderr
+
+
+def test_blocks_via_braced_mhome_shell_variable_expansion(home):
+    result = run_hook("rm -rf ${MHOME}", cwd=home, home=home)
+    assert result.returncode == 2
+    assert str(home) in result.stderr
+
+
+def test_blocks_bare_mhome_deletion(home):
+    result = run_hook("rm -rf $MHOME", cwd=home, home=home)
+    assert result.returncode == 2
+    assert str(home) in result.stderr
+
+
+def test_wildcard_of_unprotected_subdir_via_mhome_is_allowed(home):
+    # Mirrors test_wildcard_of_unprotected_subdir_is_allowed but through the
+    # $MHOME spelling the phase skills actually use.
+    result = run_hook("rm -rf $MHOME/derived/snapshots/*", cwd="/tmp", home=home)
+    assert result.returncode == 0
+
+
 def test_blocks_absolute_path_qualified_binary(home):
     """Regression: the risky-verb regex's negative lookbehind must not exclude
     "/", or a path-qualified invocation (/bin/rm, common to bypass a `rm` shell
