@@ -272,6 +272,22 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
             "missing": missing}
 
 
+def check_spawn_floor(cfg: Config, now: float) -> dict:
+    """WARN when the effective per-key spawn floor (``dispatcher.spawn_floor``,
+    i.e. ``min_spawn_interval``) is 0 -- the setting has no other surface (GA-8):
+    a typo or a debugging override left in place is otherwise invisible outside
+    ``config.toml``. With the floor off, only ``max_concurrency`` x sweep cadence
+    still bounds the fleet -- ``health.spawn_budget``'s fallback (health.py:62)
+    keeps the runaway detector honest regardless, so this check is advisory
+    visibility for the setting, not a second brake on top of it."""
+    floor = dispatcher.spawn_floor(cfg)
+    disabled = floor == 0
+    detail = (f"spawn floor is 0 (disabled) -- only max_concurrency x sweep cadence "
+              f"bounds the fleet" if disabled else f"spawn floor is {floor}s")
+    return {"name": "spawn_floor", "status": "warn" if disabled else "ok",
+            "detail": detail, "floor_s": floor}
+
+
 def check_depends_on(cfg: Config, now: float) -> dict:
     home = cfg.home
     graph = _depends_on_graph(home)
@@ -292,7 +308,7 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 # for backward compatibility with the TUI fleet view and prior doctor output.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
-          check_missing_reconcile_skill)
+          check_missing_reconcile_skill, check_spawn_floor)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
@@ -324,6 +340,7 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
         "spawns_last_hour": rate,
         "throttled_last_sweep": hb.get("throttled", 0),
         "spawn_budget_per_hour": budget,
+        "spawn_floor_s": dispatcher.spawn_floor(cfg),
         "runaway": bool(budget) and rate["total"] > budget,
         "paused": hb.get("paused", False),
         "checks": checks,

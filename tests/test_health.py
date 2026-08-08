@@ -246,6 +246,31 @@ def test_check_dead_letters_ok_when_none(home, cfg):
     assert result == {"name": "dead_letters", "status": "ok", "detail": "none", "ages_s": {}}
 
 
+# --- spawn_floor check (GA-8) ---------------------------------------------------
+
+
+def test_check_spawn_floor_warns_when_disabled(home, cfg):
+    cfg.min_spawn_interval = 0
+    result = health.check_spawn_floor(cfg, store.now_epoch())
+    assert result["name"] == "spawn_floor"
+    assert result["status"] == "warn"
+    assert result["floor_s"] == 0
+    assert "max_concurrency" in result["detail"]
+
+
+def test_check_spawn_floor_ok_when_set(home, cfg):
+    cfg.min_spawn_interval = 300
+    result = health.check_spawn_floor(cfg, store.now_epoch())
+    assert result["status"] == "ok"
+    assert result["floor_s"] == 300
+
+
+def test_report_exposes_spawn_floor_seconds(home, cfg):
+    cfg.min_spawn_interval = 45
+    rpt = health.report(cfg, store.now_epoch())
+    assert rpt["spawn_floor_s"] == 45
+
+
 def test_check_depends_on_reports_missing_key(home, cfg):
     _seed_with_deps(home, "T-1", Phase.READY, depends_on=["TYPO-9"])
     result = health.check_depends_on(cfg, store.now_epoch())
@@ -324,5 +349,67 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     names = {c["name"] for c in out["checks"]}
     assert names == {"heartbeat", "backup_age", "claim_age", "dead_letters",
                       "depends_on", "launchctl", "repo_preflight",
-                      "unknown_repo_bindings", "missing_reconcile_skill"}
+                      "unknown_repo_bindings", "missing_reconcile_skill", "spawn_floor"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
+
+
+# --- GA-8: negative min_spawn_interval rejected at load, 0 stays legal ---------
+
+
+def test_doctor_over_real_home_warns_on_disabled_floor(tmp_path):
+    """QA per CLAUDE.md: min_spawn_interval = 0 in a real config.toml, over a real
+    `maestro` CLI call -- nothing mocked. The doctor payload carries both the warn
+    check and the effective-floor field."""
+    from maestro import cli
+
+    home = tmp_path / "home"
+    for d in ("events", "inbox", "tickets", "worktrees", "derived/snapshots", "derived/cursors"):
+        (home / d).mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text("[maestro]\nmin_spawn_interval = 0\n")
+
+    code, out = _sweep(home)
+    assert code == 0
+    assert out["spawn_floor_s"] == 0
+    check = next(c for c in out["checks"] if c["name"] == "spawn_floor")
+    assert check["status"] == "warn"
+
+
+def test_negative_min_spawn_interval_rejected_at_load(tmp_path, capsys):
+    """AC: a negative min_spawn_interval fails `maestro doctor` closed -- exit 2,
+    an `error:` line naming the key, the offending value, and config.toml."""
+    from maestro import cli
+
+    home = tmp_path / "home"
+    for d in ("events", "inbox", "tickets", "worktrees", "derived/snapshots", "derived/cursors"):
+        (home / d).mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text("[maestro]\nmin_spawn_interval = -1\n")
+
+    code = cli.main(["--home", str(home), "doctor"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("error:")
+    assert "min_spawn_interval" in err
+    assert "-1" in err
+    assert "config.toml" in err
+
+
+def test_negative_min_spawn_interval_fails_dispatch_closed(tmp_path, capsys):
+    """The same bad config fails closed on the sweep path too: `config.load`
+    raises before `dispatch()` is ever reached, so no heartbeat/ledger is written."""
+    from maestro import cli, config as config_mod, store as store_mod
+
+    home = tmp_path / "home"
+    for d in ("events", "inbox", "tickets", "worktrees", "derived/snapshots", "derived/cursors"):
+        (home / d).mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text("[maestro]\nmin_spawn_interval = -1\n")
+
+    try:
+        config_mod.load(str(home))
+        assert False, "config.load should have raised"
+    except store_mod.MaestroError:
+        pass
+
+    code = cli.main(["--home", str(home), "dispatch"])
+    assert code == 2
+    assert not (home / "derived" / ".heartbeat.json").exists()
+    assert not (home / "derived" / ".spawn_ledger.json").exists()

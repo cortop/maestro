@@ -138,6 +138,15 @@ def load(home_arg: str | None = None) -> Config:
         cfg.reconcile_steady_interval = int(
             m.get("reconcile_steady_interval", cfg.reconcile_steady_interval))
         raw_floor = m.get("min_spawn_interval", cfg.min_spawn_interval)
+        if raw_floor is not None and int(raw_floor) < 0:
+            # GA-8: 0 is a legitimate, documented single-key debugging mode (it disables
+            # the floor -- see spawn_floor()); a negative value is just a typo and is
+            # worse than 0 (it would silently clamp to 0 with zero feedback), so fail
+            # closed at load rather than let it through. dispatch()/doctor never even
+            # build a Config from this home, matching the fencing-gated log's "loud, not
+            # silent" posture -- see cli.main's `except store.MaestroError` (exit 2).
+            raise store.MaestroError(
+                f"config.toml: min_spawn_interval must be >= 0, got {raw_floor!r}")
         cfg.min_spawn_interval = int(raw_floor) if raw_floor is not None else None
         cfg.backoff_base = int(m.get("backoff_base", cfg.backoff_base))
         cfg.backoff_cap = int(m.get("backoff_cap", cfg.backoff_cap))
@@ -232,6 +241,10 @@ reconcile_steady_interval = 300
 # min_spawn_interval = 300        # hard floor between two spawns of the SAME key
                                   # (default: reconcile_steady_interval). Bounds the
                                   # fleet even if the dispatcher is fired too often.
+                                  # 0 disables the floor entirely for that key (a
+                                  # legitimate debugging mode -- `maestro doctor` warns
+                                  # when the effective value is 0). Negative is rejected
+                                  # at load (exit 2), not silently clamped to 0.
 backoff_base = 30
 max_failures = 4
 max_impl_turns = 20
