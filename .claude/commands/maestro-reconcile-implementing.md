@@ -139,16 +139,17 @@ Otherwise implement the spec's Acceptance criteria:
    Spec-axis fixes below; for the rest, leave a `maestro append --type Note` breadcrumb summarizing
    what a human reviewer should look at and proceed — do not loop or block on this axis.
    - **Every AC verdict PASS** (spec axis) → continue to step 4.
-   - **Any AC verdict FAIL** → you (the implementer) fix the code per the QA evidence, append a
-     turn breadcrumb (`maestro append "$KEY" --type ImplTurnRecorded --payload
-     "{\"turn\":<n>,\"role\":\"implementer\"}" --step-id "turn-$KEY-<n>-impl"`), re-run tests,
-     then spawn QA again against the refreshed diff. Bound the rounds at `max_impl_turns`
-     combined turns; if still failing when exhausted, do not open a PR —
-     `maestro set-phase "$KEY" implementing --reason "QA loop non-converging after N rounds:
-     <summary>"` then `maestro requeue "$KEY" 60` and exit so the dispatcher resumes the loop
-     next sweep. This is enforced, not just convention: `set-phase awaiting-ci` refuses (raises,
-     no event appended) while any current AC's latest QA verdict is `fail`, so a failing verdict
-     always routes back to `implementing`, never onward to `awaiting-ci`.
+   - **Any AC verdict FAIL** → you (the implementer) fix the code per the QA evidence, record the
+     turn with `maestro impl-turn "$KEY" --role implementer` (the verb numbers the turn and mints
+     its own step-id itself — never hand-roll this with `maestro append`), re-run tests, then spawn
+     QA again against the refreshed diff. Bound the rounds at `max_impl_turns` implementer turns —
+     `impl-turn` checks the ceiling itself and routes the crossing call to `ops.fail`
+     (backoff/dead-letter), so this is not just a convention you can silently overrun; if still
+     failing when exhausted, do not open a PR — `maestro set-phase "$KEY" implementing --reason "QA
+     loop non-converging after N rounds: <summary>"` then `maestro requeue "$KEY" 60` and exit so
+     the dispatcher resumes the loop next sweep. Separately, `set-phase awaiting-ci` refuses
+     (raises, no event appended) while any current AC's latest QA verdict is `fail`, so a failing
+     verdict always routes back to `implementing`, never onward to `awaiting-ci`.
 4. **Self-review gate — one structured attestation per spec AC, before opening the PR:**
    for each `- [ ] ...` checkbox in the spec, `maestro verify-ac "$KEY" --ac <n> --what
    "<what you ran>" --where "<file:line or test name>" --result "<the observed outcome>"`
