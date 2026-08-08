@@ -246,6 +246,17 @@ def test_implementing_restates_never_abort_positively():
 # AC4: researching branch requires primary sources, not just "search the web"
 # ---------------------------------------------------------------------------
 
+def test_implementing_records_turns_via_impl_turn_verb():
+    """GA-2: the QA-loop turn breadcrumb must go through `maestro impl-turn`, which
+    checks the max_impl_turns ceiling and routes a crossing call to ops.fail -- a raw
+    `maestro append --type ImplTurnRecorded` bypasses that check entirely (and, on the
+    hand-rolled step-id the old text used, undercounts turns after a crash/respawn)."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "ImplTurnRecorded" not in text
+        assert "maestro impl-turn" in text
+
+
 def test_researching_requires_primary_sources():
     for path in (_commands_path("researching"), _skills_path("researching")):
         text = path.read_text()
