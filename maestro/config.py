@@ -41,6 +41,12 @@ class Config:
     # None = derive from what the spawn-rate floor itself permits (see health.py);
     # 0 disables the check.
     runaway_spawns_per_hour: int | None = None
+    # GA-5: seconds `dispatch()` arms `fleet.pause` for when it observes the same
+    # `runaway` condition `maestro doctor` reports (health.spawn_rate(...)["total"]
+    # > health.spawn_budget(cfg)) -- the auto-brake beside the fleet-wide rate-limit
+    # gate. 0 disables the auto-brake while leaving doctor's advisory intact;
+    # `runaway_spawns_per_hour = 0` disables both (spawn_budget() returns 0).
+    runaway_pause_cooldown: int = 900
     repo_path: str | None = None           # primary repo the reconciler builds in
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
     # GA-15: override for `maestro install-commands --user` / the doctor check's
@@ -142,6 +148,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.daily_token_ceiling = m.get("daily_token_ceiling", cfg.daily_token_ceiling)
         raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
         cfg.runaway_spawns_per_hour = int(raw_runaway) if raw_runaway is not None else None
+        cfg.runaway_pause_cooldown = int(
+            m.get("runaway_pause_cooldown", cfg.runaway_pause_cooldown))
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
@@ -236,6 +244,9 @@ max_impl_turns = 20
 # runaway_spawns_per_hour = 200   # `maestro doctor` trips runaway above this fleet-wide
                                   # spawns/hour (default: derived from the spawn floor
                                   # itself; 0 disables the check)
+# runaway_pause_cooldown = 900    # seconds dispatch() auto-arms fleet.pause for on the
+                                  # same runaway signal doctor reports (0 disables the
+                                  # auto-brake; runaway_spawns_per_hour = 0 disables both)
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
 # reconcile_allowed_tools = ["Bash(npm test:*)"]   # board-wide --allowedTools additions, unioned
                                   # with the resolved repo's own [repos.<name>]
