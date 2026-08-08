@@ -71,10 +71,11 @@ _CLAUSE_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
 
 
 def _expand_vars(command: str, home: Path) -> str:
-    """Textually substitute $MAESTRO_HOME/$HOME/~ so path matching works
-    even when the command references the home via a shell variable rather
-    than a literal path."""
+    """Textually substitute $MAESTRO_HOME/$MHOME/$HOME/~ so path matching
+    works even when the command references the home via a shell variable
+    rather than a literal path."""
     command = re.sub(r"\$\{MAESTRO_HOME\}|\$MAESTRO_HOME\b", str(home), command)
+    command = re.sub(r"\$\{MHOME\}|\$MHOME\b", str(home), command)
     home_dir = str(Path.home())
     command = re.sub(r"\$\{HOME\}|\$HOME\b", home_dir, command)
     command = re.sub(r"(?<![\w])~(?=/|\s|$)", home_dir, command)

@@ -15,7 +15,7 @@ how the Implementer↔QA loop below runs.
 ## Always: load state first
 Resolve this ticket's bound repo — REPO/SLUG/BASE/PREFIX/MODE come from `maestro env --key`, which
 can differ per ticket in a multi-repo home (single-repo homes fall back to the legacy
-`repo_path`/`branch_prefix` config, so this is unchanged there) — plus HOME, which is board-wide
+`repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME, which is board-wide
 and comes from the key-less `maestro env`. `MODE` is `git` (default — worktree/branch/PR, the
 rest of this doc unless said otherwise) or `local` (AD-6 — a plain directory, e.g. a notes vault
 or `~/.claude` for self-editing skills, with no branch/PR path; called out explicitly below
@@ -23,11 +23,11 @@ wherever it changes what you do):
 ```bash
 KEY="$1"
 eval "$(maestro env --key "$KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("REPO="+(d["repo_path"] or "")+"\nSLUG="+(d["slug"] or "")+"\nBASE="+d["base_branch"]+"\nPREFIX="+d["branch_prefix"]+"\nMODE="+d["mode"])')"
-eval "$(maestro env | python3 -c 'import sys,json;d=json.load(sys.stdin);print("HOME="+d["home"]+"\nQA_STANDARDS_AXIS="+str(bool(d.get("qa_standards_axis"))).lower())')"
+eval "$(maestro env | python3 -c 'import sys,json;d=json.load(sys.stdin);print("MHOME="+d["home"]+"\nQA_STANDARDS_AXIS="+str(bool(d.get("qa_standards_axis"))).lower())')"
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
-sed -n '1,200p' "$HOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
-cat "$HOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
+sed -n '1,200p' "$MHOME/tickets/$KEY/spec.md"   # desired state (you never edit this)
+cat "$MHOME/derived/context/$KEY.md" 2>/dev/null   # folded log: verbatim Q&A, phase reasons,
                                                     # failures, CI history, recent impl steps,
                                                     # dependsOn phases — read this before acting,
                                                     # it saves re-deriving context from raw events
@@ -60,7 +60,7 @@ cd'd you) directly in `$REPO`, the resolved target dir itself — no worktree, n
    **Done when:** `maestro local-backup` ran before the first edit, every spec AC has a
    `verify-ac` attestation, and `maestro finalize "$KEY"` has appended its event. Then exit.
 
-**If `MODE == git`** (default): you are (or the dispatcher cd'd you) in `$HOME/worktrees/$KEY`
+**If `MODE == git`** (default): you are (or the dispatcher cd'd you) in `$MHOME/worktrees/$KEY`
 (if the worktree is missing, recreate it as in the `ready` phase file — `worktree add` adopts
 the existing `${PREFIX}${KEY}` branch).
 
@@ -69,7 +69,7 @@ here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` say
 rebase onto the latest base first, then resolve any conflicts — always resolve, never
 `git rebase --abort`:
 ```bash
-WT="$HOME/worktrees/$KEY"
+WT="$MHOME/worktrees/$KEY"
 git -C "$REPO" fetch -q origin "$BASE"
 git -C "$WT" rebase "origin/$BASE" || true   # resolve conflicts, then: git -C "$WT" rebase --continue
 ```
@@ -99,7 +99,7 @@ Otherwise implement the spec's Acceptance criteria:
    `claude -p` / network / `launchctl` boundary — test the real thing under review everywhere
    else. Then (install the `tui` extra too, so TUI runtime tests run instead of skipping):
    ```bash
-   cd "$HOME/worktrees/$KEY" && python3 -m venv .venv 2>/dev/null; .venv/bin/pip -q install -e ".[dev,tui]" >/dev/null 2>&1
+   cd "$MHOME/worktrees/$KEY" && python3 -m venv .venv 2>/dev/null; .venv/bin/pip -q install -e ".[dev,tui]" >/dev/null 2>&1
    .venv/bin/python -m pytest -q
    ```
    If red, fix and re-run — stay on this step until green. If you exceed ~`max_impl_turns`
@@ -164,8 +164,8 @@ Otherwise implement the spec's Acceptance criteria:
    AC, ask instead of reaching for it yourself.)
 5. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently:
    ```bash
-   git -C "$HOME/worktrees/$KEY" add -A && git -C "$HOME/worktrees/$KEY" commit -q -m "$KEY: <subject>"
-   git -C "$HOME/worktrees/$KEY" push -q -u origin "${PREFIX}${KEY}"
+   git -C "$MHOME/worktrees/$KEY" add -A && git -C "$MHOME/worktrees/$KEY" commit -q -m "$KEY: <subject>"
+   git -C "$MHOME/worktrees/$KEY" push -q -u origin "${PREFIX}${KEY}"
    # Body includes a "| AC | Evidence |" table, one row per spec checkbox, sourced from the
    # verify-ac calls above (or `maestro snapshot "$KEY"` -> ac_verified for the what/where/result).
    PR_URL=$(gh pr create --repo "$SLUG" --base "$BASE" --head "${PREFIX}${KEY}" --draft \
