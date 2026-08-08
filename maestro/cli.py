@@ -430,7 +430,7 @@ def cmd_ratelimit(args) -> int:
     return 0
 
 
-_SCHEDULE_TASK_FLAGS = ("prompt", "every", "kind", "approval_tier", "priority",
+_SCHEDULE_TASK_FLAGS = ("prompt", "every", "cron", "tz", "kind", "approval_tier", "priority",
                         "prefix", "title", "repo", "model", "effort", "notes",
                         "depends_on", "enabled")
 
@@ -451,10 +451,12 @@ def cmd_schedule(args) -> int:
         return 2
     try:
         if args.action == "add":
-            if not args.prompt or not args.every:
-                print("error: schedule add requires --prompt and --every", file=sys.stderr)
+            if not args.prompt or (not args.every and not args.cron):
+                print("error: schedule add requires --prompt and exactly one of --every/--cron",
+                      file=sys.stderr)
                 return 2
             task = {"name": args.name, "prompt": args.prompt, "every": args.every,
+                    "cron": args.cron, "tz": args.tz,
                     "kind": args.kind or "implementation",
                     "approval_tier": args.approval_tier if args.approval_tier is not None else 1,
                     "priority": args.priority if args.priority is not None else 3,
@@ -1027,7 +1029,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name", nargs="?", default=None,
                     help="task name (required for add/edit/rm/enable/disable)")
     sp.add_argument("--prompt", default=None, help="add/edit: the minted ticket's intent")
-    sp.add_argument("--every", default=None, help="add/edit: cadence, e.g. 30m/6h/24h/seconds")
+    sp.add_argument("--every", default=None,
+                    help="add/edit: interval cadence, e.g. 30m/6h/24h/seconds "
+                         "(exactly one of --every/--cron)")
+    sp.add_argument("--cron", default=None,
+                    help="add/edit: 5-field cron expression, e.g. '0 9 * * 1' "
+                         "(exactly one of --every/--cron)")
+    sp.add_argument("--tz", default=None,
+                    help="add/edit: IANA timezone for --cron (default: UTC)")
     sp.add_argument("--kind", default=None, choices=["implementation", "research"])
     sp.add_argument("--approval-tier", dest="approval_tier", type=int, default=None)
     sp.add_argument("--priority", type=int, default=None)

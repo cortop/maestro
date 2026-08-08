@@ -1433,6 +1433,86 @@ def test_schedule_toggle_task_flips_enabled(seeded_home):
     assert cfg.scheduled[0]["enabled"] is False
 
 
+def test_schedule_modal_add_cron_task_then_toggle_survives_fields(seeded_home):
+    """GA-19 mounted-app QA: drives the real ScheduleScreen through creating a
+    cron+tz task, then toggling it, via real key presses -- asserting the cron
+    and tz fields survive in config.toml and app._exception stays None
+    throughout. No new bindings here (the modal gains Input widgets, not new
+    keybindings), so nothing to add to the binding sweep."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("S")  # schedule_panel
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ScheduleScreen)
+
+            # --- add: a cron+tz task, no 'every' -----------------------------
+            await pilot.press("n")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ScheduleModal)
+            modal.query_one("#sched-name", Input).value = "weekly-digest"
+            modal.query_one("#sched-prompt", TextArea).text = "Summarize the week"
+            modal.query_one("#sched-cron", Input).value = "0 9 * * 1"
+            modal.query_one("#sched-tz", Input).value = "America/New_York"
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+
+            cfg = config_mod.load(str(seeded_home))
+            added = next(t for t in cfg.scheduled if t["name"] == "weekly-digest")
+            assert added["cron"] == "0 9 * * 1"
+            assert added["tz"] == "America/New_York"
+            assert "every" not in added
+
+            # --- toggle: flip it, cron/tz must survive the merge -------------
+            screen = app.screen_stack[-1]
+            table = screen.query_one("#schedule-table", DataTable)
+            for row_idx in range(table.row_count):
+                if str(table.get_row_at(row_idx)[0]) == "weekly-digest":
+                    table.move_cursor(row=row_idx)
+                    break
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    cfg = config_mod.load(str(seeded_home))
+    toggled = next(t for t in cfg.scheduled if t["name"] == "weekly-digest")
+    assert toggled["enabled"] is False
+    assert toggled["cron"] == "0 9 * * 1"
+    assert toggled["tz"] == "America/New_York"
+
+
+def test_schedule_modal_rejects_both_every_and_cron(seeded_home):
+    """GA-19: the modal enforces "exactly one of every/cron" client-side --
+    submitting with both filled in must notify (not crash) and leave
+    config.toml untouched."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("schedule_panel")
+            await pilot.pause()
+            screen = app.screen_stack[-1]
+            await screen.run_action("add_task")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            modal.query_one("#sched-name", Input).value = "both"
+            modal.query_one("#sched-prompt", TextArea).text = "P"
+            modal.query_one("#sched-every", Input).value = "1h"
+            modal.query_one("#sched-cron", Input).value = "0 2 * * *"
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert isinstance(app.screen_stack[-1], _ScheduleModal)  # still open
+
+    asyncio.run(_inner())
+    assert config_mod.load(str(seeded_home)).scheduled == []
+
+
 # --- GA-13: TUI schedule verbs route through ops.schedule_* -----------------
 
 def test_schedule_add_duplicate_name_notifies_without_writing(seeded_home):

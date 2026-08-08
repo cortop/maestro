@@ -736,27 +736,52 @@ def _find_scheduled(tasks: list[dict], name: str) -> int:
     return -1
 
 
+def _validate_cadence(task: dict, verb: str) -> None:
+    """GA-19: exactly one of `every`/`cron` -- never both, never neither -- and
+    whichever is set must actually parse; a set `tz` must resolve to a real IANA
+    zone. Shared by `schedule_add`/`schedule_edit` so the CLI and the TUI's
+    `_ScheduleModal` (which enforces the same rule client-side, for immediate
+    feedback) can never drift apart on what "valid cadence" means. Raises
+    `store.MaestroError` with an actionable message; never writes on failure --
+    callers only reach `write_scheduled` after this returns cleanly.
+    """
+    every = task.get("every")
+    cron = task.get("cron")
+    if bool(every) == bool(cron):
+        raise store.MaestroError(
+            f"schedule {verb}: exactly one of 'every' or 'cron' is required")
+    if every:
+        try:
+            schedule_mod.parse_every(every)
+        except ValueError as e:
+            raise store.MaestroError(f"schedule {verb}: {e}") from e
+    else:
+        try:
+            schedule_mod.parse_cron(cron)
+        except ValueError as e:
+            raise store.MaestroError(f"schedule {verb}: {e}") from e
+    if task.get("tz"):
+        try:
+            schedule_mod.resolve_tz(task["tz"])
+        except ValueError as e:
+            raise store.MaestroError(f"schedule {verb}: {e}") from e
+
+
 def schedule_add(cfg: Config, task: dict) -> dict:
     """Append a new `[[scheduled]]` task and rewrite config.toml.
 
-    Owns the validation both surfaces need: `name`/`prompt`/`every` are
-    required, `every` must parse (`schedule.parse_every`), and `name` must not
-    already be taken. Raises `store.MaestroError` (never a bare exception) on
-    any of those, so the CLI and TUI can both catch one error type and surface
-    its message as-is.
+    Owns the validation both surfaces need: `name`/`prompt` are required,
+    exactly one of `every`/`cron` must be set and parse (`_validate_cadence`),
+    and `name` must not already be taken. Raises `store.MaestroError` (never a
+    bare exception) on any of those, so the CLI and TUI can both catch one
+    error type and surface its message as-is.
     """
     name = (task.get("name") or "").strip()
     if not name:
         raise store.MaestroError("schedule add: 'name' is required")
     if not task.get("prompt"):
         raise store.MaestroError("schedule add: 'prompt' is required")
-    every = task.get("every")
-    if not every:
-        raise store.MaestroError("schedule add: 'every' is required")
-    try:
-        schedule_mod.parse_every(every)
-    except ValueError as e:
-        raise store.MaestroError(f"schedule add: {e}") from e
+    _validate_cadence(task, "add")
     tasks = list(cfg.scheduled)
     if _find_scheduled(tasks, name) >= 0:
         raise store.MaestroError(f"schedule add: a task named {name!r} already exists")
@@ -771,8 +796,8 @@ def schedule_edit(cfg: Config, name: str, updates: dict) -> dict:
     config.toml. A changed `name` in `updates` renames the task (the TUI's edit
     modal always submits the full field set, `name` included, so this is what
     makes an in-place rename through it safe). Raises `store.MaestroError` if
-    no task is named `name`, the merged `every` fails to parse, or the merged
-    name is blank or already taken by a different task.
+    no task is named `name`, the merged cadence fails `_validate_cadence`, or
+    the merged name is blank or already taken by a different task.
     """
     tasks = list(cfg.scheduled)
     idx = _find_scheduled(tasks, name)
@@ -782,11 +807,7 @@ def schedule_edit(cfg: Config, name: str, updates: dict) -> dict:
     new_name = (merged.get("name") or "").strip()
     if not new_name:
         raise store.MaestroError("schedule edit: 'name' cannot be blank")
-    if merged.get("every"):
-        try:
-            schedule_mod.parse_every(merged["every"])
-        except ValueError as e:
-            raise store.MaestroError(f"schedule edit: {e}") from e
+    _validate_cadence(merged, "edit")
     for i, t in enumerate(tasks):
         if i != idx and t.get("name") == new_name:
             raise store.MaestroError(f"schedule edit: a task named {new_name!r} already exists")

@@ -276,3 +276,68 @@ def test_ops_schedule_add_rejects_unparseable_every(home):
     cfg = config_mod.load(str(home))
     with pytest.raises(store.MaestroError):
         ops.schedule_add(cfg, {"name": "a", "prompt": "P", "every": "not-a-duration"})
+
+
+# --- GA-19: cron/tz -- CLI round-trip + "exactly one of every/cron" validation
+
+def test_cli_schedule_add_cron_roundtrips_cron_and_tz(home):
+    """QA over the real CLI: `schedule add` with --cron/--tz exits 0, and
+    `schedule list` round-trips the cron and tz values through config.load."""
+    rc = cli_main(["--home", str(home), "schedule", "add", "digest",
+                   "--prompt", "Summarize PRs", "--cron", "0 9 * * 1",
+                   "--tz", "America/New_York"])
+    assert rc == 0
+    cfg = config_mod.load(str(home))
+    assert cfg.scheduled == [{
+        "name": "digest", "prompt": "Summarize PRs", "cron": "0 9 * * 1",
+        "tz": "America/New_York", "kind": "implementation", "approval_tier": 1,
+        "priority": 3, "enabled": True,
+    }]
+
+    rc = cli_main(["--home", str(home), "schedule", "list"])
+    assert rc == 0
+
+
+def test_ops_schedule_add_rejects_both_every_and_cron(home):
+    cfg = config_mod.load(str(home))
+    with pytest.raises(store.MaestroError, match="exactly one"):
+        ops.schedule_add(cfg, {
+            "name": "a", "prompt": "P", "every": "1h", "cron": "0 2 * * *"})
+    assert config_mod.load(str(home)).scheduled == []  # writes nothing
+
+
+def test_ops_schedule_add_rejects_neither_every_nor_cron(home):
+    cfg = config_mod.load(str(home))
+    with pytest.raises(store.MaestroError, match="exactly one"):
+        ops.schedule_add(cfg, {"name": "a", "prompt": "P"})
+    assert config_mod.load(str(home)).scheduled == []
+
+
+def test_ops_schedule_add_rejects_unparseable_cron(home):
+    cfg = config_mod.load(str(home))
+    with pytest.raises(store.MaestroError):
+        ops.schedule_add(cfg, {"name": "a", "prompt": "P", "cron": "not a cron"})
+
+
+def test_ops_schedule_add_rejects_unknown_tz(home):
+    cfg = config_mod.load(str(home))
+    with pytest.raises(store.MaestroError, match="unknown timezone"):
+        ops.schedule_add(cfg, {
+            "name": "a", "prompt": "P", "cron": "0 2 * * *", "tz": "Not/Real"})
+    assert config_mod.load(str(home)).scheduled == []
+
+
+def test_ops_schedule_edit_rejects_setting_both_every_and_cron(home):
+    assert cli_main(["--home", str(home), "schedule", "add", "a",
+                     "--prompt", "A", "--every", "1h"]) == 0
+    cfg = config_mod.load(str(home))
+    with pytest.raises(store.MaestroError, match="exactly one"):
+        ops.schedule_edit(cfg, "a", {"cron": "0 2 * * *"})  # 'every' still set too
+    # untouched -- the existing task keeps its original 'every' cadence
+    assert config_mod.load(str(home)).scheduled[0]["every"] == "1h"
+
+
+def test_cli_schedule_add_missing_cadence_exits_nonzero(home):
+    rc = cli_main(["--home", str(home), "schedule", "add", "digest", "--prompt", "P"])
+    assert rc != 0
+    assert config_mod.load(str(home)).scheduled == []

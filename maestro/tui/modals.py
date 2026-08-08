@@ -439,8 +439,12 @@ class _ScheduleModal(ModalScreen):
             yield Input(value=t.get("title") or "", placeholder="e.g. Morning PR digest", id="sched-title")
             yield Label("Prompt [bold red]*[/bold red]")
             yield TextArea(t.get("prompt", ""), id="sched-prompt")
-            yield Label("Every (e.g. 30m / 6h / 24h / seconds) [bold red]*[/bold red]")
-            yield Input(value=str(t.get("every", "")), placeholder="30m", id="sched-every")
+            yield Label("Every (e.g. 30m / 6h / 24h / seconds) -- exactly one of Every/Cron")
+            yield Input(value=str(t.get("every") or ""), placeholder="30m", id="sched-every")
+            yield Label("Cron (5-field, e.g. '0 9 * * 1') -- exactly one of Every/Cron")
+            yield Input(value=t.get("cron") or "", placeholder="0 9 * * 1", id="sched-cron")
+            yield Label("Timezone (IANA, e.g. America/New_York; default UTC; only used by Cron)")
+            yield Input(value=t.get("tz") or "", placeholder="UTC", id="sched-tz")
             yield Label("Repo (optional; must match a [repos.<name>] table)")
             yield Input(value=t.get("repo") or "", placeholder="e.g. alpha", id="sched-repo")
             yield Label("Kind")
@@ -478,14 +482,29 @@ class _ScheduleModal(ModalScreen):
             self.notify("Prompt is required", severity="warning")
             return
         every = self.query_one("#sched-every", Input).value.strip()
-        if not every:
-            self.notify("Every is required", severity="warning")
+        cron = self.query_one("#sched-cron", Input).value.strip()
+        if bool(every) == bool(cron):
+            self.notify("Exactly one of Every or Cron is required", severity="warning")
             return
-        try:
-            schedule.parse_every(every)
-        except ValueError:
-            self.notify("Every must look like 30m / 6h / 24h / seconds", severity="warning")
-            return
+        if every:
+            try:
+                schedule.parse_every(every)
+            except ValueError:
+                self.notify("Every must look like 30m / 6h / 24h / seconds", severity="warning")
+                return
+        else:
+            try:
+                schedule.parse_cron(cron)
+            except ValueError as e:
+                self.notify(f"Cron: {e}", severity="warning")
+                return
+        tz = self.query_one("#sched-tz", Input).value.strip() or None
+        if tz:
+            try:
+                schedule.resolve_tz(tz)
+            except ValueError as e:
+                self.notify(str(e), severity="warning")
+                return
         try:
             tier = int(self.query_one("#sched-tier", Input).value.strip() or "1")
             priority = int(self.query_one("#sched-priority", Input).value.strip() or "3")
@@ -500,7 +519,8 @@ class _ScheduleModal(ModalScreen):
         title = self.query_one("#sched-title", Input).value.strip() or None
         repo = self.query_one("#sched-repo", Input).value.strip() or None
         self.dismiss({
-            "name": name, "prompt": prompt, "every": every, "kind": kind,
+            "name": name, "prompt": prompt, "every": every or None, "cron": cron or None,
+            "tz": tz, "kind": kind,
             "approval_tier": tier, "priority": priority, "prefix": prefix,
             "enabled": enabled, "title": title, "repo": repo,
         })

@@ -289,6 +289,23 @@ def test_cli_fleet_pause_resume_round_trip(home):
     assert rc == 0
 
 
+def test_cli_fleet_pause_for_keeps_interval_grammar_unchanged(home):
+    """GA-19 regression: `fleet pause --for` (cli.py:428, inside cmd_fleet) is the
+    ONLY other `schedule.parse_every` caller besides the scheduled-task cadence
+    seam -- adding cron parsing alongside it must not disturb this path. Asserts
+    the delta off the real clock (cmd_fleet computes `store.now_epoch() +
+    parse_every(...)`), not an exact epoch."""
+    from maestro import cli
+
+    before = store.now_epoch()
+    rc = cli.main(["--home", str(home), "fleet", "pause", "--for", "6h"])
+    assert rc == 0
+    raw = store.read_json(fleet.pause_path(home), None)
+    assert raw is not None
+    delta = raw["until"] - before
+    assert abs(delta - 21600) < 5  # ~6h, small slack for real-clock jitter
+
+
 def test_cli_dispatch_json_includes_paused(home):
     import io
     import json

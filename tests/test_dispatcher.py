@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -797,6 +798,7 @@ def test_schedule_status_reports_cadence_and_cursor(home, cfg):
     rows = disp.schedule_status(cfg, now + 10)
     assert rows == [{
         "name": "digest", "prompt": "Summarize things", "every": "1h",
+        "cron": None, "tz": "UTC",
         "kind": "implementation", "approval_tier": 0, "priority": 3,
         "prefix": "S", "enabled": True, "repo": None, "title": None,
         "last_fired": now, "next_due": now + 3600,
@@ -808,6 +810,95 @@ def test_schedule_status_never_fired_has_no_last_fired(home, cfg):
     rows = disp.schedule_status(cfg, now=1_000_000)
     assert rows[0]["last_fired"] is None
     assert rows[0]["next_due"] == 3600  # one period from the epoch
+
+
+# --- GA-19: cron / wall-clock cadence, driven through the real dispatcher -----
+
+def _cron_sched_cfg(cfg, **overrides):
+    task = {
+        "name": "digest", "prompt": "Summarize things", "cron": "0 2 * * *",
+        "tz": "UTC", "approval_tier": 0, "kind": "implementation", "priority": 3,
+        "prefix": "S", "enabled": True,
+    }
+    task.update(overrides)
+    cfg.scheduled = [task]
+    return cfg
+
+
+def test_dispatch_cron_task_fires_exactly_on_the_sweep_crossing_its_slot(home, cfg):
+    """QA over the real surface (CLAUDE.md): real dispatch() sweeps at hand-
+    chosen epochs -- before the slot, at/after it, and again within the same
+    slot -- fire on exactly the sweep that crosses the wall-clock slot, and
+    mint exactly one ticket per slot, not one per sweep. Only the claude spawn
+    is mocked (DryRunSessions)."""
+    _cron_sched_cfg(cfg)
+    prev_slot = datetime(2025, 12, 31, 2, 0, tzinfo=ZoneInfo("UTC")).timestamp()
+    slot = datetime(2026, 1, 1, 2, 0, tzinfo=ZoneInfo("UTC")).timestamp()
+
+    r1 = disp.dispatch(cfg, DryRunSessions(), now=prev_slot)  # anchor the cursor
+    assert r1.scheduled_fired == ["digest"]
+    assert r1.minted == []  # the fire only queues a _new entry; mint happens next sweep
+
+    r2 = disp.dispatch(cfg, DryRunSessions(), now=slot - 3600)  # 01:00, too early
+    assert r2.scheduled_fired == []
+    assert r2.minted == ["S-1"]  # sweep 1's queued fire mints here
+
+    r3 = disp.dispatch(cfg, DryRunSessions(), now=slot)  # crosses the wall-clock slot
+    assert r3.scheduled_fired == ["digest"]
+
+    r4 = disp.dispatch(cfg, DryRunSessions(), now=slot + 5)  # same slot, must not re-fire
+    assert r4.scheduled_fired == []
+    assert r4.minted == ["S-2"]
+
+    r5 = disp.dispatch(cfg, DryRunSessions(), now=slot + 1800)  # still 02:xx, same slot
+    assert r5.scheduled_fired == []
+    assert r5.minted == []
+
+    minted_tickets = sorted(p.name for p in (home / "tickets").iterdir())
+    assert minted_tickets == ["S-1", "S-2"]  # one per slot, not one per sweep
+
+
+def test_run_scheduled_tasks_cron_only_task_mints_without_every_field(home, cfg):
+    """AC: a cron-only task (no 'every' at all) mints without raising KeyError --
+    the dedup token has moved behind `schedule.dedup_bucket`, so `schedule.period`
+    (which requires 'every') is never called for a cron task."""
+    _cron_sched_cfg(cfg)
+    assert "every" not in cfg.scheduled[0]
+    slot = datetime(2026, 1, 1, 2, 0, tzinfo=ZoneInfo("UTC")).timestamp()
+    result = disp.run_scheduled_tasks(cfg, now=slot)
+    assert result["fired"] == ["digest"]
+
+
+def test_mint_new_tickets_dedup_closes_cursor_crash_window_cron(home, cfg):
+    """GA-19 extension of the interval crash-window regression: a cron task
+    fired twice inside the SAME slot (cursor deleted between fires, simulating
+    a crash before it persisted) mints exactly ONE ticket, not two."""
+    _cron_sched_cfg(cfg)
+    slot = datetime(2026, 1, 1, 2, 0, tzinfo=ZoneInfo("UTC")).timestamp()
+    fired1 = disp.run_scheduled_tasks(cfg, slot)
+    assert fired1["fired"] == ["digest"]
+    (home / "derived" / ".schedule_cursor.json").unlink()
+    fired2 = disp.run_scheduled_tasks(cfg, slot + 5)  # same wall-clock slot
+    assert fired2["fired"] == ["digest"]
+
+    pending = inbox.pending_new(home)
+    assert len(pending) == 2
+    assert pending[0][1]["args"]["dedup"] == pending[1][1]["args"]["dedup"]
+
+    minted = disp.mint_new_tickets(cfg)
+    assert minted == ["S-1"]  # only one real ticket, despite two queued fires
+    assert sorted(p.name for p in (home / "tickets").iterdir()) == ["S-1"]
+
+
+def test_schedule_status_cron_task_next_due_is_a_real_timestamp(home, cfg):
+    """`maestro schedule list` (schedule_status) must show a real next-due
+    timestamp for a cron task, never None or a crash."""
+    _cron_sched_cfg(cfg)
+    now = datetime(2026, 1, 1, 1, 0, tzinfo=ZoneInfo("UTC")).timestamp()
+    rows = disp.schedule_status(cfg, now)
+    assert rows[0]["next_due"] == datetime(2026, 1, 1, 2, 0, tzinfo=ZoneInfo("UTC")).timestamp()
+    assert rows[0]["cron"] == "0 2 * * *"
+    assert rows[0]["tz"] == "UTC"
 
 
 def test_dispatch_cli_reports_scheduled_fired(home):
