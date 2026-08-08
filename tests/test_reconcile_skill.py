@@ -121,28 +121,203 @@ def test_no_hardcoded_repo_slug():
 def test_no_bare_origin_main():
     for path in ALL_PHASE_PATHS:
         assert "origin/main" not in path.read_text(), f"{path} still hardcodes origin/main"
-    # The rewritten form must actually be present (not just deleted): ready.md creates the
-    # worktree off origin/$BASE and fetches it once; implementing.md rebases onto
-    # origin/$BASE, diffs the QA loop against it, and fetches it once (step 0).
-    for phase, base_count, fetch_count in (("ready", 1, 1), ("implementing", 2, 1)):
-        for path in (_commands_path(phase), _skills_path(phase)):
-            text = path.read_text()
-            assert text.count('"origin/$BASE"') == base_count, \
-                f'{path} should target "origin/$BASE" exactly {base_count} time(s)'
-            assert text.count('fetch -q origin "$BASE"') == fetch_count, \
-                f'{path} should fetch "$BASE" exactly {fetch_count} time(s)'
+    # The rewritten form must actually be present (not just deleted): ready.md still resolves
+    # REPO/BASE via real shell variables (GA-10 only rewrote its preamble, not this ticket's
+    # scope) and creates the worktree off origin/$BASE, fetching it once. implementing.md
+    # (GA-12: downstream commands literalized -- REPO/BASE substituted as the <REPO>/<BASE>
+    # tokens the agent types, never a shell $VAR a fenced line expands) rebases onto
+    # origin/<BASE>, diffs the QA loop against it, and fetches it once (step 0).
+    for path in (_commands_path("ready"), _skills_path("ready")):
+        text = path.read_text()
+        assert text.count('"origin/$BASE"') == 1, \
+            f'{path} should target "origin/$BASE" exactly 1 time(s)'
+        assert text.count('fetch -q origin "$BASE"') == 1, \
+            f'{path} should fetch "$BASE" exactly 1 time(s)'
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert '$BASE' not in text, f'{path} should hold BASE as the literal <BASE>, not $BASE'
+        assert text.count('"origin/<BASE>"') == 2, \
+            f'{path} should target "origin/<BASE>" exactly 2 time(s)'
+        assert text.count('fetch -q origin "<BASE>"') == 1, \
+            f'{path} should fetch "<BASE>" exactly 1 time(s)'
 
 
 def test_gh_pr_calls_use_repo_slug_and_base():
-    # gh calls only live in the implementing file (PR create/view) now.
+    # gh calls only live in the implementing file (PR create/view) now. GA-12: SLUG/BASE are
+    # substituted as the literal <SLUG>/<BASE> tokens the agent types, never $SLUG/$BASE.
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
-        assert text.count('--repo "$SLUG"') == 3, \
-            f"{path}: expected exactly 3 gh calls (1 create + 2 view) carrying --repo \"$SLUG\""
-        assert text.count('--base "$BASE"') == 1, \
-            f"{path}: expected exactly 1 --base \"$BASE\" (on gh pr create only)"
+        assert '$SLUG' not in text, f'{path} should hold SLUG as the literal <SLUG>, not $SLUG'
+        assert text.count('--repo "<SLUG>"') == 3, \
+            f'{path}: expected exactly 3 gh calls (1 create + 2 view) carrying --repo "<SLUG>"'
+        assert text.count('--base "<BASE>"') == 1, \
+            f'{path}: expected exactly 1 --base "<BASE>" (on gh pr create only)'
         create_line = next(l for l in text.splitlines() if "gh pr create" in l)
-        assert '--repo "$SLUG"' in create_line and '--base "$BASE"' in create_line
+        assert '--repo "<SLUG>"' in create_line and '--base "<BASE>"' in create_line
+
+
+# ---------------------------------------------------------------------------
+# GA-12: implementing.md's downstream commands (everything below the preamble
+# GA-10 already made eval-free) are literalized -- a fence parser proving AC1
+# (single invocation), AC2 (allowed first token) and AC3 (no raw $VAR expansion).
+# ---------------------------------------------------------------------------
+
+_BASH_FENCE_RE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
+_ALLOWED_FIRST_TOKENS = {"git", "gh", "maestro", "python3"}
+_BANNED_FENCE_VARS = ("$REPO", "$WT", "$MHOME", "$BASE", "$PREFIX", "$SLUG")
+
+
+def _bash_fences(text: str) -> list[str]:
+    """Every ```bash ... ``` fenced block's raw content, file-order."""
+    return _BASH_FENCE_RE.findall(text)
+
+
+def _downstream_fences(text: str) -> list[str]:
+    """Every bash fence in the file *except* the preamble's own load-state block --
+    GA-10 already made that one eval-free and its own tests cover it (including its
+    `KEY="$1"` argument-capture line, which is not a git/gh/maestro/python3/venv-binary
+    invocation and predates this ticket). GA-12's scope is everything below it."""
+    stripped = _strip_frontmatter(text)
+    preamble = _preamble_block(stripped)
+    return [f for f in _bash_fences(stripped) if f != preamble]
+
+
+def _logical_commands(fence: str) -> list[tuple[int, str]]:
+    """(1-based line-within-fence, command text) pairs. A command spans more than one
+    physical line only while a double-quote it opened hasn't yet closed -- the only
+    case in this file is the multi-line `gh pr create --body "...table..."` value; GA-12
+    banned trailing-backslash continuations, so nothing else spans lines this way."""
+    lines = fence.splitlines()
+    out: list[tuple[int, str]] = []
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            i += 1
+            continue
+        start_line = i + 1
+        buf = [raw]
+        quotes = raw.count('"')
+        i += 1
+        while quotes % 2 == 1 and i < len(lines):
+            buf.append(lines[i])
+            quotes += lines[i].count('"')
+            i += 1
+        out.append((start_line, "\n".join(buf)))
+    return out
+
+
+def _first_token(command: str) -> str:
+    return command.split(None, 1)[0]
+
+
+def _first_token_allowed(token: str) -> bool:
+    return token in _ALLOWED_FIRST_TOKENS or token.startswith(".venv/bin/")
+
+
+def test_implementing_fenced_commands_are_single_invocations():
+    """AC1 (GA-12): no &&, ||, ;-chaining, if/…/fi, or VAR=$(...) command-substitution
+    assignment inside any downstream bash fence -- each command must be a single
+    invocation, or it matches no Bash(<binary>:*) permission rule at all and stalls an
+    unattended reconciler on a prompt."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        for fence in _downstream_fences(text):
+            assert "&&" not in fence, f"{path}: a fence still chains with &&:\n{fence}"
+            assert "||" not in fence, f"{path}: a fence still chains with ||:\n{fence}"
+            assert ";" not in fence, f"{path}: a fence still chains with ;:\n{fence}"
+            for lineno, command in _logical_commands(fence):
+                assert not re.match(r"\s*if\b", command), \
+                    f"{path}: line {lineno} is an if/…/fi construct: {command!r}"
+                assert not re.search(r"\bthen\b|\bfi\b", command), \
+                    f"{path}: line {lineno} is an if/…/fi construct: {command!r}"
+                assert not re.match(r"\s*\w+=\$\(", command), \
+                    f"{path}: line {lineno} is a VAR=$(...) assignment: {command!r}"
+
+
+def test_implementing_fenced_commands_use_allowed_first_token():
+    """AC2 (GA-12): every downstream command's first token is git/gh/maestro/python3 or
+    a venv binary path (`.venv/bin/...`), so each one matches exactly one
+    Bash(<binary>:*) allow rule."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        for fence in _downstream_fences(text):
+            for lineno, command in _logical_commands(fence):
+                token = _first_token(command)
+                assert _first_token_allowed(token), \
+                    f"{path}: line {lineno} starts with {token!r}, not an allowed binary"
+
+
+def test_implementing_fenced_commands_never_expand_env_vars():
+    """AC3 (GA-12): no downstream bash fence expands $REPO/$WT/$MHOME/$BASE/$PREFIX/
+    $SLUG -- those are literal values the agent reads once from `maestro env --key`/
+    `maestro env` and substitutes when it types each command, never a shell variable a
+    fenced line resolves. The <TOKEN> placeholder spelling is GA-10's own convention
+    (`<MHOME>`/`<KEY>` in the preamble's file-loading bullets), extended here to REPO/
+    WT/BASE/PREFIX/SLUG, and the prose says so explicitly."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        for fence in _downstream_fences(text):
+            for banned in _BANNED_FENCE_VARS:
+                assert banned not in fence, \
+                    f"{path}: a fence still expands {banned}:\n{fence}"
+        for token in ("<REPO>", "<WT>", "<BASE>", "<PREFIX>", "<SLUG>"):
+            assert token in text, f"{path}: never introduces the {token} placeholder"
+        assert "none is a shell variable a fenced line expands" in text, \
+            f"{path}: never states the substitute-don't-expand instruction"
+
+
+def test_implementing_venv_bootstrap_is_split_into_single_invocations():
+    """The venv-bootstrap AC (GA-12): one `python3 -m venv`, one pip install, one
+    pytest -- no `cd … &&`, no `;` chain, no `>/dev/null` redirects. This is the
+    INTERIM form (Notes): GA-20 later deletes the venv/pip lines and keeps the pytest
+    line standing, which is exactly why they must be separable single lines now."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "python3 -m venv .venv" in text
+        assert '.venv/bin/pip install -q -e ".[dev,tui]"' in text
+        assert ".venv/bin/python -m pytest -q" in text
+        assert " cd " not in text and not text.startswith("cd "), \
+            f"{path}: bootstrap still `cd`s instead of relying on the session cwd"
+        for banned in (">/dev/null", "2>/dev/null", "2>&1"):
+            assert banned not in text, f"{path}: still redirects with {banned}"
+
+
+def test_implementing_pytest_permission_story_is_decided_and_relative():
+    """The pytest-permission AC (GA-12): the file states in prose which option was
+    chosen -- (a), cwd-anchored -- and, since (a) was chosen, no absolute `.venv/bin/`
+    path appears anywhere in the file: `Bash(.venv/bin/:*)` in `.claude/settings.json`
+    is a RELATIVE-prefix grant that only matches while the shell's cwd is the
+    worktree."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "cwd-anchored" in text
+        assert "Bash(.venv/bin/:*)" in text
+        assert "_worker_cwd" in text
+        assert not re.search(r"\S/\.venv/bin/", text), \
+            f"{path}: an absolute .venv/bin/ path snuck back in"
+
+
+def _maestro_verbs_named(text: str) -> set[str]:
+    verbs = {m.group(1) for m in re.finditer(r"`maestro ([a-z][a-z-]*)", text)}
+    for fence in _bash_fences(text):
+        verbs |= {m.group(1) for m in re.finditer(r"(?:^|\n)\s*maestro ([a-z][a-z-]*)", fence)}
+    return verbs
+
+
+def test_every_maestro_verb_named_in_implementing_resolves():
+    """Every `maestro <verb>` named anywhere in the rewritten file is a real subcommand
+    of `cli.build_parser()` -- a typo'd verb is otherwise a silent runtime no-op."""
+    from maestro.cli import build_parser
+
+    parser = build_parser()
+    sub_action = next(a for a in parser._subparsers._group_actions if a.dest == "cmd")
+    valid_verbs = set(sub_action.choices.keys())
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        verbs = _maestro_verbs_named(path.read_text())
+        assert verbs, f"{path}: verb scan found nothing -- the regex is broken"
+        unknown = verbs - valid_verbs
+        assert not unknown, f"{path}: `maestro {unknown}` is not a real subcommand"
 
 
 def test_preamble_resolves_via_env_key_for_repo_aware_phases():
