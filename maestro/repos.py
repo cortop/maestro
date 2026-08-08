@@ -9,7 +9,7 @@ the implicit default so the dispatcher can never wedge on a bad spec edit.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import snapshot as snap_mod
@@ -41,12 +41,17 @@ class RepoBinding:
     # unrecognized value falls back to "git" -- never silently write in place
     # from a typo'd config.
     mode: str = "git"
+    # GA-10: this repo's own --allowedTools additions (e.g. its git/gh/test surface),
+    # unioned with the board-wide Config.reconcile_allowed_tools list -- never a
+    # replacement, so [] means "nothing extra beyond board-wide", not "no tools at all".
+    reconcile_allowed_tools: list = field(default_factory=list)
 
 
 def _binding_from_table(name: str, table: dict) -> RepoBinding:
     mode = table.get("mode", "git")
     if mode not in _MODES:
         mode = "git"
+    raw_tools = table.get("reconcile_allowed_tools", [])
     return RepoBinding(
         name=name,
         path=table.get("path"),
@@ -55,6 +60,7 @@ def _binding_from_table(name: str, table: dict) -> RepoBinding:
         branch_prefix=table.get("branch_prefix", "maestro/"),
         max_spawns_per_sweep=table.get("max_spawns_per_sweep"),
         mode=mode,
+        reconcile_allowed_tools=raw_tools if isinstance(raw_tools, list) else [],
     )
 
 
