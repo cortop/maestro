@@ -33,6 +33,10 @@ def test_spawn_budget_uses_configured_knob(home):
 
 
 def test_spawn_budget_derived_from_spawn_floor_when_knob_absent(home, cfg):
+    # GA-14: spawn_budget is phase-aware now, but these tickets are READY --
+    # weight 1, same as before weighting -- so the formula (and number) here
+    # is unchanged; only an `implementing` ticket gets the bigger allowance
+    # (see test_same_tickets_under_default_floor_do_not_trip).
     for i in range(3):
         _seed(home, f"T-{i}", Phase.READY)
     import math
@@ -44,6 +48,7 @@ def test_spawn_budget_derived_from_spawn_floor_when_knob_absent(home, cfg):
 
 
 def test_spawn_budget_falls_back_when_floor_disabled(home):
+    # GA-14: READY tickets weight 1, so this stays a plain session count too.
     for i in range(2):
         _seed(home, f"T-{i}", Phase.READY)
     cfg = Config(home=home, min_spawn_interval=0, reconcile_steady_interval=300)
@@ -87,6 +92,10 @@ def test_doctor_reports_new_fields(home):
     assert isinstance(out["throttled_last_sweep"], int)
     assert isinstance(out["spawn_budget_per_hour"], int)
     assert isinstance(out["runaway"], bool)
+    # GA-14: spawn_rate/spawn_budget are agent-equivalents now, not a bare
+    # session count -- the payload names the unit so a human reading a bare
+    # number knows it isn't sessions.
+    assert out["spawn_rate_unit"] == "agent-equivalents"
     # GA-11: added beside the spawn-rate fields above, not folded into them.
     assert out["spend_today_usd"] == 0.0
     assert out["spend_ceiling_usd"] is None
@@ -118,22 +127,49 @@ def test_throttled_last_sweep_reflects_prior_real_sweep(home, cfg):
 
 def test_incident_replay_trips_runaway_with_floor_disabled(home):
     """Four tickets that never advance, spawn floor OFF: real sweeps at
-    the 2026-07-19 cadence (~11s) exceed the derived budget and doctor trips."""
+    the 2026-07-19 cadence (~11s) exceed the derived budget and doctor trips
+    -- and, GA-14, trips in strictly fewer sweeps than session-counting did.
+
+    Pre-weighting, this exact replay (four keys' worth of un-throttled ~11s
+    spawns against a 48-session/hour budget, i.e. `n_keys * ceil(3600 /
+    effective_floor)`) empirically crosses around sweep 15-16 (the watchdog's
+    own no-progress reaping staggers the raw spawn count, so it's not an exact
+    `budget / spawns_per_sweep` division). Weighted, each `implementing` spawn
+    now counts as `disp.spawn_weight(cfg, "implementing")` (21 by default)
+    agent-equivalents against a budget that only assumes HALF that per spawn
+    (`health._budget_weight` -- see its docstring: budgeting the full
+    worst-case weight AS the healthy baseline would make the detector no more
+    sensitive than before, since it multiplies both sides of `rate > budget`
+    by the same factor). Empirically this crosses by sweep 7-9; asserted at
+    sweep 12 for headroom against the auto-brake's own jitter (ops.fail's
+    exponential backoff is randomized) without flirting with flakiness --
+    still well under the pre-weighting ~15-16.
+    """
     for k in ("T-1", "T-2", "T-3", "T-4"):
         _seed(home, k, Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=4, min_spawn_interval=0)
     sessions = _EphemeralSessions()
     t0, step = store.now_epoch(), 11
-    for i in range(100):  # ~18 minutes of 11s sweeps, well inside the 1h window
+    for i in range(12):
         disp.dispatch(cfg, sessions, now=t0 + i * step)
+    code, out = _sweep(home)
+    assert out["runaway"] is True and code == 1  # strictly fewer than the
+                                                  # ~15-16 sweeps session-counting needed
 
+    for i in range(12, 100):  # ~18 minutes of 11s sweeps, well inside the 1h window
+        disp.dispatch(cfg, sessions, now=t0 + i * step)
     code, out = _sweep(home)
     assert out["runaway"] is True
     assert code == 1
 
 
 def test_same_tickets_under_default_floor_do_not_trip(home):
-    """The same shape, but with the default spawn floor engaged, stays healthy."""
+    """The same shape, but with the default spawn floor engaged, stays
+    healthy -- the GA-14 central-design-trap check: with the floor respected,
+    each of the 4 IMPLEMENTING tickets spawns only ~4 times in this window,
+    weighted rate 16 * 21 == 336, comfortably under the phase-aware budget
+    (health.spawn_budget), which is NOT silently redefined down to a bare
+    session count just because every ticket happens to be `implementing`."""
     for k in ("T-1", "T-2", "T-3", "T-4"):
         _seed(home, k, Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=4)  # min_spawn_interval defaults to
@@ -143,6 +179,8 @@ def test_same_tickets_under_default_floor_do_not_trip(home):
     for i in range(100):
         disp.dispatch(cfg, sessions, now=t0 + i * step)
 
+    W_implementing = disp.spawn_weight(cfg, Phase.IMPLEMENTING.value)  # 1 + 20*1 == 21
+    assert health.spawn_rate(home, t0 + 99 * step)["total"] == 16 * W_implementing
     code, out = _sweep(home)
     assert out["runaway"] is False
     assert code == 0

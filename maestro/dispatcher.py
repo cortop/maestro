@@ -1077,6 +1077,47 @@ def spawn_floor(cfg: Config) -> int:
     return max(0, int(floor))
 
 
+def spawn_weight(cfg: Config, phase: str) -> int:
+    """Expected-cost weight, in agent-equivalents, of ONE spawn of a ticket
+    currently in *phase* (GA-14). AD-4/T-23's Implementer<->QA loop in the
+    `implementing` reconcile skill runs entirely inside ONE session, via
+    `Agent`-tool sub-agent spawns -- up to `max_impl_turns` rounds, each firing
+    one QA sub-agent (two when `qa_standards_axis` is on) alongside the
+    top-level session itself. So one dispatcher spawn of an `implementing`
+    ticket can, worst case, produce `1 + max_impl_turns * (2 if
+    qa_standards_axis else 1)` agent-equivalents -- a pessimistic, preventive
+    estimate made at the moment the spawn decision is taken, before any of
+    those rounds actually run (see health.spawn_rate, which records this
+    weight per spawn rather than counting sessions). Every other phase spawns
+    no `Agent`-tool sub-agents, so its weight is 1 -- an ordinary session."""
+    if phase != Phase.IMPLEMENTING.value:
+        return 1
+    return 1 + cfg.max_impl_turns * (2 if cfg.qa_standards_axis else 1)
+
+
+def _ledger_entry_ts(entry) -> float | None:
+    """One `recent` entry is either a bare timestamp (pre-GA-14 ledger, always
+    weight 1) or a `[timestamp, weight]` pair (GA-14+). Returns the timestamp,
+    or None if the entry is neither (a corrupt/foreign value -- never crash the
+    dispatcher over a malformed ledger, just drop it)."""
+    if isinstance(entry, (int, float)):
+        return float(entry)
+    if (isinstance(entry, (list, tuple)) and len(entry) == 2
+            and isinstance(entry[0], (int, float))):
+        return float(entry[0])
+    return None
+
+
+def _ledger_entry_weight(entry) -> int:
+    """The agent-equivalent weight of one `recent` entry -- 1 for a legacy
+    (pre-GA-14) bare-timestamp entry, since it predates weighting and so is
+    read the same as an ordinary (non-`implementing`) session."""
+    if (isinstance(entry, (list, tuple)) and len(entry) == 2
+            and isinstance(entry[1], (int, float))):
+        return int(entry[1])
+    return 1
+
+
 def _runaway_brake_state_path(home: Path) -> Path:
     return home / "derived" / ".runaway_brake.json"
 
@@ -1445,10 +1486,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                                disallowed_tools=disallowed_tools, allowed_tools=allowed_tools)
                 spawned.append(key)
                 decisions[key]["outcome"] = "spawned"
+                weight = spawn_weight(cfg, phase_by_key.get(key, ""))
                 prev = ledger.get(key)
                 recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
-                recent.append(now)
-                recent = [t for t in recent if now - t <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
+                recent.append([now, weight])
+                recent = [e for e in recent
+                          if (ts := _ledger_entry_ts(e)) is not None
+                          and now - ts <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
                 ledger[key] = {"last": now, "recent": recent}
 
             if spawned:

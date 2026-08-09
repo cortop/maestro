@@ -240,7 +240,14 @@ DEFAULT_CONFIG_TOML = """\
 # maestro configuration (project-agnostic). Fill in your providers.
 
 [maestro]
-max_concurrency = 12
+max_concurrency = 12              # one COUNTED spawn: sizing the fleet at N concurrent
+                                   # sessions can mean far more than N agents running at
+                                   # once -- an `implementing` session's Implementer<->QA
+                                   # loop fans out up to `max_impl_turns` rounds of
+                                   # `Agent`-tool sub-agents INSIDE that one session (see
+                                   # health.spawn_rate/spawn_budget, denominated in
+                                   # agent-equivalents, not sessions, for exactly this
+                                   # reason)
 reconcile_steady_interval = 300
 # min_spawn_interval = 300        # hard floor between two spawns of the SAME key
                                   # (default: reconcile_steady_interval). Bounds the

@@ -221,8 +221,9 @@ def test_dispatch_cli_reports_throttled(home):
 
 
 def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
-    """dispatch() writes {key: {"last": float, "recent": [...]}}, and rate
-    computation (health.spawn_rate) drops entries older than the window."""
+    """dispatch() writes {key: {"last": float, "recent": [[ts, weight], ...]}},
+    and rate computation (health.spawn_rate) drops entries older than the
+    window and sums each entry's agent-equivalent weight (GA-14)."""
     from maestro import health
 
     _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase, no timer -> due every sweep
@@ -230,21 +231,26 @@ def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
     cfg.max_spawn_attempts = 0  # this test's ticket never progresses observed_seq by
     # design (it's exercising the ledger, not real reconcile steps); the no-progress
     # watchdog (T-13) would otherwise fail it after 5 spawns and starve `recent`.
+    cfg.runaway_pause_cooldown = 0  # GA-14: an `implementing` ticket now weighs
+    # heavily enough that the auto-brake (armed off the SAME ledger) would
+    # otherwise cut this loop short before all 10 spawns land -- this test
+    # exercises the ledger, not the brake (see test_runaway_brake.py for that).
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     for i in range(10):
         disp.dispatch(cfg, sessions, now=t0 + i)  # 10 spawns, 1s apart
 
+    W_implementing = disp.spawn_weight(cfg, Phase.IMPLEMENTING.value)  # 1 + 20*1 == 21
     ledger = store.read_json(disp._spawn_ledger_path(home), {})
     entry = ledger["T-1"]
     assert isinstance(entry, dict) and "last" in entry and "recent" in entry
     assert len(entry["recent"]) == 10
-    assert health.spawn_rate(home, t0 + 9)["total"] == 10
+    assert health.spawn_rate(home, t0 + 9)["total"] == 10 * W_implementing
 
     # Jump past the window and spawn once more: only the fresh entry counts.
     later = t0 + health.WINDOW_SECONDS + 100
     disp.dispatch(cfg, sessions, now=later)
-    assert health.spawn_rate(home, later)["total"] == 1
+    assert health.spawn_rate(home, later)["total"] == 1 * W_implementing
 
 
 def test_spawn_ledger_recent_hard_capped(home, cfg):
@@ -279,6 +285,26 @@ def test_legacy_bare_float_ledger_still_throttles(home, cfg):
     report = disp.dispatch(cfg, sessions, now=1001)
     assert report.spawned == [] and report.throttled == ["T-1"]
     assert health.spawn_rate(home, 1001)["total"] == 0
+
+
+def test_legacy_unweighted_recent_history_reads_without_crashing(home, cfg):
+    """GA-14: a ledger written by a pre-GA-14 maestro has `recent` entries
+    that are bare timestamps, not `[ts, weight]` pairs. Reading it must not
+    crash, and each legacy entry reads as weight 1 -- same as before
+    weighting existed -- so a healthy legacy ledger does not suddenly read as
+    a runaway just because maestro was upgraded."""
+    from maestro import health
+
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    now = 1000.0
+    store.write_json(disp._spawn_ledger_path(home),
+                     {"T-1": {"last": now, "recent": [now - 5.0, now - 3.0, now - 1.0]}})
+
+    rate = health.spawn_rate(home, now)
+    assert rate == {"total": 3, "by_key": {"T-1": 3}}
+    budget = health.spawn_budget(cfg)
+    assert budget > 0
+    assert rate["total"] <= budget  # unweighted legacy history: not a runaway
 
 
 def test_dispatch_respects_concurrency_cap(home, cfg):
@@ -1368,6 +1394,19 @@ def test_watchdog_knobs_documented_in_sample_config():
     from maestro.config import DEFAULT_CONFIG_TOML
     assert "max_session_seconds" in DEFAULT_CONFIG_TOML
     assert "max_spawn_attempts" in DEFAULT_CONFIG_TOML
+
+
+def test_max_concurrency_documents_sub_agent_amplification():
+    """GA-14: an operator sizing the fleet off `max_concurrency` needs to see
+    that one counted spawn can be far more than one agent (the `implementing`
+    QA loop's `Agent`-tool sub-agent fan-out)."""
+    from maestro.config import DEFAULT_CONFIG_TOML
+    max_concurrency_line = next(
+        line for line in DEFAULT_CONFIG_TOML.splitlines() if line.startswith("max_concurrency"))
+    idx = DEFAULT_CONFIG_TOML.index(max_concurrency_line)
+    block_end = DEFAULT_CONFIG_TOML.index("\nreconcile_steady_interval", idx)
+    block = DEFAULT_CONFIG_TOML[idx:block_end]
+    assert "Agent" in block and "sub-agent" in block
 
 
 def test_watchdog_kills_aged_claim_and_fails_ticket(home, cfg):

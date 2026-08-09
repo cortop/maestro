@@ -16,7 +16,9 @@ import math
 from pathlib import Path
 
 from . import claims, dispatcher, fleet, skills_install, spend as spend_mod, store
+from . import snapshot as snap_mod
 from .config import Config
+from .statemachine import Phase
 
 WINDOW_SECONDS = 3600
 
@@ -29,30 +31,71 @@ STALE_INTERVAL_FACTOR = 6  # missing this many consecutive sweeps looks stale
 
 
 def spawn_rate(home: Path, now: float, window: int = WINDOW_SECONDS) -> dict:
-    """Spawns actually observed in the trailing *window* seconds, from the ledger.
+    """Agent-equivalents observed in the trailing *window* seconds, from the
+    ledger (GA-14).
 
     The ledger is rewritten only when something spawns, so ``recent`` can be
     stale during a quiet stretch -- always filter by window here rather than
-    trusting the file to be pre-trimmed. Legacy bare-float entries (pre-history
-    ledgers) carry no history and contribute zero to the rate.
+    trusting the file to be pre-trimmed. Each entry carries its own
+    ``dispatcher.spawn_weight`` (a legacy bare-timestamp entry, pre-GA-14, reads
+    as weight 1 -- see ``dispatcher._ledger_entry_weight``); the total is the
+    SUM of those weights, not a count of spawns.
     """
     ledger = store.read_json(dispatcher._spawn_ledger_path(home), {}) or {}
     by_key: dict[str, int] = {}
     for key, entry in ledger.items():
         recent = entry.get("recent", []) if isinstance(entry, dict) else []
-        count = sum(1 for t in recent if isinstance(t, (int, float)) and now - t <= window)
-        if count:
-            by_key[key] = count
+        total = 0
+        for e in recent:
+            ts = dispatcher._ledger_entry_ts(e)
+            if ts is not None and now - ts <= window:
+                total += dispatcher._ledger_entry_weight(e)
+        if total:
+            by_key[key] = total
     return {"total": sum(by_key.values()), "by_key": by_key}
 
 
-def spawn_budget(cfg: Config) -> int:
-    """Fleet-wide spawns/hour the rate guards themselves permit, unless overridden
-    by the ``runaway_spawns_per_hour`` knob (0 disables the runaway check).
+# GA-14: the unit `spawn_rate`/`spawn_budget` are now denominated in, surfaced
+# by `maestro doctor` (see report()) so a human reading a bare number knows
+# it's no longer a session count.
+SPAWN_RATE_UNIT = "agent-equivalents"
 
-    Default: the per-key allowance ``ceil(3600 / effective_floor)`` -- exactly
-    what ``spawn_floor`` permits one key -- times the number of tickets. This
-    scales with board size and, critically, is not silenced by the same
+
+def _budget_weight(cfg: Config, phase: str) -> int:
+    """The per-spawn weight `spawn_budget` assumes for a key currently in
+    *phase*, deliberately SMALLER than `dispatcher.spawn_weight`'s own
+    preventive (worst-case) estimate for the same phase.
+
+    `spawn_budget` already assumes every key spawns at its floor-capped max
+    rate for a full hour -- compounding that with the ledger's own worst-case
+    per-spawn weight (every one of those spawns maxing out `max_impl_turns`)
+    would budget for the exact runaway pattern this detector exists to catch
+    AS the healthy baseline, making the weighted detector no more sensitive
+    than the session-counting one it replaces (see GA-14's spec, "the central
+    design trap" -- multiplying both sides of `rate > budget` by the same
+    constant never changes which side crosses first). Budgeting for HALF of
+    the worst case is still generous headroom for legitimate QA convergence,
+    while a key that's actually maxing out every single spawn -- the abuse
+    case -- outgrows it much sooner than a bare session count would.
+    """
+    if phase != Phase.IMPLEMENTING.value:
+        return 1
+    full = dispatcher.spawn_weight(cfg, phase)
+    return 1 + math.ceil((full - 1) / 2)
+
+
+def spawn_budget(cfg: Config) -> int:
+    """Fleet-wide agent-equivalents/hour the rate guards themselves permit,
+    unless overridden by the ``runaway_spawns_per_hour`` knob (0 disables the
+    runaway check; the override is already in the same unit `spawn_rate`
+    reports, so it passes through unscaled).
+
+    Default: for each current key, the per-key allowance ``ceil(3600 /
+    effective_floor)`` -- exactly what ``spawn_floor`` permits one key --
+    times that key's own ``_budget_weight`` (1 for every phase except
+    ``implementing``, GA-14). This scales with board size AND composition (a
+    board with no ``implementing`` tickets keeps the old session-counting
+    budget exactly) and, critically, is not silenced by the same
     ``min_spawn_interval = 0`` misconfiguration the detector exists to catch:
     ``spawn_floor`` legitimately returns 0, so fall back to a sane per-key floor
     instead of dividing by zero.
@@ -60,8 +103,13 @@ def spawn_budget(cfg: Config) -> int:
     if cfg.runaway_spawns_per_hour is not None:
         return int(cfg.runaway_spawns_per_hour)
     effective_floor = dispatcher.spawn_floor(cfg) or max(cfg.reconcile_steady_interval, 60)
-    n_keys = len(dispatcher.list_keys(cfg.home))
-    return n_keys * math.ceil(3600 / effective_floor)
+    per_key = math.ceil(3600 / effective_floor)
+    home = cfg.home
+    total = 0
+    for key in dispatcher.list_keys(home):
+        phase = snap_mod.load(home, key).phase
+        total += per_key * _budget_weight(cfg, phase)
+    return total
 
 
 def stale_threshold(home: Path | None = None, *, plist=None) -> int:
@@ -361,6 +409,7 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
         "dead_letters": [p.stem for p in dead],
         "stale": age is not None and age > threshold,
         "spawns_last_hour": rate,
+        "spawn_rate_unit": SPAWN_RATE_UNIT,
         "throttled_last_sweep": hb.get("throttled", 0),
         "spawn_budget_per_hour": budget,
         "spawn_floor_s": dispatcher.spawn_floor(cfg),
