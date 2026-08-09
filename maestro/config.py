@@ -52,6 +52,12 @@ class Config:
     runaway_pause_cooldown: int = 900
     repo_path: str | None = None           # primary repo the reconciler builds in
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
+    # GA-20: `prime` fallback for the implicit default binding (repos.implicit_default) --
+    # lets a single-repo home with no [repos.*] table at all (e.g. this project's own
+    # dogfood home) declare a dependency-install command without adopting the multi-repo
+    # [repos.<name>] shape. A [repos.<name>] table's own `prime` always wins over this.
+    # See RepoBinding.prime (maestro/repos.py) for what runs it, when, and how.
+    prime: str | None = None
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -139,7 +145,7 @@ class Config:
 _REPO_TABLE_KEYS = frozenset({
     "path", "slug", "base_branch", "branch_prefix", "default",
     "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
-    "gh_account", "token_env",
+    "gh_account", "token_env", "prime",
 })
 
 
@@ -183,6 +189,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
+        cfg.prime = m.get("prime", cfg.prime) or None
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.user_settings_path = m.get("user_settings_path", cfg.user_settings_path)
         raw_repos = data.get("repos", {})
@@ -222,6 +229,8 @@ def load(home_arg: str | None = None) -> Config:
                     # Both None (default) means "use the ambient gh account", unchanged.
                     "gh_account": table.get("gh_account"),
                     "token_env": table.get("token_env"),
+                    # GA-20: this repo's dependency-priming command -- see RepoBinding.prime.
+                    "prime": table.get("prime"),
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -299,9 +308,18 @@ max_impl_turns = 20
                                   # sessions legitimately run 30-60+ min.
 # max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
                                   # zero progress (observed_seq unchanged)
-# daily_spend_ceiling_usd = 50.0  # dispatch() spawns nothing once today's folded
+daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # session spend reaches this (enforced, not advisory;
-                                  # surfaced by `maestro doctor` + the TUI fleet panel)
+                                  # surfaced by `maestro doctor` + the TUI fleet panel).
+                                  # RB-8: a NEW home must not start uncapped -- an unset
+                                  # ceiling silently disarms the fleet's one hard cost
+                                  # guard (this exact knob sat unset on this project's own
+                                  # dogfood board for the whole period since GA-11 added
+                                  # it). 150.0 is this board's own value, set from real
+                                  # spend data (~$58/day baseline as of 2026-08-08) --
+                                  # generous headroom above a normal day, still an order
+                                  # of magnitude below the 2026-07-19 runaway's $845.
+                                  # Tune this to your own board's baseline; do not unset it.
 # runaway_spawns_per_hour = 200   # `maestro doctor` trips runaway above this fleet-wide
                                   # spawns/hour (default: derived from the spawn floor
                                   # itself; 0 disables the check)
@@ -321,6 +339,12 @@ max_impl_turns = 20
 # session_log_retention_days = 14 # delete session logs older than N days (0/None = keep all)
 # session_log_max_per_ticket = 200 # keep at most N session logs per ticket (0/None = unlimited)
 # repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
+# prime = "python3 -m venv .venv && .venv/bin/pip install -q -e '.[dev,tui]'"
+                                  # dependency-install command for the implicit default binding
+                                  # (no [repos.*] table at all -- see [repos.<name>] prime below
+                                  # for the multi-repo equivalent). Run ONCE per fresh worktree by
+                                  # `maestro worktree ensure`, cwd=worktree, with $WT/$REPO/$KEY
+                                  # in its environment -- never by the dispatcher.
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `implementing` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
@@ -397,6 +421,13 @@ implementer = "claude_skill"
                                      # this repo's spawns/polls rather than falling back to
                                      # ambient -- see maestro/credentials.py. Covers `gh`
                                      # API calls only, not `git push` over ssh/osxkeychain.
+# prime = "npm ci"                  # dependency-install command run ONCE per fresh worktree
+                                     # by `maestro worktree ensure`, cwd=worktree, with
+                                     # $WT/$REPO/$KEY in its environment. Read ONLY from this
+                                     # file (never a spec/payload field) and run ONLY by the
+                                     # reconciler session -- never by the dispatcher. Unset =
+                                     # nothing runs (today's behavior). A non-zero exit or a
+                                     # timeout fails `worktree ensure` loudly, never silently.
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""

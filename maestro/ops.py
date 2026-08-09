@@ -1,12 +1,17 @@
 """High-level reconciler operations — the verbs an agent uses, each correct by
 construction. Every verb: appends event(s) with a deterministic step-id, then
-refreshes the snapshot. Idempotent under crash-and-respawn.
+refreshes the snapshot. Idempotent under crash-and-respawn -- the one exception
+is ``worktree_ensure`` (GA-20), whose idempotence is a worktree-local marker
+file rather than an event, by design (see its docstring).
 """
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
+import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -162,6 +167,180 @@ def local_write_backup(cfg: Config, key: str, *, actor: str = "reconciler",
     archive = backup.backup_local_target(target, now)
     _append(cfg, key, E.NOTE, {"text": f"local write backup: {archive}"}, actor=actor, sid=sid)
     return str(archive)
+
+
+# ---------------------------------------------------------------------------
+# GA-20: idempotent worktree create-or-adopt + config-declared `prime`.
+#
+# Call ONLY from a reconciler session (ready.md's `maestro worktree ensure`) --
+# NEVER from dispatch(). `prime` is arbitrary shell read from config.toml, and
+# the dispatcher runs as an unsandboxed launchd LaunchAgent with no session
+# sandbox; MR-3 deliberately kept its own git work to removal-on-merge. Nothing
+# in this module's dispatcher-facing code path (dispatcher.py) calls any
+# function below.
+# ---------------------------------------------------------------------------
+
+_FETCH_TIMEOUT = 60     # seconds; a hung `git fetch` must never wedge a reconciler
+_GIT_TIMEOUT = 30       # seconds; worktree add/adopt and rev-parse plumbing calls
+_DEFAULT_PRIME_TIMEOUT = 600  # seconds; a hanging `npm ci` etc. must not wedge a reconciler
+
+# GA-7-derived: gitignored-by-convention names a fresh `git worktree add` never
+# brings (tracked files only) that this op mirrors from the source checkout.
+_PRIMED_EXTRA_FILES = ("CLAUDE.local.md", ".claude/settings.local.json")
+_PRIMED_NODE_MODULES = "node_modules"
+
+
+def _git_dir(wt: Path) -> Path:
+    """The worktree-SPECIFIC git dir (e.g. ``<repo>/.git/worktrees/<KEY>``) --
+    distinct from ``--git-common-dir``/``--git-path``, which resolve to the
+    dir SHARED by every worktree of the repo. Self-cleaning: `git worktree
+    remove` (dispatcher.py's merge-triggered cleanup) deletes this whole
+    directory, so anything stored under it never outlives its worktree."""
+    out = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                         capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True).stdout.strip()
+    p = Path(out)
+    return p if p.is_absolute() else wt / p
+
+
+def _worktree_create_or_adopt(repo: str, wt: Path, branch: str, base: str) -> None:
+    """Create *wt* on a fresh branch off ``origin/<base>``, or adopt *branch*
+    if it already exists -- the same create-then-fallback the old ready.md
+    prose did. Raises loudly (never a silent no-op) if both attempts fail."""
+    fetch = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", base],
+                           capture_output=True, text=True, timeout=_FETCH_TIMEOUT)
+    if fetch.returncode != 0:
+        raise store.MaestroError(
+            f"git fetch origin {base!r} in {repo} failed (rc={fetch.returncode}): "
+            f"{fetch.stderr.strip()}")
+    created = subprocess.run(
+        ["git", "-C", repo, "worktree", "add", str(wt), "-b", branch, f"origin/{base}"],
+        capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    if created.returncode != 0:
+        adopted = subprocess.run(
+            ["git", "-C", repo, "worktree", "add", str(wt), branch],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+        if adopted.returncode != 0:
+            raise store.MaestroError(
+                f"git worktree add failed for {wt} in {repo}: create "
+                f"({created.stderr.strip()}) and adopt ({adopted.stderr.strip()}) both failed")
+
+
+def _prime_worktree_extras(repo: str, wt: Path) -> None:
+    """GA-7, absorbed: exclude the mirrored names from `git add` via the
+    git-COMMON `info/exclude` (idempotent -- shared across every worktree of
+    the repo), then mirror CLAUDE.local.md / .claude/settings.local.json /
+    node_modules from the source checkout into *wt*. A real, write-isolated
+    copy (never a symlink or hardlink -- see the `cp` ladder below), so an
+    install run inside *wt* never writes through into *repo* or a sibling
+    worktree. Every step is a no-op when the source doesn't have it."""
+    exclude = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--git-path", "info/exclude"],
+        capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True).stdout.strip()
+    exclude_path = Path(exclude)
+    if not exclude_path.is_absolute():
+        exclude_path = wt / exclude_path
+    existing = (exclude_path.read_text(encoding="utf-8").splitlines()
+               if exclude_path.exists() else [])
+    names = _PRIMED_EXTRA_FILES + (f"{_PRIMED_NODE_MODULES}/",)
+    missing = [n for n in names if n not in existing]
+    if missing:
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        with exclude_path.open("a", encoding="utf-8") as f:
+            for n in missing:
+                f.write(n + "\n")
+
+    repo_path = Path(repo)
+    for name in _PRIMED_EXTRA_FILES:
+        src = repo_path / name
+        if src.exists():
+            dst = wt / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+
+    src_nm = repo_path / _PRIMED_NODE_MODULES
+    dst_nm = wt / _PRIMED_NODE_MODULES
+    if src_nm.is_dir() and not dst_nm.exists():
+        # cp -c is an APFS copy-on-write clone (write-isolated, near-instant);
+        # --reflink=auto is its GNU/Linux equivalent (CoW on btrfs/xfs, falling
+        # back to a deep copy itself when unsupported); cp -R is the last-resort
+        # deep copy for any other cp. Deliberately no hardlink rung -- a
+        # hardlink shares one inode, so an in-place write mutates both copies
+        # at once (not write-isolated). The trailing "/." copies node_modules'
+        # *contents* into place instead of nesting a second node_modules inside it.
+        rungs = (
+            ["cp", "-c", "-R", f"{src_nm}/.", str(dst_nm)],
+            ["cp", "--reflink=auto", "-R", f"{src_nm}/.", str(dst_nm)],
+            ["cp", "-R", f"{src_nm}/.", str(dst_nm)],
+        )
+        for rung in rungs:
+            if subprocess.run(rung, capture_output=True, text=True).returncode == 0:
+                break
+        else:
+            raise store.MaestroError(f"node_modules copy into {dst_nm} failed on every cp rung")
+
+
+def _run_prime(binding: repos_mod.RepoBinding, wt: Path, repo: str, key: str, timeout: int) -> None:
+    env = {**os.environ, "WT": str(wt), "REPO": repo, "KEY": key}
+    try:
+        result = subprocess.run(binding.prime, shell=True, cwd=wt, env=env,
+                                capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise store.MaestroError(
+            f"prime for repo {binding.name!r} ({key}) exceeded its {timeout}s timeout")
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise store.MaestroError(
+            f"prime for repo {binding.name!r} ({key}) failed (rc={result.returncode}): {detail}")
+
+
+def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIME_TIMEOUT) -> dict:
+    """Idempotently create-or-adopt *key*'s reconciler worktree, absorb GA-7's
+    CLAUDE.local.md/.claude/settings.local.json/node_modules priming, and run
+    the resolved repo binding's `prime` command exactly once inside it.
+
+    `prime` comes ONLY from ``repos.resolve()`` (config.toml's ``[repos.<name>]
+    prime`` or the ``[maestro] prime`` fallback) -- never a spec front-matter
+    field or a ``TicketCreated`` payload, neither of which this function or
+    anything it calls ever reads.
+
+    Idempotence: a fresh ``git worktree add`` is skipped once the worktree dir
+    already exists; `prime` is skipped once its worktree-local marker (under
+    the worktree's OWN git dir -- see `_git_dir` -- so it self-cleans when the
+    worktree is removed) is present. Raises ``store.MaestroError`` -- never a
+    silent success -- if worktree add/adopt fails, or if `prime` exits non-zero
+    or exceeds *prime_timeout*; the CLI wrapper surfaces that as a non-zero
+    exit with the repo name and rc in stderr, and appends no event, so no
+    phase transition follows a failed ensure.
+
+    AD-6 ``mode = "local"`` bindings have no worktree at all: a successful,
+    side-effect-free no-op.
+    """
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode == "local":
+        return {"created": False, "primed": False}
+    if not binding.path:
+        raise store.MaestroError(f"{key}: repo binding {binding.name!r} has no path configured")
+
+    repo = binding.path
+    wt = store.worktree_path(cfg.home, key)
+    created = False
+    if not wt.exists():
+        branch = f"{binding.branch_prefix}{key}"
+        _worktree_create_or_adopt(repo, wt, branch, binding.base_branch)
+        created = True
+
+    _prime_worktree_extras(repo, wt)
+
+    primed = False
+    if binding.prime:
+        marker = _git_dir(wt) / "maestro-primed"
+        if not marker.exists():
+            _run_prime(binding, wt, repo, key, prime_timeout)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(store.iso_now() + "\n", encoding="utf-8")
+            primed = True
+
+    return {"created": created, "primed": primed}
 
 
 def verify_ac(cfg: Config, key: str, ac_index: int, evidence: dict, *, actor: str = "reconciler") -> str:
@@ -654,17 +833,28 @@ def compact(cfg: Config, key: str) -> dict:
         last_archived_seq = max((e["seq"] for e in archived_events if isinstance(e.get("seq"), int)), default=0)
         to_archive = [e for e in pre if e["seq"] > last_archived_seq]
 
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        with archive_path.open("a", encoding="utf-8") as f:
-            for ev in to_archive:
-                f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+        # Durability ordering is what makes this move crash-safe: the archive append
+        # must be flushed + fsynced to disk BEFORE the active log is replaced. If a
+        # crash lands after this line but before the active log is rewritten below,
+        # the to_archive events are simply duplicated (present in both files, still
+        # fully readable) rather than lost -- event_log.read dedups by seq, so that
+        # window folds to the same snapshot as before the compaction. Reusing
+        # store.append_line (rather than hand-rolling the write) is what gives us
+        # that flush+fsync for free; it's called once with all lines joined so the
+        # whole batch is one durable append.
+        if to_archive:
+            lines = "\n".join(json.dumps(ev, separators=(",", ":")) for ev in to_archive)
+            store.append_line(archive_path, lines)
 
-        # Rewrite active log with only post-snapshot events.
-        tmp = active_path.parent / f".{active_path.name}.compact.tmp"
-        with tmp.open("w", encoding="utf-8") as f:
-            for ev in post:
-                f.write(json.dumps(ev, separators=(",", ":")) + "\n")
-        tmp.replace(active_path)
+        # Rewrite active log with only post-snapshot events, through the same
+        # fsync-then-replace-then-fsync-dir sequence as every other durable write in
+        # the package (store.atomic_write) -- a bare tmp.replace() left the
+        # replacement in the page cache, so a crash right after could lose it. This
+        # also picks up atomic_write's pid-suffixed tmp name, so two concurrent
+        # compactions of the same key (impossible today under file_lock, but a
+        # future caller) can't collide on a fixed ".compact.tmp" name.
+        data = "".join(json.dumps(ev, separators=(",", ":")) + "\n" for ev in post)
+        store.atomic_write(active_path, data)
 
     pruned_logs, pruned_bytes = prune_session_logs(cfg, key)
     return {"archived": len(to_archive), "remaining": len(post), "cutoff_seq": cutoff,

@@ -98,25 +98,27 @@ def append(
 def read(home: Path, key: str, *, since: int = 0) -> list[dict]:
     """All events for a key with seq > ``since`` (oldest first), archive included.
 
-    Deduplicated by seq (RB-2, law (c)): ``ops.compact`` appends events to the
-    archive and only then rewrites the active log with the post-cutoff tail --
-    a crash between those two steps leaves the same seq in both files. The two
-    copies are always byte-identical (compact only ever copies an event, never
-    mutates one), so which copy wins can't change folded meaning; we read the
-    archive first and keep the first occurrence of each seq, i.e. the archive's
-    copy wins over a leftover active-log duplicate.
+    Deduplicates by seq (RB-6 introduced this dedup for the compaction crash
+    window; RB-2 law (c) requires it hold independent of that specific trigger).
+    ``ops.compact`` fsyncs its archive append before it replaces the active log
+    (see there), so a crash in between can leave the same events present in both
+    files -- byte-identical, since compaction never rewrites an event, only
+    relocates it. Keeping the first occurrence (the archive copy) and dropping
+    the rest is what makes that window survivable: without it, a duplicated
+    event would replay twice through ``fold`` and corrupt state that isn't
+    naturally idempotent (e.g. ``failure_count``).
     """
     events: list[dict] = []
     events += store.read_jsonl(store.events_archive_path(home, key))
     events += store.read_jsonl(store.events_path(home, key))
-    deduped: list[dict] = []
+    events = [e for e in events if isinstance(e.get("seq"), int) and e["seq"] > since]
     seen: set[int] = set()
+    deduped: list[dict] = []
     for e in events:
-        seq = e.get("seq")
-        if not isinstance(seq, int) or seq in seen:
+        seq = e["seq"]
+        if seq in seen:
             continue
         seen.add(seq)
         deduped.append(e)
-    events = [e for e in deduped if e["seq"] > since]
-    events.sort(key=lambda e: e["seq"])
-    return events
+    deduped.sort(key=lambda e: e["seq"])
+    return deduped

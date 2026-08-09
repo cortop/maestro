@@ -50,6 +50,15 @@ class RepoBinding:
     # "use the ambient gh account", unchanged from before this ticket.
     gh_account: str | None = None
     token_env: str | None = None
+    # GA-20: shell command `maestro worktree ensure` runs, cwd=worktree, with
+    # $WT/$REPO/$KEY in its environment, once per fresh worktree -- installs
+    # this repo's dependency tree (venv/npm/etc.) so the implementing step
+    # doesn't have to hardcode one ecosystem. Read ONLY from config.toml
+    # (never a spec/payload field -- see repos.resolve/bound_repo_name, which
+    # this field never flows through) and run ONLY by the reconciler session,
+    # never by dispatch() (see maestro/ops.py:worktree_ensure). None (default)
+    # runs nothing -- unchanged behavior for every repo that doesn't set it.
+    prime: str | None = None
 
 
 def _binding_from_table(name: str, table: dict) -> RepoBinding:
@@ -68,6 +77,7 @@ def _binding_from_table(name: str, table: dict) -> RepoBinding:
         reconcile_allowed_tools=raw_tools if isinstance(raw_tools, list) else [],
         gh_account=table.get("gh_account"),
         token_env=table.get("token_env"),
+        prime=table.get("prime"),
     )
 
 
@@ -77,6 +87,12 @@ def implicit_default(cfg: Config) -> RepoBinding:
     Prefers a [repos.<name>] table with `default = true`; otherwise synthesizes
     one from cfg.repo_path/branch_prefix (today's single-repo behavior), with the
     slug taken from the same [vcs.github_cli] repos[0] value providers/cli.py reads.
+
+    GA-20: the synthesized binding carries `cfg.prime` (the `[maestro] prime`
+    fallback) so a single-repo home with no `[repos.*]` table at all -- the
+    dogfood shape, `[maestro] repo_path = ...` only -- can still declare a
+    `prime` command. A `[repos.<name>] default = true` table's own `prime` (or
+    its absence) wins over this fallback, same as every other field.
     """
     for name, table in cfg.repos.items():
         if table.get("default"):
@@ -92,6 +108,7 @@ def implicit_default(cfg: Config) -> RepoBinding:
         slug=slug,
         base_branch="main",
         branch_prefix=cfg.branch_prefix,
+        prime=cfg.prime,
     )
 
 
