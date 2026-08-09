@@ -654,17 +654,28 @@ def compact(cfg: Config, key: str) -> dict:
         last_archived_seq = max((e["seq"] for e in archived_events if isinstance(e.get("seq"), int)), default=0)
         to_archive = [e for e in pre if e["seq"] > last_archived_seq]
 
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        with archive_path.open("a", encoding="utf-8") as f:
-            for ev in to_archive:
-                f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+        # Durability ordering is what makes this move crash-safe: the archive append
+        # must be flushed + fsynced to disk BEFORE the active log is replaced. If a
+        # crash lands after this line but before the active log is rewritten below,
+        # the to_archive events are simply duplicated (present in both files, still
+        # fully readable) rather than lost -- event_log.read dedups by seq, so that
+        # window folds to the same snapshot as before the compaction. Reusing
+        # store.append_line (rather than hand-rolling the write) is what gives us
+        # that flush+fsync for free; it's called once with all lines joined so the
+        # whole batch is one durable append.
+        if to_archive:
+            lines = "\n".join(json.dumps(ev, separators=(",", ":")) for ev in to_archive)
+            store.append_line(archive_path, lines)
 
-        # Rewrite active log with only post-snapshot events.
-        tmp = active_path.parent / f".{active_path.name}.compact.tmp"
-        with tmp.open("w", encoding="utf-8") as f:
-            for ev in post:
-                f.write(json.dumps(ev, separators=(",", ":")) + "\n")
-        tmp.replace(active_path)
+        # Rewrite active log with only post-snapshot events, through the same
+        # fsync-then-replace-then-fsync-dir sequence as every other durable write in
+        # the package (store.atomic_write) -- a bare tmp.replace() left the
+        # replacement in the page cache, so a crash right after could lose it. This
+        # also picks up atomic_write's pid-suffixed tmp name, so two concurrent
+        # compactions of the same key (impossible today under file_lock, but a
+        # future caller) can't collide on a fixed ".compact.tmp" name.
+        data = "".join(json.dumps(ev, separators=(",", ":")) + "\n" for ev in post)
+        store.atomic_write(active_path, data)
 
     pruned_logs, pruned_bytes = prune_session_logs(cfg, key)
     return {"archived": len(to_archive), "remaining": len(post), "cutoff_seq": cutoff,
