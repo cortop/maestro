@@ -451,16 +451,28 @@ def check_daily_spend(cfg: Config, now: float) -> dict:
     never a silent ``$0.00``). FAIL when today's folded spend has already
     reached ``daily_spend_ceiling_usd`` -- the same signal ``dispatch()``'s
     gate (``spend.over_ceiling``) acts on, surfaced here so a human sees it
-    without waiting for a blocked sweep."""
+    without waiting for a blocked sweep.
+
+    RB-8: an unset ``daily_spend_ceiling_usd`` is ALSO a WARN, not ``ok`` --
+    it means the fleet's one hard cost guard is armed in code and disarmed in
+    practice (exactly the 2026-08-08 dogfood-board finding: unset for the
+    whole period since GA-11 merged, silently reading as a passing check).
+    ``over_ceiling`` itself keeps failing OPEN for a ``None`` ceiling
+    (unchanged, dispatch() must still spawn) -- this only changes how loud the
+    *visibility* signal is, per this ticket's Intent."""
     st = spend_mod.status(cfg, now)
     if st["unavailable"]:
         return {"name": "daily_spend", "status": "warn",
                 "detail": "spend unavailable: session_log_format is not stream-json",
                 "today_usd": None, "ceiling_usd": st["ceiling_usd"]}
-    over = spend_mod.over_ceiling(cfg, now)
     ceiling = st["ceiling_usd"]
-    ceiling_str = "no ceiling configured" if ceiling is None else f"${float(ceiling):.2f} ceiling"
-    detail = over or f"${st['today_usd']:.2f} of {ceiling_str}"
+    if ceiling is None:
+        return {"name": "daily_spend", "status": "warn",
+                "detail": (f"no daily_spend_ceiling_usd configured -- ${st['today_usd']:.2f} "
+                           "spent today, uncapped"),
+                "today_usd": st["today_usd"], "ceiling_usd": None}
+    over = spend_mod.over_ceiling(cfg, now)
+    detail = over or f"${st['today_usd']:.2f} of ${float(ceiling):.2f} ceiling"
     return {"name": "daily_spend", "status": "fail" if over else "ok", "detail": detail,
             "today_usd": st["today_usd"], "ceiling_usd": ceiling}
 

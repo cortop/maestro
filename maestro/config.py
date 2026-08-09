@@ -308,9 +308,18 @@ max_impl_turns = 20
                                   # sessions legitimately run 30-60+ min.
 # max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
                                   # zero progress (observed_seq unchanged)
-# daily_spend_ceiling_usd = 50.0  # dispatch() spawns nothing once today's folded
+daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # session spend reaches this (enforced, not advisory;
-                                  # surfaced by `maestro doctor` + the TUI fleet panel)
+                                  # surfaced by `maestro doctor` + the TUI fleet panel).
+                                  # RB-8: a NEW home must not start uncapped -- an unset
+                                  # ceiling silently disarms the fleet's one hard cost
+                                  # guard (this exact knob sat unset on this project's own
+                                  # dogfood board for the whole period since GA-11 added
+                                  # it). 150.0 is this board's own value, set from real
+                                  # spend data (~$58/day baseline as of 2026-08-08) --
+                                  # generous headroom above a normal day, still an order
+                                  # of magnitude below the 2026-07-19 runaway's $845.
+                                  # Tune this to your own board's baseline; do not unset it.
 # runaway_spawns_per_hour = 200   # `maestro doctor` trips runaway above this fleet-wide
                                   # spawns/hour (default: derived from the spawn floor
                                   # itself; 0 disables the check)

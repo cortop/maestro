@@ -112,6 +112,26 @@ def test_dispatch_spawns_normally_one_cent_below_ceiling(home, cfg):
     assert report.spend_ceiling_reason is None
 
 
+def test_dispatch_still_spawns_with_no_ceiling_configured(home, cfg):
+    """RB-8: an unset daily_spend_ceiling_usd (the default) must keep failing
+    OPEN -- visibility (health.check_daily_spend's warn status) is this
+    ticket's fix, blocking is explicitly NOT. A real dispatch() sweep, real
+    spend already folded well above any sane ceiling, still spawns."""
+    t0 = 1_000_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(845.00)])  # the 2026-07-19 figure
+    spend.probe(cfg, t0 + 5)
+
+    assert cfg.daily_spend_ceiling_usd is None
+    cfg.min_spawn_interval = 0
+    _seed(home, "T-2", Phase.READY)
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
+
+    assert "T-2" in report.spawned
+    assert report.spend_ceiling_reason is None
+
+
 # --- AC6: text-format homes report spend as unavailable, never $0.00 --------
 
 def test_text_format_home_reports_spend_unavailable_not_zero(home, cfg):
