@@ -13,6 +13,7 @@ forever with zero signal).
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 from . import claims, dispatcher, fleet, skills_install, spend as spend_mod, store
@@ -272,6 +273,111 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
             "missing": missing}
 
 
+def user_settings_path(cfg: Config | None = None) -> Path:
+    """Where ``check_reconciler_permissions``'s user-scope settings layer lives --
+    Claude Code resolves Bash permissions across a repo's
+    ``.claude/settings.local.json``, its ``.claude/settings.json``, AND this
+    user-scope file, so a grant present in any one of the three counts.
+
+    Override precedence: ``MAESTRO_USER_SETTINGS_PATH`` env var >
+    ``cfg.user_settings_path`` > ``~/.claude/settings.json`` -- mirrors
+    ``skills_install.user_commands_dir``'s precedence so no test ever has to
+    read (or risk clobbering) a developer's real ``~/.claude/settings.json``.
+    """
+    env = os.environ.get("MAESTRO_USER_SETTINGS_PATH")
+    if env:
+        return Path(env).expanduser()
+    if cfg is not None and cfg.user_settings_path:
+        return Path(cfg.user_settings_path).expanduser()
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _settings_allow_deny(path: Path) -> tuple[list[str], list[str]]:
+    """``(allow, deny)`` rule lists from one Claude Code settings.json-shaped
+    file. Missing/malformed reads as ``([], [])``, never raises -- this check
+    must never block a spawn."""
+    data = store.read_json(path, {}) or {}
+    perms = data.get("permissions", {}) if isinstance(data, dict) else {}
+    if not isinstance(perms, dict):
+        return [], []
+    allow = perms.get("allow", [])
+    deny = perms.get("deny", [])
+    return (allow if isinstance(allow, list) else [],
+            deny if isinstance(deny, list) else [])
+
+
+def _repo_permission_surface(repo_path: Path, cfg: Config) -> tuple[set, set]:
+    """Union of allow/deny rules across every settings layer Claude Code
+    resolves permissions from for a reconciler working in *repo_path*: its own
+    ``settings.local.json`` and ``settings.json``, plus the (injectable)
+    user-scope ``settings.json`` -- a grant present in ANY layer satisfies the
+    requirement."""
+    allow: set[str] = set()
+    deny: set[str] = set()
+    for path in (
+        repo_path / ".claude" / "settings.local.json",
+        repo_path / ".claude" / "settings.json",
+        user_settings_path(cfg),
+    ):
+        a, d = _settings_allow_deny(path)
+        allow.update(a)
+        deny.update(d)
+    return allow, deny
+
+
+def check_reconciler_permissions(cfg: Config, now: float) -> dict:
+    """WARN (never blocks a spawn) when a repo bound by a current ticket has no
+    Claude Code permission grant for the reconciler's whole Bash surface
+    (``dispatcher.RECONCILER_REQUIRED_TOOLS``) -- the "This command needs your
+    approval to run." stall (GA-16's Intent) that the dispatcher never
+    observes (it doesn't read a spawned session's exit status), so today only
+    the no-progress watchdog eventually reacts, after ~20 full ``claude -p``
+    sessions per ticket, and blames the reconciler rather than permissions.
+
+    Moot (reports ``ok``) when the home's ``permission_mode`` is
+    ``bypassPermissions`` -- Claude Code never consults a settings file in
+    that mode, so there is nothing to check.
+
+    Modeled byte-for-byte on ``check_missing_reconcile_skill`` above: iterate
+    ``dispatcher.referenced_repo_bindings``, skip a binding whose path doesn't
+    exist (fails open, same as that check and ``repo_preflight_all``).
+    """
+    if cfg.permission_mode == "bypassPermissions":
+        return {"name": "reconciler_permissions", "status": "ok",
+                "detail": "permissions bypassed for this home (permission_mode = bypassPermissions)",
+                "missing_by_repo": {}}
+
+    home = cfg.home
+    bindings = dispatcher.referenced_repo_bindings(cfg, home, dispatcher.list_keys(home))
+    required = dispatcher.RECONCILER_REQUIRED_TOOLS
+    missing_by_repo: dict[str, list[str]] = {}
+    denied_by_repo: dict[str, list[str]] = {}
+    for name, binding in bindings.items():
+        if not binding.path or not Path(binding.path).exists():
+            continue
+        allow, deny = _repo_permission_surface(Path(binding.path), cfg)
+        missing = [tool for tool in required if tool not in allow or tool in deny]
+        if missing:
+            missing_by_repo[name] = missing
+        denied = [tool for tool in missing if tool in deny]
+        if denied:
+            denied_by_repo[name] = denied
+
+    status = "warn" if missing_by_repo else "ok"
+    if missing_by_repo:
+        parts = []
+        for name, tools in missing_by_repo.items():
+            note = f"{name}: missing {', '.join(tools)}"
+            if name in denied_by_repo:
+                note += f" (denied by settings: {', '.join(denied_by_repo[name])})"
+            parts.append(note)
+        detail = "; ".join(parts)
+    else:
+        detail = "all referenced repos grant the full reconciler surface"
+    return {"name": "reconciler_permissions", "status": status, "detail": detail,
+            "missing_by_repo": missing_by_repo}
+
+
 def check_spawn_floor(cfg: Config, now: float) -> dict:
     """WARN when the effective per-key spawn floor (``dispatcher.spawn_floor``,
     i.e. ``min_spawn_interval``) is 0 -- the setting has no other surface (GA-8):
@@ -330,7 +436,8 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 # for backward compatibility with the TUI fleet view and prior doctor output.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
-          check_missing_reconcile_skill, check_spawn_floor, check_daily_spend)
+          check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
+          check_daily_spend)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
