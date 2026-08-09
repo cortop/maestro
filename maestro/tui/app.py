@@ -160,7 +160,8 @@ class MaestroTUI(App):
             self.query_one("#events", RichLog).clear()
             return
         snap = snap_mod.load(self._home, key)
-        detail.update(_render_detail(snap, spec_tier(self._home, key)))
+        detail.update(_render_detail(snap, spec_tier(self._home, key),
+                                     snap_mod.display_title(self._home, snap)))
         self._refresh_events()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -295,7 +296,8 @@ class MaestroTUI(App):
                 self.notify(f"{answered} answer(s) queued for {key}")
                 snap = snap_mod.load(self._home, key)
                 self.query_one("#detail", Static).update(
-                    _render_detail(snap, spec_tier(self._home, key)))
+                    _render_detail(snap, spec_tier(self._home, key),
+                                   snap_mod.display_title(self._home, snap)))
             return
         qid, text = questions[idx]
         remaining = len(questions) - idx

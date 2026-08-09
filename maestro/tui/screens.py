@@ -393,7 +393,8 @@ class DetailScreen(Screen):
     def _refresh(self) -> None:
         snap = snap_mod.load(self._home, self._key)
         self.query_one("#ds-detail", Static).update(
-            _render_detail(snap, spec_tier(self._home, self._key)))
+            _render_detail(snap, spec_tier(self._home, self._key),
+                           snap_mod.display_title(self._home, snap)))
         events = event_log.read(self._home, self._key)
         log = self.query_one("#ds-events", RichLog)
         log.clear()
