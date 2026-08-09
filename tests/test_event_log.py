@@ -1,7 +1,7 @@
 """The two load-bearing correctness guarantees of the event log."""
 import pytest
 
-from maestro import event_log
+from maestro import event_log, store
 from maestro.event_log import StaleAppendError
 
 
@@ -50,3 +50,34 @@ def test_read_since(home):
         event_log.append(home, "T-1", "Note", {"n": i}, actor="t")
     later = event_log.read(home, "T-1", since=3)
     assert [e["seq"] for e in later] == [4, 5]
+
+
+def test_torn_tail_does_not_swallow_the_next_append(home):
+    """A crashed writer that leaves an unterminated line (RB-1's repro) must not
+    corrupt or swallow the append that follows it, and must not disarm step-id
+    dedup for that swallowed append's own step-id."""
+    event_log.append(home, "T-1", "Note", {"t": "1"}, actor="x", step_id="sid-1")
+    path = store.events_path(home, "T-1")
+    with path.open("a") as fh:
+        # a writer that died mid-line -- no trailing newline
+        fh.write('{"seq": 2, "type": "Note", "payload": {"t": "torn"')
+
+    seqs_before = [e["seq"] for e in event_log.read(home, "T-1")]  # the torn line is unreadable
+    ev = event_log.append(home, "T-1", "Note", {"t": "3"}, actor="x", step_id="sid-3")
+    assert ev is not None  # no longer swallowed
+    assert ev["payload"] == {"t": "3"}
+
+    events = event_log.read(home, "T-1")
+    assert [e["payload"] for e in events] == [{"t": "1"}, {"t": "3"}]
+    # no seq is reused: the new event's seq is strictly greater than every seq
+    # that was readable from the log before it (the torn line contributed none,
+    # being unparseable)
+    assert ev["seq"] > max(seqs_before)
+
+    # dedup still works across the torn tail: replaying sid-3 is an idempotent no-op
+    dup = event_log.append(home, "T-1", "Note", {"t": "should-not-land"},
+                           actor="x", step_id="sid-3")
+    assert dup is None
+    sid3_events = [e for e in event_log.read(home, "T-1") if e["step_id"] == "sid-3"]
+    assert len(sid3_events) == 1
+    assert sid3_events[0]["payload"] == {"t": "3"}

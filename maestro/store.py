@@ -187,10 +187,33 @@ def atomic_write(target: Path, data: str, *, follow_symlinks: bool = False) -> N
 
 
 def append_line(target: Path, line: str) -> None:
-    """Durably append a single line (must hold ``file_lock`` for the stream)."""
+    """Durably append a single line (must hold ``file_lock`` for the stream).
+
+    A previous writer may have died mid-line, leaving the file's last byte not a
+    ``\\n``. Appending straight onto that (the old bug) concatenates our bytes onto
+    the torn line instead of forming a new record -- silently swallowing this
+    append and reusing its seq. So before writing, check (via a seek-to-end + a
+    single 1-byte read -- O(1) in file size, never the whole file) whether the
+    target is non-empty and its last byte isn't a newline; if so, prepend one. This
+    is additive-only: the torn fragment is left in place for ``read_jsonl`` to skip
+    as unparseable, never rewritten (rewriting would turn an append into a
+    read-modify-write on the sole source of truth).
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
+    needs_leading_newline = False
+    try:
+        size = target.stat().st_size
+    except FileNotFoundError:
+        size = 0
+    if size > 0:
+        with target.open("rb") as f:
+            f.seek(-1, os.SEEK_END)
+            needs_leading_newline = f.read(1) != b"\n"
+    text = line if line.endswith("\n") else line + "\n"
+    if needs_leading_newline:
+        text = "\n" + text
     with target.open("a", encoding="utf-8") as f:
-        f.write(line if line.endswith("\n") else line + "\n")
+        f.write(text)
         f.flush()
         os.fsync(f.fileno())
 
