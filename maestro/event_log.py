@@ -69,6 +69,22 @@ def append(
 ) -> dict | None:
     """Append one event. Returns the written event, or ``None`` if it was a
     step-id-idempotent no-op. Raises ``StaleAppendError`` on a lost fencing race.
+
+    **Ordering: step-id dedup is checked BEFORE fencing** (below: the ``step_id``
+    branch precedes the ``expected_last_seq`` branch). This means a ``None``
+    return tells you only "this exact step already happened" -- it does NOT
+    tell you whether ``expected_last_seq`` was fresh or stale, because a caller
+    that recomputes the same deterministic ``step_id`` from the state it last
+    knew about (the ordinary crash-and-respawn replay) is short-circuited to a
+    clean no-op before the tail is even compared. That is intentional and
+    load-bearing: replaying an already-applied step must always succeed
+    idempotently, even if the log has since moved on for OTHER reasons, or
+    crash-and-respawn would spuriously raise instead of no-opping. A caller
+    that wants the fencing check to actually run must pass a ``step_id`` that
+    is either absent or genuinely novel for a stale fold -- see
+    ``ops.set_phase``, where the phase-transition ``step_id`` is derived from
+    the caller's ``(phase, observed_seq)``, so a stale caller's step_id differs
+    from the fresh one and dedup does not shadow the CAS.
     """
     store.validate_key(key)
     path = store.events_path(home, key)

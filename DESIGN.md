@@ -97,7 +97,12 @@ already have, not a separate journal.
 - **Idempotency:** `step_id = hash(key, phase, observed_seq, action)`. Two reconcilers
   racing on the same frozen log compute the same id; the log dedups → one recorded effect.
 - **Fencing:** an append with a stale `expected_last_seq` is rejected (optimistic
-  concurrency); the loser bails and is re-derived next sweep.
+  concurrency); the loser bails and is re-derived next sweep. Armed (RB-7) on the
+  state-machine gate, `ops.set_phase` — a caller that already folded the snapshot it
+  decided the target phase from passes `expect=<that observed_seq>`; a lost race raises
+  `StaleAppendError`, which is left to propagate uncaught (no `failure_count` spend, no
+  dead-letter — see `ops.set_phase`'s docstring). Plain append-only event types (`Note`,
+  `QuestionAsked`, …) don't carry it — nothing downstream branches on their freshness.
 - **Crash safety:** a reconciler that dies after writing its event but before exit is
   re-spawned, recomputes the same step-id, and no-ops.
 - **Inbox crash safety:** the reconciler acks the inbox cursor *last* (after advancing the

@@ -17,8 +17,10 @@ later than ``epoch`` (beyond a small tolerance) is ``"denied"``. ``"unknown"`` (
 capped by ``unverified_claim_max_age`` so an unverifiable claim can't squat a slot
 forever either. ``active_keys`` probes ONCE for the whole batch of claims per call.
 
-This is why the claim is only a *hint*: the event log's fencing token is the real
-authority against double-writes.
+This is why the claim is only a *hint*: the event log's fencing token (RB-7 — armed on
+`ops.set_phase`, the state-machine gate) is the real authority against a phase transition
+decided from a fold that went stale before the write landed, e.g. during the grace window
+above, or a human racing a live reconciler.
 """
 from __future__ import annotations
 

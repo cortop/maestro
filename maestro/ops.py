@@ -50,6 +50,20 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     log still has to show that they did, so a forced transition records
     `forced_by=<actor>` on the PhaseChanged event plus a Note spelling out the
     count.
+
+    `expect` (RB-7) is the fencing CAS, scoped to this one call site — the
+    state-machine gate — and to nowhere else in `ops`: a caller that already
+    holds the folded snapshot it decided `phase` from passes `expect=<that
+    snapshot's observed_seq>`, and a lost race (something else appended after
+    that fold) raises `event_log.StaleAppendError` instead of silently
+    committing a decision made on stale data. `None` (the default) means the
+    caller isn't asserting freshness — no CAS is applied. Callers that already
+    hold that fold for free (`ask`, `ask_round`, `route_conflict`,
+    `route_stale`, `dispatcher._observe_ci`, `dispatcher._observe_reviews`)
+    pass it; `StaleAppendError` is deliberately left to propagate uncaught —
+    it means "someone else moved this ticket first," which is a benign lost
+    race, not a failure: the dispatcher's level-triggered sweep re-derives the
+    ticket next pass, and nothing here should spend `failure_count` on it.
     """
     snap = snap_mod.load(cfg.home, key)
     unverified = _acs_unverified_count(cfg, key, snap) if phase == Phase.AWAITING_CI else 0
@@ -418,7 +432,12 @@ def ask(cfg: Config, key: str, text: str, *, qid: str | None = None, actor: str 
     qid = qid or content_hash(text)
     _append(cfg, key, E.QUESTION_ASKED, {"qid": qid, "text": text},
             actor=actor, sid=f"ask-{key}-{qid}")
-    set_phase(cfg, key, Phase.AWAITING_HUMAN, reason="asked human", actor=actor)
+    # The QuestionAsked append just above is the fold this decision is made
+    # from -- reload it (cheap, in-process) so the AWAITING_HUMAN transition is
+    # fenced against exactly that observed tail, not an earlier one.
+    snap = snap_mod.load(cfg.home, key)
+    set_phase(cfg, key, Phase.AWAITING_HUMAN, reason="asked human", actor=actor,
+              expect=snap.observed_seq)
     return qid
 
 
@@ -455,8 +474,12 @@ def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str 
         _append(cfg, key, E.QUESTION_ASKED, {"qid": qid, "text": numbered},
                 actor=actor, sid=f"ask-{key}-{qid}")
         qids.append(qid)
+    # Same fencing rationale as `ask` above: reload after the last QuestionAsked
+    # append and fence the phase transition against that observed tail.
+    snap = snap_mod.load(cfg.home, key)
     set_phase(cfg, key, Phase.AWAITING_HUMAN,
-              reason=f"asked human ({total} question(s) this round)", actor=actor)
+              reason=f"asked human ({total} question(s) this round)", actor=actor,
+              expect=snap.observed_seq)
     return qids
 
 
@@ -492,7 +515,8 @@ def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "recon
     if snap.phase == Phase.IMPLEMENTING.value:
         return False
     set_phase(cfg, key, Phase.IMPLEMENTING,
-              reason=f"resolve merge conflict for PR #{pr_number}", actor=actor)
+              reason=f"resolve merge conflict for PR #{pr_number}", actor=actor,
+              expect=snap.observed_seq)
     return True
 
 
@@ -511,7 +535,7 @@ def route_stale(cfg: Config, key: str, *, base_branch: str = "main",
         return False
     set_phase(cfg, key, Phase.IMPLEMENTING,
               reason=f"origin/{base_branch} advanced — rebase worktree onto latest {base_branch}",
-              actor=actor)
+              actor=actor, expect=snap.observed_seq)
     return True
 
 
