@@ -1,7 +1,6 @@
 """Compaction: pre-snapshot events move to archive; history and idempotency survive."""
 import dataclasses
 import json
-import os
 
 import pytest
 
@@ -152,27 +151,25 @@ def test_incremental_compact(cfg):
 #   (a) during the archive append itself (before it is durable), and
 #   (b) after the archive append is durable but before the active log is
 #       replaced (the two files now hold the same events -- a duplicate, not a
-#       loss). Both are proven by stubbing os.fsync to raise at the point a
-#       real crash would land, exactly as the ticket's QA note prescribes.
+#       loss). Both are proven by arming the RB-11 fault-injection shim
+#       (`tests/fault_injection.py`) to raise on fsync at the ordinal a real
+#       crash would land on -- folded into that shared shim rather than each
+#       hand-rolling its own fsync-counting closure. The generalized,
+#       parameterized sweep over every window (including the one these two
+#       don't cover -- a crash after the replace, before the directory
+#       fsync -- plus append_line/atomic_write/flock) lives in
+#       `tests/test_crash_injection.py`; these two stay here as RB-6's own
+#       regression pins, in the fixture shape RB-6 originally used.
 # ---------------------------------------------------------------------------
 
-def test_crash_during_archive_append_loses_nothing(cfg, monkeypatch):
+def test_crash_during_archive_append_loses_nothing(cfg, faults):
     home = cfg.home
     _append_n(home, "T-1", 5)
     _rebuild(home, "T-1")                            # observed_seq = 5
     event_log.append(home, "T-1", "Note", {"n": 6}, actor="t")   # seq 6, stays active
     before = snap_mod.fold("T-1", event_log.read(home, "T-1"))
 
-    real_fsync = os.fsync
-    calls = {"n": 0}
-
-    def flaky_fsync(fd):
-        calls["n"] += 1
-        if calls["n"] == 1:               # the archive append's own fsync
-            raise OSError("simulated crash during archive append")
-        return real_fsync(fd)
-
-    monkeypatch.setattr(store.os, "fsync", flaky_fsync)
+    faults.inject_fsync_raise(1)  # the archive append's own fsync
 
     with pytest.raises(OSError):
         compact(cfg, "T-1")
@@ -185,7 +182,7 @@ def test_crash_during_archive_append_loses_nothing(cfg, monkeypatch):
     assert after == before
 
 
-def test_crash_between_archive_append_and_replace_is_survivable(cfg, monkeypatch):
+def test_crash_between_archive_append_and_replace_is_survivable(cfg, faults):
     home = cfg.home
     event_log.append(home, "T-1", "TicketCreated", {"title": "t", "spec_hash": "x"}, actor="d")  # seq 1
     event_log.append(home, "T-1", "Failed", {"error": "boom"}, actor="r")                          # seq 2
@@ -194,16 +191,9 @@ def test_crash_between_archive_append_and_replace_is_survivable(cfg, monkeypatch
     before = snap_mod.fold("T-1", event_log.read(home, "T-1"))
     assert before.failure_count == 1
 
-    real_fsync = os.fsync
-    calls = {"n": 0}
-
-    def flaky_fsync(fd):
-        calls["n"] += 1
-        if calls["n"] == 2:                # archive's fsync (#1) succeeds; the
-            raise OSError("simulated crash between archive append and active-log replace")
-        return real_fsync(fd)
-
-    monkeypatch.setattr(store.os, "fsync", flaky_fsync)
+    # archive's fsync (#1) succeeds; atomic_write's tmp-file fsync (#2),
+    # before os.replace runs, raises.
+    faults.inject_fsync_raise(2)
 
     with pytest.raises(OSError):
         compact(cfg, "T-1")
@@ -238,7 +228,7 @@ def test_duplicate_seq_across_archive_and_active_is_deduped_by_read(cfg):
     assert [e["seq"] for e in events] == [1, 2, 3]
 
 
-def test_compact_survives_crash_via_real_maestro_compact_verb(cfg, monkeypatch):
+def test_compact_survives_crash_via_real_maestro_compact_verb(cfg, faults, monkeypatch):
     """QA per CLAUDE.md: drive the real ``maestro compact`` verb (not internal
     calls), inject the crash, then prove readability + fold via the same verb
     surface an agent/human would use."""
@@ -250,15 +240,13 @@ def test_compact_survives_crash_via_real_maestro_compact_verb(cfg, monkeypatch):
     event_log.append(home, "T-1", "Note", {"n": 6}, actor="t")
     before = snap_mod.fold("T-1", event_log.read(home, "T-1"))
 
-    real_fsync = os.fsync
-    monkeypatch.setattr(store.os, "fsync",
-                         lambda fd: (_ for _ in ()).throw(OSError("simulated crash")))
+    faults.inject_fsync_raise(1)  # the very next fsync call -- fires once,
+                                   # so nothing needs manually un-arming below
     monkeypatch.setenv("MAESTRO_HOME", str(home))
 
     with pytest.raises(OSError):
         cli.main(["compact", "T-1"])
 
-    monkeypatch.setattr(store.os, "fsync", real_fsync)
     after = snap_mod.fold("T-1", event_log.read(home, "T-1"))
     assert after == before
 

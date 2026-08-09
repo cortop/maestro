@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from maestro import event_log, snapshot as snap_mod, store  # noqa: E402
 from maestro.config import Config  # noqa: E402
+from fault_injection import FaultInjector  # noqa: E402
 
 
 def git(*args, cwd):
@@ -47,6 +48,14 @@ def home(tmp_path):
 @pytest.fixture
 def cfg(home):
     return Config(home=home, max_concurrency=3, backoff_base=10, max_failures=3)
+
+
+@pytest.fixture
+def faults(monkeypatch):
+    """A fresh `FaultInjector` (RB-11's crash-injection shim, see
+    `tests/fault_injection.py`) for the test -- patches auto-reverted at
+    teardown via the standard `monkeypatch` fixture."""
+    return FaultInjector(monkeypatch)
 
 
 def seed_ticket(home, key, title, *, phase=None, questions=None, pr=None, tier=1):
