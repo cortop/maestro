@@ -56,6 +56,109 @@ def test_snapshot_roundtrip(home):
     assert loaded.to_dict() == snap.to_dict()
 
 
+# --- RB-2: the four algebraic laws `fold` is assumed to satisfy -------------
+
+def test_fold_is_total_unknown_phase():
+    """(b) An unrecognized `phase` must not raise -- pre-fix this was ValueError."""
+    snap = snap_mod.fold("K", [{"seq": 1, "type": "PhaseChanged", "payload": {"phase": "bogus"}}])
+    assert snap.phase == Phase.TRIAGING.value  # coerced no-op: default snapshot's own phase
+    assert any("unknown/missing phase" in w for w in snap.fold_warnings)  # not silently dropped
+
+
+def test_fold_is_total_missing_phase():
+    """(b) A missing `phase` key must not raise -- pre-fix this was KeyError."""
+    snap = snap_mod.fold("K", [{"seq": 1, "type": "PhaseChanged", "payload": {}}])
+    assert snap.phase == Phase.TRIAGING.value
+    assert any("unknown/missing phase" in w for w in snap.fold_warnings)
+
+
+def test_fold_is_total_non_integer_turn():
+    """(b) A non-integer `turn` must not raise -- pre-fix this was ValueError from int()."""
+    snap = snap_mod.fold("K", [{"seq": 1, "type": "ImplTurnRecorded", "payload": {"turn": "abc"}}])
+    assert snap.impl_turns == 0  # coerced no-op: default counter left unchanged
+    assert any("non-integer turn" in w for w in snap.fold_warnings)
+
+
+def test_fold_is_duplicate_idempotent():
+    """(c) fold(evs) == fold(evs * 2), across the events RB-2 names by name --
+    not just the two counters (`failure_count`/`unresolved_reviews`) the bug
+    was first noticed through. Deliberately no `PhaseChanged` in *evs*: that
+    event resets both counters to 0 as a side effect, which would mask the
+    duplicate-counting bug when the whole list (PhaseChanged included) is
+    replayed twice back-to-back -- exactly the trap this law guards against."""
+    evs = [
+        {"seq": 1, "type": "TicketCreated", "payload": {"title": "x", "spec_hash": "h"}},
+        {"seq": 2, "type": "Failed", "payload": {"error": "boom"}},
+        {"seq": 3, "type": "ReviewFeedbackReceived",
+         "payload": {"comment_id": "c1", "state": "CHANGES_REQUESTED"}},
+        {"seq": 4, "type": "AcVerified", "payload": {"ac_hash": "h1", "evidence": {"what": "w"}}},
+        {"seq": 5, "type": "AcQaVerdict", "payload": {"ac_hash": "h1", "verdict": "fail", "evidence": "e"}},
+    ]
+    once = snap_mod.fold("K", evs).to_dict()
+    twice = snap_mod.fold("K", evs * 2).to_dict()
+    assert once == twice
+    assert once["failure_count"] == 1  # not inflated to 2 by the duplicated Failed
+    assert once["unresolved_reviews"] == 1  # ditto ReviewFeedbackReceived
+
+
+def test_duplicated_seqs_from_interrupted_compaction_cannot_inflate_failure_count(home):
+    """(c), the live trigger named in the spec: a crash between compact's
+    archive-append and active-rewrite leaves the same seq in both files --
+    `event_log.read` must dedup rather than double-count on replay."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "x"}, actor="d")
+    ev = event_log.append(home, "T-1", "Failed", {"error": "boom"}, actor="r")
+    # Simulate compact's crash window: the event landed in the archive, and
+    # the active-log rewrite (which would have dropped it) never completed.
+    from maestro import store
+    archive_path = store.events_archive_path(home, "T-1")
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    with archive_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert snap.failure_count == 1  # not 2
+
+
+def test_observed_seq_is_a_high_water_mark():
+    """(d) observed_seq is max(seq), not last-write -- an out-of-order tail
+    (e.g. from a merged/replayed segment) can't move it backwards."""
+    snap = snap_mod.fold("K", [{"seq": 9, "type": "Note"}, {"seq": 1, "type": "Note"}])
+    assert snap.observed_seq == 9
+
+
+def test_done_is_absorbing():
+    """(e) [Finalized, Stalled] folds to done -- a Stalled after Finalized
+    must not resurrect a finished ticket into an active (DEGRADED) phase."""
+    snap = snap_mod.fold("K", [
+        {"seq": 1, "type": "Finalized", "payload": {}},
+        {"seq": 2, "type": "Stalled", "payload": {"reason": "r"}},
+    ])
+    assert snap.phase == Phase.DONE.value
+    assert any("DONE (absorbing)" in w for w in snap.fold_warnings)
+
+
+def test_done_is_absorbing_against_phase_changed_too():
+    """(e), the general form: no event TYPE -- not just Stalled -- can move a
+    folded done snapshot into an active phase."""
+    snap = snap_mod.fold("K", [
+        {"seq": 1, "type": "Finalized", "payload": {}},
+        {"seq": 2, "type": "PhaseChanged", "payload": {"phase": "ready"}},
+    ])
+    assert snap.phase == Phase.DONE.value
+
+
+def test_done_is_absorbing_against_ticket_created_too():
+    """(e), the general form again: a (re-)TicketCreated must not resurrect a
+    folded done snapshot back to TRIAGING either -- the write boundary
+    (`ops.mint_new_tickets`) already refuses to append a second TicketCreated
+    to a key with events, but `fold` must hold the law for ANY event list."""
+    snap = snap_mod.fold("K", [
+        {"seq": 1, "type": "Finalized", "payload": {}},
+        {"seq": 2, "type": "TicketCreated", "payload": {"title": "x"}},
+    ])
+    assert snap.phase == Phase.DONE.value
+
+
 def test_from_dict_ignores_legacy_tier_field(home):
     """A pre-GA-18 snapshot JSON on disk still carries `"tier": null` (or any
     other stale value) -- from_dict's unknown-key filter must silently drop it

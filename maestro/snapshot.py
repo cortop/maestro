@@ -4,6 +4,25 @@ Tiny (~1-2KB), disposable, machine-owned, DO-NOT-EDIT. The dispatcher reads only
 snapshots to decide what is due, so a sweep never touches the full event history
 or any of the old 100-500KB monoliths. Writers refresh the snapshot after every
 append, so the dispatcher's cheap read is always current.
+
+``fold`` is a TOTAL function of the log (RB-2): no event, however malformed its
+payload, may raise. A ``PhaseChanged`` with a missing/unrecognized ``phase``, or
+an ``ImplTurn``/``ImplStep`` with a non-integer ``turn``, is coerced to a safe
+default (the phase is left unchanged; the turn counter is left unchanged) and
+recorded in ``fold_warnings`` instead of being silently dropped -- a corrupt log
+must stay visible, never crash the fold. ``observed_seq`` is a high-water mark
+(``max`` across every event's ``seq``, not last-write) so an out-of-order log
+segment can't move it backwards. ``DONE`` is absorbing: once folded to
+``Phase.DONE``, NO later event of ANY type can move the phase again -- see
+``fold``'s ``TICKET_CREATED``/``PHASE_CHANGED``/``STALLED`` arms (this is a
+`fold` law, held for any event list `fold` is handed, not merely a
+consequence of what the write boundary would actually append -- e.g.
+``ops.mint_new_tickets`` already refuses a second ``TicketCreated`` on a key
+with events, but `fold` still guards it). ``fold`` is
+also duplicate-idempotent (``fold(evs) == fold(evs * 2)``): it dedups its
+input by seq itself, on top of ``event_log.read`` deduping upstream (an
+interrupted ``ops.compact`` can otherwise leave the same seq in both the
+archive and the active log -- see that module's docstring).
 """
 from __future__ import annotations
 
@@ -135,6 +154,11 @@ class Snapshot:
     # [repos.<name>] this ticket is bound to, from TicketCreated.repo. None = no
     # explicit binding -- repos.resolve() falls back to the implicit default.
     repo: str | None = None
+    # Human-readable notes of malformed events `fold` coerced instead of
+    # raising on (RB-2, law (b)) -- "seq <n> <Type>: <what was wrong>". Never
+    # reset by a phase change; a corrupt log stays visible for as long as the
+    # corrupt event remains in the log (a compaction doesn't remove it).
+    fold_warnings: list[str] = field(default_factory=list)
 
     @property
     def question_open(self) -> bool:
@@ -187,12 +211,55 @@ class Snapshot:
         return cls(**{k: v for k, v in d.items() if k in known})
 
 
+def _coerce_phase(p: dict, default: str) -> tuple[str, str | None]:
+    """Best-effort ``Phase(payload['phase']).value``, falling back to
+    *default* (the snapshot's current phase, i.e. treat the event as a
+    phase-preserving no-op) on a missing or unrecognized value -- never
+    raises (law (b): fold is total). Returns ``(phase, warning_or_None)``."""
+    raw = p.get("phase")
+    try:
+        return Phase(raw).value, None
+    except ValueError:
+        return default, f"unknown/missing phase {raw!r}"
+
+
+def _coerce_turn(p: dict, default: int) -> tuple[int, str | None]:
+    """Best-effort ``int(payload['turn'])``, falling back to *default* (the
+    snapshot's current counter, unchanged) on a non-numeric value -- never
+    raises (law (b): fold is total). Returns ``(turn, warning_or_None)``."""
+    raw = p.get("turn", default)
+    try:
+        return int(raw), None
+    except (TypeError, ValueError):
+        return default, f"non-integer turn {raw!r}"
+
+
 def fold(key: str, events: list[dict]) -> Snapshot:
-    """Replay events into a Snapshot. Pure function of the log — the whole point."""
-    s = Snapshot(key=key)
+    """Replay events into a Snapshot. Pure function of the log — the whole point.
+
+    Total (never raises — see module docstring) and DONE-absorbing. Also
+    duplicate-idempotent in its own right (``fold(evs) == fold(evs * 2)``):
+    *events* is deduplicated by seq (first occurrence wins) before the replay
+    loop runs, so a caller handing this a raw, possibly-duplicated list —
+    including ``fold`` itself, called directly, as opposed to through
+    ``event_log.read``, which already dedups upstream for the same reason
+    (see its docstring) — still gets a duplicate-safe fold.
+    """
+    seen_seqs: set[int] = set()
+    deduped: list[dict] = []
     for ev in events:
         seq = ev.get("seq")
         if isinstance(seq, int):
+            if seq in seen_seqs:
+                continue
+            seen_seqs.add(seq)
+        deduped.append(ev)
+    events = deduped
+
+    s = Snapshot(key=key)
+    for ev in events:
+        seq = ev.get("seq")
+        if isinstance(seq, int) and seq > s.observed_seq:
             s.observed_seq = seq
         t = ev.get("type")
         p = ev.get("payload") or {}
@@ -206,15 +273,32 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.external_source = p.get("external_source", s.external_source)
             s.external_id = p.get("external_id", s.external_id)
             s.repo = p.get("repo", s.repo)
-            s.phase = Phase.TRIAGING.value
+            if s.phase == Phase.DONE.value:
+                # (e) DONE is absorbing: a (re-)TicketCreated after Finalized
+                # must not resurrect a finished ticket back to TRIAGING -- the
+                # write boundary already refuses to append a second
+                # TicketCreated to a key with events, but `fold` itself must
+                # hold this law for ANY event list, not just ones the write
+                # boundary would actually produce.
+                s.fold_warnings.append(f"seq {seq} {t}: dropped phase reset -- phase is DONE (absorbing)")
+            else:
+                s.phase = Phase.TRIAGING.value
         elif t == E.SPEC_OBSERVED:
             s.spec_hash = p.get("spec_hash", s.spec_hash)
         elif t == E.PHASE_CHANGED:
-            s.phase = Phase(p["phase"]).value
-            s.failure_count = 0
-            s.next_requeue_at = None
-            s.answered_questions = {}
-            s.unresolved_reviews = 0
+            if s.phase == Phase.DONE.value:
+                # (e) DONE is absorbing: a PhaseChanged after Finalized is a
+                # full no-op, not just a phase no-op -- record it and move on.
+                s.fold_warnings.append(f"seq {seq} {t}: dropped -- phase is DONE (absorbing)")
+            else:
+                new_phase, warn = _coerce_phase(p, s.phase)
+                s.phase = new_phase
+                s.failure_count = 0
+                s.next_requeue_at = None
+                s.answered_questions = {}
+                s.unresolved_reviews = 0
+                if warn:
+                    s.fold_warnings.append(f"seq {seq} {t}: {warn}")
         elif t == E.QUESTION_ASKED:
             s.open_questions[p.get("qid", str(seq))] = p.get("text", "")
         elif t == E.QUESTION_ANSWERED:
@@ -239,9 +323,15 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             if p.get("state") == "CHANGES_REQUESTED":
                 s.unresolved_reviews += 1
         elif t == E.IMPL_TURN:
-            s.impl_turns = max(s.impl_turns, int(p.get("turn", s.impl_turns)))
+            turn, warn = _coerce_turn(p, s.impl_turns)
+            s.impl_turns = max(s.impl_turns, turn)
+            if warn:
+                s.fold_warnings.append(f"seq {seq} {t}: {warn}")
         elif t == E.IMPL_STEP:
-            s.impl_turns = max(s.impl_turns, int(p.get("turn", s.impl_turns)))
+            turn, warn = _coerce_turn(p, s.impl_turns)
+            s.impl_turns = max(s.impl_turns, turn)
+            if warn:
+                s.fold_warnings.append(f"seq {seq} {t}: {warn}")
             if p.get("summary"):
                 s.last_step = p["summary"]
         elif t == E.AC_VERIFIED:
@@ -266,8 +356,13 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             s.failure_count += 1
             s.last_error = p.get("error", s.last_error)
         elif t == E.STALLED:
-            s.phase = Phase.DEGRADED.value
-            s.last_error = p.get("reason", s.last_error)
+            if s.phase == Phase.DONE.value:
+                # (e) DONE is absorbing: a Stalled after Finalized cannot
+                # resurrect a finished ticket into an active phase.
+                s.fold_warnings.append(f"seq {seq} {t}: dropped -- phase is DONE (absorbing)")
+            else:
+                s.phase = Phase.DEGRADED.value
+                s.last_error = p.get("reason", s.last_error)
         elif t == E.FINALIZED:
             s.phase = Phase.DONE.value
             s.next_requeue_at = None

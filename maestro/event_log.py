@@ -98,13 +98,15 @@ def append(
 def read(home: Path, key: str, *, since: int = 0) -> list[dict]:
     """All events for a key with seq > ``since`` (oldest first), archive included.
 
-    Deduplicates by seq. ``ops.compact`` fsyncs its archive append before it
-    replaces the active log (see there), so a crash in between can leave the
-    same events present in both files -- byte-identical, since compaction never
-    rewrites an event, only relocates it. Keeping the first occurrence (the
-    archive copy) and dropping the rest is what makes that window survivable:
-    without it, a duplicated event would replay twice through ``fold`` and
-    corrupt state that isn't naturally idempotent (e.g. ``failure_count``).
+    Deduplicates by seq (RB-6 introduced this dedup for the compaction crash
+    window; RB-2 law (c) requires it hold independent of that specific trigger).
+    ``ops.compact`` fsyncs its archive append before it replaces the active log
+    (see there), so a crash in between can leave the same events present in both
+    files -- byte-identical, since compaction never rewrites an event, only
+    relocates it. Keeping the first occurrence (the archive copy) and dropping
+    the rest is what makes that window survivable: without it, a duplicated
+    event would replay twice through ``fold`` and corrupt state that isn't
+    naturally idempotent (e.g. ``failure_count``).
     """
     events: list[dict] = []
     events += store.read_jsonl(store.events_archive_path(home, key))
