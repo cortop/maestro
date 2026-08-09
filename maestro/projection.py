@@ -73,7 +73,7 @@ def load_snapshots(home: Path) -> list[snap_mod.Snapshot]:
 
 
 def _row(home: Path, s: snap_mod.Snapshot) -> tuple[str, ...]:
-    return (s.key, s.phase, (s.title or "")[:64], _pr_cell(s),
+    return (s.key, s.phase, snap_mod.display_title(home, s)[:64], _pr_cell(s),
             s.ci_state or "—", str(spec_tier(home, s.key)), str(s.failure_count), s.key)
 
 
@@ -123,7 +123,7 @@ def render(home: Path) -> dict[str, str]:
     for p in order:
         for s in sorted(by_phase.get(p.value, []), key=lambda x: split_key(x.key)):
             lines.append(
-                f"| {s.key} | {s.phase} | {(s.title or '')[:64]} | {_link(s)} "
+                f"| {s.key} | {s.phase} | {snap_mod.display_title(home, s)[:64]} | {_link(s)} "
                 f"| {s.ci_state or '—'} | {spec_tier(home, s.key)} | {s.failure_count} |"
             )
     workstate = "\n".join(lines) + "\n"

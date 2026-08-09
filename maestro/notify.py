@@ -99,7 +99,8 @@ def maybe_notify(cfg: Config, now: float) -> list[str]:
                 for url in cfg.webhook_urls:
                     _post_webhook(url, {
                         "key": key, "phase": snap.phase, "gated": gated,
-                        "question": question, "title": snap.title,
+                        "question": question,
+                        "title": snap_mod.display_title(home, snap),
                     })
                 fired.append(key)
 

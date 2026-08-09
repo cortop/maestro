@@ -19,10 +19,53 @@ from .statemachine import Phase
 # Spec acceptance criteria are Markdown task-list items: "- [ ] ..." / "- [x] ...".
 _AC_RE = re.compile(r"^- \[[ xX]\]\s*(.+)$", re.MULTILINE)
 
+# A spec's title is its first level-1 heading, conventionally "# <KEY>: <title>".
+_TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+
 
 def parse_acs(spec_text: str) -> list[str]:
     """Extract acceptance-criteria line texts (in spec order) from a spec's body."""
     return [m.group(1).strip() for m in _AC_RE.finditer(spec_text)]
+
+
+def parse_title(spec_text: str, key: str | None = None) -> str | None:
+    """The spec's first level-1 heading, with a leading ``<KEY>: `` stripped.
+
+    The fallback for a ticket whose log carries no ``TicketCreated`` — which is a
+    real, supported state, not only a mishap: ``dispatcher.list_keys`` discovers a
+    ticket from a bare ``tickets/<KEY>/`` directory, and ``mint_new_tickets``
+    deliberately declines to append a second ``TicketCreated`` to a key that
+    already has events (it would clobber the folded phase back to triaging). Such
+    a ticket has a perfectly good title in its own spec and ``None`` in its
+    snapshot, so every dashboard rendered it blank.
+    """
+    m = _TITLE_RE.search(spec_text)
+    if not m:
+        return None
+    title = m.group(1).strip()
+    if key and title.startswith(f"{key}:"):
+        title = title[len(key) + 1:].strip()
+    return title or None
+
+
+def display_title(home: Path, s: "Snapshot") -> str:
+    """The title to show a human: the folded one, else the spec's own H1.
+
+    Read from disk on demand, exactly like `gates.spec_tier` -- so a ticket with
+    no `TicketCreated` still renders with a title, and a human's edit to the
+    spec's heading takes effect on the next render rather than never. Lives here,
+    below `projection`/`notify`/`tui`, so all three human-facing surfaces share
+    ONE definition instead of each re-deriving the fallback (the drift that
+    `gates.needs_approval` exists to prevent). Total: a missing or unreadable
+    spec falls back to the empty string.
+    """
+    if s.title:
+        return s.title
+    try:
+        text = store.spec_path(home, s.key).read_text(encoding="utf-8")
+    except (OSError, store.MaestroError):
+        return ""
+    return parse_title(text, s.key) or ""
 
 
 def ac_hash(ac_text: str) -> str:

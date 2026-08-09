@@ -1873,3 +1873,57 @@ def test_answer_flow_ctrl_g_accepts_all_remaining_recommendations(home):
     assert answers[_qid_for(home, "T-4", "Use Postgres")] == "Postgres (matches prod)"
     assert answers[_qid_for(home, "T-4", "Cut a v2 API")] == "extend v1"
     assert answers[_qid_for(home, "T-4", "Who owns")] == "the reconciler"
+
+
+def test_detail_pane_and_screen_render_title_from_spec(home):
+    """A ticket whose log carries no TicketCreated folds to `title = None`, but
+    its spec's H1 has the title -- both the compact #detail pane and the full
+    DetailScreen (#ds-detail) must show it (`snapshot.display_title`), and the
+    normally-minted case must keep rendering the folded title."""
+    # no TicketCreated: exactly what a directory-discovered / already-advanced key looks like
+    store.atomic_write(store.spec_path(home, "X-1"),
+                       "# X-1: title only in the spec\n\napproval_tier: 1\n\n## Intent\nb\n")
+    event_log.append(home, "X-1", "SpecObserved", {"spec_hash": "abc"}, actor="r")
+    event_log.append(home, "X-1", "PhaseChanged", {"phase": "ready", "reason": ""}, actor="r")
+    snap_mod.rebuild(home, "X-1")
+    seed_ticket(home, "X-2", "folded title wins", phase="ready")
+
+    def _title_line(static: Static) -> str:
+        return static.render().plain.splitlines()[0]
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+
+            table = app.query_one("#tickets", DataTable)
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            assert app._selected_key == "X-1"
+            assert "title only in the spec" in _title_line(app.query_one("#detail", Static))
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            assert "title only in the spec" in _title_line(
+                app.screen_stack[-1].query_one("#ds-detail", Static))
+            await pilot.press("escape")
+            await pilot.pause()
+
+            # the folded title still wins for a normally-minted ticket
+            table.move_cursor(row=1)
+            await pilot.pause()
+            assert app._selected_key == "X-2"
+            assert "folded title wins" in _title_line(app.query_one("#detail", Static))
+
+            # and the board row itself carries it
+            titles = {str(table.get_row_at(r)[0]): str(table.get_row_at(r)[2])
+                      for r in range(table.row_count)}
+            assert "title only in the spec" in titles["X-1"]
+
+            assert app._exception is None
+
+    asyncio.run(_inner())
