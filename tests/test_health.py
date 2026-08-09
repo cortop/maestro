@@ -614,7 +614,8 @@ def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypa
     _init_plain_repo(repo)
     _install_dummy_reconcile_skill(repo)
     (home / "config.toml").write_text(
-        f'[maestro]\nbackup_interval = 0\n\n[repos.alpha]\npath = "{repo}"\ndefault = true\n')
+        f'[maestro]\nbackup_interval = 0\ndaily_spend_ceiling_usd = 50.0\n\n'
+        f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
     _seed_bound_ticket(home, "T-1", "alpha")
 
     rc = cli.main(["--home", str(home), "doctor"])
@@ -669,3 +670,59 @@ def test_user_settings_path_injectable_never_reads_real_home(tmp_path, monkeypat
     env_path = tmp_path / "env-settings.json"
     monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(env_path))
     assert health.user_settings_path(cfg) == env_path
+
+
+# --- RB-8: an unset daily_spend_ceiling_usd is a visible doctor warning -------
+
+
+def test_doctor_warns_on_unset_spend_ceiling(home):
+    """AC1: `maestro doctor` reports an unset ceiling as a named check with a
+    warning status and today's spend for context, over the real CLI."""
+    code, out = _sweep(home)
+    assert code == 0  # a warning must not itself fail the (non-strict) sweep
+    check = next(c for c in out["checks"] if c["name"] == "daily_spend")
+    assert check["status"] == "warn"
+    assert check["ceiling_usd"] is None
+    assert check["today_usd"] == 0.0
+    assert "uncapped" in check["detail"]
+
+
+def test_doctor_passes_when_spend_ceiling_set(home):
+    """AC2: with a ceiling configured, the check passes (not warn/fail) and the
+    reported value matches the configured one, over the real CLI."""
+    store.atomic_write(home / "config.toml", "[maestro]\ndaily_spend_ceiling_usd = 25.0\n")
+    code, out = _sweep(home)
+    assert code == 0
+    check = next(c for c in out["checks"] if c["name"] == "daily_spend")
+    assert check["status"] == "ok"
+    assert check["ceiling_usd"] == 25.0
+
+
+def test_check_daily_spend_unaffected_for_unavailable_meter(home, cfg):
+    """The pre-existing unavailable-meter branch (text session log format) is
+    untouched by the RB-8 unset-ceiling warning -- still its own warn/detail."""
+    cfg.session_log_format = "text"
+    result = health.check_daily_spend(cfg, store.now_epoch())
+    assert result["status"] == "warn"
+    assert "unavailable" in result["detail"]
+    assert "uncapped" not in result["detail"]
+
+
+def test_init_sets_a_nonzero_default_spend_ceiling(tmp_path):
+    """AC4: a home created by `maestro init` is not silently uncapped -- the
+    generated config.toml carries an actual `daily_spend_ceiling_usd` (chosen
+    over a commented-out recommendation: only a real default protects an
+    operator who never reads the file -- see DEFAULT_CONFIG_TOML's own comment
+    for the dogfood-board justification). Doctor on that same fresh home does
+    not warn on this check, proving the default actually closes the gap."""
+    from maestro.config import load
+
+    assert cli.main(["--home", str(tmp_path), "init"]) == 0
+    cfg = load(str(tmp_path))
+    assert cfg.daily_spend_ceiling_usd is not None
+    assert cfg.daily_spend_ceiling_usd > 0
+
+    code, out = _sweep(tmp_path)
+    assert code == 0
+    check = next(c for c in out["checks"] if c["name"] == "daily_spend")
+    assert check["status"] == "ok"

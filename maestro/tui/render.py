@@ -96,7 +96,12 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         spend_str = "[yellow]unavailable (session_log_format != stream-json)[/yellow]"
     else:
         today_str = f"${spend_today:.2f}" if spend_today is not None else "—"
-        ceiling_str = "no ceiling" if spend_ceiling is None else f"${float(spend_ceiling):.2f}"
+        # RB-8: an unset ceiling reads as an explicit "no cap" warning, matching
+        # the wording style of the `unavailable` branch above -- never a blank
+        # or an omitted value, which is how the ceiling stayed unset unnoticed
+        # on this very board (see health.check_daily_spend).
+        ceiling_str = ("[yellow]no cap[/yellow]" if spend_ceiling is None
+                       else f"${float(spend_ceiling):.2f}")
         over = (spend_ceiling is not None and spend_today is not None
                 and spend_today >= float(spend_ceiling))
         spend_str = (f"[red bold]{today_str}[/red bold] / {ceiling_str}" if over
