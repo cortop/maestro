@@ -84,6 +84,18 @@ def _render_fleet(status: dict, doctor: dict) -> str:
                   else str(spawns_total))
     paused = status.get("paused", False)
     paused_str = "[yellow bold]yes[/yellow bold]" if paused else "no"
+    spend_unavailable = doctor.get("spend_unavailable", False)
+    spend_today = doctor.get("spend_today_usd")
+    spend_ceiling = doctor.get("spend_ceiling_usd")
+    if spend_unavailable:
+        spend_str = "[yellow]unavailable (session_log_format != stream-json)[/yellow]"
+    else:
+        today_str = f"${spend_today:.2f}" if spend_today is not None else "—"
+        ceiling_str = "no ceiling" if spend_ceiling is None else f"${float(spend_ceiling):.2f}"
+        over = (spend_ceiling is not None and spend_today is not None
+                and spend_today >= float(spend_ceiling))
+        spend_str = (f"[red bold]{today_str}[/red bold] / {ceiling_str}" if over
+                     else f"{today_str} / {ceiling_str}")
 
     lines = [
         "[bold]Fleet & Health[/bold]",
@@ -108,6 +120,7 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         f"  Spawns/hr:       {spawns_str} / budget {budget}",
         f"  Spawn floor:     {floor_str}",
         f"  Runaway:         {runaway_str}",
+        f"  Spend today:     {spend_str}",
     ]
     rl = doctor.get("rate_limit") or {}
     if rl.get("paused"):

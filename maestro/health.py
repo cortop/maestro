@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from . import claims, dispatcher, fleet, skills_install, store
+from . import claims, dispatcher, fleet, skills_install, spend as spend_mod, store
 from .config import Config
 
 WINDOW_SECONDS = 3600
@@ -288,6 +288,28 @@ def check_spawn_floor(cfg: Config, now: float) -> dict:
             "detail": detail, "floor_s": floor}
 
 
+def check_daily_spend(cfg: Config, now: float) -> dict:
+    """GA-11: surface the daily spend meter/ceiling as a check, beside the
+    top-level ``spend_*`` payload fields. WARN when the meter can't attribute
+    cost at all (``session_log_format`` isn't ``stream-json`` -- see
+    ``maestro/spend.py``'s module docstring: this must read as unavailable,
+    never a silent ``$0.00``). FAIL when today's folded spend has already
+    reached ``daily_spend_ceiling_usd`` -- the same signal ``dispatch()``'s
+    gate (``spend.over_ceiling``) acts on, surfaced here so a human sees it
+    without waiting for a blocked sweep."""
+    st = spend_mod.status(cfg, now)
+    if st["unavailable"]:
+        return {"name": "daily_spend", "status": "warn",
+                "detail": "spend unavailable: session_log_format is not stream-json",
+                "today_usd": None, "ceiling_usd": st["ceiling_usd"]}
+    over = spend_mod.over_ceiling(cfg, now)
+    ceiling = st["ceiling_usd"]
+    ceiling_str = "no ceiling configured" if ceiling is None else f"${float(ceiling):.2f} ceiling"
+    detail = over or f"${st['today_usd']:.2f} of {ceiling_str}"
+    return {"name": "daily_spend", "status": "fail" if over else "ok", "detail": detail,
+            "today_usd": st["today_usd"], "ceiling_usd": ceiling}
+
+
 def check_depends_on(cfg: Config, now: float) -> dict:
     home = cfg.home
     graph = _depends_on_graph(home)
@@ -308,7 +330,7 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 # for backward compatibility with the TUI fleet view and prior doctor output.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
-          check_missing_reconcile_skill, check_spawn_floor)
+          check_missing_reconcile_skill, check_spawn_floor, check_daily_spend)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
@@ -332,6 +354,7 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
     budget = spawn_budget(cfg)
     checks = run_checks(cfg, now, plist=plist)
     threshold = stale_threshold(home, plist=plist)
+    spend_status = spend_mod.status(cfg, now)
     return {
         "heartbeat": hb,
         "heartbeat_age_s": age,
@@ -342,6 +365,13 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
         "spawn_budget_per_hour": budget,
         "spawn_floor_s": dispatcher.spawn_floor(cfg),
         "runaway": bool(budget) and rate["total"] > budget,
+        # GA-11: added BESIDE the spawn-rate fields above, never folded into
+        # them -- GA-14 re-denominates spawns_last_hour/spawn_budget_per_hour
+        # next and needs those untouched.
+        "spend_today_usd": spend_status["today_usd"],
+        "spend_ceiling_usd": spend_status["ceiling_usd"],
+        "spend_unavailable": spend_status["unavailable"],
+        "spend_unattributed_sessions": spend_status["unattributed_sessions"],
         "paused": hb.get("paused", False),
         "checks": checks,
     }
