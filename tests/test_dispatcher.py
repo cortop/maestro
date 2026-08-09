@@ -91,13 +91,17 @@ class _EphemeralSessions(DryRunSessions):
         return set()
 
 
-@pytest.mark.parametrize("phase", [Phase.IN_REVIEW, Phase.IMPLEMENTING,
-                                   Phase.TRIAGING, Phase.READY, Phase.DEGRADED])
+@pytest.mark.parametrize("phase", [p for p in Phase if p not in disp.TERMINAL_PHASES])
 def test_requeue_timer_holds_any_non_terminal_phase(home, cfg, phase):
-    """A reconciler that asks to sleep is obeyed from EVERY phase, not just the
-    two in SLEEPING_PHASES. The in-review case is the 2026-07-19 runaway: the
-    handler ends in `maestro requeue $KEY 900` and the dispatcher ignored it."""
+    """A reconciler that asks to sleep is obeyed from EVERY non-terminal phase,
+    not just the two in SLEEPING_PHASES. The in-review case is the 2026-07-19
+    runaway: the handler ends in `maestro requeue $KEY 900` and the dispatcher
+    ignored it. Widened (RB-9) from a hand-picked 5 of the 9 non-terminal
+    phases to all 9 -- see test_dispatcher_exhaustive.py for the full
+    cross-product of this property against every other flag combination too."""
     _seed(home, "T-1", phase)
+    if phase == Phase.AWAITING_HUMAN:
+        _ask(home, "T-1")  # give it an open question, or it's already due via "stranded"
     ops.requeue(cfg, "T-1", 900)
     snap = snap_mod.load(home, "T-1")
     base = snap.next_requeue_at
