@@ -1,124 +1,245 @@
-"""GA-7: a fresh `git worktree add` brings tracked files only, so a reconciler's
-worktree silently lacks the repo's gitignored guidance (`CLAUDE.local.md`,
-`.claude/settings.local.json`) and any installed dependency tree -- for a JS repo
-whose `node_modules` is multiple GB, that means the implementing reconciler can't
-even run the test command. `maestro-reconcile-ready.md`'s `MODE == git` branch now
-primes a fresh worktree with a real, write-isolated `cp` copy (never a symlink --
-a symlink would share ONE mutable tree across every concurrent worktree) of each,
-after excluding the copied names from `git add` via the git-common `info/exclude`
-file (idempotently, since that file is shared across every worktree of the repo).
+"""GA-7 + GA-20: idempotent worktree create-or-adopt, plus priming.
 
-These tests: (1)/(2) static checks over the prime block's text (no symlink, the
-cp ladder, the git-common exclude path, idempotent guards), (3)/(4)/(5) extract
-that block verbatim and run it against a real throwaway repo + linked worktree,
-proving it's clean (git add -A stages nothing), write-isolated (mutating the
-worktree's copy never touches the source), and idempotent (a second run doesn't
-duplicate exclude entries or nest node_modules), (6) every command word the block
-invokes has a matching grant in `.claude/settings.json`, and (7) a real dispatcher
-sweep resolves a ready ticket to this file and the block primes the exact worktree
-path the dispatcher hands a real reconciler.
+A fresh `git worktree add` brings tracked files only, so a reconciler's
+worktree silently lacks the repo's gitignored guidance (`CLAUDE.local.md`,
+`.claude/settings.local.json`) and any installed dependency tree -- for a JS
+repo whose `node_modules` is multiple GB, that means the implementing
+reconciler can't even run the test command. GA-7 first fixed this as prose in
+`maestro-reconcile-ready.md`; GA-20 moved the whole thing -- worktree
+create-or-adopt, the CLAUDE.local.md/settings.local.json/node_modules mirror,
+and a new config-declared `prime` command -- into `ops.worktree_ensure`
+(`maestro worktree ensure <KEY>`), a real, idempotent Python op the ready skill
+now calls with one line instead of an 8-line bash fence.
+
+These tests drive `ops.worktree_ensure` (and, where the CLI's own exit-code/
+stderr contract matters, `cli.main(["worktree", "ensure", ...])`) against a
+REAL throwaway origin+repo+worktree -- never mocked -- proving: create vs.
+adopt, the `$WT`/`$REPO`/`$KEY` prime environment, prime idempotence (runs
+exactly once across re-runs), loud failure on a non-zero/timing-out prime, the
+`mode = "local"` no-op, that `prime` is honored ONLY from config.toml (a spec
+front-matter/TicketCreated `prime` field is ignored), that GA-7's
+clean/write-isolated/idempotent priming guarantee still holds through the op,
+and that a real dispatcher sweep never executes `prime` itself.
 """
 from __future__ import annotations
 
-import os
-import re
 import subprocess
 from pathlib import Path
 
 from maestro import config as config_mod
-from maestro import snapshot as snap_mod, store
+from maestro import event_log, ops, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
 from maestro.sessions import DryRunSessions
 
 from conftest import git as _git, make_origin_and_repo as _make_origin_and_repo
-from test_reconcile_skill import COMMANDS_DIR, _commands_path, _skills_path, _strip_frontmatter
-
-READY_TEXT = _strip_frontmatter(_commands_path("ready").read_text())
 
 
-def _ready_git_block(text: str) -> str:
-    """The `MODE == git` bash fence -- fetch, worktree add/adopt, the prime
-    block and the final set-phase -- extracted verbatim."""
-    m = re.search(r"\*\*`MODE == git`\*\*.*?```bash\n(.*?)```", text, re.DOTALL)
-    assert m, "could not find the MODE == git bash block"
-    return m.group(1)
+def _write_config(home, repo, *, prime=None, extra="") -> config_mod.Config:
+    prime_line = f'prime = {prime!r}\n' if prime is not None else ""
+    (home / "config.toml").write_text(
+        f'[maestro]\nrepo_path = "{repo}"\nbranch_prefix = "maestro/"\n{prime_line}{extra}',
+        encoding="utf-8")
+    return config_mod.load(str(home))
 
 
-def _prime_block(git_block: str) -> str:
-    """Just the priming portion -- from the WT= assignment through the
-    node_modules ladder -- excluding the worktree add/adopt pair before it and
-    the final set-phase after it, so it can run against an already-existing
-    worktree without needing a live $REPO/$BASE to fetch from."""
-    start = git_block.index('WT="$MHOME')
-    end = git_block.index("maestro set-phase")
-    return git_block[start:end]
-
-
-def _run_bash(script: str, *, cwd: Path, env_overrides: dict) -> subprocess.CompletedProcess:
-    script_file = cwd / "prime.sh"
-    script_file.write_text(script, encoding="utf-8")
-    env = {**os.environ, **env_overrides}
-    return subprocess.run(["bash", str(script_file)], cwd=cwd, env=env,
-                          capture_output=True, text=True)
+def _seed_spec(home, key, *, extra_frontmatter=""):
+    store.atomic_write(
+        store.spec_path(home, key),
+        f"# {key}\napproval_tier: 1\n{extra_frontmatter}\n## Intent\nx\n")
 
 
 # ---------------------------------------------------------------------------
-# AC1: no symlink, replaced by the cp ladder; also copies CLAUDE.local.md and
-# .claude/settings.local.json; the whole thing sits inside MODE == git only
+# Create vs. adopt
 # ---------------------------------------------------------------------------
 
-def test_no_symlink_and_cp_ladder_guarded_on_both_conditions():
-    for path in (_commands_path("ready"), _skills_path("ready")):
-        text = _strip_frontmatter(path.read_text())
-        assert "ln -s" not in text, f"{path}: node_modules symlink is still present"
-
-        git_block = _ready_git_block(text)
-        assert 'cp -c -R' in git_block and 'cp --reflink=auto -R' in git_block and 'cp -R' in git_block
-        assert 'cp -al' not in git_block, \
-            f"{path}: hardlink rung is back -- a hardlink shares one inode, so an in-place " \
-            "write mutates both the worktree's and the source checkout's copies (not write-isolated)"
-        assert re.search(r"cp -c -R.*?\|\|.*?cp --reflink=auto -R.*?\|\|.*?cp -R", git_block, re.DOTALL), \
-            f"{path}: cp -c -R / cp --reflink=auto -R / cp -R don't read as one ladder"
-        assert '[ -d "$REPO/node_modules" ]' in git_block
-        assert '[ ! -e "$WT/node_modules" ]' in git_block
-
-        assert 'CLAUDE.local.md' in git_block
-        assert '.claude/settings.local.json' in git_block
-
-        # None of this leaks into the MODE == local branch just above it.
-        local_start = text.index("MODE == local")
-        git_start = text.index("MODE == git")
-        local_section = text[local_start:git_start]
-        assert "node_modules" not in local_section
-        assert "CLAUDE.local.md" not in local_section
-
-
-# ---------------------------------------------------------------------------
-# AC2: the exclude append is resolved via --git-path (never the literal
-# linked-worktree .git/info/exclude), and is idempotently guarded
-# ---------------------------------------------------------------------------
-
-def test_exclude_append_uses_git_common_path_and_is_idempotently_guarded():
-    for path in (_commands_path("ready"), _skills_path("ready")):
-        git_block = _ready_git_block(_strip_frontmatter(path.read_text()))
-        assert 'rev-parse --git-path info/exclude' in git_block
-        assert '$WT/.git/info/exclude' not in git_block, \
-            f"{path}: still references the literal linked-worktree path, which is a FILE"
-        # The append only happens if the name isn't already there.
-        assert 'grep -qxF' in git_block
-
-
-# ---------------------------------------------------------------------------
-# AC3/AC4/AC5: extract the prime block verbatim and run it for real -- clean,
-# write-isolated, and idempotent, against a real throwaway repo + linked
-# worktree ("the same test" per the spec, so one function proves all three).
-# ---------------------------------------------------------------------------
-
-def test_prime_block_is_clean_isolated_and_idempotent(tmp_path):
+def test_ensure_creates_worktree_off_base_branch(home, tmp_path):
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "G-1")
 
-    # Untracked, gitignored-by-convention source-side files a human's real checkout
-    # would carry -- present, but never committed.
+    result = ops.worktree_ensure(cfg, "G-1")
+    assert result == {"created": True, "primed": False}
+
+    wt = store.worktree_path(home, "G-1")
+    assert wt.is_dir()
+    branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert branch == "maestro/G-1"
+
+
+def test_ensure_adopts_existing_branch(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "G-2")
+
+    # A branch already exists (e.g. a prior worktree was removed after merge)
+    # but the worktree dir does not.
+    _git("branch", "maestro/G-2", cwd=repo)
+
+    result = ops.worktree_ensure(cfg, "G-2")
+    assert result["created"] is True
+    wt = store.worktree_path(home, "G-2")
+    branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert branch == "maestro/G-2"
+
+
+def test_ensure_is_noop_when_worktree_already_exists(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "G-3")
+
+    ops.worktree_ensure(cfg, "G-3")
+    wt = store.worktree_path(home, "G-3")
+    marker_before = (wt / "README.md").stat().st_mtime
+
+    result = ops.worktree_ensure(cfg, "G-3")
+    assert result["created"] is False
+    assert (wt / "README.md").stat().st_mtime == marker_before
+
+
+# ---------------------------------------------------------------------------
+# prime: env, idempotence, loud failure
+# ---------------------------------------------------------------------------
+
+def test_ensure_runs_prime_with_wt_repo_key_env(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    marker = tmp_path / "env.txt"
+    prime = f'printf "%s|%s|%s" "$WT" "$REPO" "$KEY" > {marker}'
+    cfg = _write_config(home, repo, prime=prime)
+    _seed_spec(home, "G-4")
+
+    result = ops.worktree_ensure(cfg, "G-4")
+    assert result == {"created": True, "primed": True}
+
+    wt = store.worktree_path(home, "G-4")
+    assert marker.read_text() == f"{wt}|{repo}|G-4"
+
+
+def test_ensure_prime_runs_exactly_once_across_reruns(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    marker = tmp_path / "log.txt"
+    cfg = _write_config(home, repo, prime=f'echo ran >> {marker}')
+    _seed_spec(home, "G-5")
+
+    r1 = ops.worktree_ensure(cfg, "G-5")
+    assert r1["primed"] is True
+    r2 = ops.worktree_ensure(cfg, "G-5")
+    assert r2["primed"] is False
+    r3 = ops.worktree_ensure(cfg, "G-5")
+    assert r3["primed"] is False
+
+    assert marker.read_text().splitlines() == ["ran"]
+
+
+def test_ensure_prime_nonzero_fails_loudly_no_marker(home, tmp_path, capsys):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, prime="exit 7")
+    _seed_spec(home, "G-6")
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "G-6"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "default" in err  # repo name
+    assert "7" in err        # the rc
+
+    # The worktree itself was created (that half succeeded); only prime failed,
+    # and it failed loudly rather than silently marking itself done.
+    wt = store.worktree_path(home, "G-6")
+    assert wt.is_dir()
+    marker = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert not (Path(marker) / "maestro-primed").exists()
+
+    # No phase transition -- worktree_ensure never touches the event log at all.
+    assert event_log.read(home, "G-6") == []
+
+
+def test_ensure_prime_timeout_fails_loudly(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, prime="sleep 5")
+    _seed_spec(home, "G-7")
+
+    try:
+        ops.worktree_ensure(cfg, "G-7", prime_timeout=1)
+        assert False, "expected a MaestroError on prime timeout"
+    except store.MaestroError as e:
+        assert "timeout" in str(e).lower()
+        assert "default" in str(e)
+
+
+def test_ensure_reruns_cleanly_after_a_fixed_prime(home, tmp_path):
+    """A failed prime doesn't wedge the ticket: fix config.toml and re-run --
+    the worktree (already created) is adopted, and prime now runs and marks
+    itself done."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    marker = tmp_path / "log.txt"
+    cfg = _write_config(home, repo, prime="exit 3")
+    _seed_spec(home, "G-8")
+
+    try:
+        ops.worktree_ensure(cfg, "G-8")
+        assert False
+    except store.MaestroError:
+        pass
+
+    cfg2 = _write_config(home, repo, prime=f"echo ran >> {marker}")
+    result = ops.worktree_ensure(cfg2, "G-8")
+    assert result == {"created": False, "primed": True}
+    assert marker.read_text().splitlines() == ["ran"]
+
+
+# ---------------------------------------------------------------------------
+# mode = "local" (AD-6): successful no-op
+# ---------------------------------------------------------------------------
+
+def test_ensure_is_noop_for_local_mode_binding(home, tmp_path):
+    target = tmp_path / "vault"
+    target.mkdir()
+    (home / "config.toml").write_text(
+        f'[maestro]\nrepo_path = "/repo/default"\n\n'
+        f'[repos.vault]\npath = "{target}"\nmode = "local"\nprime = "touch should-not-run"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    store.atomic_write(store.spec_path(home, "V-1"),
+                       "# V-1\napproval_tier: 0\nrepo: vault\n\n## Intent\nx\n")
+
+    result = ops.worktree_ensure(cfg, "V-1")
+    assert result == {"created": False, "primed": False}
+    assert not (home / "worktrees" / "V-1").exists()
+    assert not (target / "should-not-run").exists()
+
+
+# ---------------------------------------------------------------------------
+# prime is honored ONLY from config.toml -- never a spec field or payload
+# ---------------------------------------------------------------------------
+
+def test_prime_ignored_from_spec_frontmatter_and_ticket_created_payload(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)  # no [maestro] prime configured at all
+    _seed_spec(home, "G-9", extra_frontmatter='prime: "touch spec-ran"\n')
+    event_log.append(home, "G-9", "TicketCreated",
+                     {"title": "G-9", "spec_hash": "x", "prime": "touch payload-ran"},
+                     actor="d")
+    snap_mod.rebuild(home, "G-9")
+
+    result = ops.worktree_ensure(cfg, "G-9")
+    assert result == {"created": True, "primed": False}  # binding.prime resolved to None
+
+    wt = store.worktree_path(home, "G-9")
+    assert not (wt / "spec-ran").exists()
+    assert not (wt / "payload-ran").exists()
+    assert not (repo / "spec-ran").exists()
+    assert not (repo / "payload-ran").exists()
+
+
+# ---------------------------------------------------------------------------
+# GA-7's guarantee, through the op: clean, write-isolated, idempotent
+# ---------------------------------------------------------------------------
+
+def test_ensure_is_clean_isolated_and_idempotent(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
     (repo / "CLAUDE.local.md").write_text("private notes\n", encoding="utf-8")
     (repo / ".claude").mkdir(exist_ok=True)
     (repo / ".claude" / "settings.local.json").write_text('{"allow": []}\n', encoding="utf-8")
@@ -126,21 +247,16 @@ def test_prime_block_is_clean_isolated_and_idempotent(tmp_path):
     nm_file.parent.mkdir(parents=True)
     nm_file.write_text("original\n", encoding="utf-8")
 
-    mhome = tmp_path / "mhome"
-    wt = mhome / "worktrees" / "G-1"
-    wt.parent.mkdir(parents=True)
-    _git("worktree", "add", "-q", "-b", "maestro/G-1", str(wt), "main", cwd=repo)
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "G-10")
 
-    prime = _prime_block(_ready_git_block(READY_TEXT))
-    env = {"REPO": str(repo), "MHOME": str(mhome), "KEY": "G-1"}
+    ops.worktree_ensure(cfg, "G-10")
+    wt = store.worktree_path(home, "G-10")
 
-    # --- AC3: running it leaves the worktree clean -- git add -A stages nothing ---
-    result = _run_bash(prime, cwd=tmp_path, env_overrides=env)
-    assert result.returncode == 0, result.stderr
-
+    # --- clean: git add -A stages nothing ---
     status = subprocess.run(["git", "status", "--porcelain"], cwd=wt,
                             capture_output=True, text=True, check=True)
-    assert status.stdout == "", f"worktree not clean after priming: {status.stdout}"
+    assert status.stdout == "", f"worktree not clean after ensure: {status.stdout}"
     _git("add", "-A", cwd=wt)
     staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=wt,
                             capture_output=True, text=True, check=True)
@@ -150,131 +266,94 @@ def test_prime_block_is_clean_isolated_and_idempotent(tmp_path):
     assert (wt / ".claude" / "settings.local.json").read_text(encoding="utf-8") == '{"allow": []}\n'
     assert (wt / "node_modules" / "pkgA" / "file.txt").read_text(encoding="utf-8") == "original\n"
 
-    # --- AC4: write isolation -- mutating the worktree's copy never reaches $REPO ---
+    # --- write isolation: mutating the worktree's copy never reaches $REPO ---
     (wt / "node_modules" / "pkgA" / "file.txt").write_text("mutated\n", encoding="utf-8")
     assert nm_file.read_text(encoding="utf-8") == "original\n", \
-        "mutating $WT/node_modules leaked into $REPO/node_modules -- not write-isolated " \
-        "(a symlink, or a hardlink mutated in place, would fail exactly this way)"
+        "mutating $WT/node_modules leaked into $REPO/node_modules -- not write-isolated"
 
-    # --- AC5: idempotence -- a second run is clean, doesn't duplicate excludes,
-    # and doesn't nest a second node_modules inside the first ---
-    result2 = _run_bash(prime, cwd=tmp_path, env_overrides=env)
-    assert result2.returncode == 0, result2.stderr
-
+    # --- idempotence: a second ensure doesn't duplicate excludes or nest node_modules ---
+    ops.worktree_ensure(cfg, "G-10")
     exc = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-path", "info/exclude"],
                          capture_output=True, text=True, check=True).stdout.strip()
     exclude_lines = Path(exc).read_text(encoding="utf-8").splitlines()
     for name in ("CLAUDE.local.md", ".claude/settings.local.json", "node_modules/"):
         assert exclude_lines.count(name) == 1, \
             f"{name} appears {exclude_lines.count(name)} times in info/exclude after 2 runs"
-
     assert not (wt / "node_modules" / "node_modules").exists(), \
         "second run nested a node_modules inside node_modules"
 
 
-# ---------------------------------------------------------------------------
-# AC6: every command word the prime block invokes has a matching
-# Bash(<word>:*) grant in .claude/settings.json
-# ---------------------------------------------------------------------------
+def test_ensure_primed_marker_is_worktree_local_not_working_tree(home, tmp_path):
+    """The primed marker lives under the worktree's OWN git dir (self-cleaning
+    on `git worktree remove`), never inside the working tree -- otherwise it
+    would show up as an untracked file `git add -A` stages."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, prime="true")
+    _seed_spec(home, "G-11")
 
-_SHELL_KEYWORDS = {"if", "then", "else", "elif", "fi", "for", "do", "done", "in", "[", "]"}
-
-
-def _line_command_words(line: str) -> list[str]:
-    """The external command word(s) a single line of the prime block invokes --
-    both its own leading word and any embedded in a `VAR="$(...)"` command
-    substitution -- skipping comments, shell keywords, and bare assignments."""
-    line = line.strip()
-    if not line or line.startswith("#"):
-        return []
-    line = line.rstrip("\\").strip()
-    if not line:
-        return []
-    if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', line):
-        # A variable assignment -- only a `$(...)` command substitution inside it
-        # is an actual external invocation; the rest is shell syntax, not a command.
-        return [m.group(1) for m in re.finditer(r"\$\(\s*([A-Za-z0-9_./]+)", line)]
-    words = []
-    for part in re.split(r"\|\||&&", line):
-        part = part.strip().lstrip("|&").strip()
-        if not part:
-            continue
-        first = part.split()[0]
-        if first not in _SHELL_KEYWORDS:
-            words.append(first)
-    return words
-
-
-def test_settings_json_grants_every_command_word_in_prime_block():
-    import json
-    settings = json.loads((COMMANDS_DIR.parent / "settings.json").read_text())
-    allowed = set()
-    for entry in settings["permissions"]["allow"]:
-        m = re.match(r"Bash\(([^:]+):\*\)$", entry)
-        if m:
-            allowed.add(m.group(1))
-
-    for path in (_commands_path("ready"), _skills_path("ready")):
-        git_block = _ready_git_block(_strip_frontmatter(path.read_text()))
-        words = {w for line in git_block.splitlines() for w in _line_command_words(line)}
-        assert "cp" in words, f"{path}: expected the block to actually invoke cp"
-        for word in words:
-            assert word in allowed, (
-                f"{path}: prime block invokes {word!r} with no Bash({word}:*) grant "
-                f"in .claude/settings.json -- an unattended reconciler would stall on it")
+    ops.worktree_ensure(cfg, "G-11")
+    wt = store.worktree_path(home, "G-11")
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=wt,
+                            capture_output=True, text=True, check=True)
+    assert status.stdout == "", f"the primed marker leaked into the working tree: {status.stdout}"
 
 
 # ---------------------------------------------------------------------------
-# AC7: real-surface QA -- a real dispatcher sweep routes a ready ticket to this
-# file, and the prime block primes the exact worktree path the dispatcher hands
-# a real reconciler (store.worktree_path). Only the claude spawn is mocked.
+# The dispatcher NEVER runs prime -- config-supplied shell only ever executes
+# inside a reconciler session (`maestro worktree ensure`, ready.md), never
+# dispatch() itself (an unsandboxed launchd daemon).
 # ---------------------------------------------------------------------------
 
-def test_ready_dispatch_sweep_primes_the_dispatcher_resolved_worktree(home, tmp_path):
-    origin, repo = _make_origin_and_repo(tmp_path, name="dispatch-target")
-    (repo / "CLAUDE.local.md").write_text("private notes\n", encoding="utf-8")
-    nm_file = repo / "node_modules" / "pkgA" / "file.txt"
-    nm_file.parent.mkdir(parents=True)
-    nm_file.write_text("original\n", encoding="utf-8")
+def test_cli_worktree_ensure_then_dispatch_still_routes_ready_ticket(home, tmp_path):
+    """Real-surface QA: `cli.main(["worktree", "ensure", ...])` over a temp
+    MAESTRO_HOME with a REAL git repo returns 0, the worktree lands on the
+    expected branch, prime's side effect is on disk, and a real dispatch()
+    sweep still routes a `ready` ticket to the ready phase command -- only the
+    `claude` spawn itself is mocked (DryRunSessions)."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="dispatch-target-2")
+    marker = tmp_path / "primed.txt"
+    cfg = _write_config(home, repo, prime=f"touch {marker}")
 
-    (home / "config.toml").write_text(f'[maestro]\nrepo_path = "{repo}"\n', encoding="utf-8")
-    cfg = config_mod.load(str(home))
-
-    assert cli_main(["--home", str(home), "create", "GA-7 QA ticket",
-                     "--key", "Q-1", "--no-nudge"]) == 0
+    assert cli_main(["--home", str(home), "create", "GA-20 CLI QA ticket",
+                     "--key", "Q-3", "--no-nudge"]) == 0
     from maestro.dispatcher import dispatch
-    dispatch(cfg, DryRunSessions(), now=1000)   # mints the ticket (starts in triaging)
+    dispatch(cfg, DryRunSessions(), now=1000)
+    assert cli_main(["--home", str(home), "set-phase", "Q-3", "ready",
+                     "--reason", "test: ready for worktree setup"]) == 0
 
-    assert cli_main(["--home", str(home), "set-phase", "Q-1", "ready",
+    assert cli_main(["--home", str(home), "worktree", "ensure", "Q-3"]) == 0
+
+    wt = store.worktree_path(home, "Q-3")
+    assert wt.is_dir()
+    branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert branch == "maestro/Q-3"
+    assert marker.exists(), "prime's side effect should be on disk"
+
+    sessions = DryRunSessions()
+    dispatch(cfg, sessions, now=2000)
+    spawned = {key: prompt for key, prompt, *_ in sessions.spawned}
+    assert spawned.get("Q-3") == "/maestro-reconcile-ready Q-3", (
+        f"ready ticket should still route to the ready command, spawned: {spawned}")
+
+
+def test_dispatch_never_executes_prime(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="dispatch-target")
+    marker = tmp_path / "dispatcher-ran-prime.txt"
+    cfg = _write_config(home, repo, prime=f"touch {marker}")
+
+    assert cli_main(["--home", str(home), "create", "GA-20 QA ticket",
+                     "--key", "Q-2", "--no-nudge"]) == 0
+    from maestro.dispatcher import dispatch
+    dispatch(cfg, DryRunSessions(), now=1000)
+    assert cli_main(["--home", str(home), "set-phase", "Q-2", "ready",
                      "--reason", "test: ready for worktree setup"]) == 0
 
     sessions = DryRunSessions()
     dispatch(cfg, sessions, now=2000)
     spawned = {key: prompt for key, prompt, *_ in sessions.spawned}
-    assert spawned.get("Q-1") == "/maestro-reconcile-ready Q-1", (
-        f"ready ticket should route to the ready command, spawned: {spawned}")
+    assert spawned.get("Q-2") == "/maestro-reconcile-ready Q-2"
 
-    # The dispatcher never actually runs the reconciler (DryRunSessions) -- run the
-    # real MODE == git block ourselves, at the exact path the dispatcher would hand
-    # a real reconciler, and drive the resulting phase transition through the real CLI.
-    wt = store.worktree_path(home, "Q-1")
-    _git("worktree", "add", "-q", "-b", "maestro/Q-1", str(wt), "main", cwd=repo)
-
-    git_block = _ready_git_block(READY_TEXT)
-    env = {"REPO": str(repo), "MHOME": str(home), "KEY": "Q-1", "PREFIX": "maestro/",
-           "BASE": "main", "MAESTRO_HOME": str(home)}
-    script_file = home / "run_ready_block.sh"
-    script_file.write_text(git_block, encoding="utf-8")
-    result = subprocess.run(["bash", str(script_file)], cwd=home,
-                            env={**os.environ, **env}, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-
-    assert (wt / "CLAUDE.local.md").read_text(encoding="utf-8") == "private notes\n"
-    assert (wt / "node_modules" / "pkgA" / "file.txt").read_text(encoding="utf-8") == "original\n"
-    status = subprocess.run(["git", "status", "--porcelain"], cwd=wt,
-                            capture_output=True, text=True, check=True)
-    assert status.stdout == ""
-
-    snap = snap_mod.load(home, "Q-1")
-    assert snap.phase == "implementing", \
-        f"the block's own `maestro set-phase implementing` should have landed, got {snap.phase!r}"
+    assert not marker.exists(), "dispatch() executed config-supplied `prime` shell directly"
+    assert not (home / "worktrees" / "Q-2").exists(), \
+        "dispatch() must never create the worktree either -- only the reconciler session does"

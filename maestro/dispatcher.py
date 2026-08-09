@@ -214,6 +214,44 @@ def existing_prefixes(home: Path) -> list[str]:
     return sorted(seen)
 
 
+def _case_collision(home: Path, key: str) -> str | None:
+    """Return an already-minted key that differs from *key* only by letter case,
+    or ``None``. Filesystem-detected (probes the same case-insensitivity every
+    volume either has or doesn't, never assumed) via ``list_keys``, so it costs
+    an O(n) scan of existing keys -- deliberately kept OUT of ``validate_key``
+    (a hot path hit on every path construction) and run only here, at
+    ticket-creation time (RB-3, case (i): reject rather than canonicalise, since
+    that's a creation-time check with no effect on already-minted keys)."""
+    lower = key.lower()
+    for existing in list_keys(home):
+        if existing != key and existing.lower() == lower:
+            return existing
+    return None
+
+
+def _report_rejected_mint(home: Path, key: str, reason: str) -> None:
+    """A create request that couldn't be minted -- reported via the existing
+    dead-letter surface (``tickets/_deadletter/*.md``, already surfaced by
+    ``maestro doctor`` / ``health.check_dead_letters``) instead of the previous
+    silent ``except MaestroError: continue`` drop (RB-3).
+
+    The filename is derived from *key*, never *key* itself interpolated raw --
+    an inbox-supplied key can fail ``validate_key`` for being path-unsafe in the
+    first place (traversal, odd characters), and trusting it as a path component
+    here would reopen exactly the hole ``validate_key`` exists to close. No
+    ticket dir or event log exists for a rejected key, so this never collides
+    with a real ticket's own dead-letter file (which is named ``<key>.md``).
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", key)[:128] or "unknown"
+    path = home / "tickets" / "_deadletter" / f"rejected-{safe}.md"
+    body = (
+        f"# Rejected create request: {key!r}\n\n"
+        f"Reason: {reason}\n\n"
+        "This key was never minted -- no ticket dir or event log exists for it.\n"
+    )
+    store.atomic_write(path, body)
+
+
 def mint_new_tickets(cfg: Config) -> list[str]:
     """Drain the keyless ``_new`` inbox into real ticket dirs + TicketCreated events.
 
@@ -222,6 +260,11 @@ def mint_new_tickets(cfg: Config) -> list[str]:
     append and its cursor write: if a crash there causes the same period to be
     re-fired, the re-fired request carries the same token and is skipped here,
     making the re-fire a guaranteed no-op instead of a duplicate ticket.
+
+    A request whose key would alias an existing key -- either textually
+    (``validate_key``, e.g. a trailing ``.archive``) or on a case-insensitive
+    filesystem (``_case_collision``) -- is rejected rather than minted, and the
+    rejection is reported via ``_report_rejected_mint`` instead of dropped (RB-3).
     """
     home = cfg.home
     minted: list[str] = []
@@ -237,7 +280,16 @@ def mint_new_tickets(cfg: Config) -> list[str]:
         key = entry.get("key") or _auto_key(home, prefix=prefix or "T")
         try:
             store.validate_key(key)
-        except store.MaestroError:
+        except store.MaestroError as e:
+            _report_rejected_mint(home, key, str(e))
+            continue
+        collision = _case_collision(home, key)
+        if collision:
+            _report_rejected_mint(
+                home, key,
+                f"differs from existing key {collision!r} only by letter case -- "
+                "would alias its event log on a case-insensitive filesystem",
+            )
             continue
         if event_log.last_seq(home, key) > 0:
             # Key already has events -- it was triaged (or otherwise advanced)
@@ -1234,6 +1286,19 @@ def _maybe_trip_runaway_brake(cfg: Config, home: Path, now: float, health_mod) -
     return reason
 
 
+def _load_and_refresh_snapshot(home: Path, key: str) -> "snap_mod.Snapshot":
+    """Load *key*'s persisted snapshot, refolding if a writer got ahead of it.
+
+    Pulled out of the per-key sweep loop so `_run_hook` can wrap the whole
+    load-then-maybe-refold step atomically per ticket (RB-2) -- a fold that
+    somehow still raises must not abort the rest of the sweep.
+    """
+    snap = snap_mod.load(home, key)
+    if event_log.last_seq(home, key) > snap.observed_seq:
+        snap = snap_mod.rebuild(home, key)
+    return snap
+
+
 def _run_hook(name: str, hook_errors: dict, fn, *args, default=None, **kwargs):
     """Run one dispatch hook, recording (not raising) any exception.
 
@@ -1392,10 +1457,15 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     decisions: dict[str, dict] = {}
 
     for key in list_keys(home):
-        snap = snap_mod.load(home, key)
-        # Keep the dispatcher's view fresh if a writer fell behind on its fold.
-        if event_log.last_seq(home, key) > snap.observed_seq:
-            snap = snap_mod.rebuild(home, key)
+        # RB-2: `snapshot.fold` is total by construction (never raises), but this
+        # is defense-in-depth against a future/unforeseen corruption -- ONE bad
+        # ticket must never abort the sweep for every other ticket on the board.
+        # Same pattern as `_run_hook`, keyed per-ticket instead of per-hook-name.
+        snap = _run_hook(f"fold:{key}", hook_errors, _load_and_refresh_snapshot, home, key)
+        if snap is None:
+            decisions[key] = {"outcome": "fold_error",
+                               "reason": hook_errors.get(f"fold:{key}", "fold failed")}
+            continue
         observed_seq_by_key[key] = snap.observed_seq
         phase_by_key[key] = snap.phase
         blocked_dep = _has_unmet_deps(home, key)

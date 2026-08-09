@@ -886,6 +886,30 @@ def test_fleet_screen_shows_spend_unavailable_for_text_format(seeded_home):
     asyncio.run(_inner())
 
 
+def test_fleet_screen_shows_no_cap_for_unset_ceiling(seeded_home):
+    """RB-8: with a stream-json meter available but no daily_spend_ceiling_usd
+    configured (seeded_home writes no config.toml, so the ceiling defaults to
+    None), the fleet panel must read as an explicit "no cap" warning -- never a
+    blank or an omitted value, matching the wording style of the `unavailable`
+    branch above."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status = app.screen_stack[-1].query_one("#fleet-status", Static)
+            content = str(status.content)
+            assert "Spend today" in content
+            assert "no cap" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_fleet_screen_renders_runaway_board_differently(seeded_home):
     """A board that has actually exceeded its spawn budget must render visibly
     differently (RUNAWAY, red) from the healthy seeded_home above."""

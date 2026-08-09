@@ -52,10 +52,35 @@ def test_read_since(home):
     assert [e["seq"] for e in later] == [4, 5]
 
 
+def test_read_dedups_seq_duplicated_across_archive_and_active(home):
+    """RB-2 (c): an interrupted `ops.compact` (archive-append succeeded, the
+    active-log rewrite that would have dropped the archived tail didn't) can
+    leave the same seq in both files -- `read` must return it exactly once,
+    keeping the archive's copy (read first)."""
+    from maestro import store
+    import json
+
+    ev1 = event_log.append(home, "T-1", "Note", {"n": 1}, actor="t")
+    ev2 = event_log.append(home, "T-1", "Note", {"n": 2}, actor="t")
+    archive_path = store.events_archive_path(home, "T-1")
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with archive_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(ev1, separators=(",", ":")) + "\n")  # duplicated into the archive
+    events = event_log.read(home, "T-1")
+    assert [e["seq"] for e in events] == [1, 2]  # not [1, 1, 2]
+    assert events[0]["payload"] == ev1["payload"]  # the archive's copy, not dropped either
+
+
 def test_torn_tail_does_not_swallow_the_next_append(home):
     """A crashed writer that leaves an unterminated line (RB-1's repro) must not
     corrupt or swallow the append that follows it, and must not disarm step-id
-    dedup for that swallowed append's own step-id."""
+    dedup for that swallowed append's own step-id.
+
+    RB-11 note: this fixes the torn tail in place as a static precondition.
+    `tests/test_crash_injection.py::test_append_killed_mid_line_...` proves the
+    same claim generated live, via an actual injected mid-write crash during a
+    real `event_log.append` call -- kept separately since the two exercise
+    different things (recovery-from-artifact vs. crash-during-the-call)."""
     event_log.append(home, "T-1", "Note", {"t": "1"}, actor="x", step_id="sid-1")
     path = store.events_path(home, "T-1")
     with path.open("a") as fh:

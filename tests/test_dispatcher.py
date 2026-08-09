@@ -91,13 +91,17 @@ class _EphemeralSessions(DryRunSessions):
         return set()
 
 
-@pytest.mark.parametrize("phase", [Phase.IN_REVIEW, Phase.IMPLEMENTING,
-                                   Phase.TRIAGING, Phase.READY, Phase.DEGRADED])
+@pytest.mark.parametrize("phase", [p for p in Phase if p not in disp.TERMINAL_PHASES])
 def test_requeue_timer_holds_any_non_terminal_phase(home, cfg, phase):
-    """A reconciler that asks to sleep is obeyed from EVERY phase, not just the
-    two in SLEEPING_PHASES. The in-review case is the 2026-07-19 runaway: the
-    handler ends in `maestro requeue $KEY 900` and the dispatcher ignored it."""
+    """A reconciler that asks to sleep is obeyed from EVERY non-terminal phase,
+    not just the two in SLEEPING_PHASES. The in-review case is the 2026-07-19
+    runaway: the handler ends in `maestro requeue $KEY 900` and the dispatcher
+    ignored it. Widened (RB-9) from a hand-picked 5 of the 9 non-terminal
+    phases to all 9 -- see test_dispatcher_exhaustive.py for the full
+    cross-product of this property against every other flag combination too."""
     _seed(home, "T-1", phase)
+    if phase == Phase.AWAITING_HUMAN:
+        _ask(home, "T-1")  # give it an open question, or it's already due via "stranded"
     ops.requeue(cfg, "T-1", 900)
     snap = snap_mod.load(home, "T-1")
     base = snap.next_requeue_at
@@ -1719,6 +1723,48 @@ def test_healthy_sweep_has_no_hook_errors(home, cfg):
     _seed(home, "T-1", Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert report.hook_errors == {}
+
+
+# --- RB-2: one bad ticket's fold never stops the sweep -----------------------
+
+
+def test_malformed_event_does_not_stop_the_sweep(home, cfg):
+    """AC2, repro form: a ticket carrying the spec's exact repro corruption (a
+    PhaseChanged with an unrecognized `phase`) folds cleanly now that `fold`
+    is total (law b) -- no exception, so the corrupt ticket itself is not even
+    knocked out of the sweep, and every other due ticket still spawns."""
+    _seed(home, "T-bad", Phase.READY)
+    event_log.append(home, "T-bad", "PhaseChanged", {"phase": "totally-bogus"}, actor="r")
+    snap_mod.rebuild(home, "T-bad")
+    _seed(home, "T-good", Phase.READY)
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert "T-good" in report.spawned
+    assert "T-bad" in report.spawned  # the corrupt ticket recovers too, not just its neighbors
+    assert snap_mod.load(home, "T-bad").fold_warnings  # corruption stayed visible, not silent
+
+
+def test_fold_wrap_records_failure_on_report(home, cfg, monkeypatch):
+    """AC2, defense-in-depth form: even though `fold` is now total, the per-key
+    fold in the sweep loop is wrapped exactly like the other dispatch hooks
+    (see test_raising_hook_does_not_abort_the_sweep above) -- if it somehow
+    still raises for one ticket, that must not stop the other due tickets from
+    being found and spawned, and the failure must be recorded on the report."""
+    _seed(home, "T-bad", Phase.READY)
+    _seed(home, "T-good", Phase.READY)
+
+    real = disp._load_and_refresh_snapshot
+
+    def _boom(home_, key):
+        if key == "T-bad":
+            raise ValueError("simulated corrupt event")
+        return real(home_, key)
+
+    monkeypatch.setattr(disp, "_load_and_refresh_snapshot", _boom)
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.spawned == ["T-good"]
+    assert "fold:T-bad" in report.hook_errors
+    assert "simulated corrupt event" in report.hook_errors["fold:T-bad"]
 
 
 # --- L-12: per-sweep decision ledger (`derived/dispatch.jsonl`) + `maestro why` ---
