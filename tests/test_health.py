@@ -6,9 +6,11 @@ import sys
 
 from maestro import cli, claims, dispatcher as disp, health, ops, store
 from maestro.config import Config
+from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from test_dispatcher import _EphemeralSessions, _seed, _seed_with_deps
+from test_repo_preflight import _repo_table, _seed_bound_ticket
 
 
 def _sweep(home):
@@ -354,8 +356,8 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     names = {c["name"] for c in out["checks"]}
     assert names == {"heartbeat", "backup_age", "claim_age", "dead_letters",
                       "depends_on", "launchctl", "repo_preflight",
-                      "unknown_repo_bindings", "missing_reconcile_skill", "spawn_floor",
-                      "daily_spend"}
+                      "unknown_repo_bindings", "missing_reconcile_skill",
+                      "reconciler_permissions", "spawn_floor", "daily_spend"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -419,3 +421,212 @@ def test_negative_min_spawn_interval_fails_dispatch_closed(tmp_path, capsys):
     assert code == 2
     assert not (home / "derived" / ".heartbeat.json").exists()
     assert not (home / "derived" / ".spawn_ledger.json").exists()
+
+
+# --- GA-16: reconciler permission surface -------------------------------------
+
+from conftest import git as _git  # noqa: E402
+
+
+def _init_plain_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("config", "user.email", "test@example.com", cwd=path)
+    _git("config", "user.name", "Test", cwd=path)
+    (path / "f.txt").write_text("hi\n")
+    _git("add", "-A", cwd=path)
+    _git("commit", "-q", "-m", "init", cwd=path)
+
+
+def _write_repo_settings(repo, *, allow=None, deny=None, local=False):
+    fname = "settings.local.json" if local else "settings.json"
+    payload = {"permissions": {}}
+    if allow is not None:
+        payload["permissions"]["allow"] = allow
+    if deny is not None:
+        payload["permissions"]["deny"] = deny
+    store.write_json(repo / ".claude" / fname, payload)
+
+
+def _install_dummy_reconcile_skill(repo):
+    """Satisfies the unrelated missing_reconcile_skill check so a --strict
+    assertion below is about reconciler_permissions specifically."""
+    d = repo / ".claude" / "commands"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "maestro-reconcile-triaging.md").write_text("# stub\n")
+
+
+def test_reconciler_permissions_registered_and_never_blocks_a_spawn(home, tmp_path, monkeypatch):
+    """AC1: the check is registered, iterates referenced_repo_bindings, and never
+    blocks a spawn -- proven by a real sweep over a temp home whose bound repo
+    carries no settings file at all."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.spawned == ["T-1"]  # the missing grant never blocked the spawn
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "default" in check["missing_by_repo"]
+
+
+def test_reconciler_permissions_missing_patterns_match_shared_constant(home, tmp_path, monkeypatch):
+    """AC3 + AC6: a repo granted only Bash(maestro:*) is reported not-ok with
+    git/gh/the test runner named as missing, verbatim against the shared
+    constant both this check and the spawn-time grant (cli._reconciler_tool_grants)
+    read."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _write_repo_settings(repo, allow=["Bash(maestro:*)"])
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    missing = check["missing_by_repo"]["default"]
+    assert "Bash(maestro:*)" not in missing        # already granted
+    assert set(missing) == set(disp.RECONCILER_REQUIRED_TOOLS) - {"Bash(maestro:*)"}
+    for tool in missing:
+        assert tool in disp.RECONCILER_REQUIRED_TOOLS   # verbatim, not paraphrased
+        assert tool in check["detail"]
+
+
+def test_reconciler_permissions_union_across_settings_layers(home, tmp_path, monkeypatch):
+    """AC2 + AC5: a grant present in ANY layer -- repo settings.local.json, repo
+    settings.json, or the injected user-scope settings.json -- satisfies the
+    requirement; each layer is exercised independently here."""
+    user_settings = tmp_path / "user-settings.json"
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(user_settings))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    required = list(disp.RECONCILER_REQUIRED_TOOLS)
+    third = len(required) // 3 or 1
+    _write_repo_settings(repo, allow=required[:third], local=True)
+    _write_repo_settings(repo, allow=required[third:2 * third])
+    store.write_json(user_settings, {"permissions": {"allow": required[2 * third:]}})
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+    assert check["missing_by_repo"] == {}
+
+
+def test_reconciler_permissions_user_scope_alone_satisfies(home, tmp_path, monkeypatch):
+    """AC5: a grant present ONLY in the injected user-scope file (the repo
+    itself carries none) still satisfies the check."""
+    user_settings = tmp_path / "user-settings.json"
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(user_settings))
+    store.write_json(user_settings, {"permissions": {"allow": list(disp.RECONCILER_REQUIRED_TOOLS)}})
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+
+
+def test_reconciler_permissions_deny_rule_reported_in_detail(home, tmp_path, monkeypatch):
+    """AC2: a deny rule that would block a required tool is reported in the
+    detail, even though the same tool is also present in the allow list."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _write_repo_settings(repo, allow=list(disp.RECONCILER_REQUIRED_TOOLS), deny=["Bash(gh:*)"])
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "Bash(gh:*)" in check["missing_by_repo"]["default"]
+    assert "Bash(gh:*)" in check["detail"]
+    assert "denied" in check["detail"]
+
+
+def test_reconciler_permissions_ok_when_permission_mode_bypasses(home, tmp_path, monkeypatch):
+    """AC4: permission_mode = bypassPermissions makes the question moot for the
+    home -- ok, never a false warning, even with no settings file anywhere."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    cfg = Config(home=home, repo_path=str(repo), permission_mode="bypassPermissions")
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+    assert "bypassed" in check["detail"]
+
+
+def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypatch, capsys):
+    """AC7 + AC10: the global doctor exit contract stays 0 no matter what;
+    `--strict` exits 1 while the reconciler_permissions check is not ok and 0
+    once every check (including it) is ok. QA over the real CLI -- only the
+    user-home settings location is mocked, never the developer's real one, and
+    nothing spawns a session."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_dummy_reconcile_skill(repo)
+    (home / "config.toml").write_text(
+        f'[maestro]\nbackup_interval = 0\n\n[repos.alpha]\npath = "{repo}"\ndefault = true\n')
+    _seed_bound_ticket(home, "T-1", "alpha")
+
+    rc = cli.main(["--home", str(home), "doctor"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    check = next(c for c in out["checks"] if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "alpha" in check["detail"]
+
+    rc_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc_strict == 1
+
+    _write_repo_settings(repo, allow=list(disp.RECONCILER_REQUIRED_TOOLS))
+
+    rc2 = cli.main(["--home", str(home), "doctor"])
+    out2 = json.loads(capsys.readouterr().out)
+    assert rc2 == 0
+    check2 = next(c for c in out2["checks"] if c["name"] == "reconciler_permissions")
+    assert check2["status"] == "ok"
+
+    rc2_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc2_strict == 0
+
+    # AC10: repeat with the grant present ONLY in the injected user-scope file --
+    # remove the repo-scope grant that just satisfied it above, so this leg is
+    # unambiguously exercising the user-scope layer, still through the real CLI.
+    (repo / ".claude" / "settings.json").unlink()
+    user_settings_path = tmp_path / "no-user-settings.json"
+    store.write_json(user_settings_path, {"permissions": {"allow": list(disp.RECONCILER_REQUIRED_TOOLS)}})
+
+    rc3 = cli.main(["--home", str(home), "doctor"])
+    out3 = json.loads(capsys.readouterr().out)
+    assert rc3 == 0
+    check3 = next(c for c in out3["checks"] if c["name"] == "reconciler_permissions")
+    assert check3["status"] == "ok"
+
+    rc3_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc3_strict == 0
+
+
+def test_user_settings_path_injectable_never_reads_real_home(tmp_path, monkeypatch):
+    """AC5: cfg.user_settings_path and MAESTRO_USER_SETTINGS_PATH both override
+    the default ~/.claude/settings.json -- env wins over config."""
+    monkeypatch.delenv("MAESTRO_USER_SETTINGS_PATH", raising=False)
+    cfg_path = tmp_path / "cfg-settings.json"
+    cfg = Config(home=tmp_path, user_settings_path=str(cfg_path))
+    assert health.user_settings_path(cfg) == cfg_path
+
+    env_path = tmp_path / "env-settings.json"
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(env_path))
+    assert health.user_settings_path(cfg) == env_path
