@@ -28,6 +28,15 @@ class MaestroError(Exception):
 def validate_key(key: str) -> str:
     if not isinstance(key, str) or not _KEY_RE.match(key) or key in {".", ".."}:
         raise MaestroError(f"invalid ticket key: {key!r}")
+    if key.endswith(".archive"):
+        # events_path(home, "X.archive") == events_archive_path(home, "X") -- a
+        # key ending in ".archive" silently aliases another key's compaction
+        # archive file (RB-3). A pure suffix check, no filesystem access, so this
+        # stays O(1) on the hot path (validate_key runs on every path construction).
+        raise MaestroError(
+            f"invalid ticket key: {key!r} (a trailing '.archive' would collide with "
+            "another key's compaction-archive path)"
+        )
     return key
 
 
