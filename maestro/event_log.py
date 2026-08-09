@@ -96,10 +96,27 @@ def append(
 
 
 def read(home: Path, key: str, *, since: int = 0) -> list[dict]:
-    """All events for a key with seq > ``since`` (oldest first), archive included."""
+    """All events for a key with seq > ``since`` (oldest first), archive included.
+
+    Deduplicated by seq (RB-2, law (c)): ``ops.compact`` appends events to the
+    archive and only then rewrites the active log with the post-cutoff tail --
+    a crash between those two steps leaves the same seq in both files. The two
+    copies are always byte-identical (compact only ever copies an event, never
+    mutates one), so which copy wins can't change folded meaning; we read the
+    archive first and keep the first occurrence of each seq, i.e. the archive's
+    copy wins over a leftover active-log duplicate.
+    """
     events: list[dict] = []
     events += store.read_jsonl(store.events_archive_path(home, key))
     events += store.read_jsonl(store.events_path(home, key))
-    events = [e for e in events if isinstance(e.get("seq"), int) and e["seq"] > since]
+    deduped: list[dict] = []
+    seen: set[int] = set()
+    for e in events:
+        seq = e.get("seq")
+        if not isinstance(seq, int) or seq in seen:
+            continue
+        seen.add(seq)
+        deduped.append(e)
+    events = [e for e in deduped if e["seq"] > since]
     events.sort(key=lambda e: e["seq"])
     return events

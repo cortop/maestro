@@ -1721,6 +1721,48 @@ def test_healthy_sweep_has_no_hook_errors(home, cfg):
     assert report.hook_errors == {}
 
 
+# --- RB-2: one bad ticket's fold never stops the sweep -----------------------
+
+
+def test_malformed_event_does_not_stop_the_sweep(home, cfg):
+    """AC2, repro form: a ticket carrying the spec's exact repro corruption (a
+    PhaseChanged with an unrecognized `phase`) folds cleanly now that `fold`
+    is total (law b) -- no exception, so the corrupt ticket itself is not even
+    knocked out of the sweep, and every other due ticket still spawns."""
+    _seed(home, "T-bad", Phase.READY)
+    event_log.append(home, "T-bad", "PhaseChanged", {"phase": "totally-bogus"}, actor="r")
+    snap_mod.rebuild(home, "T-bad")
+    _seed(home, "T-good", Phase.READY)
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert "T-good" in report.spawned
+    assert "T-bad" in report.spawned  # the corrupt ticket recovers too, not just its neighbors
+    assert snap_mod.load(home, "T-bad").fold_warnings  # corruption stayed visible, not silent
+
+
+def test_fold_wrap_records_failure_on_report(home, cfg, monkeypatch):
+    """AC2, defense-in-depth form: even though `fold` is now total, the per-key
+    fold in the sweep loop is wrapped exactly like the other dispatch hooks
+    (see test_raising_hook_does_not_abort_the_sweep above) -- if it somehow
+    still raises for one ticket, that must not stop the other due tickets from
+    being found and spawned, and the failure must be recorded on the report."""
+    _seed(home, "T-bad", Phase.READY)
+    _seed(home, "T-good", Phase.READY)
+
+    real = disp._load_and_refresh_snapshot
+
+    def _boom(home_, key):
+        if key == "T-bad":
+            raise ValueError("simulated corrupt event")
+        return real(home_, key)
+
+    monkeypatch.setattr(disp, "_load_and_refresh_snapshot", _boom)
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert report.spawned == ["T-good"]
+    assert "fold:T-bad" in report.hook_errors
+    assert "simulated corrupt event" in report.hook_errors["fold:T-bad"]
+
+
 # --- L-12: per-sweep decision ledger (`derived/dispatch.jsonl`) + `maestro why` ---
 
 
