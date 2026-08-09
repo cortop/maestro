@@ -77,7 +77,8 @@ class SessionManager(Protocol):
     def spawn(self, key: str, prompt: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
-              allowed_tools: list[str] | None = None) -> int | None:
+              allowed_tools: list[str] | None = None,
+              env_overlay: dict[str, str] | None = None) -> int | None:
         """Launch a detached reconciler for ``key``; return its pid (or None).
 
         *model* and *effort* override instance defaults when provided.
@@ -89,6 +90,11 @@ class SessionManager(Protocol):
         own list); the implementation merges this with its own process-wide base
         grant (maestro CLI verbs + reconcile_web_tools) into exactly ONE
         ``--allowedTools`` flag, never two.
+        *env_overlay* (GA-17) is this key's resolved gh credential (see
+        ``maestro.credentials`` / ``dispatcher.resolve_credential``) -- merged
+        into the spawned session's env beside the ``MAESTRO_HOME`` pin. None
+        (the default -- no credential configured for this key's repo) leaves
+        the env byte-identical to before this ticket.
         """
 
 
@@ -126,7 +132,8 @@ class ClaudeCliSessions:
     def spawn(self, key: str, prompt: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
-              allowed_tools: list[str] | None = None) -> int | None:
+              allowed_tools: list[str] | None = None,
+              env_overlay: dict[str, str] | None = None) -> int | None:
         session_id = f"{session_name(key)}-{self._clock():.6f}"
         effective_model = model or self.model
         cmd = ["claude", "-p", prompt, "--model", effective_model, "-n", session_name(key)]
@@ -152,6 +159,10 @@ class ClaudeCliSessions:
         assert cmd.count("--allowedTools") <= 1, "spawn argv must carry at most one --allowedTools flag"
         env = dict(os.environ)
         env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
+        # GA-17: this key's resolved gh credential wins over whatever's ambient --
+        # it's an explicit, already-fail-closed-checked resolution, not a guess.
+        if env_overlay:
+            env.update(env_overlay)
 
         log_path: str | None = None
         if self.capture_session_logs:
@@ -188,12 +199,13 @@ class DryRunSessions:
 
     def __init__(self, active: set[str] | None = None):
         self._active = set(active or set())   # KEYS
-        # 7-tuple: (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools).
-        # GA-10 appended allowed_tools LAST, after the prior 6-tuple shape -- any later
-        # per-key spawn input (e.g. GA-17's env overlay) appends here too, rather than
-        # opening a second per-key channel. Unpack by name or by negative index, never
-        # assume this stays exactly 7 long.
-        self.spawned: list[tuple[str, str, str, str | None, str | None, list[str], list[str]]] = []
+        # 8-tuple: (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools,
+        # env_overlay). GA-10 appended allowed_tools as the 7th element; GA-17 appended
+        # env_overlay as the 8th, the SAME way -- any later per-key spawn input appends
+        # here too, rather than opening a second per-key channel. Unpack by name or by
+        # negative index, never assume this stays exactly 8 long.
+        self.spawned: list[tuple[str, str, str, str | None, str | None, list[str], list[str],
+                                 dict[str, str]]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
@@ -201,8 +213,10 @@ class DryRunSessions:
     def spawn(self, key: str, prompt: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
-              allowed_tools: list[str] | None = None) -> int | None:
+              allowed_tools: list[str] | None = None,
+              env_overlay: dict[str, str] | None = None) -> int | None:
         self.spawned.append((key, prompt, str(cwd), model, effort,
-                             list(disallowed_tools or []), list(allowed_tools or [])))
+                             list(disallowed_tools or []), list(allowed_tools or []),
+                             dict(env_overlay or {})))
         self._active.add(key)
         return None

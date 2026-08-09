@@ -37,17 +37,19 @@ class FakeVCS:
             return table[(repo, pr_number)]
         return table.get(pr_number, default)
 
-    def pr_for_branch(self, branch, repo=None):
+    def pr_for_branch(self, branch, repo=None, env=None):
         return None
 
-    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
+    def pr_status(self, pr_number: int, repo: str | None = None,
+                  env: dict | None = None) -> dict:
         self.status_calls.append((repo, pr_number))
         return self._lookup(self.statuses, repo, pr_number, {
             "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha1",
             "ci_state": "unknown", "failing_checks": [],
         })
 
-    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]:
+    def review_feedback(self, pr_number: int, repo: str | None = None,
+                        env: dict | None = None) -> list[dict]:
         self.review_calls.append((repo, pr_number))
         return self._lookup(self.reviews, repo, pr_number, [])
 
@@ -307,7 +309,7 @@ def _use_real_github_cli_vcs(cfg, monkeypatch, view_response):
     cfg.providers["vcs"] = "github_cli"
     cfg.provider_config = {"vcs": {"github_cli": {"sync_interval": 0}}}
 
-    def fake_run(cmd, timeout=60):
+    def fake_run(cmd, timeout=60, env=None):
         if "reviews" in cmd:
             return 0, '{"reviews": []}', ""
         return view_response

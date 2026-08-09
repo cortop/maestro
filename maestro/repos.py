@@ -45,6 +45,11 @@ class RepoBinding:
     # unioned with the board-wide Config.reconcile_allowed_tools list -- never a
     # replacement, so [] means "nothing extra beyond board-wide", not "no tools at all".
     reconcile_allowed_tools: list = field(default_factory=list)
+    # GA-17: this repo's gh credential -- see maestro/credentials.py. token_env
+    # wins when both are set. Neither set (both None, today's default) means
+    # "use the ambient gh account", unchanged from before this ticket.
+    gh_account: str | None = None
+    token_env: str | None = None
 
 
 def _binding_from_table(name: str, table: dict) -> RepoBinding:
@@ -61,6 +66,8 @@ def _binding_from_table(name: str, table: dict) -> RepoBinding:
         max_spawns_per_sweep=table.get("max_spawns_per_sweep"),
         mode=mode,
         reconcile_allowed_tools=raw_tools if isinstance(raw_tools, list) else [],
+        gh_account=table.get("gh_account"),
+        token_env=table.get("token_env"),
     )
 
 

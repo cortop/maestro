@@ -68,11 +68,13 @@ def test_config_load_parses_repos_tables(home):
         "path": "/repo/alpha", "slug": "acme/alpha",
         "base_branch": "develop", "branch_prefix": "alpha/", "default": False,
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
+        "gh_account": None, "token_env": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
         "base_branch": "main", "branch_prefix": "maestro/", "default": False,
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
+        "gh_account": None, "token_env": None,
     }
 
 
@@ -146,6 +148,7 @@ def test_env_key_prints_resolved_binding(home, capsys):
     printed = json.loads(out)
     assert printed == {"repo": "beta", "repo_path": "/repo/beta", "slug": "acme/beta",
                         "base_branch": "main", "branch_prefix": "maestro/", "mode": "git",
+                        "gh_credential": None,
                         "reconcile_command": "/maestro-reconcile-triaging"}
 
 

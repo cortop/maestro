@@ -37,9 +37,11 @@ class VCS(Protocol):
     single-repo boards are unaffected. Callers resolve the slug via ``repos.py``.
     """
 
-    def pr_for_branch(self, branch: str, repo: str | None = None) -> dict | None: ...
+    def pr_for_branch(self, branch: str, repo: str | None = None,
+                      env: dict | None = None) -> dict | None: ...
 
-    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
+    def pr_status(self, pr_number: int, repo: str | None = None,
+                  env: dict | None = None) -> dict:
         """Poll one PR's merge state and CI checks in a single round-trip.
 
         Returns {"state": "OPEN"|"MERGED"|"CLOSED"|"unknown",
@@ -57,13 +59,19 @@ class VCS(Protocol):
         "not_found" (repo or PR doesn't resolve), "transient" (timeout/network --
         retry, don't spend failure budget), or "unknown" (unrecognized failure --
         today's behavior, unchanged).
+
+        ``env`` (GA-17) is the credential overlay to run the underlying `gh`
+        call under (``dispatcher.resolve_credential``); None means the
+        ambient environment, unchanged from before this ticket.
         """
         ...
 
-    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]:
+    def review_feedback(self, pr_number: int, repo: str | None = None,
+                        env: dict | None = None) -> list[dict]:
         """Return every review left on the PR as [{"id": str, "state": str|None,
         "body": str, "author": str|None}, ...]. The caller de-dupes per comment-id
-        via the event log's step-id idempotency (see ``dispatcher.sync_vcs``)."""
+        via the event log's step-id idempotency (see ``dispatcher.sync_vcs``).
+        ``env`` (GA-17): see ``pr_status``."""
         ...
 
 
@@ -84,11 +92,14 @@ class NullTracker:
 
 
 class NullVCS:
-    def pr_for_branch(self, branch: str, repo: str | None = None) -> dict | None: return None
-    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
+    def pr_for_branch(self, branch: str, repo: str | None = None,
+                      env: dict | None = None) -> dict | None: return None
+    def pr_status(self, pr_number: int, repo: str | None = None,
+                  env: dict | None = None) -> dict:
         return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
                 "ci_state": "unknown", "failing_checks": []}
-    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]: return []
+    def review_feedback(self, pr_number: int, repo: str | None = None,
+                        env: dict | None = None) -> list[dict]: return []
 
 
 class NullFetcher:

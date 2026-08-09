@@ -395,7 +395,8 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     assert names == {"heartbeat", "backup_age", "claim_age", "dead_letters",
                       "depends_on", "launchctl", "repo_preflight",
                       "unknown_repo_bindings", "missing_reconcile_skill",
-                      "reconciler_permissions", "spawn_floor", "daily_spend"}
+                      "reconciler_permissions", "spawn_floor", "daily_spend",
+                      "gh_credential_reachability"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
