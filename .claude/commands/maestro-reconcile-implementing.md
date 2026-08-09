@@ -69,7 +69,8 @@ cd'd you) directly in `<REPO>`, the resolved target dir itself — no worktree, 
 
 **If `MODE == git`** (default): you are (or the dispatcher cd'd you) in `<MHOME>/worktrees/<KEY>`
 — call this directory **`<WT>`** for the rest of this file (if the worktree is missing, recreate
-it as in the `ready` phase file — `worktree add` adopts the existing `<PREFIX>$KEY` branch).
+it exactly as the `ready` phase file does — `maestro worktree ensure "$KEY"` idempotently
+creates it, or adopts the existing `<PREFIX>$KEY` branch).
 `<REPO>`, `<BASE>`, `<PREFIX>`, `<SLUG>` and `<WT>` are, exactly like `<MHOME>`/`<KEY>` above,
 literal values you already hold from the preamble's two `maestro env` calls — every command below
 substitutes them directly when you type it; none is a shell variable a fenced line expands.
@@ -111,17 +112,17 @@ Otherwise implement the spec's Acceptance criteria:
    pilot:` + the binding sweep / `test_every_binding_action_resolves`). Mock only the external
    `claude -p` / network / `launchctl` boundary — test the real thing under review everywhere
    else. The Bash tool's cwd is already `<WT>` (the dispatcher spawns this session there), so the
-   bootstrap below needs no `cd` — install the `tui` extra too, so TUI runtime tests run instead
-   of skipping:
+   test invocation below needs no `cd`. Its dependency tree (including the `tui` extra, so TUI
+   runtime tests run instead of skipping) is already installed — `maestro worktree ensure` (GA-20,
+   the `ready` phase file) ran the repo's declared `prime` once when this worktree was first
+   created, so this step only runs the tests:
    ```bash
-   python3 -m venv .venv
-   .venv/bin/pip install -q -e ".[dev,tui]"
    .venv/bin/python -m pytest -q
    ```
-   **Pytest's permission story, decided:** `.venv/bin/python` and `.venv/bin/pip` stay
-   cwd-anchored above, never absolutized to an absolute path rooted at `<WT>` — `.claude/settings.json` grants
-   only the *relative* prefix `Bash(.venv/bin/:*)`, which matches the command string solely while
-   the shell's cwd is the worktree, and `dispatcher._worker_cwd`
+   **Pytest's permission story, decided:** `.venv/bin/python` stays cwd-anchored above, never
+   absolutized to an absolute path rooted at `<WT>` — `.claude/settings.json` grants only the
+   *relative* prefix `Bash(.venv/bin/:*)`, which matches the command string solely while the
+   shell's cwd is the worktree, and `dispatcher._worker_cwd`
    (`maestro/dispatcher.py:1369`) already runs this session with `<WT>` as cwd — so the relative
    form is both correct and the only one that avoids a permission prompt. Do not "fix" this back
    to an absolute path.
