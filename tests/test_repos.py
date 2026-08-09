@@ -68,13 +68,13 @@ def test_config_load_parses_repos_tables(home):
         "path": "/repo/alpha", "slug": "acme/alpha",
         "base_branch": "develop", "branch_prefix": "alpha/", "default": False,
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
-        "gh_account": None, "token_env": None,
+        "gh_account": None, "token_env": None, "prime": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
         "base_branch": "main", "branch_prefix": "maestro/", "default": False,
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
-        "gh_account": None, "token_env": None,
+        "gh_account": None, "token_env": None, "prime": None,
     }
 
 
@@ -89,6 +89,7 @@ def test_no_repos_tables_yields_implicit_default_matching_repo_path(home):
     binding = repos_mod.resolve(cfg, home, "T-1")
     assert binding.path == cfg.repo_path == "/repo/only"
     assert binding.branch_prefix == cfg.branch_prefix == "solo/"
+    assert binding.prime is None  # no [maestro] prime set -- absent changes no existing behavior
 
 
 # --- AC3: precedence proven by editing the real spec.md ---
@@ -148,7 +149,7 @@ def test_env_key_prints_resolved_binding(home, capsys):
     printed = json.loads(out)
     assert printed == {"repo": "beta", "repo_path": "/repo/beta", "slug": "acme/beta",
                         "base_branch": "main", "branch_prefix": "maestro/", "mode": "git",
-                        "gh_credential": None,
+                        "gh_credential": None, "prime": None,
                         "reconcile_command": "/maestro-reconcile-triaging"}
 
 
@@ -261,3 +262,48 @@ def test_resolve_vcs_slug_none_when_neither_available(home):
     cfg = _write_multi_repo_config(home)
     snap = snap_mod.Snapshot(key="X")
     assert repos_mod.resolve_vcs_slug(cfg, snap) is None
+
+
+# --- GA-20: [repos.<name>] prime / [maestro] prime fallback ---
+
+def test_repos_table_prime_parses_and_resolves(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\nprime = "npm ci"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos["alpha"]["prime"] == "npm ci"
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.prime == "npm ci"
+
+
+def test_maestro_prime_fallback_carried_by_implicit_default_dogfood_shape(home):
+    """GA-20's recorded shape decision: a single-repo home with NO [repos.*]
+    table at all -- the dogfood shape, `[maestro] repo_path = ...` only --
+    declares its prime via a bare `[maestro] prime`, carried by
+    repos.implicit_default."""
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/only"\nprime = "python3 -m venv .venv"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos == {}
+    assert cfg.prime == "python3 -m venv .venv"
+
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.name == "default"
+    assert binding.prime == "python3 -m venv .venv"
+
+
+def test_repos_default_table_prime_wins_over_maestro_prime_fallback(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\nprime = "fallback"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\ndefault = true\nprime = "alpha prime"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    binding = repos_mod.implicit_default(cfg)
+    assert binding.name == "alpha"
+    assert binding.prime == "alpha prime"

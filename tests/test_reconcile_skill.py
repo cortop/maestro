@@ -121,18 +121,23 @@ def test_no_hardcoded_repo_slug():
 def test_no_bare_origin_main():
     for path in ALL_PHASE_PATHS:
         assert "origin/main" not in path.read_text(), f"{path} still hardcodes origin/main"
-    # The rewritten form must actually be present (not just deleted): ready.md still resolves
-    # REPO/BASE via real shell variables (GA-10 only rewrote its preamble, not this ticket's
-    # scope) and creates the worktree off origin/$BASE, fetching it once. implementing.md
-    # (GA-12: downstream commands literalized -- REPO/BASE substituted as the <REPO>/<BASE>
-    # tokens the agent types, never a shell $VAR a fenced line expands) rebases onto
-    # origin/<BASE>, diffs the QA loop against it, and fetches it once (step 0).
+    # GA-20: the whole `MODE == git` bash fence -- including the `fetch -q origin "$BASE"` /
+    # `worktree add ... "origin/$BASE"` create-or-adopt pair -- collapsed into a single
+    # `maestro worktree ensure "$KEY"` call, so both counts go to 0. The rewritten form must
+    # actually be present (not just deleted): assert the collapsed call is there instead.
+    # implementing.md (GA-12: downstream commands literalized -- REPO/BASE substituted as the
+    # <REPO>/<BASE> tokens the agent types, never a shell $VAR a fenced line expands) rebases onto
+    # origin/<BASE>, diffs the QA loop against it, and fetches it once (step 0) -- unchanged here.
     for path in (_commands_path("ready"), _skills_path("ready")):
         text = path.read_text()
-        assert text.count('"origin/$BASE"') == 1, \
-            f'{path} should target "origin/$BASE" exactly 1 time(s)'
-        assert text.count('fetch -q origin "$BASE"') == 1, \
-            f'{path} should fetch "$BASE" exactly 1 time(s)'
+        assert '"origin/$BASE"' not in text, \
+            f'{path} should no longer target "origin/$BASE" directly -- that moved into ' \
+            f'`maestro worktree ensure`'
+        assert 'fetch -q origin "$BASE"' not in text, \
+            f'{path} should no longer fetch "$BASE" directly -- that moved into ' \
+            f'`maestro worktree ensure`'
+        assert text.count('maestro worktree ensure "$KEY"') == 1, \
+            f'{path} should call `maestro worktree ensure "$KEY"` exactly once'
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         assert '$BASE' not in text, f'{path} should hold BASE as the literal <BASE>, not $BASE'
@@ -267,15 +272,20 @@ def test_implementing_fenced_commands_never_expand_env_vars():
             f"{path}: never states the substitute-don't-expand instruction"
 
 
-def test_implementing_venv_bootstrap_is_split_into_single_invocations():
-    """The venv-bootstrap AC (GA-12): one `python3 -m venv`, one pip install, one
-    pytest -- no `cd … &&`, no `;` chain, no `>/dev/null` redirects. This is the
-    INTERIM form (Notes): GA-20 later deletes the venv/pip lines and keeps the pytest
-    line standing, which is exactly why they must be separable single lines now."""
+def test_implementing_venv_bootstrap_is_gone_pytest_invocation_stays():
+    """GA-20: the venv-bootstrap AC (GA-12) was deliberately interim -- "one
+    `python3 -m venv`, one pip install, one pytest" -- exactly so the dependency-
+    install half could be lifted out on its own once `maestro worktree ensure`'s
+    config-declared `prime` existed to run it instead (ready.md, once per fresh
+    worktree). This AC proves that split actually happened: the venv/pip lines are
+    gone, and the pytest invocation that follows them stands exactly as GA-12 left
+    it -- no `cd …`, no `;` chain, no `>/dev/null` redirect."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
-        assert "python3 -m venv .venv" in text
-        assert '.venv/bin/pip install -q -e ".[dev,tui]"' in text
+        assert "python3 -m venv" not in text, \
+            f"{path}: venv bootstrap should be gone -- that's now `prime`'s job"
+        assert "pip install" not in text, \
+            f"{path}: pip install should be gone -- that's now `prime`'s job"
         assert ".venv/bin/python -m pytest -q" in text
         assert " cd " not in text and not text.startswith("cd "), \
             f"{path}: bootstrap still `cd`s instead of relying on the session cwd"

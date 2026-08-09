@@ -48,11 +48,11 @@ def _print(obj) -> None:
 # switch), or any other human-only verb here -- and never collapse this to
 # the bare wildcard "maestro:*", which grants all of those at once.
 _AGENT_TOOL_VERBS = (
-    # The 19 "[agent]"-tagged verbs registered in build_parser().
+    # The 20 "[agent]"-tagged verbs registered in build_parser().
     "local-backup", "snapshot", "events", "append", "set-phase", "ask",
     "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
     "verify-ac", "qa-verdict", "finalize", "release", "check-conflicts",
-    "check-merged", "fold-steps",
+    "check-merged", "fold-steps", "worktree",
     # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
     "env",     # every phase preamble's first command, all phase files
     "show",    # maestro-reconcile-passive.md reads pending_inbox through it
@@ -920,6 +920,17 @@ def cmd_local_backup(args) -> int:
     return 0
 
 
+def cmd_worktree(args) -> int:
+    """[agent] GA-20: idempotently create/adopt a ticket's worktree and run its
+    resolved repo binding's declared `prime` command inside it exactly once.
+    Reconciler-only -- never called from dispatch()."""
+    cfg = _cfg(args)
+    if args.action == "ensure":
+        _print(ops.worktree_ensure(cfg, args.key))
+        return 0
+    raise store.MaestroError(f"worktree: unknown action {args.action!r}")
+
+
 def cmd_install_commands(args) -> int:
     """GA-15: idempotently install the six per-phase reconcile command files —
     ``--repo <name>`` copies them into a configured repo's checkout,
@@ -964,7 +975,7 @@ def cmd_env(args) -> int:
         gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
         _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
                 "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
-                "mode": binding.mode, "gh_credential": gh_credential,
+                "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
                 "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase)})
         return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
@@ -1093,6 +1104,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("local-backup", cmd_local_backup,
              "[agent] back up a mode=\"local\" ticket's target dir before writing in place")
     sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
+    sp = add("worktree", cmd_worktree,
+             "[agent] idempotently create/adopt a ticket's worktree and run its repo's `prime`")
+    sp.add_argument("action", choices=["ensure"])
+    sp.add_argument("key")
     sp = add("install-commands", cmd_install_commands,
              "install the six per-phase maestro-reconcile-*.md commands into a repo or user dir")
     sp.add_argument("--repo", default=None,
