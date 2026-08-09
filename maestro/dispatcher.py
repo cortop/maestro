@@ -1286,6 +1286,19 @@ def _maybe_trip_runaway_brake(cfg: Config, home: Path, now: float, health_mod) -
     return reason
 
 
+def _load_and_refresh_snapshot(home: Path, key: str) -> "snap_mod.Snapshot":
+    """Load *key*'s persisted snapshot, refolding if a writer got ahead of it.
+
+    Pulled out of the per-key sweep loop so `_run_hook` can wrap the whole
+    load-then-maybe-refold step atomically per ticket (RB-2) -- a fold that
+    somehow still raises must not abort the rest of the sweep.
+    """
+    snap = snap_mod.load(home, key)
+    if event_log.last_seq(home, key) > snap.observed_seq:
+        snap = snap_mod.rebuild(home, key)
+    return snap
+
+
 def _run_hook(name: str, hook_errors: dict, fn, *args, default=None, **kwargs):
     """Run one dispatch hook, recording (not raising) any exception.
 
@@ -1444,10 +1457,15 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     decisions: dict[str, dict] = {}
 
     for key in list_keys(home):
-        snap = snap_mod.load(home, key)
-        # Keep the dispatcher's view fresh if a writer fell behind on its fold.
-        if event_log.last_seq(home, key) > snap.observed_seq:
-            snap = snap_mod.rebuild(home, key)
+        # RB-2: `snapshot.fold` is total by construction (never raises), but this
+        # is defense-in-depth against a future/unforeseen corruption -- ONE bad
+        # ticket must never abort the sweep for every other ticket on the board.
+        # Same pattern as `_run_hook`, keyed per-ticket instead of per-hook-name.
+        snap = _run_hook(f"fold:{key}", hook_errors, _load_and_refresh_snapshot, home, key)
+        if snap is None:
+            decisions[key] = {"outcome": "fold_error",
+                               "reason": hook_errors.get(f"fold:{key}", "fold failed")}
+            continue
         observed_seq_by_key[key] = snap.observed_seq
         phase_by_key[key] = snap.phase
         blocked_dep = _has_unmet_deps(home, key)
