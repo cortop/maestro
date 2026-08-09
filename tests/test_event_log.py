@@ -74,7 +74,13 @@ def test_read_dedups_seq_duplicated_across_archive_and_active(home):
 def test_torn_tail_does_not_swallow_the_next_append(home):
     """A crashed writer that leaves an unterminated line (RB-1's repro) must not
     corrupt or swallow the append that follows it, and must not disarm step-id
-    dedup for that swallowed append's own step-id."""
+    dedup for that swallowed append's own step-id.
+
+    RB-11 note: this fixes the torn tail in place as a static precondition.
+    `tests/test_crash_injection.py::test_append_killed_mid_line_...` proves the
+    same claim generated live, via an actual injected mid-write crash during a
+    real `event_log.append` call -- kept separately since the two exercise
+    different things (recovery-from-artifact vs. crash-during-the-call)."""
     event_log.append(home, "T-1", "Note", {"t": "1"}, actor="x", step_id="sid-1")
     path = store.events_path(home, "T-1")
     with path.open("a") as fh:

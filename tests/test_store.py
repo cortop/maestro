@@ -4,6 +4,15 @@ A previous writer dying mid-line leaves the target's last byte not a ``\\n``.
 These tests drive ``store.append_line`` directly (and, for the event log and
 inbox callers, through the real appenders) to prove a torn tail can no longer
 corrupt or swallow the append that follows it. (RB-1)
+
+RB-11 note: these fix the torn tail in place as a static precondition (a
+hand-crafted fixture), covering `append_line`'s recovery logic in isolation.
+`tests/test_crash_injection.py` generalizes this: the torn tail there is
+produced by an actual injected crash mid-write during a real
+`event_log.append` call, across every window the ticket lists, not just this
+one. Kept separately -- different unit (`append_line` alone vs. the full
+`event_log.append` call), different thing proved (recovery-from-artifact vs.
+crash-during-the-call).
 """
 from maestro import inbox, store
 
