@@ -1,4 +1,5 @@
 """T-11: a built wheel must be self-sufficient (no reliance on a repo checkout)."""
+import email
 import subprocess
 import sys
 import venv
@@ -28,6 +29,21 @@ def test_wheel_contains_packaged_assets(built_wheel):
     names = zipfile.ZipFile(built_wheel).namelist()
     assert "maestro/_assets/daemon/install.sh" in names
     assert "maestro/_assets/completions/_maestro" in names
+
+
+def test_wheel_declares_no_unconditional_runtime_dependencies(built_wheel):
+    """RB-10: Hypothesis (and pytest, textual) must land in the built wheel's metadata ONLY as
+    extra-gated `Requires-Dist` lines -- never as a bare, unconditional one -- so a fresh `pip
+    install .` (no extras) pulls nothing new. Inspecting the actual built metadata, not just
+    `pyproject.toml`'s source text, is what `hatchling` really emits into the wheel a user
+    installs."""
+    names = zipfile.ZipFile(built_wheel).namelist()
+    info_name = next(n for n in names if n.endswith(".dist-info/METADATA"))
+    metadata = email.message_from_bytes(zipfile.ZipFile(built_wheel).read(info_name))
+    requires = metadata.get_all("Requires-Dist") or []
+    unconditional = [r for r in requires if "extra ==" not in r]
+    assert unconditional == []  # the core wheel's dependency list is empty
+    assert any(r.startswith("hypothesis") and "extra == 'dev'" in r for r in requires)
 
 
 def test_wheel_install_smoke(built_wheel, tmp_path):

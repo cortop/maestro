@@ -5,12 +5,15 @@ snapshots to decide what is due, so a sweep never touches the full event history
 or any of the old 100-500KB monoliths. Writers refresh the snapshot after every
 append, so the dispatcher's cheap read is always current.
 
-``fold`` is a TOTAL function of the log (RB-2): no event, however malformed its
-payload, may raise. A ``PhaseChanged`` with a missing/unrecognized ``phase``, or
-an ``ImplTurn``/``ImplStep`` with a non-integer ``turn``, is coerced to a safe
-default (the phase is left unchanged; the turn counter is left unchanged) and
-recorded in ``fold_warnings`` instead of being silently dropped -- a corrupt log
-must stay visible, never crash the fold. ``observed_seq`` is a high-water mark
+``fold`` is a TOTAL function of the log (RB-2, and RB-10's property-based
+regression in ``tests/test_snapshot_properties.py``): no event, however
+malformed its payload, may raise. A ``PhaseChanged`` with a missing/unrecognized
+``phase``, or an ``ImplTurn``/``ImplStep`` with a non-integer ``turn``, is
+coerced to a safe default (the phase is left unchanged; the turn counter is
+left unchanged) and recorded in ``fold_warnings`` instead of being silently
+dropped -- a corrupt log must stay visible, never crash the fold. A ``payload``
+that isn't even a dict (a bare int/str/list) is likewise coerced to ``{}``
+before any event-type arm touches it. ``observed_seq`` is a high-water mark
 (``max`` across every event's ``seq``, not last-write) so an out-of-order log
 segment can't move it backwards. ``DONE`` is absorbing: once folded to
 ``Phase.DONE``, NO later event of ANY type can move the phase again -- see
@@ -230,7 +233,10 @@ def _coerce_turn(p: dict, default: int) -> tuple[int, str | None]:
     raw = p.get("turn", default)
     try:
         return int(raw), None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: RB-10's property generator found `int(float("inf"))` -- a value
+        # `int()` accepts as an argument but can't represent -- raises OverflowError, not
+        # ValueError, so it slipped past the original except clause.
         return default, f"non-integer turn {raw!r}"
 
 
@@ -262,7 +268,12 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         if isinstance(seq, int) and seq > s.observed_seq:
             s.observed_seq = seq
         t = ev.get("type")
-        p = ev.get("payload") or {}
+        p = ev.get("payload")
+        if not isinstance(p, dict):
+            # (b) totality: a payload that isn't a dict at all (a bare int/str/list, found by
+            # RB-10's property generator) must coerce to empty, not crash every `p.get(...)`
+            # call below -- the same defensive posture as `_coerce_phase`/`_coerce_turn`.
+            p = {}
         s.updated_ts = ev.get("ts", s.updated_ts)
 
         if t == E.TICKET_CREATED:
