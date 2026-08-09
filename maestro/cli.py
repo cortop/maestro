@@ -48,11 +48,11 @@ def _print(obj) -> None:
 # switch), or any other human-only verb here -- and never collapse this to
 # the bare wildcard "maestro:*", which grants all of those at once.
 _AGENT_TOOL_VERBS = (
-    # The 19 "[agent]"-tagged verbs registered in build_parser().
+    # The 20 "[agent]"-tagged verbs registered in build_parser().
     "local-backup", "snapshot", "events", "append", "set-phase", "ask",
     "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-    "verify-ac", "qa-verdict", "finalize", "release", "check-conflicts",
-    "check-merged", "fold-steps",
+    "verify-ac", "qa-brief", "qa-verdict", "finalize", "release",
+    "check-conflicts", "check-merged", "fold-steps",
     # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
     "env",     # every phase preamble's first command, all phase files
     "show",    # maestro-reconcile-passive.md reads pending_inbox through it
@@ -656,6 +656,16 @@ def cmd_verify_ac(args) -> int:
     return 0
 
 
+def cmd_qa_brief(args) -> int:
+    """[agent] mint the Implementer->QA hand-off packet (AC list + diff) for one ticket.
+
+    Read-only. The QA sub-agent is briefed from this result instead of from
+    diff text the implementer re-types into the prompt -- see ops.qa_brief.
+    """
+    _print(ops.qa_brief(_cfg(args), args.key))
+    return 0
+
+
 def cmd_qa_verdict(args) -> int:
     """[agent] record an independent QA verdict (pass/fail) for AC #n with evidence,
     on either the "spec" axis (default; gates awaiting-ci) or the T-23 "standards"
@@ -1168,6 +1178,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--where", required=True, help="where it ran (file:line or test name)")
     sp.add_argument("--result", required=True, help="the observed result (e.g. PASSED, output excerpt)")
     sp.add_argument("--actor", default="reconciler")
+
+    sp = add("qa-brief", cmd_qa_brief,
+             "[agent] mint the QA hand-off packet (AC list + diff) for one ticket")
+    sp.add_argument("key")
 
     sp = add("qa-verdict", cmd_qa_verdict,
              "[agent] record an independent QA pass/fail verdict for AC #n (content-hash keyed)")

@@ -139,8 +139,8 @@ def test_agent_tool_verbs_named_exactly():
     expected = {
         "local-backup", "snapshot", "events", "append", "set-phase", "ask",
         "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-        "verify-ac", "qa-verdict", "finalize", "release", "check-conflicts",
-        "check-merged", "fold-steps", "env", "show", "create",
+        "verify-ac", "qa-brief", "qa-verdict", "finalize", "release",
+        "check-conflicts", "check-merged", "fold-steps", "env", "show", "create",
     }
     assert granted == expected
     assert not (granted & set(_HUMAN_ONLY_VERBS))
