@@ -823,6 +823,11 @@ def test_fleet_screen_reports_spawn_rate_from_health_report(seeded_home):
             status = app.screen_stack[-1].query_one("#fleet-status", Static)
             content = str(status.content)
             assert "Spawns/hr" in content
+            # GA-14: the line is relabeled with the unit doctor now reports
+            # (agent-equivalents, not a bare session count) -- assert the
+            # label itself, not just the "Spawns/hr" prefix, so a regression
+            # back to session-counting can't slip the assertion.
+            assert "Spawns/hr (agent-equiv)" in content
             assert "Runaway" in content
             assert "Spawn floor" in content
             # GA-11: added beside the spawn-rate line, not folded into it --

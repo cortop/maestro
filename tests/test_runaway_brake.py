@@ -11,12 +11,21 @@ temp home; only the `claude -p` spawn is faked (`_EphemeralSessions`, the
 import io
 import json
 import sys
+from pathlib import Path
 
 from maestro import cli, dispatcher as disp, fleet, inbox, projection, store
 from maestro.config import Config
 from maestro.statemachine import Phase
 
 from test_dispatcher import _EphemeralSessions, _seed
+
+# GA-14: `health.spawn_rate` now records one `implementing`-phase spawn as
+# this many agent-equivalents (1 + max_impl_turns * 1, qa_standards_axis
+# defaults off), not a bare count of 1 -- every `runaway_spawns_per_hour`
+# override below that arms the brake off a fleet of `implementing` tickets is
+# scaled by the same factor, so the "N real spawns before the breach" shape
+# each test exercises is unchanged, just in the new unit.
+_W_IMPL = disp.spawn_weight(Config(home=Path(".")), Phase.IMPLEMENTING.value)
 
 
 def _sweep_cli(home, *args):
@@ -48,7 +57,7 @@ def test_dispatch_never_calls_health_report(home, monkeypatch):
 
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
-                runaway_spawns_per_hour=2, runaway_pause_cooldown=50)
+                runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=50)
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     for i in range(5):  # crosses the budget partway through -- arm path too
@@ -60,19 +69,20 @@ def test_dispatch_never_calls_health_report(home, monkeypatch):
 def test_brake_arms_pause_with_bounded_until_and_reason(home):
     _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase -- due every sweep
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
-                runaway_spawns_per_hour=2, runaway_pause_cooldown=120)
+                runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=120)
     sessions = _EphemeralSessions()
     t0 = 1_000_000
 
-    # Two real spawns land at/under budget=2; a third observes rate==2 (not yet
-    # > 2) and also spawns, bringing the recorded total to 3.
+    # Two real spawns land at/under budget==2*_W_IMPL; a third observes
+    # rate==2*_W_IMPL (not yet >) and also spawns, bringing the recorded
+    # total to 3*_W_IMPL.
     for i in range(3):
         report = disp.dispatch(cfg, sessions, now=t0 + i)
         assert report.spawned == ["T-1"]
     assert not fleet.pause_path(home).exists()
 
     ledger_before = disp._spawn_ledger_path(home).read_bytes()
-    breaching = disp.dispatch(cfg, sessions, now=t0 + 3)  # rate==3 > budget==2
+    breaching = disp.dispatch(cfg, sessions, now=t0 + 3)  # rate > budget
 
     assert breaching.spawned == []
     assert disp._spawn_ledger_path(home).read_bytes() == ledger_before
@@ -80,7 +90,7 @@ def test_brake_arms_pause_with_bounded_until_and_reason(home):
     state = store.read_json(fleet.pause_path(home), None)
     assert state is not None
     assert state["until"] == t0 + 3 + cfg.runaway_pause_cooldown
-    assert "3" in state["reason"] and "2" in state["reason"]
+    assert f"{3 * _W_IMPL}" in state["reason"] and f"{2 * _W_IMPL}" in state["reason"]
 
 
 # --- the full arm -> short-circuit -> self-heal sequence, one temp home -----
@@ -88,7 +98,7 @@ def test_brake_arms_pause_with_bounded_until_and_reason(home):
 def test_arm_short_circuits_next_sweep_then_self_heals(home):
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
-                runaway_spawns_per_hour=2, runaway_pause_cooldown=50)
+                runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=50)
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     for i in range(3):
@@ -119,7 +129,7 @@ def test_arm_short_circuits_next_sweep_then_self_heals(home):
 def test_resume_does_not_immediately_rewedge_without_truncating_ledger(home):
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
-                runaway_spawns_per_hour=2, runaway_pause_cooldown=1800)
+                runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=1800)
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     for i in range(3):
@@ -148,7 +158,7 @@ def test_resume_suppression_expires_and_brake_resumes_working(home):
     (10) == t0+23, independent of exactly when the human resumed."""
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
-                runaway_spawns_per_hour=2, runaway_pause_cooldown=10)
+                runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=10)
     sessions = _EphemeralSessions()
     t0 = 1_000_000
     for i in range(3):
@@ -247,7 +257,7 @@ def test_cooldown_configurable_via_config_toml(home):
 def test_legible_on_fleet_status_dispatch_json_workstate_and_doctor(home):
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
-                runaway_spawns_per_hour=2, runaway_pause_cooldown=120)
+                runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=120)
     sessions = _EphemeralSessions()
     t0 = store.now_epoch()
     for i in range(3):

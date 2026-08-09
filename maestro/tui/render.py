@@ -74,6 +74,11 @@ def _render_fleet(status: dict, doctor: dict) -> str:
     rate = doctor.get("spawns_last_hour") or {}
     spawns_total = rate.get("total", 0)
     budget = doctor.get("spawn_budget_per_hour", 0)
+    # GA-14: spawns_last_hour/spawn_budget_per_hour are agent-equivalents now,
+    # not a bare session count -- label the line with the unit doctor reports
+    # so "Spawns/hr" is never silently redefined out from under a reader.
+    spawn_unit = doctor.get("spawn_rate_unit") or "sessions"
+    spawn_unit_short = "agent-equiv" if spawn_unit == "agent-equivalents" else spawn_unit
     floor = doctor.get("spawn_floor_s")
     floor_str = ("[yellow]0 (disabled)[/yellow]" if floor == 0
                  else "—" if floor is None else f"{floor}s")
@@ -117,7 +122,7 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         "",
         f"  Stale:           {stale_str}",
         f"  Dead letters:    {dead_str}",
-        f"  Spawns/hr:       {spawns_str} / budget {budget}",
+        f"  Spawns/hr ({spawn_unit_short}): {spawns_str} / budget {budget}",
         f"  Spawn floor:     {floor_str}",
         f"  Runaway:         {runaway_str}",
         f"  Spend today:     {spend_str}",
