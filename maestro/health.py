@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 from pathlib import Path
 
-from . import claims, dispatcher, fleet, skills_install, spend as spend_mod, store
+from . import claims, credentials, dispatcher, fleet, skills_install, spend as spend_mod, store
 from . import snapshot as snap_mod
 from .config import Config
 from .statemachine import Phase
@@ -464,6 +465,55 @@ def check_daily_spend(cfg: Config, now: float) -> dict:
             "today_usd": st["today_usd"], "ceiling_usd": ceiling}
 
 
+def check_gh_credential_reachability(cfg: Config, now: float, *, run=None) -> dict:
+    """WARN (never blocks a spawn) per ``[repos.<name>]`` table that names a
+    ``slug``: whether the resolved gh credential (this repo's own
+    ``gh_account``/``token_env``, or the ambient account when neither is set --
+    see ``maestro.credentials``) can actually see that repo, via ``gh repo
+    view <slug>`` under the SAME env overlay a spawn/``sync_vcs`` poll for
+    that repo would use.
+
+    Injectable subprocess boundary (``run``, defaulting to ``subprocess.run``)
+    so the test suite never shells a real ``gh`` -- also threaded into
+    ``credentials.resolve`` for the ``gh_account`` case, so ONE fake covers
+    both the token lookup and the reachability probe. Skips entirely (``ok``,
+    empty ``unreachable``) when no ``[repos.*]`` table names a slug -- never a
+    network call on a home with nothing configured.
+    """
+    run = run or subprocess.run
+    unreachable: dict[str, str] = {}
+    checked = 0
+    for name, table in cfg.repos.items():
+        slug = table.get("slug")
+        if not slug:
+            continue
+        checked += 1
+        cred = credentials.resolve(table.get("gh_account"), table.get("token_env"), run=run)
+        if not cred.ok:
+            unreachable[name] = f"credential unresolvable: {cred.error}"
+            continue
+        env = dict(os.environ)
+        if cred.env:
+            env.update(cred.env)
+        try:
+            p = run(["gh", "repo", "view", slug, "--json", "name"],
+                   capture_output=True, text=True, timeout=15, env=env)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            unreachable[name] = f"{type(e).__name__}: {e}"
+            continue
+        if p.returncode != 0:
+            unreachable[name] = (p.stderr or "gh repo view failed").strip()
+    status = "warn" if unreachable else "ok"
+    if unreachable:
+        detail = "; ".join(f"{name}: {reason}" for name, reason in unreachable.items())
+    elif checked:
+        detail = f"{checked} repo(s) reachable"
+    else:
+        detail = "no [repos.*] table names a slug"
+    return {"name": "gh_credential_reachability", "status": status, "detail": detail,
+            "unreachable": unreachable}
+
+
 def check_depends_on(cfg: Config, now: float) -> dict:
     home = cfg.home
     graph = _depends_on_graph(home)
@@ -485,7 +535,7 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
-          check_daily_spend)
+          check_daily_spend, check_gh_credential_reachability)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:

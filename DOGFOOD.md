@@ -124,7 +124,24 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
    above) to skip the settings-file check for the whole home. Verify with `maestro doctor` (the
    `reconciler_permissions` check names any repo and pattern still missing; `maestro doctor
    --strict` exits 1 while any check, including this one, isn't `ok`).
-5. Confirm MR-1 .. MR-6 are all merged (per-repo dispatcher plumbing, repo-scoped VCS, and this
+5. If the new repo is owned by a *different* `gh` account than the one already bound elsewhere on
+   this board, bind its credential explicitly: `gh_account = "<login>"` (resolved via `gh auth
+   token --user <login>` at spawn/poll time) or `token_env = "GH_TOKEN_..."` (read from that env
+   var — deterministic under launchd, since a LaunchAgent does not inherit a login shell's
+   env — see `maestro/fleet.py`; `token_env` wins when both are set) in the same `[repos.<name>]`
+   table. **Until every repo bound by an in-flight ticket is bound to a credential the dispatcher
+   can resolve (or is reachable by the single active `gh` account when no credential is
+   configured), do not bind that repo to a ticket** — this is the corrected constraint (an
+   earlier draft of this doc said "safe at `max_concurrency = 1`"; that's wrong, since the
+   dispatcher's own `sync_vcs`/spawn credential resolution runs regardless of concurrency and
+   fails closed with no ambient fallback — see `maestro/credentials.py`). The overlay covers `gh`
+   API calls only (PR/CI/review polling, spawn env) — it does **not** cover `git push`, which
+   still goes over whatever `git_protocol`/credential helper (ssh key, `osxkeychain`, ...)
+   `~/.config/gh/hosts.yml` and your git config already resolve; threading a per-repo SSH
+   identity is out of scope here. Verify with `maestro doctor` (the `gh_credential_reachability`
+   check WARNs, per `[repos.*]` table with a `slug`, when the resolved credential can't see that
+   repo).
+6. Confirm MR-1 .. MR-6 are all merged (per-repo dispatcher plumbing, repo-scoped VCS, and this
    ticket's hardcode removal all need to be in place first).
 
 ## Backups (the event logs are the sole source of truth — protect them)

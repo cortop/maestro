@@ -9,9 +9,13 @@ import shlex
 import subprocess
 
 
-def _run(cmd: list[str], timeout: int = 60) -> tuple[int, str, str]:
+def _run(cmd: list[str], timeout: int = 60, env: dict | None = None) -> tuple[int, str, str]:
+    """*env* (GA-17) is a credential overlay (``dispatcher.resolve_credential``)
+    to run *cmd* under instead of the ambient environment. None (the default)
+    is byte-identical to before this ticket -- ``subprocess.run(env=None)``
+    inherits the parent process's environment exactly as a bare call did."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError as e:
         # The executable itself is missing (e.g. `gh` not installed) -- a config
@@ -100,26 +104,28 @@ class GitHubCliVCS:
     def __init__(self, settings: dict):
         self.repos = settings.get("repos", [])
 
-    def pr_for_branch(self, branch: str, repo: str | None = None) -> dict | None:
+    def pr_for_branch(self, branch: str, repo: str | None = None,
+                      env: dict | None = None) -> dict | None:
         for r in [repo] if repo else (self.repos or [None]):
             cmd = ["gh", "pr", "list", "--head", branch, "--state", "all",
                    "--json", "number,url,isDraft,state,mergeStateStatus"]
             if r:
                 cmd += ["--repo", r]
-            rc, out, _ = _run(cmd)
+            rc, out, _ = _run(cmd, env=env)
             if rc == 0 and out.strip():
                 rows = json.loads(out)
                 if rows:
                     return rows[0]
         return None
 
-    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
+    def pr_status(self, pr_number: int, repo: str | None = None,
+                  env: dict | None = None) -> dict:
         repo = repo or (self.repos[0] if self.repos else None)
         cmd = ["gh", "pr", "view", str(pr_number), "--json",
                "state,mergeable,headRefOid,statusCheckRollup"]
         if repo:
             cmd += ["--repo", repo]
-        rc, out, err = _run(cmd)
+        rc, out, err = _run(cmd, env=env)
         if rc != 0 or not out.strip():
             return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
                     "ci_state": "unknown", "failing_checks": [],
@@ -153,12 +159,13 @@ class GitHubCliVCS:
             "failing_checks": failing,
         }
 
-    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]:
+    def review_feedback(self, pr_number: int, repo: str | None = None,
+                        env: dict | None = None) -> list[dict]:
         repo = repo or (self.repos[0] if self.repos else None)
         cmd = ["gh", "pr", "view", str(pr_number), "--json", "reviews"]
         if repo:
             cmd += ["--repo", repo]
-        rc, out, _ = _run(cmd)
+        rc, out, _ = _run(cmd, env=env)
         if rc != 0 or not out.strip():
             return []
         reviews = json.loads(out).get("reviews") or []

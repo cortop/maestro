@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
+from . import backup, claims, credentials, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
@@ -957,9 +957,14 @@ def cmd_env(args) -> int:
             return 1
         binding = repos_mod.resolve(cfg, cfg.home, key)
         snap = snap_mod.load(cfg.home, key)
+        # GA-17: name only -- never resolve() here (that shells `gh auth token` /
+        # reads the env var), just the identifier. This is a hot path (every
+        # reconciler phase preamble calls `maestro env --key`), so it must stay
+        # zero-cost and never touch the secret value.
+        gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
         _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
                 "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
-                "mode": binding.mode,
+                "mode": binding.mode, "gh_credential": gh_credential,
                 "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase)})
         return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,

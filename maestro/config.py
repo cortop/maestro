@@ -133,6 +133,16 @@ class Config:
     raw: dict = field(default_factory=dict)
 
 
+# GA-17: the whole recognized [repos.<name>] key set -- config.load raises on
+# anything outside it (see the fail-closed AC), so a typo'd credential field
+# (or any other field) never gets silently ignored.
+_REPO_TABLE_KEYS = frozenset({
+    "path", "slug", "base_branch", "branch_prefix", "default",
+    "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
+    "gh_account", "token_env",
+})
+
+
 def config_path(home: Path) -> Path:
     return home / "config.toml"
 
@@ -178,7 +188,20 @@ def load(home_arg: str | None = None) -> Config:
         raw_repos = data.get("repos", {})
         if isinstance(raw_repos, dict):
             for name, table in raw_repos.items():
-                if not isinstance(table, dict) or not table.get("path"):
+                if not isinstance(table, dict):
+                    continue
+                # GA-17: ONE fail-closed rule -- an unrecognized key inside
+                # [repos.<name>] (e.g. a typo'd credential field) fails config.load
+                # loudly rather than being silently ignored, which is exactly how a
+                # typo'd `gh_acount` would otherwise leave a binding on the ambient
+                # `gh` account with zero feedback. Checked before the `path`-less
+                # skip below so a path-less table's typo is still caught.
+                unknown = set(table) - _REPO_TABLE_KEYS
+                if unknown:
+                    raise store.MaestroError(
+                        f"config.toml: [repos.{name}] has unrecognized key(s): "
+                        f"{', '.join(sorted(unknown))}")
+                if not table.get("path"):
                     continue
                 raw_cap = table.get("max_spawns_per_sweep")
                 raw_mode = table.get("mode", "git")
@@ -195,6 +218,10 @@ def load(home_arg: str | None = None) -> Config:
                     # reconcile_allowed_tools list -- this is unioned in, never a replacement,
                     # so [] here means "nothing extra beyond board-wide", not "no tools at all".
                     "reconcile_allowed_tools": raw_repo_tools if isinstance(raw_repo_tools, list) else [],
+                    # GA-17: this repo's gh credential -- see maestro/credentials.py.
+                    # Both None (default) means "use the ambient gh account", unchanged.
+                    "gh_account": table.get("gh_account"),
+                    "token_env": table.get("token_env"),
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -357,6 +384,19 @@ implementer = "claude_skill"
 # reconcile_allowed_tools = ["Bash(npm test:*)"]   # this repo's own git/gh/test --allowedTools
                                      # surface; unset inherits just the board-wide list (unioned,
                                      # never replaces it)
+# gh_account = "work-login"         # resolve this repo's gh credential via
+                                     # `gh auth token --user <login>` at spawn/poll time
+                                     # (needs `gh` + an unlocked keychain on the dispatcher
+                                     # host). token_env below wins when both are set.
+# token_env = "GH_TOKEN_DDOG"       # resolve this repo's gh credential from this env var
+                                     # instead (deterministic under launchd, no keyring --
+                                     # get the var into the LaunchAgent's own environment,
+                                     # see maestro/fleet.py). Neither set = ambient gh
+                                     # account (today's behavior). Fails closed: a
+                                     # configured credential that can't be resolved blocks
+                                     # this repo's spawns/polls rather than falling back to
+                                     # ambient -- see maestro/credentials.py. Covers `gh`
+                                     # API calls only, not `git push` over ssh/osxkeychain.
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""

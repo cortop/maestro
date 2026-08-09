@@ -22,7 +22,7 @@ import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import claims, events as E
+from . import claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, store
 from .config import Config
 from .gates import needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
@@ -90,6 +90,19 @@ def resolved_allowed_tools(cfg: Config, binding) -> list[str]:
             if tool not in merged:
                 merged.append(tool)
     return merged
+
+
+def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution:
+    """*binding*'s resolved gh credential overlay (GA-17), memoized in *cache*
+    (caller-owned, keyed by ``(gh_account, token_env)``) so N keys bound to the
+    same repo resolve the token once per sweep -- see ``maestro.credentials``.
+    ``binding is None`` (defensive -- mirrors ``resolved_allowed_tools``'s own
+    None-handling; shouldn't happen for a key already in ``bindings_by_key``)
+    resolves to "nothing configured", same as a binding with neither field set.
+    """
+    gh_account = binding.gh_account if binding is not None else None
+    token_env = binding.token_env if binding is not None else None
+    return credentials.resolve_cached(gh_account, token_env, cache)
 
 
 # GA-16: the whole spawned-reconciler Bash surface, as it would appear in a
@@ -847,6 +860,8 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     vcs = providers.get_vcs(cfg)
     checked = 0
     worktree_removal_errors: dict[str, str] = {}
+    # GA-17: memoized per (gh_account, token_env) for this whole sync tick.
+    credential_cache: dict = {}
     for key in list_keys(home):
         snap = snap_mod.load(home, key)
         phase = Phase(snap.phase)
@@ -854,7 +869,19 @@ def sync_vcs(cfg: Config, now: float) -> dict:
             continue
         checked += 1
         repo_slug = repos.resolve_vcs_slug(cfg, snap)
-        status = vcs.pr_status(snap.pr_number, repo=repo_slug)
+        binding = repos.resolve(cfg, home, key)
+        cred = resolve_credential(binding, credential_cache)
+        if not cred.ok:
+            # Fail closed (GA-17): never let the dispatcher's own gh poll fall
+            # back to the ambient account. Synthesize the same "auth" shape a
+            # real `gh` credential failure would produce (see
+            # providers/cli.py's classify_gh_failure) so _observe_ci's existing
+            # auth-failure routing (a visible ops.fail naming the repo/PR)
+            # handles this identically -- no second failure path to invent.
+            status = {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
+                     "ci_state": "unknown", "failing_checks": [], "error": "auth"}
+        else:
+            status = vcs.pr_status(snap.pr_number, repo=repo_slug, env=cred.env)
 
         if _route_if_merged(cfg, key, status, worktree_removal_errors):
             continue
@@ -864,7 +891,8 @@ def sync_vcs(cfg: Config, now: float) -> dict:
             continue
 
         _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number)
-        _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug)
+        if cred.ok:
+            _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env)
 
     cursor[vcs_name] = now
     store.write_json(cursor_path, cursor)
@@ -936,9 +964,10 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
         ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher")
 
 
-def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None) -> None:
+def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None,
+                     env: dict | None = None) -> None:
     changes_requested_body: str | None = None
-    for r in vcs.review_feedback(pr_number, repo=repo):
+    for r in vcs.review_feedback(pr_number, repo=repo, env=env):
         cid = r.get("id")
         if not cid:
             continue
@@ -1497,9 +1526,27 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             attempts_path = _spawn_attempts_path(home)
             attempts = store.read_json(attempts_path, {}) or {}
             attempts_changed = False
+            # GA-17: memoized per (gh_account, token_env) for this whole sweep -- N
+            # keys bound to the same repo resolve the credential once, not once each.
+            credential_cache: dict = {}
 
             spawned = []
             for key, _reason in to_spawn:
+                binding = bindings_by_key.get(key)
+                cred = resolve_credential(binding, credential_cache)
+                if not cred.ok:
+                    # Fail closed (GA-17): never spawn into a repo whose configured
+                    # credential can't be resolved, and never fall back to the
+                    # ambient `gh` account -- that's precisely the silent-404 mode
+                    # this ticket exists to remove. No attempts-ledger spend either;
+                    # this is a config problem, not a no-progress spawn.
+                    decisions[key]["outcome"] = "credential_unresolvable"
+                    from . import ops
+                    ops.fail(cfg, key,
+                            f"gh credential unresolvable for repo "
+                            f"'{binding.name if binding is not None else 'default'}': {cred.error}",
+                            actor="dispatcher")
+                    continue
                 if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
                     attempts_changed = True
                     reaped.append(key)
@@ -1511,9 +1558,10 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 prompt = f"{command} {key}"
                 model, effort = _resolve_model_effort(cfg, key)
                 disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
-                allowed_tools = resolved_allowed_tools(cfg, bindings_by_key.get(key))
+                allowed_tools = resolved_allowed_tools(cfg, binding)
                 sessions.spawn(key, prompt, cwd, model=model, effort=effort,
-                               disallowed_tools=disallowed_tools, allowed_tools=allowed_tools)
+                               disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
+                               env_overlay=cred.env)
                 spawned.append(key)
                 decisions[key]["outcome"] = "spawned"
                 weight = spawn_weight(cfg, phase_by_key.get(key, ""))

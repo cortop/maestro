@@ -86,16 +86,18 @@ class FakeVCS:
     def __init__(self, statuses=None):
         self.statuses = statuses or {}
 
-    def pr_for_branch(self, branch):
+    def pr_for_branch(self, branch, env=None):
         return None
 
-    def pr_status(self, pr_number: int, repo: str | None = None) -> dict:
+    def pr_status(self, pr_number: int, repo: str | None = None,
+                  env: dict | None = None) -> dict:
         return self.statuses.get(pr_number, {
             "state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha1",
             "ci_state": "unknown", "failing_checks": [],
         })
 
-    def review_feedback(self, pr_number: int, repo: str | None = None) -> list[dict]:
+    def review_feedback(self, pr_number: int, repo: str | None = None,
+                        env: dict | None = None) -> list[dict]:
         return []
 
 
