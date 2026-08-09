@@ -36,7 +36,10 @@ class Config:
     # Watchdog: fail a key instead of respawning once it has been spawned this many
     # times with observed_seq unchanged (no progress). Resets the moment seq advances.
     max_spawn_attempts: int = 5
-    daily_token_ceiling: int | None = None # advisory; surfaced by `maestro doctor`
+    # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
+    # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
+    # by `maestro doctor` and the TUI fleet panel alongside today's actual spend.
+    daily_spend_ceiling_usd: float | None = None
     # Fleet-wide spawns/hour above which `maestro doctor` trips `runaway` (exit 1).
     # None = derive from what the spawn-rate floor itself permits (see health.py);
     # 0 disables the check.
@@ -154,7 +157,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.max_impl_turns = int(m.get("max_impl_turns", cfg.max_impl_turns))
         cfg.max_session_seconds = int(m.get("max_session_seconds", cfg.max_session_seconds))
         cfg.max_spawn_attempts = int(m.get("max_spawn_attempts", cfg.max_spawn_attempts))
-        cfg.daily_token_ceiling = m.get("daily_token_ceiling", cfg.daily_token_ceiling)
+        raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
+        cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
         raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
         cfg.runaway_spawns_per_hour = int(raw_runaway) if raw_runaway is not None else None
         cfg.runaway_pause_cooldown = int(
@@ -253,7 +257,9 @@ max_impl_turns = 20
                                   # sessions legitimately run 30-60+ min.
 # max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
                                   # zero progress (observed_seq unchanged)
-# daily_token_ceiling = 5000000   # advisory cost guardrail
+# daily_spend_ceiling_usd = 50.0  # dispatch() spawns nothing once today's folded
+                                  # session spend reaches this (enforced, not advisory;
+                                  # surfaced by `maestro doctor` + the TUI fleet panel)
 # runaway_spawns_per_hour = 200   # `maestro doctor` trips runaway above this fleet-wide
                                   # spawns/hour (default: derived from the spawn floor
                                   # itself; 0 disables the check)

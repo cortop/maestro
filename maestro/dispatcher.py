@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import claims, events as E
-from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, store
+from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, store
 from .config import Config
 from .gates import needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
 from .idempotency import content_hash
@@ -1041,6 +1041,7 @@ class DispatchReport:
     pruned_bytes: int = 0
     errors: dict = field(default_factory=dict)  # tick name -> error string (never aborts the sweep)
     paused_until: float | None = None  # fleet-wide rate-limit gate deadline, if paused
+    spend_ceiling_reason: str | None = None  # GA-11: set when the daily spend gate blocked this sweep
     reaped: list[str] = field(default_factory=list)     # watchdog: killed for age or no-progress
     paused: bool = False            # the fleet.pause() kill switch was armed this sweep
     repo_blockers: list[str] = field(default_factory=list)  # flat union; non-empty -> >=1 repo blocked
@@ -1202,7 +1203,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     (``would_mint`` reports what mint_new_tickets would have minted, read via
     ``inbox.pending_new`` without draining it), no external-source sync, no
     scheduled-task fire, no worktree/VCS sync, no backup, no compact/archive/
-    prune, no rate-limit probe or notify, no watchdog reap, and no spawn-ledger
+    prune, no rate-limit or spend probe, no notify, no watchdog reap, and no spawn-ledger
     or spawn-attempts write (so it can never trip ``max_spawn_attempts`` into a
     real ``Failed``/``RequeueScheduled``, and never throttles the next real
     sweep). ``dry_run`` is an explicit, separate flag from the ``sessions``
@@ -1263,6 +1264,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
         _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
         _run_hook("ratelimit_probe", hook_errors, ratelimit.probe, cfg, now)
+        _run_hook("spend_probe", hook_errors, spend.probe, cfg, now)
         _run_hook("notify", hook_errors, notify.maybe_notify, cfg, now)
 
         # Watchdog runs before `active` is computed: a hung claim must not count
@@ -1337,7 +1339,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     # the rate-limit gate exactly -- while the next sweep short-circuits at G1.
     runaway_armed = (None if paused_until_ts is not None or dry_run
                      else _maybe_trip_runaway_brake(cfg, home, now, health))
-    if paused_until_ts is not None or runaway_armed is not None:
+    # GA-11: the daily spend ceiling, a third reason to take the same
+    # spawn-nothing branch. spend.over_ceiling is a pure read, never folds --
+    # so it still applies even under dry_run, off whatever spend.probe last
+    # persisted (the ratelimit gate above is read the same way).
+    spend_ceiling_reason = (None if paused_until_ts is not None or runaway_armed is not None
+                            else spend.over_ceiling(cfg, now))
+    if paused_until_ts is not None or runaway_armed is not None or spend_ceiling_reason is not None:
         spawned: list[str] = []
         throttled: list[str] = []
         capacity_skipped: list[str] = []
@@ -1473,7 +1481,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         capacity_skipped=capacity_skipped, active_sessions=len(active),
         scheduled_fired=scheduled_fired, throttled=throttled,
         pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
-        paused_until=paused_until_ts, reaped=reaped,
+        paused_until=paused_until_ts, spend_ceiling_reason=spend_ceiling_reason, reaped=reaped,
         repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo,
         hook_errors=hook_errors,
         worktree_removal_errors=worktree_removal_errors,

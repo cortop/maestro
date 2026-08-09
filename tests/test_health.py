@@ -87,6 +87,11 @@ def test_doctor_reports_new_fields(home):
     assert isinstance(out["throttled_last_sweep"], int)
     assert isinstance(out["spawn_budget_per_hour"], int)
     assert isinstance(out["runaway"], bool)
+    # GA-11: added beside the spawn-rate fields above, not folded into them.
+    assert out["spend_today_usd"] == 0.0
+    assert out["spend_ceiling_usd"] is None
+    assert out["spend_unavailable"] is False
+    assert isinstance(out["spend_unattributed_sessions"], int)
     assert code == 0
 
 
@@ -349,7 +354,8 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     names = {c["name"] for c in out["checks"]}
     assert names == {"heartbeat", "backup_age", "claim_age", "dead_letters",
                       "depends_on", "launchctl", "repo_preflight",
-                      "unknown_repo_bindings", "missing_reconcile_skill", "spawn_floor"}
+                      "unknown_repo_bindings", "missing_reconcile_skill", "spawn_floor",
+                      "daily_spend"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 

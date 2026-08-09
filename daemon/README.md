@@ -31,6 +31,9 @@ up. That alert is the only thing that tells you the fleet has silently stopped.
 
 ## 3. Cost control
 
-12 concurrent Sonnet+Opus reconcilers multiply spend. Set `daily_token_ceiling` in
-`config.toml`; `maestro doctor` surfaces it. The dispatcher needs no model at all, so the
-*idle* fleet costs nothing — you only pay when tickets are actually moving.
+12 concurrent Sonnet+Opus reconcilers multiply spend. Set `daily_spend_ceiling_usd` in
+`config.toml`; the dispatcher enforces it (folded from session logs' `total_cost_usd`,
+see `maestro/spend.py`) — a sweep whose day total is at or above the ceiling spawns
+nothing, and `maestro doctor` / the TUI fleet panel surface today's spend against it.
+The dispatcher needs no model at all, so the *idle* fleet costs nothing — you only pay
+when tickets are actually moving.

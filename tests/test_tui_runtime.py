@@ -825,6 +825,9 @@ def test_fleet_screen_reports_spawn_rate_from_health_report(seeded_home):
             assert "Spawns/hr" in content
             assert "Runaway" in content
             assert "Spawn floor" in content
+            # GA-11: added beside the spawn-rate line, not folded into it --
+            # GA-14 rebases onto a panel that already has a spend line.
+            assert "Spend today" in content
             assert app._exception is None
 
     asyncio.run(_inner())
@@ -848,6 +851,31 @@ def test_fleet_screen_shows_disabled_spawn_floor_distinguishably(seeded_home):
             content = str(status.content)
             assert "Spawn floor" in content
             assert "disabled" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_screen_shows_spend_unavailable_for_text_format(seeded_home):
+    """GA-11 trap: a session_log_format = "text" home must render spend as
+    explicitly unavailable, never a silent $0.00 (a zero would be a ceiling
+    that can never fire)."""
+    (seeded_home / "config.toml").write_text('[maestro]\nsession_log_format = "text"\n')
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status = app.screen_stack[-1].query_one("#fleet-status", Static)
+            content = str(status.content)
+            assert "Spend today" in content
+            assert "unavailable" in content
+            assert "$0.00" not in content
             assert app._exception is None
 
     asyncio.run(_inner())
