@@ -112,7 +112,19 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
 2. Add a `[repos.<name>]` table for it to `config.toml` (`path` + `slug` at minimum).
 3. Add its `owner/repo` slug to the VCS provider's repo list (`[vcs.github_cli] repos = [...]`)
    so `sync_vcs` polls PRs there too.
-4. Confirm MR-1 .. MR-6 are all merged (per-repo dispatcher plumbing, repo-scoped VCS, and this
+4. Grant the reconciler's permission surface in the new repo — without it, a spawned reconciler
+   prints "This command needs your approval to run." and stalls with nobody there to approve it
+   (the dispatcher never observes a session's exit status, so this looks like a healthy spawn
+   until the no-progress watchdog eventually reacts, ~20 spawns and two hours later, and blames
+   the reconciler logic rather than permissions). Either write a `permissions.allow` list in the
+   new repo's `.claude/settings.json` (or `.claude/settings.local.json`, or your user-scope
+   `~/.claude/settings.json`) covering `Bash(maestro:*)`, `Bash(git:*)`, `Bash(gh:*)`,
+   `Bash(python3:*)`, `Bash(.venv/bin/:*)` — this repo's own `.claude/settings.json` is a working
+   example — or set `permission_mode = "bypassPermissions"` in `config.toml` (the escape hatch
+   above) to skip the settings-file check for the whole home. Verify with `maestro doctor` (the
+   `reconciler_permissions` check names any repo and pattern still missing; `maestro doctor
+   --strict` exits 1 while any check, including this one, isn't `ok`).
+5. Confirm MR-1 .. MR-6 are all merged (per-repo dispatcher plumbing, repo-scoped VCS, and this
    ticket's hardcode removal all need to be in place first).
 
 ## Backups (the event logs are the sole source of truth — protect them)

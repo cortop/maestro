@@ -92,6 +92,36 @@ def resolved_allowed_tools(cfg: Config, binding) -> list[str]:
     return merged
 
 
+# GA-16: the whole spawned-reconciler Bash surface, as it would appear in a
+# ``.claude/settings.json`` allow list -- the single shared constant
+# ``health.check_reconciler_permissions`` checks a bound repo's resolved
+# permissions against. Two already-specified sources, unioned:
+#   (1) GA-3's maestro-verb grant -- ``cli._AGENT_TOOL_VERBS`` expands to one
+#       ``Bash(maestro <verb>:*)`` rule per registered CLI verb at spawn time
+#       (``cli._reconciler_tool_grants``, which asserts against this constant's
+#       first entry so the two can't silently drift); this constant names the
+#       coarser ``Bash(maestro:*)`` pattern instead, matching how a human
+#       actually grants it in a settings file (see this repo's own
+#       ``.claude/settings.json``) rather than one line per verb.
+#   (2) the git/gh/venv+pytest commands
+#       ``skills/maestro-reconcile-implementing.md`` runs post-GA-12 --
+#       fetch/rebase (:73-74), venv+pip+pytest (:102-103), add/commit/push
+#       (:167-168), ``gh pr create``/``gh pr view`` (:171-180).
+# GA-10's per-repo ``reconcile_allowed_tools`` is the *mechanism* a human uses
+# to grant (2) via ``--allowedTools`` instead of a settings file -- not a fixed
+# pattern list itself, so there is nothing to union in from it here.
+# NOT the preamble: GA-10 already shrank every phase preamble to almost no
+# bash, so a preamble-derived list would collapse to just the maestro verbs
+# and miss exactly the git/gh/test-runner gap this ticket exists to catch.
+RECONCILER_REQUIRED_TOOLS = (
+    "Bash(maestro:*)",
+    "Bash(git:*)",
+    "Bash(gh:*)",
+    "Bash(python3:*)",
+    "Bash(.venv/bin/:*)",
+)
+
+
 def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool,
            current_spec_hash: str | None, now: float,
            blocked_dep: bool = False) -> DueResult:

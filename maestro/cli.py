@@ -75,7 +75,15 @@ def _reconciler_tool_grants(cfg: Config) -> list[str]:
     per-key reconcile_allowed_tools (dispatcher.resolved_allowed_tools) merges
     into this same list at spawn time (ClaudeCliSessions.base_allowed_tools),
     so there is exactly one --allowedTools flag in the final argv, never two.
+
+    GA-16: health.check_reconciler_permissions treats this whole per-verb grant
+    as satisfied by the coarser ``Bash(maestro:*)`` pattern -- the assert below
+    reads dispatcher.RECONCILER_REQUIRED_TOOLS (the same shared constant that
+    check reads) so the two can never silently drift apart; it never changes
+    this function's returned grant.
     """
+    assert disp.RECONCILER_REQUIRED_TOOLS[0] == "Bash(maestro:*)", \
+        "dispatcher.RECONCILER_REQUIRED_TOOLS's maestro-verb entry moved -- update both sites"
     rules = [f"Bash(maestro {verb}:*)" for verb in _AGENT_TOOL_VERBS]
     if cfg.reconcile_web_tools:
         rules += ["WebSearch", "WebFetch"]
@@ -393,6 +401,8 @@ def cmd_doctor(args) -> int:
     rpt["rate_limit"] = ratelimit.status(cfg.home, now)
     rpt["repo_preflight"] = disp.repo_preflight(cfg)
     _print(rpt)
+    if getattr(args, "strict", False) and any(c["status"] != "ok" for c in rpt["checks"]):
+        return 1
     return 1 if rpt["runaway"] else 0
 
 
@@ -1017,7 +1027,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--session", help="select a specific session_id")
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
-    add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
+    sp = add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
+    sp.add_argument("--strict", action="store_true",
+                    help="exit 1 when any check is not ok (default: only the runaway check gates exit code)")
 
     sp = add("why", cmd_why, "recent dispatcher decisions for one key (derived/dispatch.jsonl tail)")
     sp.add_argument("key")

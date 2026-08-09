@@ -56,6 +56,13 @@ class Config:
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
     user_commands_dir: str | None = None
+    # GA-16: override for the doctor permission-surface check's user-scope settings
+    # layer (Claude Code resolves permissions across a repo's settings.local.json/
+    # settings.json AND this file). None = ~/.claude/settings.json
+    # (MAESTRO_USER_SETTINGS_PATH env var takes precedence over this when set --
+    # see health.user_settings_path). Injectable so no test ever reads a
+    # developer's real ~/.claude/settings.json.
+    user_settings_path: str | None = None
     # [repos.<name>] tables: name -> {path, slug, base_branch, branch_prefix, default}.
     # Optional -- when empty, repos.resolve() synthesizes an implicit default binding
     # from repo_path/branch_prefix so every existing single-repo config works untouched.
@@ -167,6 +174,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
+        cfg.user_settings_path = m.get("user_settings_path", cfg.user_settings_path)
         raw_repos = data.get("repos", {})
         if isinstance(raw_repos, dict):
             for name, table in raw_repos.items():
