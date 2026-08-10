@@ -187,6 +187,38 @@ def check_claim_age(cfg: Config, now: float) -> dict:
     }
 
 
+def check_claim_no_output(cfg: Config, now: float) -> dict:
+    """Distinct from ``check_claim_age`` above -- names the OTHER watchdog clock
+    (``dispatcher.run_watchdog``'s no-output rule) so a wedged-but-young claim
+    (fresh epoch, silent log) shows up under its own name instead of being
+    invisible to `claim_age`, which only tracks wall-clock age. Exempt for a
+    claim with no `log_path` (no output signal, same exemption the watchdog
+    itself applies)."""
+    timeout = cfg.no_output_timeout
+    if not timeout:
+        return {"name": "claim_no_output", "status": "ok", "detail": "no-output watchdog disabled",
+                "stale_key": None, "stale_age_s": None}
+    stale_key = None
+    stale_age = None
+    for key, claim in claims.all_claims(cfg.home).items():
+        log_path = claim.get("log_path")
+        if not log_path:
+            continue
+        try:
+            age = now - os.stat(log_path).st_mtime
+        except OSError:
+            continue
+        if age > timeout and (stale_age is None or age > stale_age):
+            stale_key, stale_age = key, age
+    warn = stale_key is not None
+    return {
+        "name": "claim_no_output", "status": "warn" if warn else "ok",
+        "detail": (f"{stale_key} has produced no session output for {round(stale_age)}s"
+                   if warn else "no stale-output claims"),
+        "stale_key": stale_key, "stale_age_s": round(stale_age) if warn else None,
+    }
+
+
 def check_launchctl(cfg: Config, now: float | None = None, *, run=None) -> dict:
     # ``now`` is unused -- accepted only so this check has the same
     # ``(cfg, now, **kw)`` shape as every other CHECKS entry, letting
@@ -569,8 +601,8 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 # appending, or reordering an entry here is enough to include it; only
 # check_heartbeat's plist override is special-cased, by identity, since it's
 # the one check with a caller-supplied kwarg to thread through.
-CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
-          check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
+CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
+          check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
           check_daily_spend, check_gh_credential_reachability, check_launchctl)
 

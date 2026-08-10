@@ -1388,16 +1388,19 @@ def test_config_parses_watchdog_knobs(home):
     from maestro import config as config_mod
 
     store.atomic_write(home / "config.toml",
-                       "[maestro]\nmax_session_seconds = 999\nmax_spawn_attempts = 7\n")
+                       "[maestro]\nmax_session_seconds = 999\nmax_spawn_attempts = 7\n"
+                       "no_output_timeout = 42\n")
     cfg = config_mod.load(str(home))
     assert cfg.max_session_seconds == 999
     assert cfg.max_spawn_attempts == 7
+    assert cfg.no_output_timeout == 42
 
 
 def test_watchdog_knobs_documented_in_sample_config():
     from maestro.config import DEFAULT_CONFIG_TOML
     assert "max_session_seconds" in DEFAULT_CONFIG_TOML
     assert "max_spawn_attempts" in DEFAULT_CONFIG_TOML
+    assert "no_output_timeout" in DEFAULT_CONFIG_TOML
 
 
 def test_max_concurrency_documents_sub_agent_amplification():
@@ -1510,6 +1513,99 @@ def test_dispatch_runs_watchdog_before_computing_active(home, cfg):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+def test_watchdog_reaps_claim_with_stale_output_log(home, cfg, tmp_path):
+    """AC: a claim whose session log hasn't been mtime-touched within
+    no_output_timeout is reaped -- released, failed with a no-output reason,
+    excluded from active, and its pid passed to an injected killer."""
+    cfg.no_output_timeout = 300
+    cfg.max_session_seconds = 7200  # far larger -- isolates the no-output rule
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    log_file = tmp_path / "T-1.jsonl"
+    log_file.write_text("{}\n")
+    stale = store.now_epoch() - 1000
+    os.utime(log_file, (stale, stale))
+    claims.write_claim(home, "T-1", 424242, "reconcile-T-1", log_path=str(log_file))
+
+    killed = []
+    reaped = disp.run_watchdog(cfg, now=store.now_epoch(), kill=killed.append)
+
+    assert reaped == ["T-1"]
+    assert killed == [424242]                            # pid passed to the injected killer
+    assert claims.read_claim(home, "T-1") is None         # claim released
+    assert "T-1" not in claims.active_keys(home)
+    events = event_log.read(home, "T-1")
+    failed = [e for e in events if e["type"] == "Failed"]
+    assert failed and "no output" in failed[-1]["payload"]["error"]
+
+
+def test_watchdog_no_output_rule_independent_of_claim_epoch(home, cfg, tmp_path):
+    """AC: a freshly-mtimed log is NOT reaped even when the claim epoch is far
+    past no_output_timeout -- the two clocks are independent."""
+    cfg.no_output_timeout = 300
+    cfg.max_session_seconds = 0  # isolate: only the no-output rule can fire
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    log_file = tmp_path / "T-1.jsonl"
+    log_file.write_text("{}\n")  # just written -- mtime is now
+    claims.write_claim(home, "T-1", 424242, "reconcile-T-1", log_path=str(log_file))
+    _age_claim(home, "T-1", store.now_epoch() - 10_000)  # epoch ancient, log fresh
+
+    reaped = disp.run_watchdog(cfg, now=store.now_epoch())
+
+    assert reaped == []
+    assert claims.read_claim(home, "T-1") is not None
+
+
+def test_watchdog_claim_without_log_path_survives_no_output_rule(home, cfg):
+    """AC: a claim recorded with no log_path (capture_session_logs = false) is
+    exempt from the no-output rule -- missing data never reaps."""
+    cfg.no_output_timeout = 300
+    cfg.max_session_seconds = 7200  # young epoch below this -- age rule can't fire either
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    claims.write_claim(home, "T-1", 424242, "reconcile-T-1")  # no log_path
+
+    reaped = disp.run_watchdog(cfg, now=store.now_epoch())
+
+    assert reaped == []
+    assert claims.read_claim(home, "T-1") is not None
+
+
+def test_watchdog_claim_without_log_path_still_reaped_by_age_rule(home, cfg):
+    """AC: a claim with no log_path falls through to the age-based rule --
+    it isn't blanket-exempted from the watchdog, just from the no-output check."""
+    cfg.no_output_timeout = 300
+    cfg.max_session_seconds = 100
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    claims.write_claim(home, "T-1", 424242, "reconcile-T-1")  # no log_path
+    _age_claim(home, "T-1", store.now_epoch() - 10_000)
+
+    reaped = disp.run_watchdog(cfg, now=store.now_epoch(), kill=lambda pid: None)
+
+    assert reaped == ["T-1"]
+    assert claims.read_claim(home, "T-1") is None
+
+
+def test_watchdog_no_output_timeout_zero_disables_rule(home, cfg, tmp_path):
+    """AC: no_output_timeout = 0 disables the no-output rule entirely -- a
+    sweep reaps exactly the keys the age-only rule would have reaped before
+    this ticket, even with a stale log on a claim that's otherwise young."""
+    cfg.no_output_timeout = 0
+    cfg.max_session_seconds = 100
+    _seed(home, "T-1", Phase.IMPLEMENTING)  # aged claim, no log -- reaped by age
+    claims.write_claim(home, "T-1", 424242, "reconcile-T-1")
+    _age_claim(home, "T-1", store.now_epoch() - 10_000)
+    _seed(home, "T-2", Phase.IMPLEMENTING)  # young claim, stale log -- untouched
+    log_file = tmp_path / "T-2.jsonl"
+    log_file.write_text("{}\n")
+    stale = store.now_epoch() - 1_000_000
+    os.utime(log_file, (stale, stale))
+    claims.write_claim(home, "T-2", 434343, "reconcile-T-2", log_path=str(log_file))
+
+    reaped = disp.run_watchdog(cfg, now=store.now_epoch(), kill=lambda pid: None)
+
+    assert reaped == ["T-1"]
+    assert claims.read_claim(home, "T-2") is not None
 
 
 # --- T-45: a 0-turn "Unknown command" spawn is a structural failure, not a

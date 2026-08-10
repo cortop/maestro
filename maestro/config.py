@@ -36,6 +36,14 @@ class Config:
     # Watchdog: fail a key instead of respawning once it has been spawned this many
     # times with observed_seq unchanged (no progress). Resets the moment seq advances.
     max_spawn_attempts: int = 5
+    # Watchdog: reap a claim whose session LOG hasn't been written to in this many
+    # seconds (0 disables) -- catches a wedged-but-alive session (no output, no
+    # error, no exit) long before max_session_seconds would ever trip, since
+    # `claims.active_keys` only checks pid-liveness. Independent of the age-based
+    # clock above (a fresh no-progress log resets this even past claim epoch age).
+    # Exempt when the claim has no `log_path` (capture_session_logs = false --
+    # missing data, never reap on it; falls back to the age-based rule only).
+    no_output_timeout: int = 600
     # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
     # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
     # by `maestro doctor` and the TUI fleet panel alongside today's actual spend.
@@ -192,6 +200,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.max_impl_turns = int(m.get("max_impl_turns", cfg.max_impl_turns))
         cfg.max_session_seconds = int(m.get("max_session_seconds", cfg.max_session_seconds))
         cfg.max_spawn_attempts = int(m.get("max_spawn_attempts", cfg.max_spawn_attempts))
+        cfg.no_output_timeout = int(m.get("no_output_timeout", cfg.no_output_timeout))
         raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
         cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
         raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
@@ -326,6 +335,10 @@ max_impl_turns = 20
                                   # sessions legitimately run 30-60+ min.
 # max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
                                   # zero progress (observed_seq unchanged)
+# no_output_timeout = 600         # kill+fail a claim whose session LOG hasn't been written
+                                  # to in this many seconds (0 disables); independent of
+                                  # max_session_seconds above. Exempt when the claim has no
+                                  # log_path (capture_session_logs = false).
 daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # session spend reaches this (enforced, not advisory;
                                   # surfaced by `maestro doctor` + the TUI fleet panel).

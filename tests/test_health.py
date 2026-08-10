@@ -312,6 +312,50 @@ def test_doctor_cli_warns_and_names_key_for_mid_threshold_claim(home):
     assert check["oldest_key"] == "T-1"
 
 
+def test_check_claim_no_output_ok_with_no_claims(home, cfg):
+    result = health.check_claim_no_output(cfg, store.now_epoch())
+    assert result == {"name": "claim_no_output", "status": "ok", "detail": "no stale-output claims",
+                       "stale_key": None, "stale_age_s": None}
+
+
+def test_check_claim_no_output_disabled_when_timeout_zero(home, cfg, tmp_path):
+    cfg.no_output_timeout = 0
+    log_file = tmp_path / "T-1.jsonl"
+    log_file.write_text("{}\n")
+    old = store.now_epoch() - 1_000_000
+    os.utime(log_file, (old, old))
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1", log_path=str(log_file))
+
+    result = health.check_claim_no_output(cfg, store.now_epoch())
+    assert result["status"] == "ok"
+    assert result["detail"] == "no-output watchdog disabled"
+
+
+def test_check_claim_no_output_warns_on_stale_log(home, cfg, tmp_path):
+    """AC5: distinguishable by name from `claim_age` -- this fires purely off
+    log mtime, independent of claim epoch."""
+    cfg.no_output_timeout = 300
+    log_file = tmp_path / "T-1.jsonl"
+    log_file.write_text("{}\n")
+    old = store.now_epoch() - 1000
+    os.utime(log_file, (old, old))
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1", log_path=str(log_file))
+
+    result = health.check_claim_no_output(cfg, store.now_epoch())
+    assert result["name"] == "claim_no_output"
+    assert result["status"] == "warn"
+    assert result["stale_key"] == "T-1"
+    assert result["stale_age_s"] >= 1000
+
+
+def test_check_claim_no_output_exempts_claim_with_no_log_path(home, cfg):
+    cfg.no_output_timeout = 300
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")  # no log_path
+
+    result = health.check_claim_no_output(cfg, store.now_epoch())
+    assert result["status"] == "ok"
+
+
 def test_check_launchctl_ok_when_not_loaded(cfg):
     def fake_run(*a, **k):
         return subprocess.CompletedProcess(a[0], 1, stdout="")
@@ -450,7 +494,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     code, out = _sweep(home)
     assert code == 0
     names = {c["name"] for c in out["checks"]}
-    assert names == {"heartbeat", "backup_age", "claim_age", "dead_letters",
+    assert names == {"heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
                       "depends_on", "launchctl", "repo_preflight",
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend",
@@ -499,12 +543,15 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     """AC3: real `maestro doctor` (JSON stdout) over a temp MAESTRO_HOME prints
     the same check-name set and the same exit code (0) as the captured
     pre-change baseline -- iterating CHECKS instead of slicing it must not
-    add, drop, or rename a single check."""
+    add, drop, or rename a single check. (T-48 legitimately grew the registry
+    by one -- `claim_no_output` -- after this baseline was captured; folded in
+    here rather than re-captured, since T-46's own invariant, "iterating
+    doesn't silently add/drop/rename", still holds for every other name.)"""
     baseline_names = {
-        "heartbeat", "backup_age", "claim_age", "dead_letters", "depends_on",
-        "repo_preflight", "unknown_repo_bindings", "missing_reconcile_skill",
-        "reconciler_permissions", "spawn_floor", "daily_spend",
-        "gh_credential_reachability", "launchctl",
+        "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
+        "depends_on", "repo_preflight", "unknown_repo_bindings",
+        "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
+        "daily_spend", "gh_credential_reachability", "launchctl",
     }
     code, out = _sweep(home)
     assert code == 0
