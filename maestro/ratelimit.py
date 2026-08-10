@@ -6,9 +6,11 @@ burned spawning into a wall the fleet had already hit).
 noticed on the very next sweep, not after a whole idle interval). It takes its
 candidate keys from the spawn ledger (``derived/.spawn_ledger.json`` — a rejected
 session dies in under a second, so ``claims`` has already forgotten it by the next
-sweep) and, for each key, resolves its newest session log via
-``sessions.list_sessions``. Only bytes appended since the last probe are read,
-via a byte-offset cursor in ``derived/.ratelimit_cursor.json`` (persisted through
+sweep) and, for each key, drains every stream-json session log via
+``sessions.list_sessions`` — not just the newest — so an older, still-un-drained
+log is never skipped just because a differently-formatted log became newest in
+the meantime. Only bytes appended since the last probe are read per log, via a
+byte-offset cursor in ``derived/.ratelimit_cursor.json`` (persisted through
 :func:`maestro.steplog.iter_records`, the repo's one stream-JSONL parser). On any
 record with ``type == "rate_limit_event"`` and ``rate_limit_info.status ==
 "rejected"`` it writes ``derived/.ratelimit.json``, keeping the max of any pause
@@ -96,45 +98,43 @@ def probe(cfg: Config, now: float) -> dict | None:
 
     for key in ledger:
         candidates = sessions_mod.list_sessions(home, key)
-        if not candidates:
-            continue
-        newest = candidates[0]
-        if newest["format"] != "stream-json":
-            continue  # text-format logs carry no parseable rate_limit_event
-        path = Path(newest["path"])
-        if not path.exists():
-            continue
-        log_id = str(path)
-        try:
-            size = path.stat().st_size
-        except OSError:
-            continue
-        start = cursor.get(log_id, 0)
-        if not isinstance(start, (int, float)) or start > size:
-            start = 0
-        pos = start
-        for offset, record in steplog.iter_records(path, start=start):
-            pos = offset
-            if record.get("type") != "rate_limit_event":
+        for candidate in candidates:
+            if candidate["format"] != "stream-json":
+                continue  # text-format logs carry no parseable rate_limit_event
+            path = Path(candidate["path"])
+            if not path.exists():
                 continue
-            info = record.get("rate_limit_info") or {}
-            if info.get("status") != "rejected":
+            log_id = str(path)
+            try:
+                size = path.stat().st_size
+            except OSError:
                 continue
-            pause_target, resets_at = _compute_paused_until(info.get("resetsAt"), now, cfg)
-            if pause_target <= now:
-                continue  # ratelimit_max_pause == 0: gate disabled
-            if best is None or pause_target > best.get("paused_until", 0):
-                best = {
-                    "paused_until": pause_target,
-                    "resets_at": resets_at,
-                    "rate_limit_type": info.get("rateLimitType"),
-                    "source_key": key,
-                    "source_log": log_id,
-                    "ts": store.iso_now(),
-                }
-        if pos != start:
-            cursor[log_id] = pos
-            cursor_changed = True
+            start = cursor.get(log_id, 0)
+            if not isinstance(start, (int, float)) or start > size:
+                start = 0
+            pos = start
+            for offset, record in steplog.iter_records(path, start=start):
+                pos = offset
+                if record.get("type") != "rate_limit_event":
+                    continue
+                info = record.get("rate_limit_info") or {}
+                if info.get("status") != "rejected":
+                    continue
+                pause_target, resets_at = _compute_paused_until(info.get("resetsAt"), now, cfg)
+                if pause_target <= now:
+                    continue  # ratelimit_max_pause == 0: gate disabled
+                if best is None or pause_target > best.get("paused_until", 0):
+                    best = {
+                        "paused_until": pause_target,
+                        "resets_at": resets_at,
+                        "rate_limit_type": info.get("rateLimitType"),
+                        "source_key": key,
+                        "source_log": log_id,
+                        "ts": store.iso_now(),
+                    }
+            if pos != start:
+                cursor[log_id] = pos
+                cursor_changed = True
 
     if cursor_changed:
         store.write_json(cursor_path, cursor)

@@ -265,6 +265,60 @@ def test_text_format_newest_log_is_skipped_without_raising(home, cfg):
 
 
 # ---------------------------------------------------------------------------
+# T-47: an older un-drained stream-json log must not be shadowed by a newer
+# log of a different format -- probe drains every stream-json candidate, not
+# just candidates[0].
+# ---------------------------------------------------------------------------
+
+def test_older_undrained_log_trips_pause_despite_newer_nonstream_log(home, cfg):
+    cfg.ratelimit_grace = 60
+    t0 = 10_000_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+
+    resets_at = t0 + 500
+    older_path = _write_stream_log(home, "T-1", t0, [_rate_limit_event("rejected", resets_at)])
+    # Newer log for the same key, but text-format -- under the old
+    # candidates[0]-only logic this would shadow the older log forever.
+    newer_path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0 + 1:.6f}.log"
+    newer_path.write_text("plain text transcript, not stream-json\n", encoding="utf-8")
+
+    t1 = t0 + 10
+    report = disp.dispatch(cfg, DryRunSessions(), now=t1)
+
+    state = store.read_json(home / "derived" / ".ratelimit.json", None)
+    assert state is not None
+    assert state["paused_until"] == resets_at + cfg.ratelimit_grace
+    assert state["source_log"] == str(older_path)
+    assert report.paused_until == state["paused_until"]
+
+
+def test_all_stream_json_home_state_byte_identical_to_baseline(home, cfg):
+    """A home where every key has exactly one (newest-and-only) stream-json log
+    exercises the single-candidate loop body, unchanged by the multi-candidate
+    fix -- its on-disk state must match the pre-fix baseline byte-for-byte."""
+    cfg.ratelimit_grace = 60
+    t0 = 12_000_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    resets_at = t0 + 500
+    path = _write_stream_log(home, "T-1", t0, [_rate_limit_event("rejected", resets_at)])
+
+    disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
+
+    state = store.read_json(home / "derived" / ".ratelimit.json", None)
+    assert state is not None
+    expected = {
+        "paused_until": float(resets_at) + cfg.ratelimit_grace,
+        "resets_at": float(resets_at),
+        "rate_limit_type": "five_hour",
+        "source_key": "T-1",
+        "source_log": str(path),
+        "ts": state["ts"],
+    }
+    expected_bytes = json.dumps(expected, indent=2, sort_keys=True).encode("utf-8")
+    assert (home / "derived" / ".ratelimit.json").read_bytes() == expected_bytes
+
+
+# ---------------------------------------------------------------------------
 # AC5: real CLI surface (doctor / ratelimit / ratelimit --clear)
 # ---------------------------------------------------------------------------
 
