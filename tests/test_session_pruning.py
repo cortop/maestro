@@ -21,6 +21,8 @@ def _make_log(home: Path, key: str, epoch: float, fmt: str = "log") -> Path:
     session_id = f"{session_name(key)}-{epoch:.6f}"
     if fmt == "stream-json":
         path = store.session_stream_path(home, key, session_id)
+    elif fmt == "opencode":
+        path = store.session_opencode_path(home, key, session_id)
     else:
         path = store.session_log_path(home, key, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,6 +154,19 @@ def test_prune_never_removes_live_session_by_max(home):
     assert not files[2].exists()
     assert not files[3].exists()
     assert count == 2
+
+
+def test_prune_never_removes_live_session_naming_a_third_format_log(home):
+    """AC2 (RF-3): a live claim's log_path naming a third-format ('opencode') log
+    must survive pruning, exactly like the .log/.stream.jsonl cases above --
+    _prune_plan's suffix-stripping must recognize all three."""
+    live = _make_log(home, "T-1", NOW - 10 * 86400, fmt="opencode")
+    older = _make_log(home, "T-1", NOW - 20 * 86400, fmt="log")
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1", log_path=str(live))
+    count, nbytes = prune_session_logs(_cfg(home, session_log_retention_days=5), "T-1", now=NOW)
+    assert live.exists()
+    assert not older.exists()
+    assert count == 1
 
 
 def test_prune_removes_session_whose_pid_is_dead(home):

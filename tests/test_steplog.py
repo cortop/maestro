@@ -253,3 +253,11 @@ def test_session_outcome_unknown_for_plain_text_log(tmp_path):
     p = tmp_path / "reconcile-T-1-1.log"
     p.write_text("plain text output\n", encoding="utf-8")
     assert session_outcome(p)["outcome"] == "unknown"
+
+
+def test_session_outcome_unknown_never_running_for_third_format_log(tmp_path):
+    """RF-3: a non-Claude session's own log grammar reports 'unknown', not 'running'
+    -- session_outcome's suffix guard only recognizes '.stream.jsonl' as parseable."""
+    p = tmp_path / "reconcile-T-1-1.opencode.jsonl"
+    p.write_text(json.dumps({"type": "result", "subtype": "success"}) + "\n", encoding="utf-8")
+    assert session_outcome(p)["outcome"] == "unknown"

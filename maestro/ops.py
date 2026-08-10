@@ -898,9 +898,15 @@ def _prune_plan(cfg: Config, key: str, *, now: float | None = None) -> list[dict
         lp = claim.get("log_path")
         if lp:
             live_paths.add(lp)
-            stem = lp.removesuffix(".stream.jsonl").removesuffix(".log")
+            # RF-3: strip whichever of the three known suffixes lp actually has, then
+            # reconstruct all three siblings -- a live session is exactly one file, but
+            # exclude-by-stem regardless of which format it happens to be logged in.
+            stem = (lp.removesuffix(".stream.jsonl")
+                      .removesuffix(".opencode.jsonl")
+                      .removesuffix(".log"))
             live_paths.add(stem + ".log")
             live_paths.add(stem + ".stream.jsonl")
+            live_paths.add(stem + ".opencode.jsonl")
 
     # Group files by session_id so .log and .stream.jsonl for the same session
     # are treated as one unit for the "max" limit.
