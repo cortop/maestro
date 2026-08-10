@@ -400,6 +400,59 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
+# --- T-46: run_checks iterates CHECKS instead of slicing it --------------------
+
+
+def test_run_checks_surfaces_a_stub_check_at_any_registry_position(cfg, monkeypatch):
+    """AC1: a stub check inserted into health.CHECKS surfaces in run_checks'
+    results whether it's prepended, spliced into the middle, or appended --
+    proving run_checks iterates the whole registry rather than slicing off a
+    fixed prefix/suffix."""
+    def stub(name):
+        def _check(cfg, now, **kw):
+            return {"name": name, "status": "ok", "detail": "stub"}
+        return _check
+
+    original = health.CHECKS
+    mid = len(original) // 2
+    positions = {
+        "position 0": (stub("stub_check"),) + original,
+        "the middle": original[:mid] + (stub("stub_check"),) + original[mid:],
+        "the end": original + (stub("stub_check"),),
+    }
+    for where, checks in positions.items():
+        monkeypatch.setattr(health, "CHECKS", checks)
+        names = {r["name"] for r in health.run_checks(cfg, 1000)}
+        assert "stub_check" in names, f"stub inserted at {where} did not surface"
+
+
+def test_run_checks_calls_heartbeat_once_and_launchctl_is_registered(cfg):
+    """AC2: check_heartbeat must not run twice -- once explicitly, once again
+    via the registry -- and check_launchctl must be a genuine CHECKS entry,
+    not appended out-of-band after the loop."""
+    checks = health.run_checks(cfg, 1000)
+    names = [r["name"] for r in checks]
+    assert names.count("heartbeat") == 1
+    assert "launchctl" in names
+    assert health.check_launchctl in health.CHECKS
+
+
+def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
+    """AC3: real `maestro doctor` (JSON stdout) over a temp MAESTRO_HOME prints
+    the same check-name set and the same exit code (0) as the captured
+    pre-change baseline -- iterating CHECKS instead of slicing it must not
+    add, drop, or rename a single check."""
+    baseline_names = {
+        "heartbeat", "backup_age", "claim_age", "dead_letters", "depends_on",
+        "repo_preflight", "unknown_repo_bindings", "missing_reconcile_skill",
+        "reconciler_permissions", "spawn_floor", "daily_spend",
+        "gh_credential_reachability", "launchctl",
+    }
+    code, out = _sweep(home)
+    assert code == 0
+    assert {c["name"] for c in out["checks"]} == baseline_names
+
+
 # --- GA-8: negative min_spawn_interval rejected at load, 0 stays legal ---------
 
 

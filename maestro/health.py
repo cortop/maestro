@@ -170,7 +170,10 @@ def check_claim_age(cfg: Config, now: float) -> dict:
     }
 
 
-def check_launchctl(cfg: Config, *, run=None) -> dict:
+def check_launchctl(cfg: Config, now: float | None = None, *, run=None) -> dict:
+    # ``now`` is unused -- accepted only so this check has the same
+    # ``(cfg, now, **kw)`` shape as every other CHECKS entry, letting
+    # run_checks call the registry uniformly instead of special-casing it.
     kwargs = {"run": run} if run is not None else {}
     code = fleet.last_exit_code(cfg.home, **kwargs)
     fail = code is not None and code != 0
@@ -544,17 +547,20 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
+# Every entry is called uniformly as (cfg, now, **kw) -- run_checks below
+# iterates this tuple directly rather than slicing it, so prepending,
+# appending, or reordering an entry here is enough to include it; only
+# check_heartbeat's plist override is special-cased, by identity, since it's
+# the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_dead_letters,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
-          check_daily_spend, check_gh_credential_reachability)
+          check_daily_spend, check_gh_credential_reachability, check_launchctl)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
-    results = [check_heartbeat(cfg, now, plist=plist)]
-    results += [check(cfg, now) for check in CHECKS[1:]]
-    results.append(check_launchctl(cfg))
-    return results
+    return [check(cfg, now, plist=plist) if check is check_heartbeat else check(cfg, now)
+            for check in CHECKS]
 
 
 def report(cfg: Config, now: float, *, plist=None) -> dict:
