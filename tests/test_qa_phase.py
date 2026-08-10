@@ -111,7 +111,7 @@ def test_qa_spawn_denies_edit_and_write(home, cfg):
     _seed(home, "T-1", Phase.QA, tier=0)
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    _key, _prompt, _cwd, _model, _effort, disallowed, _allowed, _env = sessions.spawned[0]
+    _key, _prompt, _cwd, _model, _effort, disallowed, _allowed, *_ = sessions.spawned[0]
     assert "Edit" in disallowed
     assert "Write" in disallowed
 
