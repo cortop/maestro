@@ -14,6 +14,7 @@ import json
 import os
 import stat
 import subprocess
+from pathlib import Path
 
 from maestro import cli, config as config_mod, dispatcher as disp, event_log, providers, \
     snapshot as snap_mod, store
@@ -107,11 +108,16 @@ def _use_fake_vcs(cfg, monkeypatch, fake, *, interval=0):
     monkeypatch.setattr(providers, "get_vcs", lambda c: fake)
 
 
-# --- AC1: spawn cwd honors repo binding, unbound falls back to cfg.repo_path ---
+# --- AC1: spawn cwd honors repo binding (seeds the scratch dir), unbound
+# resolves through cfg.repo_path -- but (QW-7) never lands directly in either
+# repo, since both are shared checkouts a reconciler could otherwise edit ---
 
 def test_dispatch_spawn_cwd_is_owning_repo_for_bound_pre_worktree_ticket(home, tmp_path):
     _, beta_repo = make_origin_and_repo(tmp_path, "beta", base_branch="main")
     _, default_repo = make_origin_and_repo(tmp_path, "default", base_branch="main")
+    for repo in (beta_repo, default_repo):
+        (repo / ".claude" / "commands").mkdir(parents=True)
+        (repo / ".claude" / "commands" / "maestro-reconcile-triaging.md").write_text("# x\n")
     cfg = _write_config(home, repo_path=default_repo, repos={"beta": _repo_table(beta_repo)})
 
     assert cli.main(["--home", str(home), "create", "Unbound ticket",
@@ -123,8 +129,12 @@ def test_dispatch_spawn_cwd_is_owning_repo_for_bound_pre_worktree_ticket(home, t
     disp.dispatch(cfg, sessions, now=1000)
 
     cwd_by_key = {k: c for k, _p, c, _m, _e, _d, *_ in sessions.spawned}
-    assert cwd_by_key["U-1"] == str(default_repo)   # unbound -> cfg.repo_path, unchanged
-    assert cwd_by_key["B-1"] == str(beta_repo)       # bound -> its own repo, not the default
+    assert cwd_by_key["U-1"] == str(store.scratch_path(home, "U-1"))  # unbound -> seeded from cfg.repo_path
+    assert cwd_by_key["B-1"] == str(store.scratch_path(home, "B-1"))  # bound -> seeded from its own repo, not the default
+    assert (Path(cwd_by_key["U-1"]) / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve() \
+        == (default_repo / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve()
+    assert (Path(cwd_by_key["B-1"]) / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve() \
+        == (beta_repo / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve()
 
 
 # --- AC2: two-repo sync_worktrees routes only the affected repo ---

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -365,18 +366,115 @@ def test_worker_cwd_prefers_existing_worktree(home):
     assert disp._worker_cwd(cfg, "T-1") == wt
 
 
-def test_worker_cwd_falls_back_to_repo_before_worktree_exists(home, tmp_path):
-    # The first triage step runs before a worktree exists; it must land in the
-    # repo so the /maestro-reconcile command + skill resolve (home has neither).
+def test_worker_cwd_prefers_existing_worktree_in_local_mode_too(home, tmp_path):
+    # QW-7 AC4: a worktree dir literally present short-circuits before the
+    # mode branch is even consulted -- true for local mode as much as git.
+    target = tmp_path / "vault"
+    target.mkdir()
+    cfg = Config(home=home, repos={"vault": {"path": str(target), "mode": "local", "default": True}})
+    wt = home / "worktrees" / "T-1"
+    wt.mkdir(parents=True)
+    assert disp._worker_cwd(cfg, "T-1") == wt
+
+
+def test_worker_cwd_falls_back_to_scratch_dir_before_worktree_exists(home, tmp_path):
+    # QW-7: a git-mode ticket's pre-worktree fallback must never be binding.path
+    # (on this board, the human's own shared checkout) -- it lands in a per-key
+    # scratch dir instead, seeded with a symlink to .claude/commands so the
+    # phase's slash command still resolves from there.
     repo = tmp_path / "repo"
-    repo.mkdir()
+    commands_dir = repo / ".claude" / "commands"
+    commands_dir.mkdir(parents=True)
+    (commands_dir / "maestro-reconcile-triaging.md").write_text("# triaging\n")
     cfg = Config(home=home, repo_path=str(repo))
-    assert disp._worker_cwd(cfg, "T-1") == repo
+    cwd = disp._worker_cwd(cfg, "T-1")
+    assert cwd != repo
+    assert cwd == home / "scratch" / "T-1"
+    assert (cwd / ".claude" / "commands" / "maestro-reconcile-triaging.md").exists()
+
+
+def test_worker_cwd_scratch_dir_is_idempotent_and_relinks_on_repo_change(home, tmp_path):
+    repo_a = tmp_path / "repo-a"
+    (repo_a / ".claude" / "commands").mkdir(parents=True)
+    cfg = Config(home=home, repo_path=str(repo_a))
+    first = disp._worker_cwd(cfg, "T-1")
+    second = disp._worker_cwd(cfg, "T-1")  # a later sweep, same repo -- no error, same path
+    assert first == second == home / "scratch" / "T-1"
+
+    repo_b = tmp_path / "repo-b"
+    (repo_b / ".claude" / "commands").mkdir(parents=True)
+    (repo_b / ".claude" / "commands" / "maestro-reconcile-ready.md").write_text("# ready\n")
+    cfg.repo_path = str(repo_b)
+    third = disp._worker_cwd(cfg, "T-1")
+    assert third == home / "scratch" / "T-1"
+    assert (third / ".claude" / "commands" / "maestro-reconcile-ready.md").exists()
+
+
+def test_worker_cwd_local_mode_still_lands_in_binding_path(home, tmp_path):
+    # QW-7 AC3: mode == "local" (AD-6, the deliberate write-in-place case) keeps
+    # today's exact behavior -- always binding.path, never a scratch dir.
+    target = tmp_path / "vault"
+    target.mkdir()
+    cfg = Config(home=home, repos={"vault": {"path": str(target), "mode": "local", "default": True}})
+    assert disp._worker_cwd(cfg, "T-1") == target
 
 
 def test_worker_cwd_last_resort_is_home(home):
     cfg = Config(home=home, repo_path=None)
     assert disp._worker_cwd(cfg, "T-1") == home
+
+
+def test_dispatch_records_scratch_cwd_not_shared_checkout_for_triaging(home):
+    # QW-7 AC1+AC2: a real sweep over a git-mode binding with no worktree yet
+    # records a spawn cwd that is not binding.path, and that cwd can still
+    # resolve the phase's reconcile command.
+    repo = home / "repo"
+    commands_dir = repo / ".claude" / "commands"
+    commands_dir.mkdir(parents=True)
+    (commands_dir / "maestro-reconcile-triaging.md").write_text("# triaging\n")
+    cfg = Config(home=home, repo_path=str(repo), max_concurrency=1)
+    _seed(home, "T-1", Phase.TRIAGING)
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    assert report.spawned == ["T-1"]
+    cwd = sessions.spawned[0][2]
+    assert cwd != str(repo)
+    assert (Path(cwd) / ".claude" / "commands" / "maestro-reconcile-triaging.md").exists()
+
+
+def test_dispatch_still_records_binding_path_for_local_mode(home):
+    # QW-7 AC3, at the dispatch() level: local mode's spawn cwd is unaffected.
+    target = home / "vault"
+    target.mkdir()
+    cfg = Config(home=home, repos={"vault": {"path": str(target), "mode": "local", "default": True}},
+                max_concurrency=1)
+    _seed(home, "T-1", Phase.TRIAGING)
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    assert report.spawned == ["T-1"]
+    assert sessions.spawned[0][2] == str(target)
+
+
+@pytest.mark.parametrize("phase", [Phase.TRIAGING, Phase.READY, Phase.RESEARCHING, Phase.IMPLEMENTING])
+def test_dispatch_never_spawns_git_mode_ticket_into_shared_checkout(home, phase):
+    # QW-7: whatever phase a git-mode ticket without a worktree is in, the
+    # shared checkout must never be the recorded spawn cwd -- every
+    # pre-worktree phase file grants Write/Edit with acceptEdits, so landing
+    # there would let a reconciler edit the human's own working copy.
+    repo = home / "repo"
+    (repo / ".claude" / "commands").mkdir(parents=True)
+    cfg = Config(home=home, repo_path=str(repo), max_concurrency=1)
+    _seed(home, "T-1", phase)
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    assert report.spawned == ["T-1"]
+    assert sessions.spawned[0][2] != str(repo)
 
 
 # --- dependsOn gating ---
