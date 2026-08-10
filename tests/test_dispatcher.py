@@ -1512,6 +1512,148 @@ def test_dispatch_runs_watchdog_before_computing_active(home, cfg):
             proc.wait()
 
 
+# --- T-45: a 0-turn "Unknown command" spawn is a structural failure, not a
+# silently-released dead claim -------------------------------------------
+
+def _write_zero_turn_result(home, key, session_id, *, command="/maestro-reconcile-implementing"):
+    """A stream.jsonl holding only the terminal `result` record `claude -p`
+    writes when the resolved slash command doesn't exist in the session's
+    cwd -- no `system`/`assistant` records at all, since no turn ever ran.
+    Mirrors the exact shape from T-45's spec Intent: num_turns 0, cost 0,
+    is_error false, result text naming the missing command."""
+    log = store.session_stream_path(home, key, session_id)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    result = {
+        "type": "result", "subtype": "success", "is_error": False,
+        "num_turns": 0, "total_cost_usd": 0,
+        "result": f"Unknown command: {command}", "session_id": session_id,
+    }
+    log.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    return log
+
+
+def test_zero_turn_spawn_fails_and_dead_letters_on_first_detection(home, cfg):
+    """AC: a dead claim whose session's terminal result shows num_turns==0 is
+    failed -- naming the resolved command + cwd -- and dead-lettered on THIS,
+    the first, detection (never a backoff/retry: a missing command file won't
+    fix itself between sweeps)."""
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    session_id = "reconcile-T-1-1000.000000"
+    log = _write_zero_turn_result(home, "T-1", session_id)
+    dead_pid = 2_000_000_000  # almost certainly not a live pid
+    cwd = str(home / "worktrees" / "T-1")
+    prompt = "/maestro-reconcile-implementing T-1"
+    claims.write_claim(home, "T-1", dead_pid, "reconcile-T-1", log_path=str(log),
+                       cwd=cwd, prompt=prompt)
+
+    failed = disp.detect_zero_turn_spawns(cfg, now=store.now_epoch())
+
+    assert failed == ["T-1"]
+    assert claims.read_claim(home, "T-1") is None  # claim released
+
+    events = event_log.read(home, "T-1")
+    failed_events = [e for e in events if e["type"] == "Failed"]
+    assert len(failed_events) == 1
+    message = failed_events[0]["payload"]["error"]
+    assert prompt in message
+    assert cwd in message
+
+    snap = snap_mod.load(home, "T-1")
+    assert snap.failure_count == 1
+    assert snap.phase == Phase.DEGRADED.value  # dead-lettered, not backed off
+    assert any(e["type"] == "Stalled" for e in events)
+
+
+def test_zero_turn_spawn_leaves_live_session_untouched(home, cfg):
+    """AC: the existing watchdog is unchanged -- a session still running is
+    never touched by this detector, 0 turns so far or not."""
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    session_id = "reconcile-T-1-1000.000000"
+    log = store.session_stream_path(home, "T-1", session_id)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("", encoding="utf-8")  # no terminal result yet -- session still running
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1", log_path=str(log),
+                       cwd=str(home), prompt="/maestro-reconcile-implementing T-1")
+
+    assert disp.detect_zero_turn_spawns(cfg, now=store.now_epoch()) == []
+    assert claims.read_claim(home, "T-1") is not None
+    assert all(e["type"] != "Failed" for e in event_log.read(home, "T-1"))
+
+
+def test_zero_turn_spawn_leaves_real_progress_to_the_no_progress_watchdog(home, cfg):
+    """AC: a dead session that ran real turns (but appended nothing) is the
+    no-progress watchdog's territory, not this detector's -- left completely
+    untouched here, still gated by `_allow_spawn`/`max_spawn_attempts`."""
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    session_id = "reconcile-T-1-1000.000000"
+    log = store.session_stream_path(home, "T-1", session_id)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    result = {"type": "result", "subtype": "success", "is_error": False,
+              "num_turns": 3, "total_cost_usd": 0.01, "result": "did nothing useful",
+              "session_id": session_id}
+    log.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    dead_pid = 2_000_000_000
+    claims.write_claim(home, "T-1", dead_pid, "reconcile-T-1", log_path=str(log),
+                       cwd=str(home), prompt="/maestro-reconcile-implementing T-1")
+
+    assert disp.detect_zero_turn_spawns(cfg, now=store.now_epoch()) == []
+    assert claims.read_claim(home, "T-1") is not None  # left for active_keys() to release normally
+    assert all(e["type"] != "Failed" for e in event_log.read(home, "T-1"))
+
+
+class _ZeroTurnSessions(DryRunSessions):
+    """A stub `claude -p` spawn resolving to an unknown slash command (T-45):
+    exits before any tool runs, and by the time the dispatcher looks again
+    the process is already dead -- same "gone by next sweep" regime as
+    `_EphemeralSessions` above, but this one leaves behind the claim + real
+    stream log a genuine `ClaudeCliSessions.spawn()` would have written, so
+    the dispatcher's own detection has something concrete to read."""
+
+    def __init__(self, home):
+        super().__init__()
+        self._home = home
+        self._n = 0
+
+    def list_active(self) -> set[str]:
+        return set()
+
+    def spawn(self, key, prompt, cwd, model=None, effort=None,
+              disallowed_tools=None, allowed_tools=None, env_overlay=None):
+        super().spawn(key, prompt, cwd, model=model, effort=effort,
+                      disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
+                      env_overlay=env_overlay)
+        self._n += 1
+        session_id = f"reconcile-{key}-{self._n}.000000"
+        command = prompt.split()[0]
+        log = _write_zero_turn_result(self._home, key, session_id, command=command)
+        claims.write_claim(self._home, key, 2_000_000_000, f"reconcile-{key}",
+                           log_path=str(log), cwd=str(cwd), prompt=prompt)
+        return None
+
+
+def test_dispatch_detects_zero_turn_spawn_on_the_very_next_sweep(home, cfg):
+    """End-to-end over the real dispatcher (AC): the sweep that spawns a
+    0-turn 'Unknown command' session is not itself the one that catches it
+    (the log doesn't exist until spawn() writes it) -- but the VERY NEXT
+    sweep does, not the Nth sweep of the no-progress watchdog."""
+    cfg.min_spawn_interval = 0
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    sessions = _ZeroTurnSessions(home)
+    now = 1_000_000
+
+    r1 = disp.dispatch(cfg, sessions, now=now)
+    assert r1.spawned == ["T-1"]
+    assert snap_mod.load(home, "T-1").phase == Phase.IMPLEMENTING.value  # not yet detected
+
+    r2 = disp.dispatch(cfg, sessions, now=now + 1)
+
+    assert "T-1" in r2.reaped
+    events = event_log.read(home, "T-1")
+    assert any(e["type"] == "Failed" for e in events)
+    snap = snap_mod.load(home, "T-1")
+    assert snap.phase == Phase.DEGRADED.value
+
+
 def test_spawn_attempts_fail_after_max_with_no_progress(home, cfg):
     """AC: N spawns with zero new events (observed_seq never advances) convert
     into a failure instead of an infinite respawn loop -- looped over real

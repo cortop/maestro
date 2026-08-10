@@ -29,6 +29,25 @@ def test_release(home):
     assert claims.active_keys(home) == set()
 
 
+def test_write_claim_persists_cwd_and_prompt(home):
+    """T-45: a later sweep, finding this claim's process already dead, needs
+    the resolved reconcile command + session cwd to name in a Failed event --
+    both must survive on the claim itself, not just in the caller's locals."""
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1",
+                       cwd="/some/worktree/T-1",
+                       prompt="/maestro-reconcile-implementing T-1")
+    c = claims.read_claim(home, "T-1")
+    assert c["cwd"] == "/some/worktree/T-1"
+    assert c["prompt"] == "/maestro-reconcile-implementing T-1"
+
+
+def test_write_claim_omits_cwd_and_prompt_when_not_given(home):
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
+    c = claims.read_claim(home, "T-1")
+    assert "cwd" not in c
+    assert "prompt" not in c
+
+
 # ---------------------------------------------------------------------------
 # Verified identity (T-17): a three-valued verdict, matching process start time
 # (from real `ps`) against the claim's recorded epoch — pid reuse means the live

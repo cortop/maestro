@@ -768,13 +768,21 @@ def record_impl_turn(cfg: Config, key: str, *, role: str = "implementer",
     return {"turn": snap.impl_turns, "parked": parked}
 
 
-def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler") -> str:
-    """Record a failure; back off, or dead-letter if over the threshold."""
+def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler",
+         dead_letter: bool = False) -> str:
+    """Record a failure; back off, or dead-letter if over the threshold.
+
+    ``dead_letter=True`` (T-45) skips the failure-count threshold and
+    dead-letters on THIS call, for a structural failure a sweep-later retry
+    cannot possibly fix (e.g. a resolved reconcile command that doesn't exist
+    in the session's cwd) -- waiting out `max_failures` backed-off retries
+    first would just reproduce the respawn-forever bug this exists to stop.
+    """
     snap = snap_mod.load(cfg.home, key)
     _append(cfg, key, E.FAILED, {"error": error}, actor=actor,
             sid=step_id(key, snap.phase, snap.observed_seq, "fail"))
     snap = snap_mod.load(cfg.home, key)
-    if snap.failure_count >= cfg.max_failures:
+    if dead_letter or snap.failure_count >= cfg.max_failures:
         _append(cfg, key, E.STALLED, {"reason": f"{snap.failure_count} failures: {error}"},
                 actor=actor, sid=f"deadletter-{key}-{snap.observed_seq}")
         _write_deadletter(cfg, key, error)
