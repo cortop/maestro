@@ -75,11 +75,21 @@ def pid_alive(pid) -> bool:
 
 
 def write_claim(home: Path, key: str, pid: int, name: str,
-                *, log_path: str | None = None) -> None:
+                *, log_path: str | None = None, cwd: str | None = None,
+                prompt: str | None = None) -> None:
     data: dict = {"pid": pid, "name": name, "ts": store.iso_now(),
                   "epoch": store.now_epoch()}
     if log_path is not None:
         data["log_path"] = log_path
+    # T-45: the resolved reconcile command lives inside `prompt` (dispatcher
+    # builds it as f"{command} {key}") and `cwd` is the session's worktree --
+    # both cheap to stash here at spawn time so a later sweep, finding the
+    # process already dead, can name them in a `Failed` event without having
+    # to re-derive them (the ticket's phase may not even be the same anymore).
+    if cwd is not None:
+        data["cwd"] = cwd
+    if prompt is not None:
+        data["prompt"] = prompt
     store.write_json(claim_path(home, key), data)
 
 

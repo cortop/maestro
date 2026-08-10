@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import alarm, claims, credentials, events as E
-from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, store
+from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
 from .config import Config
 from .gates import needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
 from .idempotency import content_hash
@@ -1138,6 +1138,56 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
     return reaped
 
 
+def detect_zero_turn_spawns(cfg: Config, now: float) -> list[str]:
+    """Fail, on sight, any dead claim whose session's terminal ``result`` shows
+    ``num_turns == 0`` (T-45) -- e.g. a resolved reconcile command that doesn't
+    exist in the session's cwd: ``claude -p`` returns in ~24ms with
+    ``result: "Unknown command: ..."`` before any tool could run, so no event
+    could possibly have been appended. That is a structural failure the FIRST
+    time it happens; left alone, ``active_keys()`` (called right after this,
+    to compute ``active``) would silently release the claim as just another
+    dead session and the ticket would simply respawn next sweep, forever.
+
+    Must run before ``active = sessions.list_active()`` -- once that call
+    releases a stale claim (its normal job), the ``log_path``/``cwd``/
+    ``prompt`` this needs are gone. A claim whose pid is still alive, whose
+    log is missing/not-yet-terminal, or whose session ran >=1 turn is left
+    completely untouched -- that's the existing no-progress watchdog's
+    territory (``_allow_spawn``/``max_spawn_attempts``), not this one's: a
+    session that runs but appends nothing still needs N sweeps of that
+    counter, unchanged.
+    """
+    home = cfg.home
+    failed: list[str] = []
+    for key, claim in claims.all_claims(home).items():
+        if claims.pid_alive(claim.get("pid")):
+            continue
+        log_path = claim.get("log_path")
+        if not log_path:
+            continue
+        p = Path(log_path)
+        if not p.exists() or not p.name.endswith(".stream.jsonl"):
+            continue
+        result = steplog.session_outcome(p).get("result")
+        if not result or result.get("num_turns") != 0:
+            continue  # no terminal result yet, or it ran real turns
+        claims.release(home, key)
+        from . import ops
+        command = claim.get("prompt", "?")
+        cwd = claim.get("cwd", "?")
+        message = result.get("result", "")
+        # Dead-letter on this, the first, offence -- a missing/broken reconcile
+        # command will not fix itself between sweeps, so backing off and
+        # retrying (ops.fail's default) would just respawn into the same
+        # 0-turn death; see T-45's spec Notes for the retry-vs-dead-letter call.
+        ops.fail(cfg, key,
+                f"0-turn spawn: reconcile command {command!r} in cwd {cwd!r} exited "
+                f"before any tool ran ({message!r})",
+                actor="dispatcher", dead_letter=True)
+        failed.append(key)
+    return failed
+
+
 def _spawn_attempts_path(home: Path) -> Path:
     return home / "derived" / ".spawn_attempts.json"
 
@@ -1477,6 +1527,10 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # toward concurrency, and a reaped key needs to be re-fold-visible (fail
         # appends an event) before this sweep's due-check reads its snapshot.
         reaped = _run_hook("watchdog", hook_errors, run_watchdog, cfg, now, default=[])
+        # T-45: same ordering requirement -- must run before `active_keys()`
+        # (below) silently releases a dead-and-never-ran claim as unremarkable.
+        reaped += _run_hook("detect_zero_turn_spawns", hook_errors,
+                            detect_zero_turn_spawns, cfg, now, default=[])
 
         pruned_logs = 0
         pruned_bytes = 0

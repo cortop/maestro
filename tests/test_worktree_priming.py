@@ -68,9 +68,15 @@ def test_ensure_creates_worktree_off_base_branch(home, tmp_path):
 
 
 def test_ensure_adopts_existing_branch(home, tmp_path):
+    """The legitimate resume case (T-44): this ticket's OWN event log already
+    shows it was `implementing` before -- e.g. a prior worktree was removed
+    after the reconciler already pushed commits to its branch -- so the
+    fallback is allowed to re-adopt that branch."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
     cfg = _write_config(home, repo)
     _seed_spec(home, "G-2")
+    event_log.append(home, "G-2", "PhaseChanged", {"phase": "implementing", "reason": "test setup"},
+                     actor="test-setup")
 
     # A branch already exists (e.g. a prior worktree was removed after merge)
     # but the worktree dir does not.
@@ -82,6 +88,40 @@ def test_ensure_adopts_existing_branch(home, tmp_path):
     branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"],
                             capture_output=True, text=True, check=True).stdout.strip()
     assert branch == "maestro/G-2"
+
+
+def test_ensure_refuses_to_adopt_stale_branch_without_prior_implementing_history(home, tmp_path, capsys):
+    """T-44, reproducing the 2026-08-09 shape end-to-end: a pre-existing
+    `maestro/<KEY>` branch left behind by an EARLIER incarnation of this key,
+    forked from a base that has since moved on -- and this ticket's own event
+    log has no prior `implementing` phase, so this run has never touched that
+    branch. The adopt fallback must refuse (MaestroError, no event appended,
+    non-zero exit, the branch named and archive/rename suggested) rather than
+    silently binding this run to a stranger's history."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "R-1")
+
+    # A branch already exists for this key -- left over from an earlier
+    # incarnation -- forked from a base commit that origin has since moved
+    # past.
+    _git("branch", "maestro/R-1", cwd=repo)
+    (repo / "README.md").write_text("main moved on\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "main moved on", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    assert event_log.read(home, "R-1") == []  # no prior implementing history
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "R-1"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "maestro/R-1" in err
+    assert "archive" in err.lower() or "rename" in err.lower()
+
+    assert not store.worktree_path(home, "R-1").exists()
+    assert event_log.read(home, "R-1") == []
 
 
 def test_ensure_is_noop_when_worktree_already_exists(home, tmp_path):

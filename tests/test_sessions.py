@@ -57,6 +57,21 @@ def test_no_log_path_in_claim_when_capture_disabled(home):
     assert "log_path" not in c
 
 
+def test_cwd_and_prompt_stored_in_claim(home):
+    """T-45: a later sweep detecting a dead, never-ran session needs the
+    resolved reconcile command + cwd, sourced straight from the spawn() call
+    that started it -- not re-derived from (possibly stale, by then) state."""
+    sess = _make_sessions(home)
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    worktree = home / "worktrees" / "T-1"
+    with patch("subprocess.Popen", return_value=fake_proc):
+        sess.spawn("T-1", "/maestro-reconcile-implementing T-1", cwd=worktree)
+    c = claims.read_claim(home, "T-1")
+    assert c["cwd"] == str(worktree)
+    assert c["prompt"] == "/maestro-reconcile-implementing T-1"
+
+
 def test_distinct_keys_write_distinct_log_files(home):
     _fake_popen(home, "T-1", capture=True, clock_val=1_000.0)
     _fake_popen(home, "T-2", capture=True, clock_val=2_000.0)

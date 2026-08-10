@@ -155,18 +155,35 @@ def check_backup_age(cfg: Config, now: float) -> dict:
     }
 
 
+# QW-4: warn at this fraction of max_session_seconds, well before the watchdog's own
+# reap threshold -- warning AT the reap threshold (the old behavior) means the watchdog
+# already killed the claim by the time doctor could ever observe it as "warn", making
+# the one signal that should surface a wedge unreachable in practice.
+CLAIM_AGE_WARN_FRACTION = 0.5
+
+
 def check_claim_age(cfg: Config, now: float) -> dict:
-    ages = {k: now - c.get("epoch", now) for k, c in claims.all_claims(cfg.home).items()}
+    claim_data = claims.all_claims(cfg.home)
+    ages = {k: now - c.get("epoch", now) for k, c in claim_data.items()}
     if not ages:
         return {"name": "claim_age", "status": "ok", "detail": "no live claims",
-                "oldest_key": None, "oldest_age_s": None}
+                "oldest_key": None, "oldest_age_s": None, "stale_output_s": None}
     oldest_key, oldest_age = max(ages.items(), key=lambda kv: kv[1])
     threshold = cfg.max_session_seconds or None
-    warn = bool(threshold) and oldest_age > threshold
+    warn_threshold = threshold * CLAIM_AGE_WARN_FRACTION if threshold else None
+    warn = bool(warn_threshold) and oldest_age > warn_threshold
+    stale_output_s = None
+    log_path = claim_data[oldest_key].get("log_path")
+    if log_path:
+        try:
+            stale_output_s = round(now - Path(log_path).stat().st_mtime)
+        except OSError:
+            stale_output_s = None
     return {
         "name": "claim_age", "status": "warn" if warn else "ok",
         "detail": f"oldest claim {oldest_key} is {round(oldest_age)}s old",
         "oldest_key": oldest_key, "oldest_age_s": round(oldest_age),
+        "stale_output_s": stale_output_s,
     }
 
 
@@ -202,7 +219,10 @@ def check_claim_no_output(cfg: Config, now: float) -> dict:
     }
 
 
-def check_launchctl(cfg: Config, *, run=None) -> dict:
+def check_launchctl(cfg: Config, now: float | None = None, *, run=None) -> dict:
+    # ``now`` is unused -- accepted only so this check has the same
+    # ``(cfg, now, **kw)`` shape as every other CHECKS entry, letting
+    # run_checks call the registry uniformly instead of special-casing it.
     kwargs = {"run": run} if run is not None else {}
     code = fleet.last_exit_code(cfg.home, **kwargs)
     fail = code is not None and code != 0
@@ -576,17 +596,20 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
+# Every entry is called uniformly as (cfg, now, **kw) -- run_checks below
+# iterates this tuple directly rather than slicing it, so prepending,
+# appending, or reordering an entry here is enough to include it; only
+# check_heartbeat's plist override is special-cased, by identity, since it's
+# the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
-          check_daily_spend, check_gh_credential_reachability)
+          check_daily_spend, check_gh_credential_reachability, check_launchctl)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
-    results = [check_heartbeat(cfg, now, plist=plist)]
-    results += [check(cfg, now) for check in CHECKS[1:]]
-    results.append(check_launchctl(cfg))
-    return results
+    return [check(cfg, now, plist=plist) if check is check_heartbeat else check(cfg, now)
+            for check in CHECKS]
 
 
 def report(cfg: Config, now: float, *, plist=None) -> dict:

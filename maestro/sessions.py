@@ -190,7 +190,7 @@ class ClaudeCliSessions:
                 log_handle.close()
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
-                           log_path=log_path)
+                           log_path=log_path, cwd=str(cwd), prompt=prompt)
         return proc.pid
 
 
