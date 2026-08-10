@@ -60,6 +60,19 @@ def test_failure_backoff_then_deadletter(cfg):
     assert store.deadletter_path(home, "T-1").exists()
 
 
+def test_fail_dead_letter_skips_backoff_on_first_offense(cfg):
+    """T-45: `dead_letter=True` dead-letters on THIS call, ignoring
+    `max_failures` entirely -- for a structural failure a retry can't fix."""
+    home = cfg.home
+    _create(cfg, "T-1")
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING)
+    result = ops.fail(cfg, "T-1", "boom", dead_letter=True)  # 1st-ever failure
+    assert result == "dead-letter"
+    assert snap_mod.load(home, "T-1").failure_count == 1
+    assert snap_mod.load(home, "T-1").phase == Phase.DEGRADED.value
+    assert store.deadletter_path(home, "T-1").exists()
+
+
 def test_projection_never_reads_human_files(cfg):
     home = cfg.home
     _create(cfg, "T-1")
