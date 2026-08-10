@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from . import claims, credentials, dispatcher, fleet, skills_install, spend as spend_mod, store
 from . import snapshot as snap_mod
 from .config import Config
+from .providers import ollama as ollama_mod
 from .statemachine import Phase
 
 WINDOW_SECONDS = 3600
@@ -578,6 +580,82 @@ def check_gh_credential_reachability(cfg: Config, now: float, *, run=None) -> di
             "unreachable": unreachable}
 
 
+_RUNNER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
+
+
+def _spec_runner_fields(spec_text: str) -> tuple[str | None, str | None]:
+    """Read ``runner:``/``runner_model:`` straight off a spec's loose frontmatter
+    -- the same line-based scan ``gates.parse_spec_overrides`` uses (stop at the
+    first ``##`` header), kept as its own small helper here rather than folded
+    into that function: canonicalizing those two fields into
+    ``parse_spec_overrides``'s five-field allowlist is RF-2's (T-31) job, with
+    its own ACs pinning the exact behavior, and this check needs them before
+    that ticket lands. Malformed or absent lines simply read as ``None`` --
+    never raises."""
+    runner = model = None
+    for line in spec_text.splitlines():
+        if line.startswith("##"):
+            break
+        m = _RUNNER_FIELD_RE.match(line)
+        if not m:
+            continue
+        field, val = m.group(1), m.group(2).strip()
+        if field == "runner":
+            runner = val
+        elif field == "runner_model":
+            model = val
+    return runner, model
+
+
+def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
+    """WARN (never blocks a spawn) when a current ticket's spec names a
+    non-claude ``runner:`` whose ``runner_model:`` is absent from the local
+    ollama catalogue, or installed but not tool-capable
+    (``ollama.verdict_for_model``) -- OC-2's spawn preflight is the only place a
+    bad choice is actually refused; this is board-wide visibility only, one
+    sweep ahead of a wedge that would otherwise only surface as a spawn
+    failure.
+
+    Skips the network call entirely (``ok``, empty ``tickets``) when no
+    current ticket names a non-claude runner -- discovery must never cost a
+    request on a board with nothing to check. Injectable ``transport``, as
+    ``check_gh_credential_reachability``'s ``run`` kwarg already does, so tests
+    never hit a real daemon."""
+    home = cfg.home
+    candidates: list[tuple[str, str]] = []
+    for key in dispatcher.list_keys(home):
+        spec_file = store.spec_path(home, key)
+        if not spec_file.exists():
+            continue
+        runner, model = _spec_runner_fields(spec_file.read_text(encoding="utf-8"))
+        if runner and runner != "claude" and model:
+            candidates.append((key, model))
+
+    if not candidates:
+        return {"name": "ollama_models", "status": "ok", "detail": "no ticket uses a non-claude runner",
+                "tickets": {}}
+
+    models, reason = ollama_mod.fetch_models(transport=transport)
+    if models is None:
+        return {
+            "name": "ollama_models", "status": "warn",
+            "detail": f"ollama daemon unreachable ({reason}); "
+                      f"{len(candidates)} ticket(s) use a non-claude runner",
+            "tickets": {key: {"verdict": "unreachable", "model": model, "reason": reason}
+                        for key, model in candidates},
+        }
+
+    tickets = {}
+    for key, model in candidates:
+        verdict, vreason = ollama_mod.verdict_for_model(models, reason, model)
+        if verdict != "ok":
+            tickets[key] = {"verdict": verdict, "model": model, "reason": vreason}
+    status = "warn" if tickets else "ok"
+    detail = (f"{len(tickets)} ticket(s) name an absent or non-tool-capable ollama model"
+              if tickets else f"{len(candidates)} ticket(s) using a non-claude runner, all resolve ok")
+    return {"name": "ollama_models", "status": status, "detail": detail, "tickets": tickets}
+
+
 def check_depends_on(cfg: Config, now: float) -> dict:
     home = cfg.home
     graph = _depends_on_graph(home)
@@ -604,7 +682,7 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
-          check_daily_spend, check_gh_credential_reachability, check_launchctl)
+          check_daily_spend, check_gh_credential_reachability, check_launchctl, check_ollama_models)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
