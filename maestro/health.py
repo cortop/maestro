@@ -155,18 +155,35 @@ def check_backup_age(cfg: Config, now: float) -> dict:
     }
 
 
+# QW-4: warn at this fraction of max_session_seconds, well before the watchdog's own
+# reap threshold -- warning AT the reap threshold (the old behavior) means the watchdog
+# already killed the claim by the time doctor could ever observe it as "warn", making
+# the one signal that should surface a wedge unreachable in practice.
+CLAIM_AGE_WARN_FRACTION = 0.5
+
+
 def check_claim_age(cfg: Config, now: float) -> dict:
-    ages = {k: now - c.get("epoch", now) for k, c in claims.all_claims(cfg.home).items()}
+    claim_data = claims.all_claims(cfg.home)
+    ages = {k: now - c.get("epoch", now) for k, c in claim_data.items()}
     if not ages:
         return {"name": "claim_age", "status": "ok", "detail": "no live claims",
-                "oldest_key": None, "oldest_age_s": None}
+                "oldest_key": None, "oldest_age_s": None, "stale_output_s": None}
     oldest_key, oldest_age = max(ages.items(), key=lambda kv: kv[1])
     threshold = cfg.max_session_seconds or None
-    warn = bool(threshold) and oldest_age > threshold
+    warn_threshold = threshold * CLAIM_AGE_WARN_FRACTION if threshold else None
+    warn = bool(warn_threshold) and oldest_age > warn_threshold
+    stale_output_s = None
+    log_path = claim_data[oldest_key].get("log_path")
+    if log_path:
+        try:
+            stale_output_s = round(now - Path(log_path).stat().st_mtime)
+        except OSError:
+            stale_output_s = None
     return {
         "name": "claim_age", "status": "warn" if warn else "ok",
         "detail": f"oldest claim {oldest_key} is {round(oldest_age)}s old",
         "oldest_key": oldest_key, "oldest_age_s": round(oldest_age),
+        "stale_output_s": stale_output_s,
     }
 
 

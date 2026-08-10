@@ -238,20 +238,78 @@ def test_check_backup_age_ok_when_fresh(home, cfg):
 def test_check_claim_age_ok_with_no_claims(home, cfg):
     result = health.check_claim_age(cfg, store.now_epoch())
     assert result == {"name": "claim_age", "status": "ok", "detail": "no live claims",
-                       "oldest_key": None, "oldest_age_s": None}
+                       "oldest_key": None, "oldest_age_s": None, "stale_output_s": None}
 
 
-def test_check_claim_age_warns_past_max_session_seconds(home, cfg):
+def test_check_claim_age_warns_past_leading_fraction_of_max_session_seconds(home, cfg):
+    # QW-4: warn at 0.5 x max_session_seconds (the leading indicator), not at the
+    # full threshold -- by the time a claim IS the full threshold old, the watchdog
+    # (which reaps at that same value) has already killed it.
     cfg.max_session_seconds = 100
     claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
     data = claims.read_claim(home, "T-1")
-    data["epoch"] = store.now_epoch() - 10_000
+    data["epoch"] = store.now_epoch() - 60  # 0.6 x threshold
     store.write_json(claims.claim_path(home, "T-1"), data)
 
     result = health.check_claim_age(cfg, store.now_epoch())
     assert result["status"] == "warn"
     assert result["oldest_key"] == "T-1"
-    assert result["oldest_age_s"] >= 10_000
+    assert result["oldest_age_s"] >= 60
+
+
+def test_check_claim_age_ok_below_leading_fraction_of_max_session_seconds(home, cfg):
+    cfg.max_session_seconds = 100
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
+    data = claims.read_claim(home, "T-1")
+    data["epoch"] = store.now_epoch() - 40  # 0.4 x threshold
+    store.write_json(claims.claim_path(home, "T-1"), data)
+
+    result = health.check_claim_age(cfg, store.now_epoch())
+    assert result["status"] == "ok"
+
+
+def test_check_claim_age_full_key_set_and_unchanged_names_types(home, cfg):
+    cfg.max_session_seconds = 100
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
+    result = health.check_claim_age(cfg, store.now_epoch())
+    assert set(result.keys()) == {
+        "name", "status", "detail", "oldest_key", "oldest_age_s", "stale_output_s",
+    }
+    assert isinstance(result["name"], str)
+    assert isinstance(result["status"], str)
+    assert isinstance(result["detail"], str)
+    assert isinstance(result["oldest_key"], str)
+    assert isinstance(result["oldest_age_s"], int)
+    assert result["stale_output_s"] is None  # no log_path recorded
+
+
+def test_check_claim_age_stale_output_s_from_log_path_mtime(home, cfg, tmp_path):
+    log_file = tmp_path / "session.stream.jsonl"
+    log_file.write_text("{}")
+    now = store.now_epoch()
+    old_mtime = now - 500
+    os.utime(log_file, (old_mtime, old_mtime))
+
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1", log_path=str(log_file))
+    result = health.check_claim_age(cfg, now)
+    assert result["stale_output_s"] >= 500
+
+
+def test_doctor_cli_warns_and_names_key_for_mid_threshold_claim(home):
+    """AC4: real `maestro doctor --json` over a temp home with a claim aged
+    0.6 x max_session_seconds reports warn and names the key -- QA per CLAUDE.md,
+    the real CLI, nothing mocked."""
+    (home / "config.toml").write_text("[maestro]\nmax_session_seconds = 100\n")
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
+    data = claims.read_claim(home, "T-1")
+    data["epoch"] = store.now_epoch() - 60  # 0.6 x threshold
+    store.write_json(claims.claim_path(home, "T-1"), data)
+
+    code, out = _sweep(home)
+    assert code == 0
+    check = next(c for c in out["checks"] if c["name"] == "claim_age")
+    assert check["status"] == "warn"
+    assert check["oldest_key"] == "T-1"
 
 
 def test_check_launchctl_ok_when_not_loaded(cfg):
