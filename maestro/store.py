@@ -114,6 +114,13 @@ def session_stream_path(home: Path, key: str, session_id: str) -> Path:
     return home / "agent-logs" / validate_key(key) / f"{session_id}.stream.jsonl"
 
 
+def session_opencode_path(home: Path, key: str, session_id: str) -> Path:
+    """RF-3: third session-log format slot, for a non-Claude (e.g. opencode) runner's
+    own log grammar -- distinct from both ``.log`` (plain text) and ``.stream.jsonl``
+    (Claude's stream-json grammar), so consumers never mistake one for the other."""
+    return home / "agent-logs" / validate_key(key) / f"{session_id}.opencode.jsonl"
+
+
 def deadletter_path(home: Path, key: str) -> Path:
     return home / "tickets" / "_deadletter" / f"{validate_key(key)}.md"
 

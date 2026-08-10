@@ -264,6 +264,43 @@ def test_text_format_newest_log_is_skipped_without_raising(home, cfg):
     assert not (home / "derived" / ".ratelimit.json").exists()
 
 
+def test_third_format_newest_log_is_skipped_without_raising(home, cfg):
+    """AC5 (RF-3): a non-Claude ('opencode') log has no parseable rate_limit_event
+    -- the probe must skip it like any other non-stream-json log, never raise."""
+    t0 = 9_500_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0:.6f}.opencode.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"type": "message"}\n', encoding="utf-8")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)  # must not raise
+    assert report.paused_until is None
+    assert not (home / "derived" / ".ratelimit.json").exists()
+
+
+def test_older_undrained_log_trips_pause_despite_newer_third_format_log(home, cfg):
+    """AC5 (RF-3): a newer, third-format log for the same key must not shadow an
+    older un-drained stream-json log -- mirrors the .log case above."""
+    cfg.ratelimit_grace = 60
+    t0 = 10_500_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+
+    resets_at = t0 + 500
+    older_path = _write_stream_log(home, "T-1", t0, [_rate_limit_event("rejected", resets_at)])
+    newer_path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0 + 1:.6f}.opencode.jsonl"
+    newer_path.write_text('{"type": "message"}\n', encoding="utf-8")
+
+    t1 = t0 + 10
+    report = disp.dispatch(cfg, DryRunSessions(), now=t1)
+
+    state = store.read_json(home / "derived" / ".ratelimit.json", None)
+    assert state is not None
+    assert state["paused_until"] == resets_at + cfg.ratelimit_grace
+    assert state["source_log"] == str(older_path)
+    assert report.paused_until == state["paused_until"]
+    assert newer_path.exists()  # untouched, never mistaken for a drainable log
+
+
 # ---------------------------------------------------------------------------
 # T-47: an older un-drained stream-json log must not be shadowed by a newer
 # log of a different format -- probe drains every stream-json candidate, not

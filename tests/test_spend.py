@@ -92,6 +92,31 @@ def test_probe_folds_older_undrained_log_despite_newer_nonstream_log(home, cfg):
     assert st["total_usd"] == 2.5
 
 
+def test_probe_skips_third_format_log_without_raising(home, cfg):
+    """AC5 (RF-3): a non-Claude ('opencode') log carries no parseable result
+    record -- the probe must skip it like any other non-stream-json log."""
+    t0 = 1_500_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0:.6f}.opencode.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"type": "message"}\n', encoding="utf-8")
+
+    st = spend.probe(cfg, t0 + 10)  # must not raise
+    assert st["total_usd"] == 0.0
+
+
+def test_probe_folds_older_undrained_log_despite_newer_third_format_log(home, cfg):
+    t0 = 1_600_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(2.5)])
+    newer_path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0 + 1:.6f}.opencode.jsonl"
+    newer_path.write_text('{"type": "message"}\n', encoding="utf-8")
+
+    st = spend.probe(cfg, t0 + 10)
+    assert st["total_usd"] == 2.5
+    assert newer_path.exists()  # untouched, never mistaken for a drainable log
+
+
 def test_second_probe_does_not_refold_already_drained_older_log(home, cfg):
     t0 = 1_000_000
     _spawn_and_seed_ledger(home, cfg, "T-1", t0)

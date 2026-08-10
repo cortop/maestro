@@ -77,6 +77,33 @@ def test_list_sessions_format_detection(home):
     assert "stream-json" in by_fmt
 
 
+def test_list_sessions_third_format_slot_and_baseline_unchanged(home):
+    """RF-3: a third ('opencode') suffix reports its own format, and the existing
+    .log / .stream.jsonl dicts stay byte-identical to the pre-change baseline shape."""
+    log_path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.log"
+    stream_path = home / "agent-logs" / "T-1" / "reconcile-T-1-2000.000000.stream.jsonl"
+    oc_path = home / "agent-logs" / "T-1" / "reconcile-T-1-3000.000000.opencode.jsonl"
+    _make_text_log(log_path, "x")
+    _make_text_log(stream_path, "{}")
+    _make_text_log(oc_path, "{}")
+
+    sessions = list_sessions(home, "T-1")
+    by_fmt = {s["format"]: s for s in sessions}
+    assert set(by_fmt) == {"text", "stream-json", "opencode"}
+    assert by_fmt["text"] == {
+        "session_id": "reconcile-T-1-1000.000000", "path": str(log_path),
+        "format": "text", "epoch": 1000.0, "ts": by_fmt["text"]["ts"],
+    }
+    assert by_fmt["stream-json"] == {
+        "session_id": "reconcile-T-1-2000.000000", "path": str(stream_path),
+        "format": "stream-json", "epoch": 2000.0, "ts": by_fmt["stream-json"]["ts"],
+    }
+    assert by_fmt["opencode"] == {
+        "session_id": "reconcile-T-1-3000.000000", "path": str(oc_path),
+        "format": "opencode", "epoch": 3000.0, "ts": by_fmt["opencode"]["ts"],
+    }
+
+
 def test_list_sessions_session_id(home):
     path = home / "agent-logs" / "T-1" / "reconcile-T-1-5000.000000.log"
     _make_text_log(path, "hello")
@@ -113,6 +140,20 @@ def test_cli_logs_list_no_sessions(home, capsys):
     assert json.loads(capsys.readouterr().out) == []
 
 
+def test_cli_logs_list_third_format_without_raising(home, capsys):
+    """AC3: a third-format log neither raises nor is misreported as 'running'."""
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-9000.000000.opencode.jsonl"
+    _make_text_log(path, '{"type": "message", "text": "hi"}\n')
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1", "--list"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(out) == 1
+    assert out[0]["format"] == "opencode"
+    assert out[0]["outcome"] == "unknown"
+
+
 # ---------------------------------------------------------------------------
 # CLI: maestro logs (default: newest session, human-readable)
 # ---------------------------------------------------------------------------
@@ -132,6 +173,18 @@ def test_cli_logs_text_format(home, capsys):
     rc = main(["--home", str(home), "logs", "T-1"])
     assert rc == 0
     assert "line one" in capsys.readouterr().out
+
+
+def test_cli_logs_third_format_prints_raw_file(home, capsys):
+    """AC4: a third-format log prints its raw content -- not an empty stream-json
+    render (which would show nothing for a grammar it doesn't recognize)."""
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.opencode.jsonl"
+    _make_text_log(path, '{"type": "message", "text": "hello from opencode"}\n')
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1"])
+    assert rc == 0
+    assert "hello from opencode" in capsys.readouterr().out
 
 
 def test_cli_logs_stream_renders_human_readable(home, capsys):

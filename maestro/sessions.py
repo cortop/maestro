@@ -20,20 +20,36 @@ from . import claims, store
 
 RECONCILE_PREFIX = "reconcile-"
 
-# Filename pattern: reconcile-<KEY>-<epoch>.{log,stream.jsonl}
+# Filename pattern: reconcile-<KEY>-<epoch>.{log,stream.jsonl,opencode.jsonl}
 _SESSION_FILE_RE = re.compile(
-    r"^(reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+))\.(?P<ext>log|stream\.jsonl)$"
+    r"^(reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+))\.(?P<ext>log|stream\.jsonl|opencode\.jsonl)$"
 )
+
+# Maps a matched filename ``ext`` to the ``format`` value reported to callers. Any
+# ``ext`` not listed here falls back to "text" -- there is currently no such case
+# (the regex's alternation is closed), but the fallback keeps this mapping additive
+# if a future format slot lands.
+_EXT_TO_FORMAT = {
+    "stream.jsonl": "stream-json",
+    "opencode.jsonl": "opencode",
+}
 
 
 def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[dict]:
     """Return session log metadata for *key*, newest-first.
 
-    Each dict has: ``session_id``, ``path``, ``format`` ('text'|'stream-json'),
-    ``epoch`` (float), ``ts`` (ISO string). ``with_outcome`` is opt-in — it tail-scans
-    each log via :func:`maestro.steplog.session_outcome` to add an ``outcome`` field, so
-    the default (filename-only) call opens no log files, keeping callers like
-    ``ops.prune_session_logs`` and the TUI's log tailer cheap.
+    Each dict has: ``session_id``, ``path``, ``format`` ('text'|'stream-json'|
+    'opencode'), ``epoch`` (float), ``ts`` (ISO string). ``with_outcome`` is opt-in —
+    it tail-scans each log via :func:`maestro.steplog.session_outcome` to add an
+    ``outcome`` field, so the default (filename-only) call opens no log files, keeping
+    callers like ``ops.prune_session_logs`` and the TUI's log tailer cheap.
+
+    'opencode' (RF-3) is a non-Claude runner's own log grammar -- it is deliberately
+    never "stream-json" (``ratelimit.probe`` / ``spend.probe`` gate on that exact
+    string to skip logs they can't parse) and every consumer above
+    :func:`maestro.steplog.iter_records` that isn't format-aware already treats
+    anything other than "stream-json" as opaque text, so it falls straight into the
+    existing plain-text render/prune/outcome fallbacks.
     """
     store.validate_key(key)
     log_dir = home / "agent-logs" / key
@@ -45,7 +61,7 @@ def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[d
         if not m:
             continue
         epoch = float(m.group("epoch"))
-        fmt = "stream-json" if m.group("ext") == "stream.jsonl" else "text"
+        fmt = _EXT_TO_FORMAT.get(m.group("ext"), "text")
         entry = {
             "session_id": m.group(1),
             "path": str(f),
