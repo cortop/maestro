@@ -74,12 +74,22 @@ class SessionManager(Protocol):
     def list_active(self) -> set[str]:
         """Keys with a live reconciler (the 'already claimed' set)."""
 
-    def spawn(self, key: str, prompt: str, cwd: Path,
+    def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None) -> int | None:
         """Launch a detached reconciler for ``key``; return its pid (or None).
+
+        *command* (RF-1) is the resolved reconcile slash-command (see
+        ``dispatcher.resolve_reconcile_command``, e.g. ``/maestro-reconcile-implementing``)
+        WITHOUT the key appended -- the dispatcher passes ``command`` and ``key`` as separate
+        arguments rather than pre-flattening them into one prompt string, so each backend
+        composes its own invocation. ``ClaudeCliSessions.spawn`` composes the identical
+        ``f"{command} {key}"`` prompt it always has (argv unchanged); a non-Claude backend
+        (e.g. opencode) can instead take them as a distinct ``--command <name>`` flag plus
+        argument, without string-parsing a slash command back out of an already-flattened
+        prompt.
 
         *model* and *effort* override instance defaults when provided.
         *disallowed_tools* is the per-tier tool-surface denylist (see
@@ -129,13 +139,17 @@ class ClaudeCliSessions:
         return claims.active_keys(self.home, run=self._claims_run,
                                   max_age=self._unverified_claim_max_age)
 
-    def spawn(self, key: str, prompt: str, cwd: Path,
+    def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None) -> int | None:
         session_id = f"{session_name(key)}-{self._clock():.6f}"
         effective_model = model or self.model
+        # RF-1: compose the flattened prompt here, from the separate command/key
+        # inputs -- identical to the string the caller used to pre-flatten, so argv
+        # is unchanged.
+        prompt = f"{command} {key}"
         cmd = ["claude", "-p", prompt, "--model", effective_model, "-n", session_name(key)]
         if effort:
             cmd += ["--effort", effort]
@@ -203,18 +217,22 @@ class DryRunSessions:
         # env_overlay). GA-10 appended allowed_tools as the 7th element; GA-17 appended
         # env_overlay as the 8th, the SAME way -- any later per-key spawn input appends
         # here too, rather than opening a second per-key channel. Unpack by name or by
-        # negative index, never assume this stays exactly 8 long.
+        # negative index, never assume this stays exactly 8 long. RF-1: spawn()'s own
+        # 2nd parameter is now ``command`` (no key appended) -- this ``prompt`` element
+        # is the composed "<command> <key>" string built inside spawn() itself, so
+        # existing readers of element 1 see the same value as before this ticket.
         self.spawned: list[tuple[str, str, str, str | None, str | None, list[str], list[str],
                                  dict[str, str]]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
 
-    def spawn(self, key: str, prompt: str, cwd: Path,
+    def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None) -> int | None:
+        prompt = f"{command} {key}"
         self.spawned.append((key, prompt, str(cwd), model, effort,
                              list(disallowed_tools or []), list(allowed_tools or []),
                              dict(env_overlay or {})))

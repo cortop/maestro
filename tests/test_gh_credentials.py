@@ -257,14 +257,17 @@ def test_env_key_never_shells_gh_auth_token(home, capsys, monkeypatch):
 def test_dryrun_records_env_overlay_as_last_positional_element():
     s = DryRunSessions()
     s.spawn("T-1", "prompt", Path("/tmp"), env_overlay={"GH_TOKEN": "tok-x"})
-    recorded = s.spawned[0]
-    assert recorded[-1] == {"GH_TOKEN": "tok-x"}
+    # Named unpack, not a positional/[-1] index -- see DryRunSessions.spawned's
+    # docstring: never assume this tuple stays a fixed length.
+    key, prompt, cwd, model, effort, disallowed, allowed, env_overlay = s.spawned[0]
+    assert env_overlay == {"GH_TOKEN": "tok-x"}
 
 
 def test_dryrun_records_empty_dict_when_env_overlay_not_provided():
     s = DryRunSessions()
     s.spawn("T-1", "prompt", Path("/tmp"))
-    assert s.spawned[0][-1] == {}
+    key, prompt, cwd, model, effort, disallowed, allowed, env_overlay = s.spawned[0]
+    assert env_overlay == {}
 
 
 def test_claude_cli_sessions_spawn_merges_env_overlay_beside_maestro_home(home):

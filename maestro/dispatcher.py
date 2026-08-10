@@ -1733,11 +1733,16 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 attempts_changed = True
                 cwd = _worker_cwd(cfg, key)
                 command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
-                prompt = f"{command} {key}"
                 model, effort = _resolve_model_effort(cfg, key)
                 disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
                 allowed_tools = resolved_allowed_tools(cfg, binding)
-                sessions.spawn(key, prompt, cwd, model=model, effort=effort,
+                # RF-1: hand the resolved command and key to spawn() as separate
+                # arguments -- each backend composes its own invocation (the Claude
+                # CLI concatenates "<command> <key>" into one prompt string; a
+                # non-Claude backend, e.g. opencode, can take them as distinct
+                # `--command <name>` + argument instead of string-parsing a slash
+                # command back out of a prompt maestro pre-flattened).
+                sessions.spawn(key, command, cwd, model=model, effort=effort,
                                disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
                                env_overlay=cred.env)
                 spawned.append(key)

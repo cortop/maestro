@@ -60,13 +60,17 @@ def test_no_log_path_in_claim_when_capture_disabled(home):
 def test_cwd_and_prompt_stored_in_claim(home):
     """T-45: a later sweep detecting a dead, never-ran session needs the
     resolved reconcile command + cwd, sourced straight from the spawn() call
-    that started it -- not re-derived from (possibly stale, by then) state."""
+    that started it -- not re-derived from (possibly stale, by then) state.
+
+    RF-1: spawn() takes ``command`` and ``key`` separately now -- the claim's
+    stored "prompt" is still the composed "<command> <key>" string, built
+    inside spawn() itself."""
     sess = _make_sessions(home)
     fake_proc = MagicMock()
     fake_proc.pid = os.getpid()
     worktree = home / "worktrees" / "T-1"
     with patch("subprocess.Popen", return_value=fake_proc):
-        sess.spawn("T-1", "/maestro-reconcile-implementing T-1", cwd=worktree)
+        sess.spawn("T-1", "/maestro-reconcile-implementing", cwd=worktree)
     c = claims.read_claim(home, "T-1")
     assert c["cwd"] == str(worktree)
     assert c["prompt"] == "/maestro-reconcile-implementing T-1"
@@ -161,6 +165,34 @@ def test_spawn_effort_flag_appended_before_permission_mode(home):
     assert cmd[effort_pos + 1] == "high"
     # effort must come before --permission-mode (which follows model+effort)
     assert "--permission-mode" not in cmd or effort_pos < cmd.index("--permission-mode")
+
+
+def test_spawn_argv_byte_identical_to_pre_rf1_baseline(home):
+    """AC1 (RF-1): spawn() takes ``command`` and ``key`` as separate arguments now,
+    composing "<command> <key>" internally -- for the same key/command/model/effort/
+    tool inputs it must build the exact argv a caller that pre-flattened the prompt
+    itself (the pre-RF-1 shape) would have produced."""
+    sess = ClaudeCliSessions(home=home, capture_session_logs=False)
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    captured_cmd = []
+    def capture_popen(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return fake_proc
+    with patch("subprocess.Popen", side_effect=capture_popen):
+        sess.spawn(
+            "T-9", "/maestro-reconcile-implementing", cwd=home,
+            model="opus", effort="high",
+            disallowed_tools=["Bash(gh pr merge:*)"], allowed_tools=["Read"],
+        )
+    assert captured_cmd == [
+        "claude", "-p", "/maestro-reconcile-implementing T-9",
+        "--model", "opus", "-n", "reconcile-T-9",
+        "--effort", "high",
+        "--permission-mode", "acceptEdits",
+        "--disallowedTools", "Bash(gh pr merge:*)",
+        "--allowedTools", "Read",
+    ]
 
 
 def test_dryrun_records_model_and_effort():
