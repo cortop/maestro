@@ -9,9 +9,11 @@ cursor/state files under different names, so the two gates stay independently
 disable-able.
 
 ``probe`` runs on every real dispatcher sweep (via ``_run_hook``, never on a
-cadence) and sums each session's terminal ``result`` record's ``total_cost_usd``
-into a bucket keyed by the current UTC date (``derived/.spend.json``), reading
-only bytes appended since the last sweep (``derived/.spend_cursor.json``). A
+cadence) and sums every un-drained stream-json session's terminal ``result``
+record's ``total_cost_usd`` into a bucket keyed by the current UTC date
+(``derived/.spend.json``) — not just each key's newest log, so an older log
+left un-drained by a differently-formatted newer log still gets folded — reading
+only bytes appended since the last sweep, per log (``derived/.spend_cursor.json``). A
 session SIGTERM'd by ``run_watchdog`` before it can write a ``result`` record
 would otherwise silently cost $0 in this meter -- once such a log has been
 drained to its current end with no ``result`` ever seen AND its key is no
@@ -108,45 +110,43 @@ def probe(cfg: Config, now: float) -> dict:
 
     for key in ledger:
         candidates = sessions_mod.list_sessions(home, key)
-        if not candidates:
-            continue
-        newest = candidates[0]
-        if newest["format"] != "stream-json":
-            continue  # text-format logs carry no parseable result records
-        path = Path(newest["path"])
-        if not path.exists():
-            continue
-        log_id = str(path)
-        try:
-            size = path.stat().st_size
-        except OSError:
-            continue
-        start = cursor.get(log_id, 0)
-        if not isinstance(start, (int, float)) or start > size:
-            start = 0
-        pos = start
-        for offset, record in steplog.iter_records(path, start=start):
-            pos = offset
-            if record.get("type") == "result":
-                cost = record.get("total_cost_usd")
-                if isinstance(cost, (int, float)):
-                    total += float(cost)
-                settled.add(log_id)
-        if pos != start:
-            cursor[log_id] = pos
-            cursor_changed = True
-        # Trap: a session SIGTERM'd by run_watchdog mid-stream may never write
-        # a `result` record, so its cost would otherwise silently count as
-        # zero. Once we've drained a log to its current end with no result
-        # ever seen AND its key is no longer live, count it explicitly instead
-        # of dropping it -- and mark it settled so we don't recount the same
-        # dead log every subsequent sweep.
-        if pos >= size and log_id not in settled:
-            if live_keys is None:
-                live_keys = claims.active_keys(home)
-            if key not in live_keys:
-                unattributed += 1
-                settled.add(log_id)
+        for candidate in candidates:
+            if candidate["format"] != "stream-json":
+                continue  # text-format logs carry no parseable result records
+            path = Path(candidate["path"])
+            if not path.exists():
+                continue
+            log_id = str(path)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            start = cursor.get(log_id, 0)
+            if not isinstance(start, (int, float)) or start > size:
+                start = 0
+            pos = start
+            for offset, record in steplog.iter_records(path, start=start):
+                pos = offset
+                if record.get("type") == "result":
+                    cost = record.get("total_cost_usd")
+                    if isinstance(cost, (int, float)):
+                        total += float(cost)
+                    settled.add(log_id)
+            if pos != start:
+                cursor[log_id] = pos
+                cursor_changed = True
+            # Trap: a session SIGTERM'd by run_watchdog mid-stream may never
+            # write a `result` record, so its cost would otherwise silently
+            # count as zero. Once we've drained a log to its current end with
+            # no result ever seen AND its key is no longer live, count it
+            # explicitly instead of dropping it -- and mark it settled so we
+            # don't recount the same dead log every subsequent sweep.
+            if pos >= size and log_id not in settled:
+                if live_keys is None:
+                    live_keys = claims.active_keys(home)
+                if key not in live_keys:
+                    unattributed += 1
+                    settled.add(log_id)
 
     if cursor_changed:
         store.write_json(cursor_path, cursor)

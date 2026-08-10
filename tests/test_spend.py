@@ -76,6 +76,57 @@ def test_probe_accumulates_across_multiple_sessions(home, cfg):
     assert st["total_usd"] == 5.25
 
 
+# --- T-47: an older un-drained log isn't shadowed by a newer, differently- --
+# --- formatted log for the same key -----------------------------------------
+
+def test_probe_folds_older_undrained_log_despite_newer_nonstream_log(home, cfg):
+    t0 = 1_000_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(2.5)])
+    # Newer log for the same key, but text-format -- under the old
+    # candidates[0]-only logic this would shadow the older log forever.
+    newer_path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0 + 1:.6f}.log"
+    newer_path.write_text("plain text transcript, not stream-json\n", encoding="utf-8")
+
+    st = spend.probe(cfg, t0 + 10)
+    assert st["total_usd"] == 2.5
+
+
+def test_second_probe_does_not_refold_already_drained_older_log(home, cfg):
+    t0 = 1_000_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(2.5)])
+    newer_path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0 + 1:.6f}.log"
+    newer_path.write_text("plain text transcript, not stream-json\n", encoding="utf-8")
+
+    st1 = spend.probe(cfg, t0 + 10)
+    assert st1["total_usd"] == 2.5
+
+    st2 = spend.probe(cfg, t0 + 20)
+    assert st2["total_usd"] == 2.5
+
+
+def test_all_stream_json_home_spend_state_byte_identical_to_baseline(home, cfg):
+    """A home where every key has exactly one (newest-and-only) stream-json log
+    exercises the single-candidate loop body, unchanged by the multi-candidate
+    fix -- its on-disk state must match the pre-fix baseline byte-for-byte."""
+    t0 = 1_000_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    path = _write_stream_log(home, "T-1", t0, [_result_record(2.5)])
+
+    spend.probe(cfg, t0 + 10)
+
+    expected = {
+        "date": spend._utc_date(t0 + 10),
+        "total_usd": 2.5,
+        "unattributed_sessions": 0,
+        "settled_logs": [str(path)],
+        "unavailable": False,
+    }
+    expected_bytes = json.dumps(expected, indent=2, sort_keys=True).encode("utf-8")
+    assert (home / "derived" / ".spend.json").read_bytes() == expected_bytes
+
+
 # --- AC4/AC5: the ceiling gate, proven to fire at the boundary ---------------
 
 def test_dispatch_blocks_spawns_at_or_above_ceiling(home, cfg):
