@@ -798,9 +798,14 @@ def sync_worktrees(cfg: Config) -> dict:
                 continue
             if gkey == default_gkey:
                 fetched_default = True
-            # best-effort; no-op if `base` isn't checked out here
-            subprocess.run(["git", "-C", repo_path, "merge", "-q", "--ff-only", f"origin/{base}"],
-                           capture_output=True, text=True)
+            # only fast-forward the shared checkout's own HEAD -- `--ff-only` operates on
+            # whatever branch is checked out, so guard it explicitly rather than relying on
+            # base not being checked out; a detached HEAD (symbolic-ref fails) also no-ops
+            head = subprocess.run(["git", "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
+                                  capture_output=True, text=True)
+            if head.returncode == 0 and head.stdout.strip() == base:
+                subprocess.run(["git", "-C", repo_path, "merge", "-q", "--ff-only", f"origin/{base}"],
+                               capture_output=True, text=True)
 
             for key in group["keys"]:
                 wt = store.worktree_path(home, key)
