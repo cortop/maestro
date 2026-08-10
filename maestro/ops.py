@@ -387,6 +387,130 @@ QA_VERDICTS = {"pass", "fail"}
 QA_AXES = {"spec", "standards"}
 
 
+def qa_brief(cfg: Config, key: str) -> dict:
+    """Build the Implementer->QA hand-off packet for *key*, deterministically.
+
+    Read-only: appends no event and mutates nothing, so it is safe to call on
+    every QA round and safe to retry.
+
+    The hand-off used to be assembled by the implementer itself -- run
+    `git diff`, then re-type the AC list and that diff text into the QA
+    sub-agent's prompt. That is the one step of the loop with no plumbing
+    behind it, and a weaker model drops it: the sub-agent gets an empty or
+    truncated diff and verdicts against nothing. Minting the packet here makes
+    the briefing a CLI result the QA agent reads, not prose the implementer has
+    to marshal -- the same reason `verify_ac`/`record_qa_verdict` own AC
+    indexing rather than trusting an agent to count.
+
+    The diff is taken in `dispatcher._worker_cwd` -- the ticket's worktree when
+    one exists, else its resolved repo binding -- so the packet always describes
+    the tree the reconciler is actually working in, and against the binding's
+    own `base_branch` rather than an assumed "main".
+    """
+    from .dispatcher import _worker_cwd
+
+    spec_file = store.spec_path(cfg.home, key)
+    if not spec_file.exists():
+        raise store.MaestroError(f"{key}: no spec.md to brief QA against")
+    acs = snap_mod.parse_acs(spec_file.read_text(encoding="utf-8"))
+    if not acs:
+        raise store.MaestroError(f"{key}: spec.md has no acceptance criteria to check")
+
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    base = binding.base_branch
+    cwd = _worker_cwd(cfg, key)
+    diff, base_ref, ahead, stderr = _qa_diff(cwd, base)
+    return {
+        "key": key,
+        "acs": [{"index": i, "text": t, "ac_hash": snap_mod.ac_hash(t)}
+                for i, t in enumerate(acs, start=1)],
+        "base_ref": base_ref,
+        "cwd": str(cwd),
+        "diff": diff,
+        "diff_empty": not diff.strip(),
+        # Disambiguates the two very different states that both yield an empty
+        # diff: nothing implemented yet (0 commits) vs. work already merged into
+        # the base (>0 commits, content identical). A QA agent that can't tell
+        # them apart verdicts "fail -- nothing changed" on finished work.
+        "commits_ahead": ahead,
+        "warning": stderr or None,
+    }
+
+
+def _qa_diff(cwd, base: str) -> tuple[str, str, int, str]:
+    """``git diff`` for the QA packet, preferring ``origin/<base>`` over ``<base>``.
+
+    Diffs against the MERGE-BASE, not the base tip and not ``<base>...HEAD``.
+    Each of the obvious forms is wrong in a way that misleads QA:
+
+    - ``git diff origin/<base> --`` (what the skill ran) compares the worktree to
+      the base TIP, so every commit that landed on the base after branching leaks
+      in as inverted noise. Measured on a real dogfood worktree: 72,573 bytes
+      against 10,876 for the same one-commit branch.
+    - ``git diff origin/<base>...HEAD`` excludes that noise but is a
+      commit-to-commit diff, so it silently DROPS uncommitted work -- and
+      mid-`implementing` the agent frequently has not committed yet. QA would be
+      briefed with an empty diff on a tree full of changes.
+
+    ``git diff <merge-base> --`` gets both: everything this branch changed,
+    committed or not, with no base advancement.
+
+    Returns ``(diff, base_ref_used, commits_ahead, stderr)``. A worktree with no
+    fetched ``origin/<base>`` (a fresh clone, an offline box) falls back to the
+    local branch, then to the base tip if no merge-base exists, rather than
+    raising -- an empty diff with a warning routes back to `implementing`,
+    whereas an exception would fail the whole reconcile step.
+    """
+    import subprocess
+
+    def _git(*args):
+        return subprocess.run(["git", "-C", str(cwd), *args],
+                              capture_output=True, text=True)
+
+    proc = None
+    for ref in (f"origin/{base}", base):
+        mb = _git("merge-base", ref, "HEAD")
+        anchor = mb.stdout.strip() if mb.returncode == 0 and mb.stdout.strip() else ref
+        proc = _git("diff", anchor, "--")
+        if proc.returncode == 0:
+            count = _git("rev-list", "--count", f"{ref}..HEAD")
+            ahead = int(count.stdout.strip() or 0) if count.returncode == 0 else 0
+            return proc.stdout + _untracked_diff(_git), ref, ahead, ""
+    return "", base, 0, ((proc.stderr if proc else "") or "").strip()[:400]
+
+
+# A brand-new file the implementer has not `git add`-ed yet is invisible to
+# `git diff` at any anchor -- and "add the new module + its test" is the single
+# most common shape of an implementing step. Briefing QA without them produces
+# the exact false FAIL ("no test was added") this verb exists to prevent.
+_UNTRACKED_FILE_CAP = 50
+
+
+def _untracked_diff(_git) -> str:
+    """Diff hunks for untracked, non-ignored files, appended to the packet.
+
+    Uses ``git diff --no-index /dev/null <path>``, which renders a real
+    add-file hunk WITHOUT touching the index -- `git add -N` would have made
+    this verb a mutation. ``--no-index`` exits 1 when the files differ (the
+    normal case here), so only exit >1 counts as an error.
+    """
+    listed = _git("ls-files", "--others", "--exclude-standard")
+    if listed.returncode != 0:
+        return ""
+    paths = [p for p in listed.stdout.splitlines() if p.strip()]
+    if not paths:
+        return ""
+    out = []
+    for path in paths[:_UNTRACKED_FILE_CAP]:
+        d = _git("diff", "--no-index", "--", "/dev/null", path)
+        if d.returncode <= 1 and d.stdout:
+            out.append(d.stdout)
+    if len(paths) > _UNTRACKED_FILE_CAP:
+        out.append(f"\n[maestro] {len(paths) - _UNTRACKED_FILE_CAP} further untracked "
+                   f"file(s) omitted from this packet\n")
+    return "".join(out)
+
+
 def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, evidence: str, *,
                        axis: str = "spec", actor: str = "reconciler-qa") -> str:
     """Record an *independent* QA re-check of AC #ac_index (1-based, in spec
