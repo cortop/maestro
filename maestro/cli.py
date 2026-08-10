@@ -1018,6 +1018,8 @@ def cmd_env(args) -> int:
         # reconciler phase preamble calls `maestro env --key`), so it must stay
         # zero-cost and never touch the secret value.
         gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
+        tier = disp.spec_tier(cfg.home, key)
+        disallowed_tools = disp.tier_denylist(tier) + disp.phase_denylist(snap.phase)
         # RF-2: same per-key spawn-arg resolution `dispatch()` uses right before
         # `sessions.spawn` -- surfaced here so `make reconcile` (and any human
         # inspecting a ticket) sees exactly what a real spawn would resolve to.
@@ -1027,6 +1029,7 @@ def cmd_env(args) -> int:
                 "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
                 "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
                 "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase),
+                "disallowed_tools": disallowed_tools,
                 "model": model, "effort": effort,
                 "runner": runner, "runner_model": runner_model})
         return 0

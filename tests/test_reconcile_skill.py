@@ -39,13 +39,13 @@ COMMANDS_DIR = REPO_ROOT / ".claude" / "commands"
 SKILLS_DIR = REPO_ROOT / "skills"
 SKILL_COMMANDS_DIR = REPO_ROOT / "maestro" / "_skill_commands"
 
-# The six phase files T-22 split the single maestro-reconcile.md into. "passive" covers
-# awaiting-ci/in-review/degraded/terminating -- phases with no active work for a
-# reconciler, so they share one file instead of four near-empty ones.
-PHASE_FILES = ["triaging", "awaiting-human", "ready", "researching", "implementing", "passive"]
+# The phase files T-22 split the single maestro-reconcile.md into, plus RF-6's `qa`.
+# "passive" covers awaiting-ci/in-review/degraded/terminating -- phases with no active
+# work for a reconciler, so they share one file instead of four near-empty ones.
+PHASE_FILES = ["triaging", "awaiting-human", "ready", "researching", "implementing", "qa", "passive"]
 # Phases whose file needs the full REPO/SLUG/BASE/PREFIX/MODE preamble (they touch the
 # bound repo); "passive" is the one exception -- it never reads the repo, only MHOME.
-REPO_AWARE_PHASE_FILES = ["triaging", "awaiting-human", "ready", "researching", "implementing"]
+REPO_AWARE_PHASE_FILES = ["triaging", "awaiting-human", "ready", "researching", "implementing", "qa"]
 
 
 def _commands_path(phase: str) -> Path:

@@ -1,4 +1,4 @@
-"""GA-15: ``maestro install-commands`` — automated distribution of the six
+"""GA-15: ``maestro install-commands`` — automated distribution of the
 per-phase ``.claude/commands/maestro-reconcile-*.md`` files, replacing the
 "vendor them by hand" step DOGFOOD.md used to document (MR-6 deferred this;
 never filed until now). Two targets: ``--repo <name>`` copies the files into a
@@ -30,11 +30,11 @@ from pathlib import Path
 from . import store
 from .config import Config
 
-# The six phase files T-22 split the reconcile skill into (see
+# The phase files T-22 split the reconcile skill into, plus RF-6's `qa` (see
 # tests/test_reconcile_skill.py:36). Excludes maestro-task.md — a human
 # ticket-creation command no reconciler ever invokes, so a bound repo doesn't
 # need it under .claude/commands/.
-PHASE_FILES = ("triaging", "awaiting-human", "ready", "researching", "implementing", "passive")
+PHASE_FILES = ("triaging", "awaiting-human", "ready", "researching", "implementing", "qa", "passive")
 PAYLOAD_NAMES = tuple(f"maestro-reconcile-{phase}.md" for phase in PHASE_FILES)
 
 

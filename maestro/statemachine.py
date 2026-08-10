@@ -13,6 +13,7 @@ class Phase(str, Enum):
     AWAITING_HUMAN = "awaiting-human"  # blocked on an answer/approval (SLEEPING)
     READY = "ready"                  # approved + unblocked; waiting for a worker slot
     IMPLEMENTING = "implementing"    # ralph-loop running in a worktree
+    QA = "qa"                        # adversarial review of a diff; may not Edit/Write
     RESEARCHING = "researching"      # research agent active in a worktree
     AWAITING_CI = "awaiting-ci"      # PR open; polling checks on a timer (SLEEPING)
     IN_REVIEW = "in-review"          # checks green; waiting on human/merge
@@ -42,8 +43,10 @@ TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.AWAITING_HUMAN: {Phase.READY, Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.TRIAGING,
                            Phase.RESEARCHING, Phase.DEGRADED, Phase.TERMINATING},
     Phase.READY: {Phase.IMPLEMENTING, Phase.RESEARCHING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
-    Phase.IMPLEMENTING: {Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DEGRADED,
+    Phase.IMPLEMENTING: {Phase.QA, Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DEGRADED,
                          Phase.AWAITING_HUMAN, Phase.TERMINATING, Phase.DONE},
+    Phase.QA: {Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.DEGRADED,
+              Phase.AWAITING_HUMAN, Phase.TERMINATING},
     Phase.RESEARCHING: {Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING, Phase.DONE},
     Phase.AWAITING_CI: {Phase.IMPLEMENTING, Phase.IN_REVIEW, Phase.AWAITING_HUMAN,
                         Phase.DEGRADED, Phase.TERMINATING, Phase.DONE},

@@ -74,6 +74,19 @@ def tier_denylist(tier: int) -> list[str]:
     return ["Bash(gh pr merge:*)"] if tier >= 1 else []
 
 
+def phase_denylist(phase: str) -> list[str]:
+    """Tool-surface denylist for a spawned reconciler, keyed by phase (RF-6).
+
+    Unioned with ``tier_denylist`` at spawn time. Empty for every phase except
+    ``qa``: a QA reconciler judges a diff independently of the agent that wrote
+    it, so it must not be able to Edit or Write the code it's reviewing.
+    """
+    try:
+        return ["Edit", "Write"] if Phase(phase) == Phase.QA else []
+    except ValueError:
+        return []
+
+
 def resolved_allowed_tools(cfg: Config, binding) -> list[str]:
     """Per-key --allowedTools additions (GA-10): the board-wide
     ``reconcile_allowed_tools`` list unioned with *binding*'s own
@@ -1749,7 +1762,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 cwd = _worker_cwd(cfg, key)
                 command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
                 model, effort = _resolve_model_effort(cfg, key)
-                disallowed_tools = tier_denylist(tier_by_key.get(key, 1))
+                disallowed_tools = tier_denylist(tier_by_key.get(key, 1)) + phase_denylist(
+                    phase_by_key.get(key, ""))
                 allowed_tools = resolved_allowed_tools(cfg, binding)
                 # RF-1: hand the resolved command and key to spawn() as separate
                 # arguments -- each backend composes its own invocation (the Claude
@@ -1820,6 +1834,7 @@ _PHASE_COMMAND_SUFFIX = {
     Phase.READY: "ready",
     Phase.RESEARCHING: "researching",
     Phase.IMPLEMENTING: "implementing",
+    Phase.QA: "qa",
     Phase.AWAITING_CI: "passive",
     Phase.IN_REVIEW: "passive",
     Phase.DEGRADED: "passive",
