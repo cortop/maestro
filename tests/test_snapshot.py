@@ -79,6 +79,31 @@ def test_fold_is_total_non_integer_turn():
     assert any("non-integer turn" in w for w in snap.fold_warnings)
 
 
+def test_fold_is_total_infinite_turn():
+    """(b) A `turn` of `float("inf")`/`-inf` must not raise either -- `int(float("inf"))` raises
+    `OverflowError`, not `ValueError`, so it slipped past `_coerce_turn`'s original except
+    clause. Found by RB-10's QA loop (the property generator's own `bad_turn` strategy draws
+    `allow_infinity=True` floats) -- pinned here as the example-based regression."""
+    snap = snap_mod.fold("K", [{"seq": 1, "type": "ImplTurnRecorded", "payload": {"turn": float("inf")}}])
+    assert snap.impl_turns == 0  # coerced no-op: default counter left unchanged
+    assert any("non-integer turn" in w for w in snap.fold_warnings)
+    snap = snap_mod.fold("K", [{"seq": 1, "type": "ImplStepRecorded", "payload": {"turn": float("-inf")}}])
+    assert snap.impl_turns == 0
+    assert any("non-integer turn" in w for w in snap.fold_warnings)
+
+
+def test_fold_is_total_non_dict_payload():
+    """(b) A `payload` that isn't a dict at all -- a bare int/str/list, not just a dict with a
+    bad key -- must not raise either. Found by RB-10's Hypothesis generator (`p = ev.get(
+    "payload") or {}` only guards against a falsy payload, e.g. `None`/`{}`; a truthy non-dict
+    payload like `1` or `"x"` sailed straight through into `p.get(...)` and raised
+    AttributeError) -- pinned here as the example-based regression per that ticket's Notes."""
+    snap = snap_mod.fold("K", [{"seq": 1, "type": "TicketCreated", "payload": 1}])
+    assert snap.title is None  # coerced no-op: payload treated as empty
+    snap = snap_mod.fold("K", [{"seq": 1, "type": "QuestionAsked", "payload": "not-a-dict"}])
+    assert snap.open_questions == {"1": ""}  # p.get("qid", str(seq)) falls back to the seq
+
+
 def test_fold_is_duplicate_idempotent():
     """(c) fold(evs) == fold(evs * 2), across the events RB-2 names by name --
     not just the two counters (`failure_count`/`unresolved_reviews`) the bug
