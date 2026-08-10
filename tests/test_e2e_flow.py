@@ -50,12 +50,13 @@ def test_dispatch_sweep_then_tui_reflects_board(home, cfg):
     # and NEVER launched a real `claude` — DryRunSessions only records tuples.
     assert "T-9" in report.minted
     assert "T-1" in report.spawned
-    # GA-10 appended allowed_tools as a 7th element, GA-17 env_overlay as an 8th
-    # (see DryRunSessions.spawned's docstring) -- named unpack, not a length check,
-    # so this doesn't become a trap the next appended spawn input has to dodge.
+    # GA-10 appended allowed_tools as a 7th element, GA-17 env_overlay as an 8th,
+    # RF-2 runner as a 9th (see DryRunSessions.spawned's docstring) -- named
+    # unpack, not a length check, so this doesn't become a trap the next
+    # appended spawn input has to dodge.
     for s in sessions.spawned:
         assert isinstance(s, tuple)
-        key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay = s
+        key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner = s
     assert {k for k, *_ in sessions.spawned} == set(report.spawned)
 
     # Now mount the REAL TUI over that same home and confirm it renders the board.

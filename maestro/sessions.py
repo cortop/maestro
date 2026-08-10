@@ -78,7 +78,8 @@ class SessionManager(Protocol):
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
-              env_overlay: dict[str, str] | None = None) -> int | None:
+              env_overlay: dict[str, str] | None = None,
+              runner: str | None = None) -> int | None:
         """Launch a detached reconciler for ``key``; return its pid (or None).
 
         *command* (RF-1) is the resolved reconcile slash-command (see
@@ -105,6 +106,12 @@ class SessionManager(Protocol):
         into the spawned session's env beside the ``MAESTRO_HOME`` pin. None
         (the default -- no credential configured for this key's repo) leaves
         the env byte-identical to before this ticket.
+
+        *runner* (RF-2) is the resolved runner name (``dispatcher.resolve_runner``,
+        already validated as registered by the caller) -- an implementation that
+        only ever speaks one backend (e.g. ``ClaudeCliSessions``) may ignore it;
+        ``RoutingSessions`` uses it to pick which delegate's ``spawn`` to call.
+        None means "the default runner" (``"claude"``).
         """
 
 
@@ -143,7 +150,13 @@ class ClaudeCliSessions:
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
-              env_overlay: dict[str, str] | None = None) -> int | None:
+              env_overlay: dict[str, str] | None = None,
+              runner: str | None = None) -> int | None:
+        # RF-2: this backend only ever speaks Claude -- `runner` is accepted (so
+        # callers can pass it uniformly, e.g. via RoutingSessions) but otherwise
+        # unused; the caller (dispatcher.dispatch) has already validated it's
+        # either None or "claude" before routing a spawn to this instance.
+        del runner
         session_id = f"{session_name(key)}-{self._clock():.6f}"
         effective_model = model or self.model
         # RF-1: compose the flattened prompt here, from the separate command/key
@@ -213,16 +226,17 @@ class DryRunSessions:
 
     def __init__(self, active: set[str] | None = None):
         self._active = set(active or set())   # KEYS
-        # 8-tuple: (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools,
-        # env_overlay). GA-10 appended allowed_tools as the 7th element; GA-17 appended
-        # env_overlay as the 8th, the SAME way -- any later per-key spawn input appends
-        # here too, rather than opening a second per-key channel. Unpack by name or by
-        # negative index, never assume this stays exactly 8 long. RF-1: spawn()'s own
-        # 2nd parameter is now ``command`` (no key appended) -- this ``prompt`` element
-        # is the composed "<command> <key>" string built inside spawn() itself, so
-        # existing readers of element 1 see the same value as before this ticket.
+        # 9-tuple: (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools,
+        # env_overlay, runner). GA-10 appended allowed_tools as the 7th element; GA-17
+        # appended env_overlay as the 8th; RF-2 appends runner as the 9th -- the SAME
+        # way -- any later per-key spawn input appends here too, rather than opening a
+        # second per-key channel. Unpack by name or by negative index, never assume
+        # this stays exactly 9 long. RF-1: spawn()'s own 2nd parameter is now
+        # ``command`` (no key appended) -- this ``prompt`` element is the composed
+        # "<command> <key>" string built inside spawn() itself, so existing readers of
+        # element 1 see the same value as before this ticket.
         self.spawned: list[tuple[str, str, str, str | None, str | None, list[str], list[str],
-                                 dict[str, str]]] = []
+                                 dict[str, str], str]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
@@ -231,10 +245,57 @@ class DryRunSessions:
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
-              env_overlay: dict[str, str] | None = None) -> int | None:
+              env_overlay: dict[str, str] | None = None,
+              runner: str | None = None) -> int | None:
         prompt = f"{command} {key}"
         self.spawned.append((key, prompt, str(cwd), model, effort,
                              list(disallowed_tools or []), list(allowed_tools or []),
-                             dict(env_overlay or {})))
+                             dict(env_overlay or {}), runner or "claude"))
         self._active.add(key)
         return None
+
+
+class RoutingSessions:
+    """A ``SessionManager`` that dispatches ``spawn`` to one of several backend
+    delegates by runner name (RF-2) -- ``{runner: SessionManager}``. This is the
+    ONE place a resolved ``runner`` (``dispatcher.resolve_runner``, already
+    validated as registered by the caller -- routing to an unregistered name is
+    a caller bug, not a runtime condition this class handles gracefully) turns
+    into an actual backend call; both construction sites (``cli.py``'s
+    ``_nudge`` and ``cmd_dispatch``) build one of these instead of a bare
+    ``ClaudeCliSessions`` now, so a second backend registers by adding one more
+    delegate here, not by touching either call site again.
+
+    ``list_active`` asks exactly ONE delegate (the first registered) instead of
+    every delegate and merging -- ``claims`` tracks liveness runner-agnostically
+    (pid + start_epoch only, never the spawned command string, see
+    ``claims._verdict``), so every delegate sharing the same home would compute
+    the identical set; asking N of them would just re-read (and, for
+    ``ClaudeCliSessions``, re-verify via ``ps``) the same claim files N times.
+    """
+
+    def __init__(self, delegates: dict[str, SessionManager]):
+        if not delegates:
+            raise store.MaestroError("RoutingSessions needs at least one delegate")
+        self.delegates = dict(delegates)
+
+    def list_active(self) -> set[str]:
+        return next(iter(self.delegates.values())).list_active()
+
+    def spawn(self, key: str, command: str, cwd: Path,
+              model: str | None = None, effort: str | None = None,
+              disallowed_tools: list[str] | None = None,
+              allowed_tools: list[str] | None = None,
+              env_overlay: dict[str, str] | None = None,
+              runner: str | None = None) -> int | None:
+        name = runner or "claude"
+        try:
+            delegate = self.delegates[name]
+        except KeyError:
+            raise store.MaestroError(
+                f"RoutingSessions: no delegate registered for runner {name!r} "
+                f"(registered: {sorted(self.delegates)}) -- the caller must "
+                "validate the runner before calling spawn") from None
+        return delegate.spawn(key, command, cwd, model=model, effort=effort,
+                              disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
+                              env_overlay=env_overlay, runner=name)

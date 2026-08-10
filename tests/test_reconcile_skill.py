@@ -734,6 +734,36 @@ def test_make_reconcile_env_key_falls_back_for_single_repo_home(home, cfg):
 
 
 # ---------------------------------------------------------------------------
+# RF-2: `make reconcile` reads the runner off `maestro env --key` and branches
+# ---------------------------------------------------------------------------
+
+def test_make_reconcile_dry_run_reads_and_branches_on_runner():
+    """RF-2: the recipe now also resolves RUNNER off the same env JSON and
+    branches on it -- "claude" is the only registered runner, so the branch
+    exists but the claude path itself stays exactly as it always was (see
+    test_make_reconcile_dry_run_resolves_repo_via_env_key's assertions, all of
+    which still hold unchanged)."""
+    proc = subprocess.run(["make", "-n", "reconcile", "KEY=X-1"], cwd=REPO_ROOT,
+                          capture_output=True, text=True, check=True)
+    assert '["runner"]' in proc.stdout
+    assert "RUNNER" in proc.stdout
+    assert 'claude -p "$COMMAND X-1"' in proc.stdout
+
+
+def test_env_key_resolved_runner_is_claude_for_a_plain_ticket(home, cfg, capsys):
+    """AC8: for a key with no `runner:` override, `maestro env --key` -- what `make
+    reconcile` actually reads RUNNER from -- resolves to "claude", so the Makefile's
+    branch takes the byte-identical-to-today `claude -p` path."""
+    assert cli_main(["--home", str(home), "create", "Makefile runner ticket",
+                     "--key", "X-7", "--no-nudge"]) == 0
+    dispatch(cfg, DryRunSessions(), now=1000)
+    capsys.readouterr()
+    assert cli_main(["--home", str(home), "env", "--key", "X-7"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["runner"] == "claude"
+
+
+# ---------------------------------------------------------------------------
 # AC7: dispatcher sweep test -- a ticket in each phase spawns with the right
 # per-phase command
 # ---------------------------------------------------------------------------
