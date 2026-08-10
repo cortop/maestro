@@ -252,6 +252,27 @@ def test_env_key_never_shells_gh_auth_token(home, capsys, monkeypatch):
     assert rc == 0
 
 
+def test_env_key_never_shells_out_for_a_spec_naming_an_opencode_runner(home, capsys, monkeypatch):
+    """RF-2: `dispatcher.resolve_runner` -- called from this same hot path -- stays a
+    pure spec+config read, even for a spec naming a runner that isn't registered."""
+    store.atomic_write(store.spec_path(home, "X-6"),
+                       "# X-6\napproval_tier: 0\nrunner: opencode\n\n## Intent\nx\n")
+    event_log.append(home, "X-6", "TicketCreated",
+                     {"title": "X-6", "spec_hash": disp.spec_hash_on_disk(home, "X-6")}, actor="d")
+    event_log.append(home, "X-6", "PhaseChanged", {"phase": Phase.IMPLEMENTING.value}, actor="r")
+    snap_mod.rebuild(home, "X-6")
+
+    def boom(*a, **k):
+        raise AssertionError("maestro env --key must not shell out")
+    monkeypatch.setattr(subprocess, "run", boom)
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "env", "--key", "X-6"])
+    assert rc == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["runner"] == "opencode"
+
+
 # --- AC: sessions.spawn / ClaudeCliSessions.spawn / DryRunSessions.spawn ----
 
 def test_dryrun_records_env_overlay_as_last_positional_element():
@@ -259,14 +280,14 @@ def test_dryrun_records_env_overlay_as_last_positional_element():
     s.spawn("T-1", "prompt", Path("/tmp"), env_overlay={"GH_TOKEN": "tok-x"})
     # Named unpack, not a positional/[-1] index -- see DryRunSessions.spawned's
     # docstring: never assume this tuple stays a fixed length.
-    key, prompt, cwd, model, effort, disallowed, allowed, env_overlay = s.spawned[0]
+    key, prompt, cwd, model, effort, disallowed, allowed, env_overlay, *_ = s.spawned[0]
     assert env_overlay == {"GH_TOKEN": "tok-x"}
 
 
 def test_dryrun_records_empty_dict_when_env_overlay_not_provided():
     s = DryRunSessions()
     s.spawn("T-1", "prompt", Path("/tmp"))
-    key, prompt, cwd, model, effort, disallowed, allowed, env_overlay = s.spawned[0]
+    key, prompt, cwd, model, effort, disallowed, allowed, env_overlay, *_ = s.spawned[0]
     assert env_overlay == {}
 
 
@@ -337,7 +358,7 @@ def test_dispatch_spawn_site_threads_correct_overlay_per_repo(home, monkeypatch)
     report = disp.dispatch(cfg, sessions, now=1000)
     assert set(report.spawned) == {"A-1", "B-1"}
 
-    overlay_by_key = {s[0]: s[-1] for s in sessions.spawned}
+    overlay_by_key = {s[0]: s[-2] for s in sessions.spawned}  # -1 is now `runner` (RF-2)
     assert overlay_by_key["A-1"] == {"GH_TOKEN": "tok-alpha"}
     assert overlay_by_key["B-1"] == {"GH_TOKEN": "tok-beta"}
 
@@ -347,7 +368,7 @@ def test_dispatch_spawn_site_no_overlay_when_nothing_configured(home):
     _seed(home, "A-1", Phase.READY, repo="alpha")
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    assert sessions.spawned[0][-1] == {}
+    assert sessions.spawned[0][-2] == {}  # -1 is now `runner` (RF-2)
 
 
 def test_dispatch_spawn_site_memoizes_credential_resolution_per_sweep(home, monkeypatch):
@@ -563,7 +584,7 @@ def test_dispatch_no_credentials_configured_is_byte_identical_env(home):
     _seed(home, "A-1", Phase.READY, repo="alpha")
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    key, prompt, cwd, model, effort, disallowed, allowed, overlay = sessions.spawned[0]
+    key, prompt, cwd, model, effort, disallowed, allowed, overlay, *_ = sessions.spawned[0]
     assert overlay == {}
 
 

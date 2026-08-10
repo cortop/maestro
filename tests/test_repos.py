@@ -151,7 +151,10 @@ def test_env_key_prints_resolved_binding(home, capsys):
                         "base_branch": "main", "branch_prefix": "maestro/", "mode": "git",
                         "gh_credential": None, "prime": None,
                         "reconcile_command": "/maestro-reconcile-triaging",
-                        "disallowed_tools": ["Bash(gh pr merge:*)"]}
+                        "disallowed_tools": ["Bash(gh pr merge:*)"],
+                        # RF-2: per-key resolved spawn args, same as a real spawn would use.
+                        "model": "sonnet", "effort": None,
+                        "runner": "claude", "runner_model": None}
 
 
 def test_env_key_unknown_repo_exits_nonzero(home, capsys):
@@ -179,7 +182,8 @@ def test_bare_env_unchanged_key_set(home, capsys):
     printed = json.loads(out)
     assert set(printed.keys()) == {"home", "repo_path", "branch_prefix", "reconcile_command",
                                     "max_concurrency", "max_impl_turns", "qa_standards_axis",
-                                    "providers", "spawn_floor_s", "no_output_timeout"}
+                                    "providers", "spawn_floor_s", "no_output_timeout",
+                                    "runner", "runner_model"}
     assert printed["no_output_timeout"] == cfg.no_output_timeout
 
 

@@ -18,7 +18,7 @@ from . import backup, claims, credentials, event_log, events, fleet, health, inb
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .providers import ollama as ollama_mod
-from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
+from .sessions import ClaudeCliSessions, DryRunSessions, RoutingSessions, list_sessions
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
@@ -111,14 +111,17 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     which fails loudly if a future param is added to one site and not the
     other.
     """
-    sessions = ClaudeCliSessions(
+    # RF-2: route through RoutingSessions -- "claude" is the only registered
+    # runner (dispatcher._REGISTERED_RUNNERS), so this wraps the exact same
+    # ClaudeCliSessions construction as before, unchanged in every kwarg.
+    sessions = RoutingSessions({"claude": ClaudeCliSessions(
         cfg.home, model=cfg.reconcile_model,
         permission_mode=cfg.permission_mode,
         base_allowed_tools=_reconciler_tool_grants(cfg),
         capture_session_logs=cfg.capture_session_logs,
         session_log_format=cfg.session_log_format,
         unverified_claim_max_age=cfg.unverified_claim_max_age,
-    )
+    )})
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     if report.repo_blockers:
         if cfg.repos:
@@ -440,13 +443,15 @@ def cmd_dispatch(args) -> int:
     if args.dry_run:
         sessions = DryRunSessions()
     else:
-        sessions = ClaudeCliSessions(
+        # RF-2: same wrap as _nudge above -- "claude" is the only registered
+        # runner, so this is a drop-in replacement, not a behavior change.
+        sessions = RoutingSessions({"claude": ClaudeCliSessions(
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
             base_allowed_tools=_reconciler_tool_grants(cfg),
             capture_session_logs=cfg.capture_session_logs,
             session_log_format=cfg.session_log_format,
-            unverified_claim_max_age=cfg.unverified_claim_max_age)
+            unverified_claim_max_age=cfg.unverified_claim_max_age)})
     report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run)
     projection.write(cfg.home)
     out = {"minted" if not args.dry_run else "would_mint":
@@ -1015,18 +1020,26 @@ def cmd_env(args) -> int:
         gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
         tier = disp.spec_tier(cfg.home, key)
         disallowed_tools = disp.tier_denylist(tier) + disp.phase_denylist(snap.phase)
+        # RF-2: same per-key spawn-arg resolution `dispatch()` uses right before
+        # `sessions.spawn` -- surfaced here so `make reconcile` (and any human
+        # inspecting a ticket) sees exactly what a real spawn would resolve to.
+        model, effort = disp._resolve_model_effort(cfg, key)
+        runner, runner_model = disp.resolve_runner(cfg, key, snap.phase)
         _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
                 "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
                 "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
                 "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase),
-                "disallowed_tools": disallowed_tools})
+                "disallowed_tools": disallowed_tools,
+                "model": model, "effort": effort,
+                "runner": runner, "runner_model": runner_model})
         return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
             "max_concurrency": cfg.max_concurrency, "max_impl_turns": cfg.max_impl_turns,
             "qa_standards_axis": cfg.qa_standards_axis, "providers": cfg.providers,
             "spawn_floor_s": disp.spawn_floor(cfg),
-            "no_output_timeout": cfg.no_output_timeout})
+            "no_output_timeout": cfg.no_output_timeout,
+            "runner": cfg.runner, "runner_model": cfg.runner_model})
     return 0
 
 
