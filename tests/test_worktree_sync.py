@@ -29,6 +29,21 @@ def _merge_new_commit_to_origin(repo, origin, base="main"):
     _git("push", "-q", "origin", base, cwd=repo)
 
 
+def _merge_new_commit_to_origin_via_scratch_clone(tmp_path, origin, base="main"):
+    """Like `_merge_new_commit_to_origin`, but lands the commit on `origin/<base>` via a
+    throwaway clone rather than committing in `repo`'s own working tree -- for tests where
+    `repo` has some other branch checked out and must stay untouched by the act of
+    advancing origin."""
+    scratch = tmp_path / "scratch"
+    _git("clone", "-q", str(origin), str(scratch), cwd=tmp_path)
+    _git("config", "user.email", "test@example.com", cwd=scratch)
+    _git("config", "user.name", "Test", cwd=scratch)
+    (scratch / "NEWS.md").write_text("merged change\n")
+    _git("add", "-A", cwd=scratch)
+    _git("commit", "-q", "-m", "T-9: merged change", cwd=scratch)
+    _git("push", "-q", "origin", base, cwd=scratch)
+
+
 def _seed(home, key, phase, pr=10):
     store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
     event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
@@ -102,6 +117,50 @@ def test_sync_worktrees_updates_local_main_when_checked_out(home, cfg, tmp_path)
                                 capture_output=True, text=True, check=True).stdout.strip()
     assert before != after
     assert after == origin_tip
+
+
+def test_sync_worktrees_leaves_feature_branch_ancestor_of_origin_main_untouched(home, cfg, tmp_path):
+    """QW-6: a human feature branch that is an ancestor of origin/main (freshly branched,
+    or fully merged) must not be silently fast-forwarded -- `--ff-only` operates on
+    whatever HEAD points at, not just `base`."""
+    origin, repo = _make_origin_and_repo(tmp_path)
+    cfg.repo_path = str(repo)
+    _git("checkout", "-q", "-b", "feature/human-branch", cwd=repo)
+    before_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                                 capture_output=True, text=True, check=True).stdout.strip()
+    before_ref = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo,
+                                capture_output=True, text=True, check=True).stdout.strip()
+
+    # origin/main advances; feature branch is behind it, but stays checked out in `repo`
+    _merge_new_commit_to_origin_via_scratch_clone(tmp_path, origin)
+
+    disp.sync_worktrees(cfg)
+
+    after_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    after_ref = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo,
+                               capture_output=True, text=True, check=True).stdout.strip()
+    assert after_head == before_head
+    assert after_ref == before_ref == "feature/human-branch"
+
+
+def test_sync_worktrees_noop_on_detached_head(home, cfg, tmp_path):
+    """A detached HEAD (e.g. mid-rebase, or a manual checkout of a sha) has no branch
+    for `symbolic-ref` to name -- the merge must be skipped, and nothing should raise."""
+    origin, repo = _make_origin_and_repo(tmp_path)
+    cfg.repo_path = str(repo)
+    head_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    _git("checkout", "-q", head_sha, cwd=repo)  # detach
+
+    _merge_new_commit_to_origin_via_scratch_clone(tmp_path, origin)
+
+    result = disp.sync_worktrees(cfg)  # must not raise
+
+    after_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    assert after_head == head_sha  # unchanged: no merge happened
+    assert result["errors"] == {}
 
 
 def test_dispatch_full_sweep_routes_and_spawns_stale_ticket(home, cfg, tmp_path):
