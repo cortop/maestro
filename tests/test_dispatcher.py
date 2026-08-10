@@ -630,6 +630,31 @@ def test_dispatch_research_ticket_uses_research_defaults(home):
     assert spawned_map["T-1"] == ("opus", "high")
 
 
+# --- RF-1: spawn() takes command+key separately; DryRunSessions.spawned unchanged ---
+
+def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
+    """AC2: a real dispatch sweep over a plain seeded READY ticket records the exact
+    same spawn tuple RF-1 found before the split -- dispatcher no longer pre-flattens
+    "<command> <key>" itself, but DryRunSessions.spawn still composes and records it,
+    so every existing reader of sessions.spawned sees byte-identical values."""
+    _seed_with_overrides(home, "T-1")  # approval_tier: 0 -> tier_denylist([]) below
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+    assert report.spawned == ["T-1"]
+    assert len(sessions.spawned) == 1
+    key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay = sessions.spawned[0]
+    assert (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay) == (
+        "T-1",
+        "/maestro-reconcile-ready T-1",
+        str(home),
+        "sonnet",
+        None,
+        [],
+        [],
+        {},
+    )
+
+
 # --- RT-1: _seed_spec with new fields ---
 
 def test_seed_spec_includes_kind_model_effort(home, cfg):
