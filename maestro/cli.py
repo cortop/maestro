@@ -17,6 +17,7 @@ from pathlib import Path
 from . import backup, claims, credentials, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
+from .providers import ollama as ollama_mod
 from .sessions import ClaudeCliSessions, DryRunSessions, list_sessions
 from .statemachine import Phase
 
@@ -416,6 +417,21 @@ def cmd_doctor(args) -> int:
     if getattr(args, "strict", False) and any(c["status"] != "ok" for c in rpt["checks"]):
         return 1
     return 1 if rpt["runaway"] else 0
+
+
+def cmd_runners(args) -> int:
+    """Which local models can actually drive an agent (RF-4) -- claude is
+    always available; opencode's are whatever the local ollama daemon reports
+    as tool-capable, discovered as a convenience only (never validated here --
+    OC-2's spawn preflight is where a bad choice is actually refused)."""
+    models, reason = ollama_mod.fetch_models()
+    if models is None:
+        opencode = {"status": "unreachable", "models": None, "reason": reason}
+    else:
+        opencode = {"status": "ok", "models": ollama_mod.model_names(models, tool_capable_only=True),
+                    "reason": None}
+    _print({"claude": {"status": "ok"}, "opencode": opencode})
+    return 0
 
 
 # --- dispatcher / projection (launchd) --------------------------------------
@@ -1068,6 +1084,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--session", help="select a specific session_id")
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
+    add("runners", cmd_runners, "which local models can drive an agent (claude + tool-capable ollama)")
     sp = add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
     sp.add_argument("--strict", action="store_true",
                     help="exit 1 when any check is not ok (default: only the runaway check gates exit code)")
