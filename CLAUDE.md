@@ -25,7 +25,8 @@ file. Read `DESIGN.md` for the full rationale, `README.md` for the quickstart.
 - `make test` — run the suite (`.venv/bin/python -m pytest -q`). Run this before finishing.
 - `make status` / `make doctor` — board state / fleet health.
 - `make reconcile KEY=<KEY>` — run ONE reconcile in the foreground (best way to watch a step).
-- `make dry` — one dispatcher sweep, dry-run (mints + would-spawn, no sessions launched).
+- `make dry` — one dispatcher sweep, read-only preview (`would_mint` + `would_spawn`, no
+  `TicketCreated` appended, no sessions launched).
 
 ## ⚠️ MAESTRO_HOME (read this before any `maestro` command)
 
@@ -106,7 +107,9 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   for a flow, run a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`); for the TUI,
   mount the real app (next bullet). Mock ONLY the genuinely external boundary — the `claude -p`
   spawn (`DryRunSessions`), network, `launchctl` — never the component under test. `make reconcile
-  KEY=…` and `make dry` run the real thing in the foreground when you want to watch a step.
+  KEY=…` runs a real reconcile step in the foreground; `make dry` runs a real sweep the same way
+  but strictly read-only (`would_mint`/`would_spawn`, no writes) — good for watching what a sweep
+  would do without minting or spawning anything.
 - Correctness invariants (idempotency, fencing, crash safety, single-writer) are all tested in
   `tests/`. If you touch the log, dispatcher, claims, or fold, add/adjust a test proving the
   invariant still holds.

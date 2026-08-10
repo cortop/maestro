@@ -761,9 +761,11 @@ def test_claude_md_rewords_pr_target_for_repo_binding():
 
 
 def test_docs_state_dry_run_is_a_read_only_preview():
-    """GA-4: `--dry-run` is a strictly read-only preview -- README, Makefile, and
-    the zsh completion script must say so, not the old "mints + would-spawn"
-    real-sweep-with-null-launcher framing."""
+    """GA-4: `--dry-run` is a strictly read-only preview -- README, Makefile,
+    CLAUDE.md, and the zsh completion script must say so, not the old "mints +
+    would-spawn" real-sweep-with-null-launcher framing. T-4: CLAUDE.md briefly
+    drifted back to claiming `make dry` mints; guard that here too so it can't
+    silently return."""
     readme = (REPO_ROOT / "README.md").read_text()
     assert "read-only preview" in readme
     assert "would_mint" in readme or "would-mint" in readme
@@ -774,3 +776,9 @@ def test_docs_state_dry_run_is_a_read_only_preview():
 
     completions = (REPO_ROOT / "maestro" / "_assets" / "completions" / "_maestro").read_text()
     assert "read-only preview" in completions
+
+    claude_md = (REPO_ROOT / "CLAUDE.md").read_text()
+    dry_line = next(line for line in claude_md.splitlines() if "make dry" in line and line.lstrip().startswith("-"))
+    assert "mints" not in dry_line
+    assert "read-only" in dry_line
+    assert "would_mint" in dry_line and "would_spawn" in dry_line
