@@ -37,6 +37,7 @@ from maestro.statemachine import Phase
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_DIR = REPO_ROOT / ".claude" / "commands"
 SKILLS_DIR = REPO_ROOT / "skills"
+SKILL_COMMANDS_DIR = REPO_ROOT / "maestro" / "_skill_commands"
 
 # The six phase files T-22 split the single maestro-reconcile.md into. "passive" covers
 # awaiting-ci/in-review/degraded/terminating -- phases with no active work for a
@@ -53,6 +54,10 @@ def _commands_path(phase: str) -> Path:
 
 def _skills_path(phase: str) -> Path:
     return SKILLS_DIR / f"maestro-reconcile-{phase}.md"
+
+
+def _skill_commands_path(phase: str) -> Path:
+    return SKILL_COMMANDS_DIR / f"maestro-reconcile-{phase}.md"
 
 
 ALL_PHASE_PATHS = [_commands_path(p) for p in PHASE_FILES] + [_skills_path(p) for p in PHASE_FILES]
@@ -127,7 +132,10 @@ def test_no_bare_origin_main():
     # actually be present (not just deleted): assert the collapsed call is there instead.
     # implementing.md (GA-12: downstream commands literalized -- REPO/BASE substituted as the
     # <REPO>/<BASE> tokens the agent types, never a shell $VAR a fenced line expands) rebases onto
-    # origin/<BASE>, diffs the QA loop against it, and fetches it once (step 0) -- unchanged here.
+    # origin/<BASE> and fetches it once (step 0) -- unchanged here. T-3: the QA loop no longer
+    # diffs "origin/<BASE>" itself (that leaked base advancement into QA's briefing) -- it now
+    # calls `maestro qa-brief "$KEY"`, which resolves <BASE> internally via `maestro env --key`,
+    # so the literal "origin/<BASE>" count drops from 2 (rebase + diff) to 1 (rebase only).
     for path in (_commands_path("ready"), _skills_path("ready")):
         text = path.read_text()
         assert '"origin/$BASE"' not in text, \
@@ -141,8 +149,8 @@ def test_no_bare_origin_main():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         assert '$BASE' not in text, f'{path} should hold BASE as the literal <BASE>, not $BASE'
-        assert text.count('"origin/<BASE>"') == 2, \
-            f'{path} should target "origin/<BASE>" exactly 2 time(s)'
+        assert text.count('"origin/<BASE>"') == 1, \
+            f'{path} should target "origin/<BASE>" exactly 1 time(s) (step 0\'s rebase only)'
         assert text.count('fetch -q origin "<BASE>"') == 1, \
             f'{path} should fetch "<BASE>" exactly 1 time(s)'
 
@@ -580,14 +588,37 @@ def test_acked_in_review_ticket_stops_spawning(home):
 
 
 # ---------------------------------------------------------------------------
-# AC6: mirror-sync -- the two copies stay byte-identical (body only), per phase file
+# AC6 (T-22 numbering) / T-3 AC3: mirror-sync -- all three copies stay
+# byte-identical (body only), per phase file. `maestro/_skill_commands/` is a
+# symlink farm into `.claude/commands/` (see pyproject.toml's packaging note),
+# so it is included here as an explicit assertion rather than trusted to
+# follow along -- a future de-symlinking would otherwise drift silently.
 # ---------------------------------------------------------------------------
 
 def test_skill_copies_are_byte_identical_after_stripping_frontmatter():
     for phase in PHASE_FILES:
         commands_body = _strip_frontmatter(_commands_path(phase).read_text())
         skills_body = _strip_frontmatter(_skills_path(phase).read_text())
+        skill_commands_body = _strip_frontmatter(_skill_commands_path(phase).read_text())
         assert commands_body == skills_body, f"maestro-reconcile-{phase}.md mirrors drifted"
+        assert commands_body == skill_commands_body, \
+            f"maestro-reconcile-{phase}.md: maestro/_skill_commands/ copy drifted from .claude/commands/"
+
+
+# ---------------------------------------------------------------------------
+# T-3: the QA hand-off is briefed from `maestro qa-brief`, not a re-typed
+# `git diff` the implementer has to marshal.
+# ---------------------------------------------------------------------------
+
+def test_implementing_skill_briefs_qa_from_qa_brief_verb():
+    for path in (_commands_path("implementing"), _skills_path("implementing"),
+                 _skill_commands_path("implementing")):
+        text = path.read_text()
+        assert 'maestro qa-brief "$KEY"' in text, f"{path}: step 3 no longer calls qa-brief"
+        assert "never write it to a file" not in text, \
+            f"{path}: the old re-type-the-diff instruction is still present"
+        assert 'git -C <WT> diff "origin/<BASE>" -- .' not in text, \
+            f"{path}: QA is still briefed from a raw git diff instead of qa-brief"
 
 
 # ---------------------------------------------------------------------------

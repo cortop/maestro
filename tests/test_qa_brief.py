@@ -5,6 +5,7 @@ the prompt; these tests pin the packet to a CLI result instead, over real git an
 the real CLI (never a mocked `git diff`).
 """
 import json
+import subprocess
 
 import pytest
 
@@ -143,6 +144,31 @@ def test_brief_appends_no_event(tmp_path, home):
     ops.qa_brief(cfg, "T-1")
     ops.qa_brief(cfg, "T-1")
     assert len(event_log.read(home, "T-1")) == before
+
+
+def test_brief_twice_leaves_worktree_and_index_unmodified(tmp_path, home):
+    """The untracked-file path (`git diff --no-index`) must never fall back to
+    `git add -N` or any other staging trick -- that would make a read-only
+    briefing call mutate the index a later `git add -A` (step 5) then commits
+    unintentionally. Calling it twice, with both a committed and an untracked
+    file in play, must leave `git status --porcelain` byte-identical."""
+    cfg, repo = _bind(tmp_path, home, "T-1")
+    (repo / "widget.py").write_text("def build():\n    return 'widget'\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "add widget", cwd=repo)
+    (repo / "test_widget.py").write_text("def test_build():\n    assert build()\n")  # untracked
+
+    status_before = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                                    check=True, capture_output=True, text=True).stdout
+
+    brief = ops.qa_brief(cfg, "T-1")
+    ops.qa_brief(cfg, "T-1")  # idempotent retry, same QA round
+
+    status_after = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                                   check=True, capture_output=True, text=True).stdout
+    assert status_after == status_before, "qa-brief mutated the worktree/index"
+    assert "test_widget.py" in status_before, "test setup lost its untracked file"
+    assert "test_widget.py" in brief["diff"], "untracked file never reached the QA packet"
 
 
 def test_brief_rejects_a_spec_with_no_acs(tmp_path, home):

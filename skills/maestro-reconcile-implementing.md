@@ -133,13 +133,17 @@ Otherwise implement the spec's Acceptance criteria:
    step: it runs entirely via `Agent`-tool sub-agent spawns inside this session, not across
    dispatcher sweeps.
    ```bash
-   git -C <WT> diff "origin/<BASE>" -- .
+   maestro qa-brief "$KEY"
    ```
-   The command's own output *is* the diff — read it from the Bash tool's result; never write it
-   to a file. Spawn a **QA** sub-agent (`Agent` tool), briefed with only: the spec's Acceptance
-   criteria list and that diff text — not your implementation reasoning. Its job, per AC: judge
-   PASS or FAIL strictly against what the diff actually does, then record a verdict itself (it
-   must not edit code):
+   This mints the hand-off packet deterministically instead of asking you to marshal it: every
+   spec AC (with the same content hash `verify-ac`/`qa-verdict` key their events by) plus a diff
+   anchored on the **merge-base** with `<BASE>` — so base advancement never leaks in — with
+   untracked files appended via `git diff --no-index`, so a brand-new module or test that hasn't
+   been `git add`-ed still reaches QA. Read-only: safe to call again on every QA round, including
+   after a fix-and-retry cycle below. Spawn a **QA** sub-agent (`Agent` tool), briefed with only
+   that JSON output — not your implementation reasoning. Its job, per AC: judge PASS or FAIL
+   strictly against what the diff actually does, then record a verdict itself (it must not edit
+   code):
    `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --evidence "<what it checked, what
    it saw in the diff>"` (1-based, in spec order — same indexing as `verify-ac`; this defaults
    to `--axis spec`, i.e. "does the diff satisfy this AC?").
@@ -164,8 +168,9 @@ Otherwise implement the spec's Acceptance criteria:
    - **Every AC verdict PASS** (spec axis) → continue to step 4.
    - **Any AC verdict FAIL** → you (the implementer) fix the code per the QA evidence, record the
      turn with `maestro impl-turn "$KEY" --role implementer` (the verb numbers the turn and mints
-     its own step-id itself — never hand-roll this with `maestro append`), re-run tests, then spawn
-     QA again against the refreshed diff. Bound the rounds at `max_impl_turns` implementer turns —
+     its own step-id itself — never hand-roll this with `maestro append`), re-run tests, then
+     re-run `maestro qa-brief "$KEY"` and spawn QA again against the refreshed packet. Bound the
+     rounds at `max_impl_turns` implementer turns —
      `impl-turn` checks the ceiling itself and routes the crossing call to `ops.fail`
      (backoff/dead-letter), so this is not just a convention you can silently overrun; if still
      failing when exhausted, do not open a PR — `maestro set-phase "$KEY" implementing --reason "QA
