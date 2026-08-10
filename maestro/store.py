@@ -12,6 +12,7 @@ import json
 import os
 import re
 import fcntl
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,15 +169,32 @@ def atomic_write(target: Path, data: str, *, follow_symlinks: bool = False) -> N
     write site (derived/*, cursors, snapshots, claims, dashboards, the
     deadletter) wants -- resolving symlinks there would move the temp file into
     someone else's directory and turn a same-filesystem rename into a
-    potentially cross-filesystem one. When ``follow_symlinks=True``, a failed
-    replace (e.g. EXDEV from a cross-filesystem target) is re-raised as a
-    `MaestroError` with a clear message instead of a bare `OSError`, so it can't
-    escape uncaught into a TUI callback.
+    potentially cross-filesystem one. A failed replace (e.g. EXDEV from a
+    cross-filesystem target, or ENOENT racing a concurrent unlink) is re-raised
+    as a `MaestroError` with a clear message instead of a bare `OSError`, on
+    every caller regardless of `follow_symlinks`, so it can't escape uncaught
+    into a TUI callback (RB-5).
+
+    The temp name comes from `tempfile.mkstemp`, not `f"...{os.getpid()}"` --
+    the pid alone is unique across processes but not across threads of one
+    process, and the TUI runs several `atomic_write` callers (`ops.compact`,
+    the projection rebuild, fleet status) on Textual worker threads inside a
+    single process. `mkstemp` guarantees each call gets its own name, so two
+    threads racing on the same target can no longer compute the same temp
+    path and step on each other's write (RB-5). It still lands in
+    `target.parent` -- same-directory rename is what makes the atomicity
+    argument hold, see the TRAPS note in RB-5's spec -- and its fd is closed
+    immediately; the write below reopens that (already-unique, already ours)
+    path so the rest of the write/fsync/replace sequence, and its
+    failure-injection seam (`tests/fault_injection.py` patches `Path.open`),
+    stays exactly as it was.
     """
     if follow_symlinks and target.is_symlink():
         target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.parent / f".{target.name}.tmp.{os.getpid()}"
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.tmp.")
+    os.close(tmp_fd)
+    tmp = Path(tmp_name)
     with tmp.open("w", encoding="utf-8") as f:
         f.write(data)
         f.flush()
@@ -185,9 +203,7 @@ def atomic_write(target: Path, data: str, *, follow_symlinks: bool = False) -> N
         os.replace(tmp, target)
     except OSError as e:
         tmp.unlink(missing_ok=True)
-        if follow_symlinks:
-            raise MaestroError(f"atomic_write: could not replace {target}: {e}") from e
-        raise
+        raise MaestroError(f"atomic_write: could not replace {target}: {e}") from e
     dfd = os.open(str(target.parent), os.O_RDONLY)
     try:
         os.fsync(dfd)

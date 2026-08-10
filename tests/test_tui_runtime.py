@@ -1951,3 +1951,41 @@ def test_detail_pane_and_screen_render_title_from_spec(home):
             assert app._exception is None
 
     asyncio.run(_inner())
+
+
+def test_compact_and_project_rebuild_do_not_race_on_shared_derived_files(seeded_home):
+    """RB-5: `ops.compact` (`action_compact`) and the projection rebuild
+    (`action_project_rebuild`) both run on Textual worker *threads* inside
+    this one process and both write under `derived/*` -- the exact shape the
+    bug was in (`store.atomic_write`'s old pid-only temp name collided across
+    threads of one process, surfacing as a bare `OSError`/`FileNotFoundError`
+    escaping into a Textual callback). Confirming the compact modal and then
+    immediately triggering the rebuild -- before waiting for either worker --
+    lets Textual actually run both concurrently; `app._exception is None`
+    proves neither raced the other into a torn/missing temp file."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+
+            await app.run_action("compact")  # opens the y/n confirm modal
+            await pilot.pause()
+            # The modal's Input starts focused, so a bare "y" keypress is
+            # consumed as text entry rather than bubbling to the modal's own
+            # on_key -- submit the (empty) input instead: `_ConfirmModal.
+            # on_input_submitted` treats an empty submission as confirm.
+            await pilot.press("enter")  # confirm -> spawns the compact worker thread
+            await app.run_action("project_rebuild")  # spawns the rebuild worker thread
+            await pilot.pause()
+
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+    # Both writers actually landed -- not just "didn't crash".
+    assert store.events_archive_path(seeded_home, "T-3").exists()
+    dashboards = list((seeded_home / "derived").glob("*.md"))
+    assert dashboards, "projection rebuild did not write any dashboard"

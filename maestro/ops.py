@@ -850,9 +850,10 @@ def compact(cfg: Config, key: str) -> dict:
         # fsync-then-replace-then-fsync-dir sequence as every other durable write in
         # the package (store.atomic_write) -- a bare tmp.replace() left the
         # replacement in the page cache, so a crash right after could lose it. This
-        # also picks up atomic_write's pid-suffixed tmp name, so two concurrent
-        # compactions of the same key (impossible today under file_lock, but a
-        # future caller) can't collide on a fixed ".compact.tmp" name.
+        # also picks up atomic_write's per-call mkstemp-derived tmp name (RB-5), so
+        # two concurrent compactions of the same key (impossible today under
+        # file_lock, but a future caller) can't collide on a fixed ".compact.tmp"
+        # name.
         data = "".join(json.dumps(ev, separators=(",", ":")) + "\n" for ev in post)
         store.atomic_write(active_path, data)
 

@@ -259,6 +259,27 @@ def test_atomic_write_follow_symlinks_wraps_replace_failure(tmp_path, monkeypatc
     assert real.read_text() == "orig"  # untouched by the failed replace
 
 
+def test_atomic_write_default_also_wraps_replace_failure(tmp_path, monkeypatch):
+    """RB-5: the non-`follow_symlinks` (default) path -- every OTHER
+    `atomic_write` caller: derived/*, cursors, snapshots, claims, dashboards,
+    the deadletter -- used to let a failed `os.replace` escape as a bare
+    `OSError`. It must now wrap in `store.MaestroError` too, and still must
+    not leave a stray temp file behind."""
+    target = tmp_path / "snapshot.json"
+    target.write_text("orig")
+
+    def _boom(src, dst):
+        raise OSError(18, "Invalid cross-device link")  # EXDEV
+
+    monkeypatch.setattr("os.replace", _boom)
+
+    with pytest.raises(store.MaestroError):
+        store.atomic_write(target, "new data")
+
+    assert not any(p.name.startswith(".snapshot.json.tmp") for p in tmp_path.iterdir())
+    assert target.read_text() == "orig"  # untouched by the failed replace
+
+
 # --- ops.py: duplicate-name / not-found / rename validation (direct) --------
 
 def test_ops_schedule_edit_rename_to_existing_name_raises(home):

@@ -266,8 +266,9 @@ def test_atomic_write_killed_before_replace_leaves_the_old_snapshot_file(home, f
 
     event_log.append(home, "T-1", "Note", {"n": 2}, actor="t")
     faults.inject_replace_raise(1)  # atomic_write's own os.replace
-    with pytest.raises(InjectedCrash):
+    with pytest.raises(store.MaestroError) as exc_info:
         snap_mod.rebuild(home, "T-1")
+    assert isinstance(exc_info.value.__cause__, InjectedCrash)  # RB-5: wrapped, never a bare OSError
 
     # The event log itself is entirely unaffected by a snapshot-cache crash.
     events = event_log.read(home, "T-1")
@@ -311,8 +312,9 @@ def test_noop_fsync_does_not_mask_a_later_crash_before_replace(home, faults):
     faults.inject_fsync_noop(1)     # the tmp-file fsync silently "succeeds"
     faults.inject_replace_raise(1)  # ...then the replace really crashes
 
-    with pytest.raises(InjectedCrash):
+    with pytest.raises(store.MaestroError) as exc_info:
         snap_mod.rebuild(home, "T-1")
+    assert isinstance(exc_info.value.__cause__, InjectedCrash)  # RB-5: wrapped, never a bare OSError
 
     after = store.read_json(store.snapshot_path(home, "T-1"))
     assert after == before  # still the pre-rebuild content -- never torn
