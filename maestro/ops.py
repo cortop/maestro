@@ -154,18 +154,39 @@ def _validate_evidence(evidence: dict) -> None:
             f"evidence missing required field(s): {', '.join(missing)} (need {', '.join(EVIDENCE_FIELDS)})")
 
 
+_LOCAL_BACKUP_KIND = "local-write-backup"
+_LOCAL_BACKUP_TEXT = "local write backup: "
+
+
+def _is_local_backup_note(ev: dict) -> bool:
+    """A Note this op appended -- `kind` on everything it writes now, text
+    prefix for the notes recorded before the marker existed."""
+    if ev.get("type") != E.NOTE:
+        return False
+    payload = ev.get("payload") or {}
+    return (payload.get("kind") == _LOCAL_BACKUP_KIND
+            or str(payload.get("text", "")).startswith(_LOCAL_BACKUP_TEXT))
+
+
 def local_write_backup(cfg: Config, key: str, *, actor: str = "reconciler",
                        now: float | None = None) -> str | None:
     """AD-6: snapshot *key*'s resolved target directory before the reconciler
     writes into it in place -- the compensating control a ``mode = "local"``
     repo binding uses in place of the PR review checkpoint a git binding gets.
-    No-op (returns None) unless the ticket resolves to a local-mode binding
-    with an existing path.
+    No-op unless the ticket resolves to a local-mode binding with an existing
+    path (returns None); on a repeat call within the step it returns the
+    archive the step already took.
 
     Idempotent per reconcile step: the backup is recorded under a step-id keyed
     on ``(phase, observed_seq)``, so a crash-and-respawn mid-step (after the
     tarball was already taken) does not create a second one -- it just resumes
     writing against the same backup.
+
+    The step's ``observed_seq`` is the log's high-water mark IGNORING this op's
+    own backup Notes -- NOT ``snapshot.observed_seq``, which its own append
+    advances. Keying on the snapshot made the second call within a step compute
+    a *different* step id and take a second tarball (masked whenever both
+    landed inside one timestamp second and so shared a filename).
     """
     binding = repos_mod.resolve(cfg, cfg.home, key)
     if binding.mode != "local" or not binding.path:
@@ -173,13 +194,19 @@ def local_write_backup(cfg: Config, key: str, *, actor: str = "reconciler",
     target = Path(binding.path)
     if not target.exists():
         return None
-    snap = snap_mod.load(cfg.home, key)
-    sid = step_id(key, snap.phase, snap.observed_seq, "local-write-backup")
-    if any(e.get("step_id") == sid for e in event_log.read(cfg.home, key)):
-        return None  # already backed up this step
+    events = event_log.read(cfg.home, key)
+    observed_seq = max((e.get("seq", 0) for e in events if not _is_local_backup_note(e)),
+                       default=0)
+    sid = step_id(key, snap_mod.load(cfg.home, key).phase, observed_seq, _LOCAL_BACKUP_KIND)
+    for e in events:
+        if e.get("step_id") == sid:  # already backed up this step
+            return (e.get("payload") or {}).get("archive")
     now = now if now is not None else store.now_epoch()
     archive = backup.backup_local_target(target, now)
-    _append(cfg, key, E.NOTE, {"text": f"local write backup: {archive}"}, actor=actor, sid=sid)
+    _append(cfg, key, E.NOTE,
+            {"text": f"{_LOCAL_BACKUP_TEXT}{archive}", "kind": _LOCAL_BACKUP_KIND,
+             "archive": str(archive)},
+            actor=actor, sid=sid)
     return str(archive)
 
 
