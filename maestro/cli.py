@@ -98,6 +98,18 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     claim dedup prevents double-spawning if a reconciler is already live.
     Returns the report so callers can react (e.g. a paused-fleet notice); every
     call site inherits that notice for free since the print lives here.
+
+    QW-5 (T-27): this always passes ``model=cfg.reconcile_model``, unlike
+    ``cmd_dispatch`` below which lets ``--model`` override it -- not a bug,
+    just no analogous flag exists here: ans/cmd/create (this function's only
+    callers) have no ``--model`` argument of their own to plumb through, and
+    adding one would collide with ``create``'s own (differently-scoped)
+    ``--model`` flag and be scope creep beyond this ticket's one-line fix.
+    Every other keyword this constructor call passes matches
+    ``cmd_dispatch``'s construction 1:1 -- see
+    ``test_nudge_and_dispatch_construct_session_manager_with_same_kwargs``,
+    which fails loudly if a future param is added to one site and not the
+    other.
     """
     sessions = ClaudeCliSessions(
         cfg.home, model=cfg.reconcile_model,
@@ -432,6 +444,7 @@ def cmd_dispatch(args) -> int:
             cfg.home, model=args.model or cfg.reconcile_model,
             permission_mode=cfg.permission_mode,
             base_allowed_tools=_reconciler_tool_grants(cfg),
+            capture_session_logs=cfg.capture_session_logs,
             session_log_format=cfg.session_log_format,
             unverified_claim_max_age=cfg.unverified_claim_max_age)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run)
