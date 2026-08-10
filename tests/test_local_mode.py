@@ -129,6 +129,65 @@ def test_local_mode_ticket_reaches_done_with_backup_on_write(home, tmp_path):
     assert (target / "note.md").read_text(encoding="utf-8") == "original\nupdated\n"
 
 
+def test_local_backup_is_idempotent_across_a_timestamp_second(home, tmp_path, monkeypatch):
+    """Regression: the dedup used to key on `snapshot.observed_seq`, which the
+    backup Note's own append advances -- so the second call within a step
+    computed a different step id and took a second tarball. That only ever
+    showed when the two calls straddled a second (same second => same archive
+    filename => the second silently overwrote the first)."""
+    target = tmp_path / "vault"
+    target.mkdir()
+    (target / "note.md").write_text("original\n", encoding="utf-8")
+    _write_local_config(home, target)
+    store.atomic_write(store.spec_path(home, "V-1"),
+                       "# V-1\napproval_tier: 0\nrepo: vault\n\n## Intent\nx\n")
+    event_log.append(home, "V-1", "TicketCreated",
+                     {"title": "V-1", "repo": "vault", "spec_hash": "x"}, actor="d")
+    snap_mod.rebuild(home, "V-1")
+    assert cli_main(["--home", str(home), "set-phase", "V-1", "ready", "--reason", "r"]) == 0
+    assert cli_main(["--home", str(home), "set-phase", "V-1", "implementing", "--reason", "r"]) == 0
+
+    clock = iter(range(1_800_000_000, 1_800_000_100))  # every read is a new second
+    monkeypatch.setattr(store, "now_epoch", lambda: float(next(clock)))
+
+    assert cli_main(["--home", str(home), "local-backup", "V-1"]) == 0
+    assert cli_main(["--home", str(home), "local-backup", "V-1"]) == 0
+
+    backups = list((target.parent / "vault-backups").glob("*.tar.gz"))
+    assert len(backups) == 1, "a second call in the same step must not take a second tarball"
+    notes = [e for e in event_log.read(home, "V-1")
+             if e["type"] == "Note" and e["payload"].get("kind") == "local-write-backup"]
+    assert len(notes) == 1
+    assert notes[0]["payload"]["archive"] == str(backups[0])
+
+
+def test_local_backup_takes_a_fresh_tarball_on_a_later_step(home, tmp_path, monkeypatch):
+    """...but a genuinely later step (the log advanced) does back up again."""
+    target = tmp_path / "vault"
+    target.mkdir()
+    (target / "note.md").write_text("original\n", encoding="utf-8")
+    _write_local_config(home, target)
+    store.atomic_write(store.spec_path(home, "V-1"),
+                       "# V-1\napproval_tier: 0\nrepo: vault\n\n## Intent\nx\n")
+    event_log.append(home, "V-1", "TicketCreated",
+                     {"title": "V-1", "repo": "vault", "spec_hash": "x"}, actor="d")
+    snap_mod.rebuild(home, "V-1")
+    assert cli_main(["--home", str(home), "set-phase", "V-1", "ready", "--reason", "r"]) == 0
+    assert cli_main(["--home", str(home), "set-phase", "V-1", "implementing", "--reason", "r"]) == 0
+
+    clock = iter(range(1_800_000_000, 1_800_000_100))
+    monkeypatch.setattr(store, "now_epoch", lambda: float(next(clock)))
+
+    assert cli_main(["--home", str(home), "local-backup", "V-1"]) == 0
+    # the reconciler did its step's work; the next step observes an advanced log
+    assert cli_main(["--home", str(home), "append", "V-1", "--type", "Note",
+                     "--payload", '{"text": "wrote note.md"}']) == 0
+    assert cli_main(["--home", str(home), "local-backup", "V-1"]) == 0
+
+    backups = list((target.parent / "vault-backups").glob("*.tar.gz"))
+    assert len(backups) == 2
+
+
 def test_local_write_backup_is_noop_for_git_mode_binding(cfg):
     home = cfg.home
     store.atomic_write(store.spec_path(home, "T-1"), "# T-1\napproval_tier: 1\n\n## Intent\nx\n")
