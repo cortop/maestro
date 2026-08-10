@@ -1078,32 +1078,62 @@ def prune_logs_tick(cfg: Config, now: float) -> dict | None:
                             lambda: ops.prune_all_session_logs(cfg, now=now))
 
 
-def run_watchdog(cfg: Config, now: float) -> list[str]:
-    """Reap any claim whose session has run past ``max_session_seconds`` (0
-    disables). ``claims.active_keys`` only checks pid-alive, so a live-but-stuck
-    claude session holds its key forever; this is the age-based backstop, and it
-    must run before ``active`` is computed so a hung claim never counts toward
-    concurrency. Best-effort SIGTERM to the process group (pid == pgid, since
-    sessions spawn with ``start_new_session=True``) -- a pid that's already gone
-    is not an error, just one less thing to kill."""
+def _killpg_best_effort(pid) -> None:
+    """Best-effort SIGTERM to the process group (pid == pgid, since sessions
+    spawn with ``start_new_session=True``) -- a pid that's already gone is not
+    an error, just one less thing to kill. The default killer; tests inject
+    their own to assert *what* would be killed without a real process."""
+    try:
+        os.killpg(int(pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, ValueError, TypeError, OSError):
+        pass
+
+
+def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
+    """Reap a claim that is either too OLD (``max_session_seconds``, 0 disables)
+    or has gone SILENT (``no_output_timeout``, 0 disables). ``claims.active_keys``
+    only checks pid-alive, so a live-but-stuck session -- wedged at startup with
+    no output, no error, no exit -- holds its key and a concurrency slot forever;
+    this closes that gap. Both clocks are independent: a fresh log survives past
+    ``max_session_seconds``, and a stale log is reaped even with a young claim
+    epoch. Must run before ``active`` is computed so a reaped claim never counts
+    toward concurrency. *kill* defaults to a best-effort SIGTERM-to-pgid
+    (``_killpg_best_effort``); injectable so a test can assert the pid passed to
+    it without spawning a real process.
+
+    The no-output check is exempt for a claim recorded without ``log_path``
+    (``capture_session_logs = false`` -- no output signal, never reap on missing
+    data) -- it still falls through to the age-based check below.
+    """
     home = cfg.home
     max_seconds = cfg.max_session_seconds
-    if not max_seconds:
+    no_output_timeout = cfg.no_output_timeout
+    kill = kill or _killpg_best_effort
+    if not max_seconds and not no_output_timeout:
         return []
     reaped: list[str] = []
     for key, claim in claims.all_claims(home).items():
-        epoch = claim.get("epoch")
-        if not isinstance(epoch, (int, float)) or now - epoch <= max_seconds:
+        reason = None
+        log_path = claim.get("log_path")
+        if no_output_timeout and log_path:
+            try:
+                mtime = os.stat(log_path).st_mtime
+            except OSError:
+                mtime = None
+            if mtime is not None and now - mtime > no_output_timeout:
+                reason = f"no output for over {no_output_timeout}s (log: {log_path})"
+        if reason is None:
+            epoch = claim.get("epoch")
+            if (max_seconds and isinstance(epoch, (int, float))
+                    and now - epoch > max_seconds):
+                reason = f"session exceeded {max_seconds}s"
+        if reason is None:
             continue
         pid = claim.get("pid")
-        try:
-            os.killpg(int(pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, ValueError, TypeError, OSError):
-            pass
+        kill(pid)
         claims.release(home, key)
         from . import ops
-        ops.fail(cfg, key, f"watchdog: session exceeded {max_seconds}s (pid {pid})",
-                actor="dispatcher")
+        ops.fail(cfg, key, f"watchdog: {reason} (pid {pid})", actor="dispatcher")
         reaped.append(key)
     return reaped
 
