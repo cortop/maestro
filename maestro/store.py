@@ -125,6 +125,14 @@ def worktree_path(home: Path, key: str) -> Path:
     return home / "worktrees" / validate_key(key)
 
 
+def scratch_path(home: Path, key: str) -> Path:
+    """Per-key, non-git scratch cwd for a ``git``-mode reconciler before its
+    worktree exists (QW-7): a plain directory, never the human's own shared
+    checkout (``[repos.*].path``). Flat under ``home/scratch``, same layout
+    rationale as ``worktree_path``."""
+    return home / "scratch" / validate_key(key)
+
+
 def _lock_file(target: Path) -> Path:
     return target.parent / f".{target.name}.lock"
 

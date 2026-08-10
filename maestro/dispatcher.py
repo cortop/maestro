@@ -1852,23 +1852,60 @@ def _resolve_model_effort(cfg: Config, key: str) -> tuple[str, str | None]:
 
 
 def _worker_cwd(cfg: Config, key: str) -> Path:
-    """Where the reconciler runs. Prefer the ticket's own worktree; before one
-    exists (e.g. the first triage step) fall back to the ticket's resolved repo
-    binding (``repos.resolve`` -- an unbound ticket resolves to ``cfg.repo_path``
-    unchanged) so the ``/maestro-reconcile`` command + skill resolve there. Only
-    if no repo is configured at all do we land in ``home`` (which has no
-    ``.claude/commands`` — the reconciler would no-op there)."""
+    """Where the reconciler runs. Prefer the ticket's own worktree. Before one
+    exists (e.g. the first triage step, or ``implementing`` if its worktree was
+    removed): ``mode == "local"`` bindings (AD-6 -- a plain, non-git target
+    directory, the deliberate write-in-place case) still land in
+    ``binding.path`` unchanged. A ``git``-mode binding never does (QW-7) --
+    on a single-repo board ``binding.path`` IS the human's own shared checkout,
+    and every pre-worktree phase grants ``Write``/``Edit`` with
+    ``--permission-mode acceptEdits``, so a relative edit would land there
+    instead of in ticket-owned state. Use a per-key scratch dir instead,
+    seeded with the repo's ``.claude/commands`` so the phase's slash command
+    still resolves. Only if no repo is configured at all (no path to seed
+    from) do we land in ``home`` (which has no ``.claude/commands`` either --
+    the reconciler would no-op there, same as before this ticket)."""
     wt = store.worktree_path(cfg.home, key)
     if wt.exists():
         return wt
     from . import repos as repos_mod  # lazy: repos imports us at module load time
 
     binding = repos_mod.resolve(cfg, cfg.home, key)
-    if binding.path:
-        return Path(binding.path)
-    if cfg.repo_path:
-        return Path(cfg.repo_path)
+    if binding.mode == "local":
+        if binding.path:
+            return Path(binding.path)
+        return cfg.home
+    if binding.path and Path(binding.path).exists():
+        return _ensure_scratch_dir(cfg.home, key, Path(binding.path))
     return cfg.home
+
+
+def _ensure_scratch_dir(home: Path, key: str, repo_path: Path) -> Path:
+    """Idempotently create/refresh the per-key scratch cwd ``_worker_cwd`` uses
+    for a ``git``-mode ticket before its worktree exists (QW-7): a plain,
+    non-git directory under ``home/scratch/<key>/`` -- never *repo_path*
+    itself -- with a symlink to *repo_path*'s ``.claude/commands`` (only that
+    dir, not the whole repo; cwd-based command resolution is already proven by
+    the fallback this replaces, and ``--add-dir``'s effect on slash-command
+    discovery from a different cwd is unverified in this codebase, so it isn't
+    load-bearing here) so the phase's ``/maestro-reconcile-<phase>`` command
+    still resolves. Safe to call every sweep: re-links only if the target repo
+    path changed, never touches an unexpected real file/dir at that path."""
+    scratch = store.scratch_path(home, key)
+    scratch.mkdir(parents=True, exist_ok=True)
+    commands_src = repo_path / ".claude" / "commands"
+    if not commands_src.exists():
+        return scratch
+    commands_link = scratch / ".claude" / "commands"
+    commands_link.parent.mkdir(parents=True, exist_ok=True)
+    if commands_link.is_symlink():
+        if commands_link.resolve() != commands_src.resolve():
+            commands_link.unlink()
+            commands_link.symlink_to(commands_src)
+    elif not commands_link.exists():
+        commands_link.symlink_to(commands_src)
+    # else: a real file/dir already sits there -- never clobber it.
+    return scratch
 
 
 def _write_heartbeat(home: Path, now: float, spawned: int, active: int,

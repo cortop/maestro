@@ -37,6 +37,15 @@ def _bind(tmp_path, home, key, *, base_branch="main"):
                        SPEC_TEMPLATE.format(key=key, acs="- [ ] build the widget\n- [ ] document it"))
     event_log.append(home, key, "TicketCreated", {"title": "Test ticket", "source": "test"}, actor="d")
     snap_mod.rebuild(home, key)
+    # QW-7: dispatcher._worker_cwd (what qa_brief diffs) no longer falls back to
+    # `repo` -- the shared checkout -- once no worktree exists; it only ever
+    # lands there via the ticket's OWN worktree path. These tests exercise
+    # qa_brief's git-diff plumbing, not worktree lifecycle, so stand in for
+    # "the worktree already exists" (true in production: `maestro worktree
+    # ensure` always runs before `implementing` ever calls qa_brief) with a
+    # symlink at the worktree path pointing straight at `repo`.
+    wt = store.worktree_path(home, key)
+    wt.symlink_to(repo)
     return cfg, repo
 
 

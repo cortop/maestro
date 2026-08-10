@@ -206,11 +206,30 @@ def test_old_snapshot_without_repo_field_round_trips(home):
     assert snap.phase == "ready"
 
 
-# --- AC6 (superseded by MR-3): once dispatcher.py consumes repo bindings for cwd,
-# a bound ticket's pre-worktree spawn lands in ITS repo, not cfg.repo_path ---
+# --- AC6 (superseded by MR-3, then QW-7): once dispatcher.py consumes repo
+# bindings for cwd, a bound ticket's pre-worktree spawn is seeded from ITS
+# repo, not cfg.repo_path -- but (QW-7) never lands IN that repo directly, a
+# shared checkout the reconciler could edit. It lands in a per-key scratch
+# dir whose .claude/commands symlink still resolves through the right repo. ---
 
 def test_dispatch_spawn_cwd_honors_repo_binding(home):
-    cfg = _write_multi_repo_config(home)
+    default_repo = home / "repo-default"
+    alpha_repo = home / "repo-alpha"
+    for repo in (default_repo, alpha_repo):
+        (repo / ".claude" / "commands").mkdir(parents=True)
+        (repo / ".claude" / "commands" / "maestro-reconcile-triaging.md").write_text("# x\n")
+    (home / "config.toml").write_text(
+        "[maestro]\n"
+        f'repo_path = "{default_repo}"\n'
+        'branch_prefix = "maestro/"\n\n'
+        "[repos.alpha]\n"
+        f'path = "{alpha_repo}"\n'
+        'slug = "acme/alpha"\n'
+        'base_branch = "develop"\n'
+        'branch_prefix = "alpha/"\n',
+        encoding="utf-8",
+    )
+    cfg = config_mod.load(str(home))
     assert cli_main(["--home", str(home), "create", "Ticket X-5",
                      "--key", "X-5", "--no-nudge"]) == 0
     assert cli_main(["--home", str(home), "create", "Ticket X-6",
@@ -219,12 +238,16 @@ def test_dispatch_spawn_cwd_honors_repo_binding(home):
     sessions = DryRunSessions()
     dispatch(cfg, sessions, now=1000)
 
-    # No worktree exists yet for either key. X-5 is unbound -> falls back to
-    # cfg.repo_path exactly as before MR-3. X-6 is bound to alpha -> its
-    # resolved repo binding's path now wins over cfg.repo_path (MR-3).
+    # No worktree exists yet for either key. Neither lands in its repo directly
+    # (QW-7) -- each gets its own scratch dir, seeded from its OWN resolved
+    # repo (X-5 unbound -> cfg.repo_path/default, X-6 bound -> alpha).
     cwd_by_key = {k: c for k, _p, c, _m, _e, _d, *_ in sessions.spawned}
-    assert cwd_by_key["X-5"] == cfg.repo_path
-    assert cwd_by_key["X-6"] == "/repo/alpha"
+    assert cwd_by_key["X-5"] == str(store.scratch_path(home, "X-5"))
+    assert cwd_by_key["X-6"] == str(store.scratch_path(home, "X-6"))
+    assert (Path(cwd_by_key["X-5"]) / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve() \
+        == (default_repo / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve()
+    assert (Path(cwd_by_key["X-6"]) / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve() \
+        == (alpha_repo / ".claude" / "commands" / "maestro-reconcile-triaging.md").resolve()
 
 
 # --- MR-4: resolve_vcs_slug / slug_from_pr_url -- the VCS-layer repo resolution ---
