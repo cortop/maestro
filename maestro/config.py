@@ -103,6 +103,11 @@ class Config:
     research_model: str = "opus"       # model for kind=research tickets
     research_effort: str = "high"      # effort for kind=research tickets
     default_effort: str | None = None  # global effort default; None = omit --effort entirely
+    # RF-2: board-wide fallback for the implementation-spawn runner, when a spec carries
+    # no `runner:`/`runner_model:` override (dispatcher.resolve_runner). "claude" is the
+    # only registered runner as of this ticket -- see dispatcher._REGISTERED_RUNNERS.
+    runner: str = "claude"
+    runner_model: str | None = None
     reconcile_web_tools: bool = True   # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
     # GA-10: board-wide --allowedTools additions beyond the maestro-verb grant (cli.py's
     # _AGENT_TOOL_VERBS) and reconcile_web_tools -- e.g. a repo's own git/gh/test surface.
@@ -266,6 +271,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.research_model = m.get("research_model", cfg.research_model)
         cfg.research_effort = m.get("research_effort", cfg.research_effort)
         cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
+        cfg.runner = m.get("runner", cfg.runner)
+        cfg.runner_model = m.get("runner_model", cfg.runner_model) or None
         cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
         raw_allowed = m.get("reconcile_allowed_tools", cfg.reconcile_allowed_tools)
         cfg.reconcile_allowed_tools = raw_allowed if isinstance(raw_allowed, list) else cfg.reconcile_allowed_tools

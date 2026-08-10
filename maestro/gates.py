@@ -25,11 +25,15 @@ _FRONTMATTER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
 
 
 def parse_spec_overrides(spec_text: str) -> dict:
-    """Extract optional kind/model/effort/repo/approval_tier from a spec's loose
-    frontmatter. Stops at the first ## section header. Returns only keys that
-    are present. ``approval_tier`` is parsed to int; a malformed value (not an
+    """Extract optional kind/model/effort/repo/runner/runner_model/approval_tier from a
+    spec's loose frontmatter. Stops at the first ## section header. Returns only keys
+    that are present. ``approval_tier`` is parsed to int; a malformed value (not an
     int) is simply omitted -- callers fall back to the safe, more-restrictive
-    default (see ``spec_tier``) rather than this function ever raising.
+    default (see ``spec_tier``) rather than this function ever raising. RF-2:
+    ``runner``/``runner_model`` follow ``model``/``effort``'s precedent exactly --
+    returned verbatim, no normalisation, no validation (that's
+    ``dispatcher.resolve_runner``'s job, and the fail-closed-on-unregistered-name
+    check is the dispatcher's, not this function's).
     """
     result: dict = {}
     for line in spec_text.splitlines():
@@ -39,7 +43,7 @@ def parse_spec_overrides(spec_text: str) -> dict:
         if not m:
             continue
         field, val = m.group(1), m.group(2).strip()
-        if field in ("kind", "model", "effort", "repo"):
+        if field in ("kind", "model", "effort", "repo", "runner", "runner_model"):
             result[field] = val
         elif field == "approval_tier":
             try:

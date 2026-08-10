@@ -1725,6 +1725,21 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                             f"'{binding.name if binding is not None else 'default'}': {cred.error}",
                             actor="dispatcher")
                     continue
+                runner, runner_model = resolve_runner(cfg, key, phase_by_key.get(key, ""))
+                if runner not in _REGISTERED_RUNNERS:
+                    # RF-2: fail closed (never fall back to Claude, same rule GA-17
+                    # states verbatim for credentials) -- ask, don't fail, and spend
+                    # no attempts-ledger slot: this is a config problem for a human
+                    # to fix (register the runner, or fix the spec's `runner:` line),
+                    # not a no-progress spawn attempt.
+                    decisions[key]["outcome"] = "runner_unregistered"
+                    from . import ops
+                    ops.ask(cfg, key,
+                            f"spec names runner {runner!r}, which has no registered "
+                            f"SessionManager (registered: {sorted(_REGISTERED_RUNNERS)}) -- "
+                            "fix the spec's `runner:` line or register the runner",
+                            qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher")
+                    continue
                 if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
                     attempts_changed = True
                     reaped.append(key)
@@ -1744,7 +1759,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 # command back out of a prompt maestro pre-flattened).
                 sessions.spawn(key, command, cwd, model=model, effort=effort,
                                disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
-                               env_overlay=cred.env)
+                               env_overlay=cred.env, runner=runner)
                 spawned.append(key)
                 decisions[key]["outcome"] = "spawned"
                 weight = spawn_weight(cfg, phase_by_key.get(key, ""))
@@ -1849,6 +1864,56 @@ def _resolve_model_effort(cfg: Config, key: str) -> tuple[str, str | None]:
     model = overrides.get("model", default_model)
     effort = overrides.get("effort") or default_effort
     return model, effort
+
+
+# RF-2: the ONLY registered runner as of this ticket -- the seam this ticket lands
+# (spec `runner:`/`runner_model:` -> resolve_runner -> RoutingSessions) is proved
+# byte-identical-by-default before a second backend can be added, per the ticket's
+# Intent. Adding a runner means adding it here AND wiring a delegate into every
+# RoutingSessions construction site (cli.py) -- one is meaningless without the other.
+_REGISTERED_RUNNERS = frozenset({"claude"})
+
+
+def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
+    """Resolve the runner (and its optional model override) for spawning *key*'s
+    reconciler (RF-2).
+
+    Requirement 1, enforced HERE and only here (``gates.needs_approval``'s "THE
+    RULE MUST HAVE EXACTLY ONE DEFINITION"): every phase other than the
+    implementation spawn always gets ``("claude", None)``, regardless of what the
+    spec says -- a non-Claude runner is only ever meaningful for the `implementing`
+    step, and every other phase's reconciler must keep spawning via the one
+    backend that's actually been proven byte-identical.
+
+    Precedence for the `implementing` phase: spec `runner:`/`runner_model:`
+    front-matter -> board config (``cfg.runner``/``cfg.runner_model``) -- two
+    levels only, matching `model`/`effort` (no ``[repos.*].runner`` layer).
+
+    Pure config + spec reads -- never spawns a subprocess (``maestro env --key``
+    is a hot path every reconciler preamble calls; see
+    ``tests/test_gh_credentials.py`` for the no-subprocess assertion this must
+    keep passing) and never raises: a missing spec file, an empty spec, or a
+    malformed `runner:` line all fall back to the config default rather than
+    wedging spawn-arg construction. Returns the runner name VERBATIM, whatever
+    it is -- validating it's actually registered (``_REGISTERED_RUNNERS``) and
+    failing closed on an unregistered name is the caller's job (``dispatch``),
+    not this function's, so this stays a pure read with no side effects.
+    """
+    try:
+        is_implementing = Phase(phase) == Phase.IMPLEMENTING
+    except ValueError:
+        is_implementing = False
+    if not is_implementing:
+        return "claude", None
+
+    spec_file = store.spec_path(cfg.home, key)
+    overrides: dict = {}
+    if spec_file.exists():
+        overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
+
+    runner = overrides.get("runner") or cfg.runner
+    runner_model = overrides.get("runner_model") or cfg.runner_model
+    return runner, runner_model
 
 
 def _worker_cwd(cfg: Config, key: str) -> Path:
