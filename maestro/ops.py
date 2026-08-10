@@ -243,10 +243,36 @@ def _git_dir(wt: Path) -> Path:
     return p if p.is_absolute() else wt / p
 
 
-def _worktree_create_or_adopt(repo: str, wt: Path, branch: str, base: str) -> None:
+def _has_prior_implementing_history(cfg: Config, key: str) -> bool:
+    """True iff *key*'s own event log already recorded a `PhaseChanged` into
+    `implementing` (archive included, so it survives a compaction) -- the
+    signal that an adopt-fallback branch plausibly belongs to THIS ticket's
+    current run, not a stale branch left behind by an earlier incarnation
+    that merely reused this key (T-44)."""
+    return any(
+        e.get("type") == E.PHASE_CHANGED
+        and (e.get("payload") or {}).get("phase") == Phase.IMPLEMENTING.value
+        for e in event_log.read(cfg.home, key)
+    )
+
+
+def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch: str, base: str) -> None:
     """Create *wt* on a fresh branch off ``origin/<base>``, or adopt *branch*
     if it already exists -- the same create-then-fallback the old ready.md
-    prose did. Raises loudly (never a silent no-op) if both attempts fail."""
+    prose did. Raises loudly (never a silent no-op) if both attempts fail.
+
+    The adopt fallback exists ONLY to resume a branch THIS TICKET'S CURRENT RUN
+    already pushed commits to (its worktree dir got removed, the branch
+    survives) -- never to bind a fresh incarnation of a reused key to some
+    stranger's history. Ticket keys are reused across board incarnations, and
+    a repo accumulates `maestro/<key>` branches from all of them (T-44: this
+    repo alone carries 100+); adopting one on nothing but a name match can
+    silently check out a tree that predates today's tooling entirely. So
+    before adopting, this requires `_has_prior_implementing_history` --
+    proof *this* run has been in `implementing` before -- and refuses
+    (`store.MaestroError`, no event appended, non-zero exit) naming the
+    branch and telling the operator to archive/rename it, rather than
+    adopting-and-hoping."""
     fetch = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", base],
                            capture_output=True, text=True, timeout=_FETCH_TIMEOUT)
     if fetch.returncode != 0:
@@ -257,6 +283,14 @@ def _worktree_create_or_adopt(repo: str, wt: Path, branch: str, base: str) -> No
         ["git", "-C", repo, "worktree", "add", str(wt), "-b", branch, f"origin/{base}"],
         capture_output=True, text=True, timeout=_GIT_TIMEOUT)
     if created.returncode != 0:
+        if not _has_prior_implementing_history(cfg, key):
+            raise store.MaestroError(
+                f"{key}: refusing to adopt existing branch {branch!r} in {repo} -- {key}'s event "
+                f"log has no prior `implementing` phase, so this branch cannot be this run's own "
+                f"history (create off origin/{base} failed: {created.stderr.strip()}). It is "
+                f"almost certainly a stale branch left by an earlier ticket that reused this key "
+                f"-- archive or rename it (e.g. `git -C {repo} branch -m {branch} "
+                f"archive/{branch}`) and re-run `maestro worktree ensure {key}`.")
         adopted = subprocess.run(
             ["git", "-C", repo, "worktree", "add", str(wt), branch],
             capture_output=True, text=True, timeout=_GIT_TIMEOUT)
@@ -347,7 +381,12 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     Idempotence: a fresh ``git worktree add`` is skipped once the worktree dir
     already exists; `prime` is skipped once its worktree-local marker (under
     the worktree's OWN git dir -- see `_git_dir` -- so it self-cleans when the
-    worktree is removed) is present. Raises ``store.MaestroError`` -- never a
+    worktree is removed) is present. If a fresh branch can't be created (it
+    already exists), the adopt fallback (see `_worktree_create_or_adopt`) only
+    fires when *key*'s own event log shows it was already `implementing`
+    before -- otherwise it refuses (`store.MaestroError` naming the branch,
+    T-44) rather than silently binding this run to a stale branch left by an
+    earlier ticket that reused this key. Raises ``store.MaestroError`` -- never a
     silent success -- if worktree add/adopt fails, or if `prime` exits non-zero
     or exceeds *prime_timeout*; the CLI wrapper surfaces that as a non-zero
     exit with the repo name and rc in stderr, and appends no event, so no
@@ -367,7 +406,7 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     created = False
     if not wt.exists():
         branch = f"{binding.branch_prefix}{key}"
-        _worktree_create_or_adopt(repo, wt, branch, binding.base_branch)
+        _worktree_create_or_adopt(cfg, key, repo, wt, branch, binding.base_branch)
         created = True
 
     _prime_worktree_extras(repo, wt)
