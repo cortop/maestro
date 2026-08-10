@@ -36,6 +36,8 @@ def _merge_new_commit_to_origin_via_scratch_clone(tmp_path, origin, base="main")
     advancing origin."""
     scratch = tmp_path / "scratch"
     _git("clone", "-q", str(origin), str(scratch), cwd=tmp_path)
+    _git("config", "user.email", "test@example.com", cwd=scratch)
+    _git("config", "user.name", "Test", cwd=scratch)
     (scratch / "NEWS.md").write_text("merged change\n")
     _git("add", "-A", cwd=scratch)
     _git("commit", "-q", "-m", "T-9: merged change", cwd=scratch)
