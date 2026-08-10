@@ -38,6 +38,28 @@ def test_fencing_rejects_stale_append(home):
     assert ev["seq"] == 3
 
 
+def test_step_id_dedup_shadows_a_stale_fencing_check(home):
+    """Ordering (RB-7): dedup is checked BEFORE fencing. A caller replaying an
+    already-applied step_id gets the idempotent `None` no-op even if its
+    `expected_last_seq` is now stale -- it never reaches the CAS at all."""
+    first = event_log.append(home, "T-1", "PhaseChanged", {"phase": "ready"},
+                             actor="a", step_id="phase-T-1-ready", expected_last_seq=0)
+    assert first is not None and first["seq"] == 1
+    event_log.append(home, "T-1", "Note", {}, actor="b")  # tail moves to 2
+
+    # Same step_id, still asserting the now-stale expected_last_seq=0 -- dedup
+    # wins and this returns None, NOT StaleAppendError.
+    replay = event_log.append(home, "T-1", "PhaseChanged", {"phase": "ready"},
+                              actor="a", step_id="phase-T-1-ready", expected_last_seq=0)
+    assert replay is None
+
+    # A genuinely NEW step_id with the same stale expected_last_seq is not
+    # shadowed by dedup, so the CAS actually runs and rejects it.
+    with pytest.raises(StaleAppendError):
+        event_log.append(home, "T-1", "PhaseChanged", {"phase": "implementing"},
+                         actor="a", step_id="phase-T-1-implementing", expected_last_seq=0)
+
+
 def test_keys_are_isolated(home):
     event_log.append(home, "T-1", "Note", {}, actor="t")
     event_log.append(home, "T-2", "Note", {}, actor="t")

@@ -935,16 +935,24 @@ def sync_vcs(cfg: Config, now: float) -> dict:
         else:
             status = vcs.pr_status(snap.pr_number, repo=repo_slug, env=cred.env)
 
-        if _route_if_merged(cfg, key, status, worktree_removal_errors):
-            continue
-        if status.get("mergeable") == "CONFLICTING":
-            from . import ops
-            ops.route_conflict(cfg, key, snap.pr_number, actor="dispatcher")
-            continue
+        try:
+            if _route_if_merged(cfg, key, status, worktree_removal_errors):
+                continue
+            if status.get("mergeable") == "CONFLICTING":
+                from . import ops
+                ops.route_conflict(cfg, key, snap.pr_number, actor="dispatcher")
+                continue
 
-        _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number)
-        if cred.ok:
-            _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env)
+            _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number)
+            if cred.ok:
+                _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env)
+        except event_log.StaleAppendError:
+            # Lost the fencing race against a concurrent writer (a human, a
+            # reconciler, or another dispatcher tick) that appended between
+            # this loop's fold and here -- benign, no failure_count spend, no
+            # partial routing for this key. The next sweep re-derives it from
+            # the now-current log, same as any other ticket this tick skipped.
+            continue
 
     cursor[vcs_name] = now
     store.write_json(cursor_path, cursor)
@@ -1004,16 +1012,18 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
                           actor="dispatcher", step_id=sid)
     if ev is None:
         return  # unchanged since the last poll — nothing to route
-    snap_mod.rebuild(cfg.home, key)
+    fresh = snap_mod.rebuild(cfg.home, key)
     from . import ops
     if error in ("auth", "not_found"):
         where = f"{repo_slug or '?'}#{pr_number if pr_number is not None else '?'}"
         ops.fail(cfg, key, f"gh {error}: could not read PR {where}", actor="dispatcher")
     elif ci_state == "failing":
         ops.set_phase(cfg, key, Phase.IMPLEMENTING,
-                      reason=f"CI failing: {', '.join(failing)}", actor="dispatcher")
+                      reason=f"CI failing: {', '.join(failing)}", actor="dispatcher",
+                      expect=fresh.observed_seq)
     elif ci_state == "passing" and phase == Phase.AWAITING_CI:
-        ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher")
+        ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher",
+                      expect=fresh.observed_seq)
 
 
 def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None,
@@ -1033,10 +1043,11 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
             changes_requested_body = r.get("body", "")
     if changes_requested_body is None:
         return
-    snap_mod.rebuild(cfg.home, key)
+    fresh = snap_mod.rebuild(cfg.home, key)
     from . import ops
     ops.set_phase(cfg, key, Phase.IMPLEMENTING,
-                 reason=f"changes requested: {changes_requested_body}", actor="dispatcher")
+                 reason=f"changes requested: {changes_requested_body}", actor="dispatcher",
+                 expect=fresh.observed_seq)
 
 
 def maintenance_tick(home: Path, name: str, interval: int, now: float, fn) -> dict | None:

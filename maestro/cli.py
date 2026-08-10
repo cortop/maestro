@@ -582,7 +582,8 @@ def cmd_append(args) -> int:
 def cmd_set_phase(args) -> int:
     cfg = _cfg(args)
     ev = ops.set_phase(cfg, args.key, Phase(args.phase), reason=args.reason or "",
-                       actor=args.actor, requeue_in=args.requeue, force=args.force)
+                       actor=args.actor, requeue_in=args.requeue, force=args.force,
+                       expect=args.expect)
     _print(ev or {"noop": "phase already set"})
     return 0
 
@@ -1149,6 +1150,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--reason"); sp.add_argument("--requeue", type=int); sp.add_argument("--actor", default="reconciler")
     sp.add_argument("--force", action="store_true",
                      help="override the AC-verification gate on awaiting-ci (records --actor as forced_by)")
+    sp.add_argument("--expect", type=int,
+                     help="fencing CAS: the observed_seq this decision was folded from -- "
+                          "rejects (StaleAppendError, non-zero exit) if the log moved on since")
 
     sp = add("ask", cmd_ask, "[agent] ask the human, go to awaiting-human")
     sp.add_argument("key")
