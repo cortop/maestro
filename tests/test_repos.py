@@ -150,7 +150,8 @@ def test_env_key_prints_resolved_binding(home, capsys):
     assert printed == {"repo": "beta", "repo_path": "/repo/beta", "slug": "acme/beta",
                         "base_branch": "main", "branch_prefix": "maestro/", "mode": "git",
                         "gh_credential": None, "prime": None,
-                        "reconcile_command": "/maestro-reconcile-triaging"}
+                        "reconcile_command": "/maestro-reconcile-triaging",
+                        "disallowed_tools": ["Bash(gh pr merge:*)"]}
 
 
 def test_env_key_unknown_repo_exits_nonzero(home, capsys):

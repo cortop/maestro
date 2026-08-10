@@ -1013,10 +1013,13 @@ def cmd_env(args) -> int:
         # reconciler phase preamble calls `maestro env --key`), so it must stay
         # zero-cost and never touch the secret value.
         gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
+        tier = disp.spec_tier(cfg.home, key)
+        disallowed_tools = disp.tier_denylist(tier) + disp.phase_denylist(snap.phase)
         _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
                 "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
                 "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
-                "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase)})
+                "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase),
+                "disallowed_tools": disallowed_tools})
         return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
