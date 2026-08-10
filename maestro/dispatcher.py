@@ -22,7 +22,7 @@ import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import claims, credentials, events as E
+from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, store
 from .config import Config
 from .gates import needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
@@ -1526,6 +1526,14 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     # persisted (the ratelimit gate above is read the same way).
     spend_ceiling_reason = (None if paused_until_ts is not None or runaway_armed is not None
                             else spend.over_ceiling(cfg, now))
+    # RB-12: the detection-channel alarm, off the exact signals just computed above --
+    # never recomputed, so it can't drift from what actually gated this sweep. A write
+    # (persists derived/.alarm.json, may fire notify_command/webhooks), so it's skipped
+    # under dry_run like every other hook here, and never reached at all while a
+    # fleet-wide pause already short-circuited the whole sweep at G1 (top of dispatch()).
+    if not dry_run:
+        _run_hook("alarm", hook_errors, alarm.check, cfg, now, health,
+                   runaway_reason=runaway_armed, spend_ceiling_reason=spend_ceiling_reason)
     if paused_until_ts is not None or runaway_armed is not None or spend_ceiling_reason is not None:
         spawned: list[str] = []
         throttled: list[str] = []

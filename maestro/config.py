@@ -136,6 +136,18 @@ class Config:
     # Outbound notify tick: fires on a key's first entry into awaiting-human/degraded/done.
     notify_command: str | None = None  # shell command; KEY/PHASE/QUESTION in env; None = disabled
     webhook_urls: list = field(default_factory=list)  # JSON-POSTed via stdlib urllib
+    # RB-12: detection-channel alarm (maestro/alarm.py) -- fires through the SAME
+    # transport above (notify_command/webhook_urls) on a runaway-brake auto-pause, a
+    # daily-spend warn-threshold crossing, the daily-spend hard ceiling blocking a
+    # sweep, or a spawn rate over health.spawn_budget (the exact signal `maestro
+    # doctor` calls `runaway`). Own [alarm] table per this ticket's Q&A, deliberately
+    # separate from [notify] -- notify.py fires on a KEYED phase transition, this is
+    # fleet-wide.
+    alarm_spend_warn_fractions: list = field(default_factory=lambda: [0.5, 0.8])
+    # Re-announce a still-active brake/spend-hard/spawn-rate condition after this many
+    # seconds (the ticket's "within the hour" bar). spend_warn_fractions is the one
+    # exception -- those fire at most once per UTC date regardless of this knob.
+    alarm_cooldown_s: int = 3600
     raw: dict = field(default_factory=dict)
 
 
@@ -270,6 +282,12 @@ def load(home_arg: str | None = None) -> Config:
         cfg.notify_command = n.get("notify_command", cfg.notify_command) or None
         raw_webhooks = n.get("webhook_urls", cfg.webhook_urls)
         cfg.webhook_urls = raw_webhooks if isinstance(raw_webhooks, list) else cfg.webhook_urls
+        al = data.get("alarm", {})
+        raw_fracs = al.get("spend_warn_fractions", cfg.alarm_spend_warn_fractions)
+        cfg.alarm_spend_warn_fractions = (
+            [float(x) for x in raw_fracs] if isinstance(raw_fracs, list)
+            else cfg.alarm_spend_warn_fractions)
+        cfg.alarm_cooldown_s = int(al.get("cooldown_s", cfg.alarm_cooldown_s))
         if "providers" in data:
             cfg.providers.update(data["providers"])
         cfg.provider_config = {
@@ -432,6 +450,15 @@ implementer = "claude_skill"
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""
 # webhook_urls = ["https://ntfy.sh/my-maestro-topic"]   # JSON {key,phase,question,title} POSTed
+
+# [alarm]                           # detection-channel alarm (RB-12); reuses [notify]'s
+                                     # own notify_command/webhook_urls transport above --
+                                     # no [notify] configured means no alarm either
+# spend_warn_fractions = [0.5, 0.8] # fire once per UTC date per fraction of
+                                     # daily_spend_ceiling_usd crossed
+# cooldown_s = 3600                 # re-announce a still-active brake/spend-hard/spawn-rate
+                                     # condition after this many seconds (spend-warn is the
+                                     # one exception -- always once/day, see above)
 
 # [[scheduled]]                    # recurring, prompt-defined triggers (optional, repeatable)
 # name = "morning-pr-digest"       # stable id -> cursor key + dedup token
