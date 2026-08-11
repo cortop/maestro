@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import snapshot as snap_mod
 from . import store
+from .config import Config
 from .statemachine import Phase
 
 _FRONTMATTER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
@@ -79,3 +80,39 @@ def needs_approval(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
     return (Phase(snap.phase) == Phase.IMPLEMENTING
             and spec_tier(home, key) >= 2
             and not snap.approved)
+
+
+# T-34/RF-5: implementer providers this dispatcher trusts to already carry a
+# bypass-resistant equivalent of the destructive-command guard. Claude Code's
+# PreToolUse hook (`.claude/hooks/block-home-deletion.py` + `guard_argv.py`,
+# both driven by `destructive_command_guard.check_command`) is the only one
+# today. Adding a provider name here IS the "wiring" step for a future backend
+# (e.g. opencode) -- it must not happen by accident just because a provider
+# name was typed into config.toml.
+BYPASS_RESISTANT_IMPLEMENTERS = {"claude_skill"}
+
+
+def backend_interlock_reason(cfg: Config) -> str | None:
+    """None if ``cfg.providers["implementer"]`` already has a bypass-resistant
+    destructive-command guard wired in (see ``BYPASS_RESISTANT_IMPLEMENTERS``);
+    otherwise the human-facing reason a spawn into it must be refused.
+
+    THE interlock the T-34/RF-5 ticket Notes require: "until a bypass-resistant
+    equivalent exists, a predicate makes any non-Claude backend refuse to
+    spawn -- enforced by a test, not by merge order." ``dispatcher.dispatch``
+    calls this once per sweep (config-only, no per-key state) and asks each
+    due key rather than spawning it while a reason is returned -- see
+    ``dispatcher.dispatch``'s spawn loop. Reads config only, so any other
+    human-facing surface (``maestro doctor``, the TUI) can surface the same
+    refusal without re-deriving it.
+    """
+    implementer = (cfg.providers or {}).get("implementer")
+    if implementer in BYPASS_RESISTANT_IMPLEMENTERS:
+        return None
+    return (
+        f"implementer provider {implementer!r} has no bypass-resistant "
+        "destructive-command guard wired in yet (see .claude/hooks/"
+        "block-home-deletion.py, guard_argv.py, and the T-34/RF-5 opencode-"
+        "spike Note) -- refusing to spawn until one exists and this provider "
+        "is added to gates.BYPASS_RESISTANT_IMPLEMENTERS"
+    )

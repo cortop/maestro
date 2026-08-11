@@ -25,7 +25,7 @@ from pathlib import Path
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
 from .config import Config
-from .gates import needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
+from .gates import backend_interlock_reason, needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
 from .idempotency import content_hash
 from .sessions import SessionManager
 from .statemachine import Phase, SLEEPING_PHASES, TERMINAL_PHASES
@@ -1704,13 +1704,28 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         for key in capacity_skipped:
             decisions[key]["outcome"] = "capacity_skipped"
 
+        # T-34/RF-5: the interlock -- config-only, computed once per sweep, not
+        # per-key, and read here (before the dry_run split) so the read-only
+        # preview reports the same refusal a real sweep would act on -- a
+        # dry_run that still showed "would_spawn" for an interlocked backend
+        # would make `make dry` lie about the one thing this ticket exists to
+        # guarantee. While it returns a reason, no key spawns into this
+        # backend at all until a bypass-resistant guard exists and is added
+        # to gates.BYPASS_RESISTANT_IMPLEMENTERS (see that function's
+        # docstring).
+        interlock_reason = backend_interlock_reason(cfg)
+
         if dry_run:
             # No _allow_spawn (it can call ops.fail -> Failed/RequeueScheduled
             # events, exactly the bug this ticket exists to stop), no real
             # sessions.spawn(), no ledger/attempts write. Every to_spawn key is
-            # reported as would-spawn; the next REAL sweep decides for itself.
+            # reported as would-spawn (or would-ask, if interlocked); the next
+            # REAL sweep decides for itself.
             spawned = []
             for key, _reason in to_spawn:
+                if interlock_reason is not None:
+                    decisions[key]["outcome"] = "would_ask_backend_interlocked"
+                    continue
                 spawned.append(key)
                 decisions[key]["outcome"] = "would_spawn"
         else:
@@ -1723,6 +1738,17 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
 
             spawned = []
             for key, _reason in to_spawn:
+                if interlock_reason is not None:
+                    # Ask (not fail): this is a config/backend gap, not a per-key
+                    # error, and asking parks the key in awaiting-human -- visibly,
+                    # once (idempotent qid) -- instead of respawning it into the same
+                    # refusal every sweep. No attempts-ledger spend either, same as
+                    # the credential_unresolvable branch below.
+                    decisions[key]["outcome"] = "backend_interlocked"
+                    from . import ops
+                    ops.ask(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
+                            actor="dispatcher")
+                    continue
                 binding = bindings_by_key.get(key)
                 cred = resolve_credential(binding, credential_cache)
                 if not cred.ok:
