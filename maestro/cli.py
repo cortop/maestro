@@ -470,6 +470,7 @@ def cmd_dispatch(args) -> int:
            "paused": report.paused,
            "repo_blocked": report.repo_blockers,
            "repo_blocked_by_repo": report.repo_blockers_by_repo,
+           "runner_blocked": report.runner_blockers,
            "worktree_removal_errors": report.worktree_removal_errors}
     _print(out)
     return 0

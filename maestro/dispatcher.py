@@ -18,9 +18,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
@@ -1266,6 +1268,7 @@ class DispatchReport:
     paused: bool = False            # the fleet.pause() kill switch was armed this sweep
     repo_blockers: list[str] = field(default_factory=list)  # flat union; non-empty -> >=1 repo blocked
     repo_blockers_by_repo: dict = field(default_factory=dict)  # {repo name: [blockers]}, MR-5
+    runner_blockers: dict = field(default_factory=dict)  # OC-2: {runner name: reason}, transient-preflight skip
     hook_errors: dict = field(default_factory=dict)     # hook name -> "ExcType: message"
     worktree_removal_errors: dict = field(default_factory=dict)  # key -> git worktree remove stderr
     would_mint: list[str] = field(default_factory=list)  # dry_run only: pending_new keys, unminted
@@ -1468,10 +1471,16 @@ def key_decisions(home: Path, key: str, *, tail: int = 20) -> list[dict]:
     return out[-tail:] if tail else out
 
 
-def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = False) -> DispatchReport:
+def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = False, *,
+             runner_probe: Callable[[str], dict] | None = None) -> DispatchReport:
     """One sweep. ``sessions`` decides whether spawns actually launch (use
     ``DryRunSessions`` to record-without-launch). Always idempotent and safe to
     run on a timer — minting and folding are no-ops when nothing changed.
+
+    ``runner_probe`` (OC-2) overrides ``_default_runner_probe`` for the
+    non-claude runner preflight below -- tests inject a fake to assert every
+    transient/permanent branch without a real binary or ollama daemon; real
+    callers never pass it.
 
     ``dry_run`` (GA-4) makes the sweep strictly read-only: no ``TicketCreated``
     (``would_mint`` reports what mint_new_tickets would have minted, read via
@@ -1508,6 +1517,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     from . import repos as repos_mod  # lazy: repos imports us at module load time
 
     hook_errors: dict = {}
+    runner_blockers: dict = {}  # OC-2: {runner name: reason}, populated below only for a real spawn loop
     if dry_run:
         # Strictly read-only (GA-4 option (a)): none of the twelve hooks below
         # run -- each one either mutates the event log, drains/advances a
@@ -1720,6 +1730,10 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             # GA-17: memoized per (gh_account, token_env) for this whole sweep -- N
             # keys bound to the same repo resolve the credential once, not once each.
             credential_cache: dict = {}
+            # OC-2: memoized per runner name for this whole sweep -- N keys bound
+            # to the same non-claude runner probe its binary/daemon once, not once
+            # each ("Probe once per sweep, cached — never per key").
+            runner_probe_cache: dict = {}
 
             spawned = []
             for key, _reason in to_spawn:
@@ -1753,6 +1767,52 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                             "fix the spec's `runner:` line or register the runner",
                             qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher")
                     continue
+                if runner != "claude":
+                    # OC-2: fail-closed preflight for a registered non-claude
+                    # runner -- a fast-failing runner is the worst failure mode
+                    # here (a claim file is the ONLY other per-key spawn memory
+                    # and is unlinked the moment the worker dies, so a runner
+                    # that exits in under a second leaves nothing behind and the
+                    # key is instantly re-spawnable, the 21,731-spawn/~$845
+                    # shape). Binary missing/unexecutable or the ollama daemon
+                    # unreachable are TRANSIENT: a group-level skip modelled on
+                    # `repo_blocked` above -- no event, no attempts-ledger spend,
+                    # so a 30s daemon outage doesn't walk the board into
+                    # `degraded` one ticket at a time (AC1/AC2/AC5). Model
+                    # absent or not tool-capable is PERMANENT: `ops.ask`, same
+                    # shape as `runner_unregistered` just above -- a human must
+                    # fix the spec, so no attempts-ledger spend either (AC3/AC4).
+                    # Never falls through to `sessions.spawn` on any branch, so
+                    # a bad runner can never silently spawn under claude (AC6).
+                    probe_fn = runner_probe or _default_runner_probe
+                    if runner not in runner_probe_cache:
+                        runner_probe_cache[runner] = probe_fn(runner)
+                    probed = runner_probe_cache[runner]
+                    if not probed.get("binary_ok"):
+                        decisions[key]["outcome"] = "runner_binary_missing"
+                        runner_blockers[runner] = f"{runner!r} binary not found on PATH"
+                        continue
+                    if probed.get("models") is None:
+                        decisions[key]["outcome"] = "runner_daemon_unreachable"
+                        runner_blockers[runner] = (f"ollama daemon unreachable: "
+                                                    f"{probed.get('daemon_reason')}")
+                        continue
+                    if not runner_model:
+                        verdict, vreason = "missing", "no runner_model configured"
+                    else:
+                        from .providers import ollama as ollama_mod
+                        verdict, vreason = ollama_mod.verdict_for_model(
+                            probed["models"], probed.get("daemon_reason"), runner_model)
+                    if verdict != "ok":
+                        decisions[key]["outcome"] = "runner_model_unavailable"
+                        from . import ops
+                        ops.ask(cfg, key,
+                                f"runner {runner!r} model {runner_model!r} unavailable: "
+                                f"{vreason} -- fix the spec's `runner_model:` line or "
+                                "install/pull the model",
+                                qid=f"runner-model-{key}-{runner}-{runner_model}",
+                                actor="dispatcher")
+                        continue
                 if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
                     attempts_changed = True
                     reaped.append(key)
@@ -1817,6 +1877,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
         paused_until=paused_until_ts, spend_ceiling_reason=spend_ceiling_reason, reaped=reaped,
         repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo,
+        runner_blockers=runner_blockers,
         hook_errors=hook_errors,
         worktree_removal_errors=worktree_removal_errors,
         would_mint=would_mint,
@@ -1929,6 +1990,26 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     runner = overrides.get("runner") or cfg.runner
     runner_model = overrides.get("runner_model") or cfg.runner_model
     return runner, runner_model
+
+
+def _default_runner_probe(runner: str) -> dict:
+    """OC-2's real preflight probe for a non-``claude`` *runner*: is its own CLI
+    binary on ``PATH`` (``shutil.which`` -- covers "missing" and "unexecutable"
+    in one check, since ``which`` already applies ``os.X_OK``), and, separately,
+    is the local ollama daemon reachable with its model catalogue
+    (``providers.ollama.fetch_models``, used below to verify a specific
+    ``runner_model`` is installed and tool-capable). Never raises -- like
+    ``fetch_models`` itself and ``resolve_credential`` beside it, a down binary
+    or daemon must never wedge the spawn loop, only gate the one key that needs
+    it. Never called for ``runner == "claude"`` (see the spawn loop below), and
+    the caller -- never this function -- is what caches one call per sweep per
+    runner name instead of once per key.
+    """
+    from .providers import ollama as ollama_mod
+
+    models, daemon_reason = ollama_mod.fetch_models()
+    return {"binary_ok": shutil.which(runner) is not None,
+            "models": models, "daemon_reason": daemon_reason}
 
 
 def _worker_cwd(cfg: Config, key: str) -> Path:

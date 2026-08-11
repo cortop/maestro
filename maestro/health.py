@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -607,6 +608,45 @@ def _spec_runner_fields(spec_text: str) -> tuple[str | None, str | None]:
     return runner, model
 
 
+def check_runner_binary(cfg: Config, now: float, *, which=None) -> dict:
+    """WARN (never blocks a spawn) when a current ticket's spec names a
+    non-claude ``runner:`` whose CLI binary isn't on ``PATH`` -- OC-2's spawn
+    preflight (``dispatcher._default_runner_probe``, the identical
+    ``shutil.which`` check, cached once per sweep there) is the actual
+    refusal point; this is board-wide visibility only, same shape as
+    ``check_ollama_models`` beside it -- one WARN a human can act on before
+    it ever surfaces as a spawn skip.
+
+    Skips the check entirely (``ok``, empty ``tickets``) when no current
+    ticket names a non-claude runner. Injectable ``which``, as
+    ``check_gh_credential_reachability``'s ``run`` kwarg already does, so
+    tests never depend on what's actually installed on the machine running
+    them."""
+    which = which or shutil.which
+    home = cfg.home
+    candidates: dict[str, str] = {}
+    for key in dispatcher.list_keys(home):
+        spec_file = store.spec_path(home, key)
+        if not spec_file.exists():
+            continue
+        runner, _model = _spec_runner_fields(spec_file.read_text(encoding="utf-8"))
+        if runner and runner != "claude":
+            candidates[key] = runner
+
+    if not candidates:
+        return {"name": "runner_binary", "status": "ok", "detail": "no ticket uses a non-claude runner",
+                "tickets": {}}
+
+    tickets = {}
+    for key, runner in candidates.items():
+        if which(runner) is None:
+            tickets[key] = {"runner": runner, "reason": f"{runner!r} not found on PATH"}
+    status = "warn" if tickets else "ok"
+    detail = (f"{len(tickets)} ticket(s) name a runner whose binary is missing from PATH"
+              if tickets else f"{len(candidates)} ticket(s) using a non-claude runner, all resolve ok")
+    return {"name": "runner_binary", "status": status, "detail": detail, "tickets": tickets}
+
+
 def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
     """WARN (never blocks a spawn) when a current ticket's spec names a
     non-claude ``runner:`` whose ``runner_model:`` is absent from the local
@@ -682,7 +722,8 @@ def check_depends_on(cfg: Config, now: float) -> dict:
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
-          check_daily_spend, check_gh_credential_reachability, check_launchctl, check_ollama_models)
+          check_daily_spend, check_gh_credential_reachability, check_launchctl, check_ollama_models,
+          check_runner_binary)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
