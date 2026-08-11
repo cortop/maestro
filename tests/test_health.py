@@ -498,7 +498,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "depends_on", "launchctl", "repo_preflight",
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend",
-                      "gh_credential_reachability", "ollama_models"}
+                      "gh_credential_reachability", "ollama_models", "runner_binary"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -547,12 +547,14 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     by one -- `claim_no_output` -- after this baseline was captured; folded in
     here rather than re-captured, since T-46's own invariant, "iterating
     doesn't silently add/drop/rename", still holds for every other name. T-33
-    grew it by one more -- `ollama_models` -- same treatment.)"""
+    grew it by one more -- `ollama_models` -- same treatment. T-38 (OC-2) grew
+    it by one more still -- `runner_binary` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "depends_on", "repo_preflight", "unknown_repo_bindings",
         "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
+        "runner_binary",
     }
     code, out = _sweep(home)
     assert code == 0
