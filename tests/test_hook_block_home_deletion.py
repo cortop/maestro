@@ -222,3 +222,30 @@ def test_relative_path_that_actually_resolves_into_protected_dir_is_blocked(home
 def test_git_clean_outside_home_is_allowed(home):
     result = run_hook("git clean -fdx", cwd="/tmp", home=home)
     assert result.returncode == 0
+
+
+def test_hook_works_with_no_maestro_package_importable(home):
+    """AC2 (T-34/RF-5): the hook -- and its extracted destructive_command_guard
+    predicate module -- must keep working even with the maestro package
+    unimportable and PYTHONPATH scrubbed. `-S` skips site initialization
+    entirely (no site-packages, no venv activation, no .pth processing), so
+    this proves zero dependency on maestro being installed, not just on
+    PYTHONPATH being empty."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}  # note: no MAESTRO_HOME either
+    payload = {"tool_name": "Bash", "tool_input": {"command": f"rm -rf {home}/events"}, "cwd": str(home)}
+    result = subprocess.run(
+        [sys.executable, "-S", str(HOOK)],
+        input=json.dumps(payload), capture_output=True, text=True,
+        env={**env, "MAESTRO_HOME": str(home)},
+    )
+    assert result.returncode == 2
+    assert "BLOCKED" in result.stderr
+
+    # And a legitimate command run the same isolated way is still allowed.
+    payload_ok = {"tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/foo"}, "cwd": "/tmp"}
+    result_ok = subprocess.run(
+        [sys.executable, "-S", str(HOOK)],
+        input=json.dumps(payload_ok), capture_output=True, text=True,
+        env={**env, "MAESTRO_HOME": str(home)},
+    )
+    assert result_ok.returncode == 0
