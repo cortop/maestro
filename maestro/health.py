@@ -73,17 +73,24 @@ def _budget_weight(cfg: Config, phase: str) -> int:
 
     `spawn_budget` already assumes every key spawns at its floor-capped max
     rate for a full hour -- compounding that with the ledger's own worst-case
-    per-spawn weight (every one of those spawns maxing out `max_impl_turns`)
-    would budget for the exact runaway pattern this detector exists to catch
-    AS the healthy baseline, making the weighted detector no more sensitive
-    than the session-counting one it replaces (see GA-14's spec, "the central
-    design trap" -- multiplying both sides of `rate > budget` by the same
-    constant never changes which side crosses first). Budgeting for HALF of
-    the worst case is still generous headroom for legitimate QA convergence,
-    while a key that's actually maxing out every single spawn -- the abuse
-    case -- outgrows it much sooner than a bare session count would.
+    per-spawn weight would budget for the exact runaway pattern this detector
+    exists to catch AS the healthy baseline, making the weighted detector no
+    more sensitive than the session-counting one it replaces (see GA-14's
+    spec, "the central design trap" -- multiplying both sides of `rate >
+    budget` by the same constant never changes which side crosses first).
+    Budgeting for HALF of the worst case is still generous headroom for
+    legitimate QA convergence, while a key that's actually maxing out every
+    single spawn -- the abuse case -- outgrows it much sooner than a bare
+    session count would.
+
+    RF-7 moved the variable-weight phase from `implementing` (which fanned out
+    an unbounded `Agent`-tool QA loop in-session) to `qa` (which fans out at
+    most ONE Standards-axis sub-agent, config-gated by `qa_standards_axis`) --
+    every other phase, `implementing` included, now spawns no sub-agents and
+    weighs 1 exactly, so it takes the same fast path as `qa` does when the
+    Standards axis is off.
     """
-    if phase != Phase.IMPLEMENTING.value:
+    if phase != Phase.QA.value:
         return 1
     full = dispatcher.spawn_weight(cfg, phase)
     return 1 + math.ceil((full - 1) / 2)
@@ -98,9 +105,9 @@ def spawn_budget(cfg: Config) -> int:
     Default: for each current key, the per-key allowance ``ceil(3600 /
     effective_floor)`` -- exactly what ``spawn_floor`` permits one key --
     times that key's own ``_budget_weight`` (1 for every phase except
-    ``implementing``, GA-14). This scales with board size AND composition (a
-    board with no ``implementing`` tickets keeps the old session-counting
-    budget exactly) and, critically, is not silenced by the same
+    ``qa``, GA-14/RF-7). This scales with board size AND composition (a
+    board with no ``qa`` tickets keeps the old session-counting budget
+    exactly) and, critically, is not silenced by the same
     ``min_spawn_interval = 0`` misconfiguration the detector exists to catch:
     ``spawn_floor`` legitimately returns 0, so fall back to a sane per-key floor
     instead of dividing by zero.

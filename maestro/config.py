@@ -319,13 +319,15 @@ DEFAULT_CONFIG_TOML = """\
 
 [maestro]
 max_concurrency = 12              # one COUNTED spawn: sizing the fleet at N concurrent
-                                   # sessions can mean far more than N agents running at
-                                   # once -- an `implementing` session's Implementer<->QA
-                                   # loop fans out up to `max_impl_turns` rounds of
-                                   # `Agent`-tool sub-agents INSIDE that one session (see
+                                   # sessions can mean slightly more than N agents running
+                                   # at once -- a `qa` session fans out ONE extra
+                                   # `Agent`-tool Standards-axis sub-agent INSIDE that one
+                                   # session when qa_standards_axis is on (see
                                    # health.spawn_rate/spawn_budget, denominated in
                                    # agent-equivalents, not sessions, for exactly this
-                                   # reason)
+                                   # reason). The Implementer<->QA loop itself is real,
+                                   # separately-counted dispatcher spawns bouncing between
+                                   # `implementing` and `qa` (RF-7), not in-session fan-out.
 reconcile_steady_interval = 300
 # min_spawn_interval = 300        # hard floor between two spawns of the SAME key
                                   # (default: reconcile_steady_interval). Bounds the
@@ -383,7 +385,7 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # for the multi-repo equivalent). Run ONCE per fresh worktree by
                                   # `maestro worktree ensure`, cwd=worktree, with $WT/$REPO/$KEY
                                   # in its environment -- never by the dispatcher.
-# qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `implementing` that
+# qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
 # compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence

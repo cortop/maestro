@@ -197,10 +197,12 @@ def test_spec_axis_fail_still_blocks_awaiting_ci_alongside_standards_axis(cfg):
 
 
 def test_standards_axis_gate_choice_is_documented_in_the_skill():
+    """RF-7 moved the Standards axis (and the sub-agent that runs it) from
+    `implementing` into the independent `qa` phase -- documented there now."""
     import pathlib
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    skill = (repo_root / "skills" / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
-    mirror = (repo_root / ".claude" / "commands" / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
+    skill = (repo_root / "skills" / "maestro-reconcile-qa.md").read_text(encoding="utf-8")
+    mirror = (repo_root / ".claude" / "commands" / "maestro-reconcile-qa.md").read_text(encoding="utf-8")
     for text in (skill, mirror):
         assert "qa_standards_axis" in text
         assert "--axis standards" in text
@@ -215,10 +217,9 @@ def test_standards_axis_gate_choice_is_documented_in_the_skill():
 def test_skill_gates_standards_agent_on_config_flag():
     import pathlib
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    for path in (repo_root / "skills" / "maestro-reconcile-implementing.md",
-                 repo_root / ".claude" / "commands" / "maestro-reconcile-implementing.md"):
+    for path in (repo_root / "skills" / "maestro-reconcile-qa.md",
+                 repo_root / ".claude" / "commands" / "maestro-reconcile-qa.md"):
         text = path.read_text(encoding="utf-8")
         assert "QA_STANDARDS_AXIS" in text
         assert "Fowler" in text
         assert "CLAUDE.md" in text
-        assert "parallel" in text.lower()

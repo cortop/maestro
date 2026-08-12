@@ -1302,20 +1302,27 @@ def spawn_floor(cfg: Config) -> int:
 
 def spawn_weight(cfg: Config, phase: str) -> int:
     """Expected-cost weight, in agent-equivalents, of ONE spawn of a ticket
-    currently in *phase* (GA-14). AD-4/T-23's Implementer<->QA loop in the
-    `implementing` reconcile skill runs entirely inside ONE session, via
-    `Agent`-tool sub-agent spawns -- up to `max_impl_turns` rounds, each firing
-    one QA sub-agent (two when `qa_standards_axis` is on) alongside the
-    top-level session itself. So one dispatcher spawn of an `implementing`
-    ticket can, worst case, produce `1 + max_impl_turns * (2 if
-    qa_standards_axis else 1)` agent-equivalents -- a pessimistic, preventive
-    estimate made at the moment the spawn decision is taken, before any of
-    those rounds actually run (see health.spawn_rate, which records this
-    weight per spawn rather than counting sessions). Every other phase spawns
-    no `Agent`-tool sub-agents, so its weight is 1 -- an ordinary session."""
-    if phase != Phase.IMPLEMENTING.value:
+    currently in *phase* (GA-14, retopologized by RF-7).
+
+    AD-4/T-23's Implementer<->QA loop used to run entirely inside ONE
+    `implementing` session, via `Agent`-tool sub-agent spawns -- up to
+    `max_impl_turns` rounds, each firing a QA sub-agent the dispatcher's own
+    spawn ledger could never see. RF-7 moved that adversarial check into its
+    own dispatcher-spawned `qa` phase: each QA round is now a REAL spawn the
+    ledger already counts on its own, so `implementing` no longer needs a
+    preventive multiplier -- it fans out no sub-agents and weighs 1, like any
+    other ordinary session.
+
+    `qa`'s spec-axis judgment is the top-level `qa` session itself (structurally
+    independent already, since `phase_denylist` denies it Edit/Write) -- no
+    sub-agent there either. The Standards axis (T-23) is the one fan-out that
+    stayed in-session, now inside `qa` rather than `implementing`: one extra
+    `Agent`-tool sub-agent per `qa` spawn when `qa_standards_axis` is on. So
+    `qa` weighs 1, or 2 with the Standards axis enabled -- one legal fan-out
+    level, not a second dispatcher spawn."""
+    if phase != Phase.QA.value:
         return 1
-    return 1 + cfg.max_impl_turns * (2 if cfg.qa_standards_axis else 1)
+    return 1 + (1 if cfg.qa_standards_axis else 0)
 
 
 def _ledger_entry_ts(entry) -> float | None:

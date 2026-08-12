@@ -1530,8 +1530,8 @@ def test_watchdog_knobs_documented_in_sample_config():
 
 def test_max_concurrency_documents_sub_agent_amplification():
     """GA-14: an operator sizing the fleet off `max_concurrency` needs to see
-    that one counted spawn can be far more than one agent (the `implementing`
-    QA loop's `Agent`-tool sub-agent fan-out)."""
+    that one counted spawn can be more than one agent (RF-7: the `qa` phase's
+    config-gated Standards-axis `Agent`-tool sub-agent fan-out)."""
     from maestro.config import DEFAULT_CONFIG_TOML
     max_concurrency_line = next(
         line for line in DEFAULT_CONFIG_TOML.splitlines() if line.startswith("max_concurrency"))

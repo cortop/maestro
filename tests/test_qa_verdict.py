@@ -162,7 +162,11 @@ def test_no_qa_verdicts_recorded_does_not_block(cfg):
 # Skill text: the loop is documented, and the CLI verbs it depends on are real
 # ---------------------------------------------------------------------------
 
-def test_reconcile_skill_documents_the_qa_loop():
+def test_reconcile_skill_documents_the_qa_handoff():
+    """RF-7: `implementing` hands the adversarial check off to the independent
+    `qa` phase (`set-phase qa`) instead of spawning an in-session `Agent`-tool
+    QA sub-agent -- that fan-out now lives only in `maestro-reconcile-qa.md`
+    (see test_reconcile_skill.py's mirror-consistency checks)."""
     import pathlib
     repo_root = pathlib.Path(__file__).resolve().parents[1]
     skill = (repo_root / "skills" / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
@@ -170,12 +174,30 @@ def test_reconcile_skill_documents_the_qa_loop():
 
     for text in (skill, mirror):
         assert "QA" in text
-        assert "Agent" in text  # spawned via the Agent tool
-        assert "qa-verdict" in text
+        frontmatter = text.split("---")[1]  # allowed-tools grant (commands copy only)
+        assert "Agent" not in frontmatter  # no in-session sub-agent spawn here anymore
+        assert 'set-phase "$KEY" qa' in text
         assert "independently" in text or "independent" in text
-        # A failing verdict routes back to implementing, not onward to awaiting-ci.
+        # A failing verdict (recorded by `qa`) routes the ticket back to
+        # implementing; a fresh hand-off routes onward via `qa`, not straight
+        # to awaiting-ci.
         assert "awaiting-ci" in text and "implementing" in text
         assert "fail" in text.lower()
+
+
+def test_reconcile_skill_qa_documents_the_standards_axis_handoff():
+    """RF-7 moved the Standards-axis (T-23) sub-agent spawn from `implementing`
+    into `qa` -- the one legal fan-out `qa`'s phase weight prices in."""
+    import pathlib
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    skill = (repo_root / "skills" / "maestro-reconcile-qa.md").read_text(encoding="utf-8")
+    mirror = (repo_root / ".claude" / "commands" / "maestro-reconcile-qa.md").read_text(encoding="utf-8")
+
+    for text in (skill, mirror):
+        assert "Agent" in text
+        assert "qa_standards_axis" in text or "QA_STANDARDS_AXIS" in text
+        assert "--axis standards" in text
+        assert "git diff origin/" not in text  # AC6: no re-derived, base-tip-polluted diff
 
 
 def test_qa_verdict_verb_exists_in_the_real_cli():

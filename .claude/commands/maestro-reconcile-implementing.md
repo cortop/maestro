@@ -1,6 +1,6 @@
 ---
-description: Reconcile an `implementing` maestro ticket — code the ACs, adversarial QA, self-review, open a PR. (maestro self-dev)
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent
+description: Reconcile an `implementing` maestro ticket — code the ACs, self-review, open a PR, hand off to independent QA. (maestro self-dev)
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 argument-hint: <TICKET-KEY>
 ---
 
@@ -10,8 +10,8 @@ You are the reconciler for ticket **`$1`** of the maestro project, spawned becau
 currently in the `implementing` phase. Take **exactly ONE** step toward its desired state,
 record it only through the `maestro` CLI, then exit. The dispatcher re-spawns you next sweep,
 routing to whichever phase file matches the ticket's phase at that time — this file only ever
-handles `implementing`. You are a top-level session, so you may use the `Agent` tool — this is
-how the Implementer↔QA loop below runs.
+handles `implementing`. QA is a separate, independent phase (`qa`) the dispatcher spawns on its
+own next sweep once you hand off below — not an `Agent`-tool sub-agent you spawn here.
 
 ## Always: load state first
 Resolve this ticket's bound repo and the board-wide home as literals — this preamble runs no
@@ -37,7 +37,9 @@ with the **Read** tool — never `cat`/`sed`, this preamble reads no file via th
 - `<MHOME>/derived/context/<KEY>.md` — folded log: verbatim Q&A, phase reasons, failures, CI
   history, recent impl steps, dependsOn phases — read this before acting, it saves re-deriving
   context from raw events. It may not exist yet for a brand-new ticket; a Read error there just
-  means no context has been folded yet, not a failure.
+  means no context has been folded yet, not a failure. **This is also how you tell a fix round
+  from a fresh implementation** — if the most recent phase-history line reads `qa -> implementing`
+  with a reason citing a failing AC, `qa` sent you back; see step 1 below.
 
 If the snapshot shows pending inbox commands, fold them before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
@@ -97,13 +99,20 @@ If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteri
 implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
 step 5 (push the rebased branch + `set-phase awaiting-ci`). Keep the prior attestations and QA
 verdicts as-is (the spec, and so their content hashes, didn't change) — do not re-implement the
-feature, re-run `verify-ac`, or re-run the QA loop below for this pass. If you truly cannot
+feature, re-run `verify-ac`, or route the ticket through `qa` for this pass. If you truly cannot
 reconcile the two intents yourself, escalate:
 `maestro ask "$KEY" "PR #<n> conflict I couldn't auto-resolve: <detail>" --qid "conflict-$KEY-<n>"`
 and exit.
 
 Otherwise implement the spec's Acceptance criteria:
-1. Read the spec's Intent + AC and the relevant code. Make the change.
+1. Read the spec's Intent + AC and the relevant code.
+   **If `qa` sent you back here** (the context file's phase history shows the most recent
+   transition is `qa -> implementing`, citing a failing AC + evidence — cross-check
+   `maestro snapshot "$KEY"` -> `qa_verdicts` for the same ac_hash if you want the raw record):
+   this is a **fix round**, not a fresh implementation. Fix the code per that evidence and
+   continue at step 2 — do not re-derive the diff or re-judge the AC yourself, that is `qa`'s own
+   independent job, running in its own phase; yours here is only to fix and hand off again (step
+   5). Otherwise, make the change fresh.
 2. **Tests are the proof — QA against the real app, not mocks.** Every change ships with a test
    that exercises the actual surface and shows the feature working end-to-end: drive the real
    `maestro` CLI / a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`) over a temp
@@ -128,74 +137,31 @@ Otherwise implement the spec's Acceptance criteria:
    to an absolute path.
    If red, fix and re-run — stay on this step until green. If you exceed ~`max_impl_turns`
    edit/test cycles without converging: `maestro fail "$KEY" "non-converging: <why>"` and exit.
-3. **Adversarial QA loop — an agent that did not write the code independently re-checks each
-   AC against the diff, before you self-attest.** This is the Implementer↔QA hand-off, mined
-   from the orchestrator's `orch-implement` shape but collapsed into this one `implementing`
-   step: it runs entirely via `Agent`-tool sub-agent spawns inside this session, not across
-   dispatcher sweeps.
+3. **If step 1 was a fix round, record it now** — the counterpart to the QA fail that sent you
+   back, and the thing that bounds the implementing↔qa ping-pong:
    ```bash
-   maestro qa-brief "$KEY"
+   maestro impl-turn "$KEY" --role implementer
    ```
-   This mints the hand-off packet deterministically instead of asking you to marshal it: every
-   spec AC (with the same content hash `verify-ac`/`qa-verdict` key their events by) plus a diff
-   anchored on the **merge-base** with `<BASE>` — so base advancement never leaks in — with
-   untracked files appended via `git diff --no-index`, so a brand-new module or test that hasn't
-   been `git add`-ed still reaches QA. Read-only: safe to call again on every QA round, including
-   after a fix-and-retry cycle below. Spawn a **QA** sub-agent (`Agent` tool), briefed with only
-   that JSON output — not your implementation reasoning. Its job, per AC: judge PASS or FAIL
-   strictly against what the diff actually does, then record a verdict itself (it must not edit
-   code):
-   `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --evidence "<what it checked, what
-   it saw in the diff>"` (1-based, in spec order — same indexing as `verify-ac`; this defaults
-   to `--axis spec`, i.e. "does the diff satisfy this AC?").
-
-   **Standards axis (T-23, config-gated by `qa_standards_axis`, default off).** If
-   `QA_STANDARDS_AXIS == true`, spawn a second **Standards QA** sub-agent (`Agent` tool) in the
-   *same batch* as the Spec-axis QA agent above, so they run in parallel — briefed with CLAUDE.md's
-   conventions (one-line module docstrings, stdlib-only core, never hand-edit `derived/`, QA proves
-   the feature with the real app and mocks only the external boundary, mount the real app for TUI
-   changes) plus a Fowler-smell baseline (long methods, duplicated code, large classes, feature
-   envy, shotgun surgery), and the same diff — not the AC list, and not the Spec-axis agent's
-   findings. Its job, per spec AC touched by the diff: judge PASS or FAIL against those standards,
-   independent of whether the Spec-axis agent passed it. Record with
-   `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --axis standards --evidence "<smell or
-   convention violated, or why it's clean>"`. Standards findings are recorded but **never reranked
-   against, or merged with, the Spec-axis findings** — they land in a separate snapshot bucket
-   (`qa_verdicts_standards`) and are advisory only: unlike a Spec-axis fail, a Standards-axis fail
-   does not block `set-phase awaiting-ci` (explicit, tested choice — see
-   `ops._refuse_if_qa_failing`). Fix any cheap, clearly-right Standards findings alongside the
-   Spec-axis fixes below; for the rest, leave a `maestro append --type Note` breadcrumb summarizing
-   what a human reviewer should look at and proceed — do not loop or block on this axis.
-   - **Every AC verdict PASS** (spec axis) → continue to step 4.
-   - **Any AC verdict FAIL** → you (the implementer) fix the code per the QA evidence, record the
-     turn with `maestro impl-turn "$KEY" --role implementer` (the verb numbers the turn and mints
-     its own step-id itself — never hand-roll this with `maestro append`), re-run tests, then
-     re-run `maestro qa-brief "$KEY"` and spawn QA again against the refreshed packet. Bound the
-     rounds at `max_impl_turns` implementer turns —
-     `impl-turn` checks the ceiling itself and routes the crossing call to `ops.fail`
-     (backoff/dead-letter), so this is not just a convention you can silently overrun; if still
-     failing when exhausted, do not open a PR — `maestro set-phase "$KEY" implementing --reason "QA
-     loop non-converging after N rounds: <summary>"` then `maestro requeue "$KEY" 60` and exit so
-     the dispatcher resumes the loop next sweep. Separately, `set-phase awaiting-ci` refuses
-     (raises, no event appended) while any current AC's latest QA verdict is `fail`, so a failing
-     verdict always routes back to `implementing`, never onward to `awaiting-ci`.
+   This verb numbers the turn and mints its own step-id itself — never hand-roll this with
+   `maestro append`, and never invent a second counter. It also checks `cfg.max_impl_turns` on its
+   own and routes a crossing call straight to `ops.fail` (backoff/dead-letter) — if its response
+   shows the ticket was parked, `maestro fail` has already run; stop here, do not push or hand off
+   again, and exit. Skip this step entirely on a fresh (non-fix-round) pass.
 4. **Self-review gate — one structured attestation per spec AC, before opening the PR:**
    for each `- [ ] ...` checkbox in the spec, `maestro verify-ac "$KEY" --ac <n> --what
    "<what you ran>" --where "<file:line or test name>" --result "<the observed outcome>"`
    (1-based, in spec order; content-hash keyed, so a later spec edit to that line un-verifies
-   it again — re-run verify-ac if that happens). All three fields are required — a call
+   it again — re-run verify-ac if that happens; also idempotent on a fix round where the AC's
+   text hasn't changed, so it's safe to call every pass). All three fields are required — a call
    missing any of them is rejected. This is a structured self-attestation that saves the human
-   reviewer time — the QA loop above is what makes it independently checked; cite the real
-   evidence (a test name, a diff hunk), never rubber-stamp it. Step 5's `set-phase awaiting-ci`
-   refuses with a non-zero exit and appends no event if any spec AC is still unverified, and
-   also refuses while any current AC's latest QA verdict is `fail` — verify all of them here.
-   (A human can still force a ticket through with `--force` on `set-phase`, which records
-   `forced_by=<actor>` in the event log — that escape hatch overrides only the unverified-ACs
-   gate, not a failing QA verdict, and is for a human override; if you truly cannot verify an
-   AC, ask instead of reaching for it yourself.)
-5. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently.
-   The body's table is sourced from the `verify-ac` calls above (or `maestro snapshot "$KEY"` ->
-   `ac_verified` for the what/where/result):
+   reviewer time — the independent `qa` phase below is what makes it independently checked; cite
+   the real evidence (a test name, a diff hunk), never rubber-stamp it. The enforced gates
+   (unverified ACs, a failing spec-axis QA verdict) live on `qa`'s own `set-phase awaiting-ci`
+   call, in its phase file — verify every AC here so that gate passes cleanly there.
+5. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently —
+   or, on a fix round, just push the fix (the block below already no-ops the PR creation once one
+   exists). The body's table is sourced from the `verify-ac` calls above (or `maestro snapshot
+   "$KEY"` -> `ac_verified` for the what/where/result):
    ```bash
    git -C <WT> add -A
    git -C <WT> commit -q -m "$KEY: <subject>"
@@ -218,19 +184,24 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    Neither the URL nor the number is captured into a shell variable — type the values you just
    read directly into the payload (`<pr-number>`/`<pr-url>` below are exactly that, not a token
-   resolved from `maestro env --key`):
+   resolved from `maestro env --key`). Skip the `PrOpened` append on a fix round (a PR already
+   open already has one):
    ```bash
    maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr-number>,\"url\":\"<pr-url>\",\"draft\":true}" --step-id "pr-$KEY"
-   maestro set-phase "$KEY" awaiting-ci --requeue 300
+   maestro set-phase "$KEY" qa --requeue 300
    ```
    Push normally — never force-push. Let hooks run — never skip them. Test the real behavior,
-   never a mock. Then exit; the dispatcher's next sweep polls CI, this session does not.
+   never a mock. Then exit; the dispatcher's next sweep spawns the independent `qa` reconciler
+   (`skills/maestro-reconcile-qa.md`) — this session never judges its own diff, and does not poll
+   CI itself.
 
-**Done when** either: (a) tests are green, every spec AC has a passing QA verdict and a
-`verify-ac` attestation, a PR is open with `PrOpened` recorded, and `set-phase awaiting-ci` has
-appended (that call itself refuses unless the gate above actually passed, so reaching it is
-proof); (b) this was a conflict-only pass — the rebase is clean (or escalated via `maestro ask`
-with a `conflict-$KEY-<n>` qid), tests are green, and the branch is pushed with `set-phase
-awaiting-ci` appended; or (c) the QA loop or tests did not converge within `max_impl_turns` and
-you appended `maestro fail` or `set-phase implementing --reason "QA loop non-converging..."` +
-`maestro requeue "$KEY" 60`. In every case, `maestro release "$KEY"` has run.
+**Done when** either: (a) a fresh implementation — tests are green, every spec AC has a
+`verify-ac` attestation, a PR is open with `PrOpened` recorded, and `set-phase qa` has appended,
+handing review off to the independent `qa` phase; (b) a fix round — the fix is made per `qa`'s
+evidence, tests are green, `impl-turn` recorded the round (and did not park the ticket), the fix
+is pushed, and `set-phase qa` has appended again to re-request review; (c) a conflict-only pass —
+the rebase is clean (or escalated via `maestro ask` with a `conflict-$KEY-<n>` qid), tests are
+green, and the branch is pushed with `set-phase awaiting-ci` appended; or (d) tests did not
+converge within this session and you appended `maestro fail` naming why, or `impl-turn` parked the
+ticket on the `max_impl_turns` ceiling (it has already called `ops.fail` itself — nothing further
+to append). In every case, `maestro release "$KEY"` has run.

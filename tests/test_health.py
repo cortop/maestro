@@ -129,34 +129,28 @@ def test_throttled_last_sweep_reflects_prior_real_sweep(home, cfg):
 
 def test_incident_replay_trips_runaway_with_floor_disabled(home):
     """Four tickets that never advance, spawn floor OFF: real sweeps at
-    the 2026-07-19 cadence (~11s) exceed the derived budget and doctor trips
-    -- and, GA-14, trips in strictly fewer sweeps than session-counting did.
+    the 2026-07-19 cadence (~11s) exceed the derived budget and doctor trips.
 
-    Pre-weighting, this exact replay (four keys' worth of un-throttled ~11s
-    spawns against a 48-session/hour budget, i.e. `n_keys * ceil(3600 /
-    effective_floor)`) empirically crosses around sweep 15-16 (the watchdog's
-    own no-progress reaping staggers the raw spawn count, so it's not an exact
-    `budget / spawns_per_sweep` division). Weighted, each `implementing` spawn
-    now counts as `disp.spawn_weight(cfg, "implementing")` (21 by default)
-    agent-equivalents against a budget that only assumes HALF that per spawn
-    (`health._budget_weight` -- see its docstring: budgeting the full
-    worst-case weight AS the healthy baseline would make the detector no more
-    sensitive than before, since it multiplies both sides of `rate > budget`
-    by the same factor). Empirically this crosses by sweep 7-9; asserted at
-    sweep 12 for headroom against the auto-brake's own jitter (ops.fail's
-    exponential backoff is randomized) without flirting with flakiness --
-    still well under the pre-weighting ~15-16.
+    RF-7 retopologized the variable-weight phase from `implementing` (which
+    used to fan out an unbounded, invisible-to-the-ledger `Agent`-tool QA loop
+    -- up to `1 + max_impl_turns` agent-equivalents per spawn) to `qa` (which
+    fans out at most ONE Standards-axis sub-agent, config-gated, so at most
+    weight 2 -- see `dispatcher.spawn_weight`). The implement<->qa ping-pong is
+    now made of REAL, separately-counted dispatcher spawns instead of one
+    spawn hiding an unbounded fan-out, so this replay uses `qa` tickets with
+    the Standards axis on to keep exercising a genuinely weighted phase; the
+    bare, un-throttled spawn rate alone (weight 1) is what test_dispatcher.py's
+    own runaway-brake tests already cover.
     """
     for k in ("T-1", "T-2", "T-3", "T-4"):
-        _seed(home, k, Phase.IMPLEMENTING)
-    cfg = Config(home=home, max_concurrency=4, min_spawn_interval=0)
+        _seed(home, k, Phase.QA)
+    cfg = Config(home=home, max_concurrency=4, min_spawn_interval=0, qa_standards_axis=True)
     sessions = _EphemeralSessions()
     t0, step = store.now_epoch(), 11
     for i in range(12):
         disp.dispatch(cfg, sessions, now=t0 + i * step)
     code, out = _sweep(home)
-    assert out["runaway"] is True and code == 1  # strictly fewer than the
-                                                  # ~15-16 sweeps session-counting needed
+    assert out["runaway"] is True and code == 1
 
     for i in range(12, 100):  # ~18 minutes of 11s sweeps, well inside the 1h window
         disp.dispatch(cfg, sessions, now=t0 + i * step)
@@ -168,24 +162,38 @@ def test_incident_replay_trips_runaway_with_floor_disabled(home):
 def test_same_tickets_under_default_floor_do_not_trip(home):
     """The same shape, but with the default spawn floor engaged, stays
     healthy -- the GA-14 central-design-trap check: with the floor respected,
-    each of the 4 IMPLEMENTING tickets spawns only ~4 times in this window,
-    weighted rate 16 * 21 == 336, comfortably under the phase-aware budget
-    (health.spawn_budget), which is NOT silently redefined down to a bare
-    session count just because every ticket happens to be `implementing`."""
+    each of the 4 `qa` tickets spawns only ~4 times in this window, weighted
+    rate 16 * W comfortably under the phase-aware budget (health.spawn_budget),
+    which is NOT silently redefined down to a bare session count just because
+    every ticket happens to be `qa` with the Standards axis on."""
     for k in ("T-1", "T-2", "T-3", "T-4"):
-        _seed(home, k, Phase.IMPLEMENTING)
-    cfg = Config(home=home, max_concurrency=4)  # min_spawn_interval defaults to
-                                                 # reconcile_steady_interval (300)
+        _seed(home, k, Phase.QA)
+    cfg = Config(home=home, max_concurrency=4, qa_standards_axis=True)  # min_spawn_interval
+                                                 # defaults to reconcile_steady_interval (300)
     sessions = _EphemeralSessions()
     t0, step = store.now_epoch(), 11
     for i in range(100):
         disp.dispatch(cfg, sessions, now=t0 + i * step)
 
-    W_implementing = disp.spawn_weight(cfg, Phase.IMPLEMENTING.value)  # 1 + 20*1 == 21
-    assert health.spawn_rate(home, t0 + 99 * step)["total"] == 16 * W_implementing
+    W_qa = disp.spawn_weight(cfg, Phase.QA.value)  # 1 + 1 (Standards axis on) == 2
+    assert health.spawn_rate(home, t0 + 99 * step)["total"] == 16 * W_qa
     code, out = _sweep(home)
     assert out["runaway"] is False
     assert code == 0
+
+
+def test_implementing_no_longer_carries_variable_weight(home):
+    """RF-7's core weighting claim, asserted directly: an `implementing` spawn
+    is now an ordinary, fixed-weight session (never a preventive multiplier)
+    regardless of `max_impl_turns` or `qa_standards_axis` -- the ping-pong that
+    used to hide behind that estimate is now real, separately-counted `qa`
+    spawns (see test_qa_roundtrip.py)."""
+    cfg_default = Config(home=home)
+    cfg_standards = Config(home=home, qa_standards_axis=True)
+    assert disp.spawn_weight(cfg_default, Phase.IMPLEMENTING.value) == 1
+    assert disp.spawn_weight(cfg_standards, Phase.IMPLEMENTING.value) == 1
+    assert disp.spawn_weight(cfg_default, Phase.QA.value) == 1
+    assert disp.spawn_weight(cfg_standards, Phase.QA.value) == 2
 
 
 # --- L-12: doctor v2 check registry --------------------------------------------

@@ -64,8 +64,8 @@ LLM at all, which is what makes an always-on fleet cheap.
 | Component | Role | Harness primitive |
 |-----------|------|-------------------|
 | dispatcher (`maestro dispatch`) | level sweep: mint → due → spawn → exit; the sole fan-out point | launchd `StartInterval` (the durable clock; survives reboot) |
-| reconciler (`/maestro-reconcile <KEY>`) | one idempotent step per ticket | top-level `claude --bg` session (keeps the `Agent` tool → can run the Impl/QA subagents) |
-| Impl↔QA loop | the `implementing` phase body | two subagents inside the reconciler (one legal fan-out level) |
+| reconciler (`/maestro-reconcile-<phase> <KEY>`) | one idempotent step per ticket | top-level `claude --bg` session, per-phase tool grant |
+| Impl↔QA loop | `implementing` hands off to the independent `qa` phase; `qa` judges and routes back or onward | two REAL, separately-counted dispatcher spawns (`implementing`, `qa`), not subagents inside one reconciler — `qa` alone keeps the `Agent` tool, for at most one config-gated Standards-axis subagent (one legal fan-out level) |
 | maestro CLI | correct-by-construction state verbs | Python (this package) |
 | projector | snapshots → dashboards, atomic | a phase of `maestro dispatch` |
 | providers | tracker / VCS / fetcher, pluggable | `config.toml` |
@@ -74,7 +74,7 @@ LLM at all, which is what makes an always-on fleet cheap.
 domain for all tickets — its crash kills the fleet. N independent `claude --bg` sessions
 are isolated; one dying is one ticket, self-healed next sweep. The no-subagent-spawning
 rule is honored because fan-out lives only at two top-level layers (dispatcher→reconcilers,
-reconciler→Impl/QA), never inside a subagent.
+`qa` reconciler→its one Standards-axis subagent), never inside `implementing`.
 
 ## State machine
 
