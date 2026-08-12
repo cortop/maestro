@@ -77,8 +77,23 @@ literal values you already hold from the preamble's two `maestro env` calls — 
 substitutes them directly when you type it; none is a shell variable a fenced line expands.
 
 **Step 0 — sync with the base branch (also how conflicts get resolved).** You may have landed
-here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` says so). Always
-rebase onto the latest base first, then resolve any conflicts — always resolve, never
+here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` says so), or because
+a drifted-behind-base worktree was auto-rerouted here (snapshot `reason` says
+`origin/<BASE> advanced (policy=...)`). If a PR is already open (snapshot `pr_number` is set),
+first fetch and incorporate `origin/<PREFIX>$KEY` — the PR branch as it actually stands on
+GitHub — **before** rebasing onto base. Rebasing from only the local worktree tip would silently
+drop any commit pushed to the PR branch by someone else since your last sync (a CI bot's
+auto-fix, a human's own push, a co-author) the moment you force-push the rebased result:
+```bash
+git -C <WT> fetch -q origin "<PREFIX>$KEY"
+git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"   # no-op if nothing new is there
+```
+If that `merge --ff-only` fails (your local tip and `origin/<PREFIX>$KEY` have diverged — someone
+else pushed while you were working), reconcile properly instead of discarding either side:
+`git -C <WT> merge -q "origin/<PREFIX>$KEY"` and resolve any conflict the same way step 0's own
+rebase conflicts are resolved below, before continuing.
+
+Then always rebase onto the latest base, and resolve any conflicts — always resolve, never
 `git rebase --abort`:
 ```bash
 git -C <REPO> fetch -q origin "<BASE>"

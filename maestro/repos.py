@@ -59,9 +59,15 @@ class RepoBinding:
     # never by dispatch() (see maestro/ops.py:worktree_ensure). None (default)
     # runs nothing -- unchanged behavior for every repo that doesn't set it.
     prime: str | None = None
+    # MTO-2: this repo's base_drift_policy, already resolved against the
+    # board-wide [maestro] base_drift_policy default -- see
+    # dispatcher.sync_worktrees, the sole reader. "always" | "daily" |
+    # "on_conflict"; both values are validated at config.load (fail closed),
+    # so by the time a RepoBinding exists this is always one of the three.
+    base_drift_policy: str = "on_conflict"
 
 
-def _binding_from_table(name: str, table: dict) -> RepoBinding:
+def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
     mode = table.get("mode", "git")
     if mode not in _MODES:
         mode = "git"
@@ -78,6 +84,8 @@ def _binding_from_table(name: str, table: dict) -> RepoBinding:
         gh_account=table.get("gh_account"),
         token_env=table.get("token_env"),
         prime=table.get("prime"),
+        # MTO-2: this table's own override wins; unset inherits the board-wide default.
+        base_drift_policy=table.get("base_drift_policy") or cfg.base_drift_policy,
     )
 
 
@@ -96,7 +104,7 @@ def implicit_default(cfg: Config) -> RepoBinding:
     """
     for name, table in cfg.repos.items():
         if table.get("default"):
-            return _binding_from_table(name, table)
+            return _binding_from_table(cfg, name, table)
     slug = None
     gh = cfg.provider_config.get("vcs", {}).get("github_cli", {})
     repos_list = gh.get("repos") or []
@@ -109,6 +117,7 @@ def implicit_default(cfg: Config) -> RepoBinding:
         base_branch="main",
         branch_prefix=cfg.branch_prefix,
         prime=cfg.prime,
+        base_drift_policy=cfg.base_drift_policy,
     )
 
 
@@ -169,5 +178,5 @@ def resolve(cfg: Config, home: Path, key: str) -> RepoBinding:
     if name:
         table = cfg.repos.get(name)
         if table:
-            return _binding_from_table(name, table)
+            return _binding_from_table(cfg, name, table)
     return implicit_default(cfg)

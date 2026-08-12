@@ -135,6 +135,21 @@ class Config:
     # Refuse to fast-forward/spawn into repo_path while it's mid-merge/rebase or carries
     # a real conflict hunk (see dispatcher.repo_preflight). Fails open on a broken probe.
     repo_preflight: bool = True
+    # MTO-2: when dispatcher.sync_worktrees finds an awaiting-ci/in-review ticket's
+    # worktree behind its repo's base branch, which policy decides whether that drift
+    # alone re-routes it to `implementing` (and so triggers a rebase + force-push,
+    # restarting CI). "always" is today's unconditional behavior (byte-identical for a
+    # board that sets nothing but this to "always"); "daily" routes at most once per
+    # calendar day per ticket (see schedule.dedup_bucket); "on_conflict" never routes on
+    # drift alone -- only a GitHub-reported CONFLICTING PR (ops.route_conflict) still
+    # rebases. Default "on_conflict": the mode that cannot livelock a fast-moving shared
+    # integration branch, which is the entire reason this knob exists -- see MTO-2. A
+    # board whose base branch only ever advances on its own merges can opt back into
+    # "always" explicitly. Per-[repos.<name>] override wins over this board-wide default,
+    # resolved the same way as base_branch/branch_prefix (see repos.RepoBinding). An
+    # unrecognized value fails closed at config load (refuse to start), never silently
+    # falls back -- see _BASE_DRIFT_POLICIES.
+    base_drift_policy: str = "on_conflict"
     # T-23: gate a second, parallel QA sub-agent in the `implementing` reconcile step that
     # checks CLAUDE.md conventions + a Fowler-smell baseline (the "standards" axis) alongside
     # the existing AD-4 "spec" axis (does the diff satisfy the AC?). Default OFF -- it roughly
@@ -177,8 +192,14 @@ class Config:
 _REPO_TABLE_KEYS = frozenset({
     "path", "slug", "base_branch", "branch_prefix", "default",
     "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
-    "gh_account", "token_env", "prime",
+    "gh_account", "token_env", "prime", "base_drift_policy",
 })
+
+# MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
+# [repos.<name>] fail closed (raise at config.load) on anything outside it,
+# naming this set in the error, rather than silently falling back to a mode
+# that can livelock a fast-moving base branch.
+_BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 
 
 def config_path(home: Path) -> Path:
@@ -247,6 +268,14 @@ def load(home_arg: str | None = None) -> Config:
                 raw_cap = table.get("max_spawns_per_sweep")
                 raw_mode = table.get("mode", "git")
                 raw_repo_tools = table.get("reconcile_allowed_tools", [])
+                # MTO-2: fail closed on a typo'd/unrecognized per-repo override too --
+                # None (unset) is valid, meaning "inherit the board-wide default"
+                # (see repos._binding_from_table).
+                raw_repo_drift_policy = table.get("base_drift_policy")
+                if raw_repo_drift_policy is not None and raw_repo_drift_policy not in _BASE_DRIFT_POLICIES:
+                    raise store.MaestroError(
+                        f"config.toml: [repos.{name}] base_drift_policy must be one of "
+                        f"{sorted(_BASE_DRIFT_POLICIES)}, got {raw_repo_drift_policy!r}")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -265,6 +294,8 @@ def load(home_arg: str | None = None) -> Config:
                     "token_env": table.get("token_env"),
                     # GA-20: this repo's dependency-priming command -- see RepoBinding.prime.
                     "prime": table.get("prime"),
+                    # MTO-2: None (unset) inherits cfg.base_drift_policy -- see repos.resolve.
+                    "base_drift_policy": raw_repo_drift_policy,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -293,6 +324,12 @@ def load(home_arg: str | None = None) -> Config:
         cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
         cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
         cfg.repo_preflight = bool(m.get("repo_preflight", cfg.repo_preflight))
+        raw_drift_policy = m.get("base_drift_policy", cfg.base_drift_policy)
+        if raw_drift_policy not in _BASE_DRIFT_POLICIES:
+            raise store.MaestroError(
+                f"config.toml: base_drift_policy must be one of "
+                f"{sorted(_BASE_DRIFT_POLICIES)}, got {raw_drift_policy!r}")
+        cfg.base_drift_policy = raw_drift_policy
         cfg.qa_standards_axis = bool(m.get("qa_standards_axis", cfg.qa_standards_axis))
         cfg.compact_interval = int(m.get("compact_interval", cfg.compact_interval))
         cfg.compact_min_events = int(m.get("compact_min_events", cfg.compact_min_events))
@@ -391,6 +428,14 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # session_log_retention_days = 14 # delete session logs older than N days (0/None = keep all)
 # session_log_max_per_ticket = 200 # keep at most N session logs per ticket (0/None = unlimited)
 # repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
+# base_drift_policy = "on_conflict" # "always" | "daily" | "on_conflict" -- whether a worktree
+                                  # merely BEHIND its base branch (not GitHub-CONFLICTING) alone
+                                  # re-routes an awaiting-ci/in-review ticket back to implementing
+                                  # (rebase + force-push, restarting CI). Default "on_conflict":
+                                  # cannot livelock a fast-moving shared integration branch.
+                                  # "always" = today's unconditional behavior; "daily" = at most
+                                  # once/calendar-day/ticket. Per-[repos.<name>] override wins.
+                                  # Unknown value fails config load closed (see _BASE_DRIFT_POLICIES).
 # prime = "python3 -m venv .venv && .venv/bin/pip install -q -e '.[dev,tui]'"
                                   # dependency-install command for the implicit default binding
                                   # (no [repos.*] table at all -- see [repos.<name>] prime below
@@ -460,6 +505,10 @@ implementer = "claude_skill"
 # reconcile_allowed_tools = ["Bash(npm test:*)"]   # this repo's own git/gh/test --allowedTools
                                      # surface; unset inherits just the board-wide list (unioned,
                                      # never replaces it)
+# base_drift_policy = "on_conflict" # this repo's base_drift_policy override -- default: unset,
+                                     # inherits [maestro] base_drift_policy. e.g. a fast-moving
+                                     # shared integration branch wants "on_conflict" even if the
+                                     # board-wide default is "always" for its other, quieter repos.
 # gh_account = "work-login"         # resolve this repo's gh credential via
                                      # `gh auth token --user <login>` at spawn/poll time
                                      # (needs `gh` + an unlocked keychain on the dispatcher

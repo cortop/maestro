@@ -54,7 +54,7 @@ def test_unrecognized_mode_falls_back_to_git(home, tmp_path):
         f'[repos.vault]\npath = "{target}"\nmode = "bogus"\n', encoding="utf-8")
     cfg = config_mod.load(str(home))
     assert cfg.repos["vault"]["mode"] == "git"
-    binding = repos_mod._binding_from_table("vault", cfg.repos["vault"])
+    binding = repos_mod._binding_from_table(cfg, "vault", cfg.repos["vault"])
     assert binding.mode == "git"
 
 

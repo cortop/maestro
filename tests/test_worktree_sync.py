@@ -55,6 +55,10 @@ def _seed(home, key, phase, pr=10):
 
 
 def test_sync_worktrees_routes_stale_awaiting_ci_ticket_to_implementing(home, cfg, tmp_path):
+    # MTO-2: "always" opts back into today's unconditional-on-drift behavior --
+    # the new default (on_conflict) never routes on drift alone; see
+    # test_drift_policy.py for default/on_conflict/daily coverage.
+    cfg.base_drift_policy = "always"
     origin, repo = _make_origin_and_repo(tmp_path)
     cfg.repo_path = str(repo)
 
@@ -167,6 +171,7 @@ def test_dispatch_full_sweep_routes_and_spawns_stale_ticket(home, cfg, tmp_path)
     """End-to-end: a real dispatcher sweep (not just sync_worktrees directly) both
     routes the stale ticket to implementing and spawns a reconciler for it in the
     same pass, since implementing is an active (non-sleeping) phase."""
+    cfg.base_drift_policy = "always"  # MTO-2: new default (on_conflict) never routes on drift alone
     origin, repo = _make_origin_and_repo(tmp_path)
     cfg.repo_path = str(repo)
 

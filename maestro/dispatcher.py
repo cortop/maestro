@@ -783,7 +783,11 @@ def repo_preflight_all(cfg: Config, home: Path, keys) -> dict:
     return {"ok": not blockers_by_repo, "blockers_by_repo": blockers_by_repo, "blockers": flat}
 
 
-def sync_worktrees(cfg: Config) -> dict:
+def _drift_policy_cursor_path(home: Path) -> Path:
+    return home / "derived" / ".drift_policy_cursor.json"
+
+
+def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     """Keep other tickets' worktrees from drifting behind a just-merged base branch.
 
     Groups every ticket's worktree by its *resolved* repo (``repos.resolve`` --
@@ -797,18 +801,37 @@ def sync_worktrees(cfg: Config) -> dict:
     local branch of that name too, when it's checked out) at most once per
     sweep; the implicit default repo is always included even with zero due
     tickets, so a single-repo board's local ``main`` still tracks
-    ``origin/main`` every sweep. For every ticket sitting in
-    ``awaiting-ci``/``in-review`` whose worktree is now behind its own repo's
-    base, routes it back into ``implementing`` so the reconciler rebases and
-    resolves any conflict exactly as it already does for a GitHub-reported
-    CONFLICTING PR (see ``ops.route_conflict``). A ticket that's already
-    ``implementing`` needs no nudge — it re-syncs with its base branch on
-    every turn on its own. Level-triggered and idempotent: a no-op when
-    nothing is behind, and one repo's fetch/network failure is contained to
-    that repo -- it never stalls sibling repos' sync or this sweep's
-    mint/backup ticks. ``fetched`` mirrors the *default* repo's fetch outcome
-    only, keeping the historical single-repo return contract byte-identical;
-    per-repo detail (including failures) rides the additional ``errors`` key.
+    ``origin/main`` every sweep. The fetch + local fast-forward always run,
+    independent of ``base_drift_policy`` below -- they're cheap, useful on
+    their own, and never coupled to whether drift alone is allowed to route.
+
+    For every ticket sitting in ``awaiting-ci``/``in-review`` whose worktree is
+    now behind its own repo's base, whether that drift alone routes it back
+    into ``implementing`` (so the reconciler rebases, exactly as it already
+    does for a GitHub-reported CONFLICTING PR -- see ``ops.route_conflict``)
+    is gated on the resolved repo binding's ``base_drift_policy`` (MTO-2):
+    ``"always"`` routes unconditionally (today's byte-identical behavior),
+    ``"on_conflict"`` never routes on drift alone (only a CONFLICTING PR still
+    does, via the separate ``sync_vcs`` hook), and ``"daily"`` routes at most
+    once per calendar day per ticket, deduped via
+    ``schedule.dedup_bucket``/a persisted cursor
+    (``derived/.drift_policy_cursor.json``) keyed on ``(key, day-bucket)`` --
+    reusing the same "have I done this today" machinery ``run_scheduled_tasks``
+    already relies on, rather than hand-rolling a timestamp comparison. Under
+    every policy, a ticket whose latest observed CI is still ``pending`` is
+    never routed on drift alone -- staleness only matters at merge time, and
+    routing while checks are still running is exactly what restarts CI and
+    livelocks a fast-moving base (see the ticket's evidence). A ticket that's
+    already ``implementing`` needs no nudge — it re-syncs with its base branch
+    on every turn on its own. Suppressed reroutes (policy gate or pending CI)
+    are reported under ``skipped_by_policy`` rather than silently absent.
+
+    Level-triggered and idempotent: a no-op when nothing is behind, and one
+    repo's fetch/network failure is contained to that repo -- it never stalls
+    sibling repos' sync or this sweep's mint/backup ticks. ``fetched`` mirrors
+    the *default* repo's fetch outcome only, keeping the historical
+    single-repo return contract byte-identical; per-repo detail (including
+    failures) rides the additional ``errors`` key.
 
     Each group is preflighted (``repo_preflight``/MR-5) before its fetch: a
     mid-merge/conflicted repo is skipped entirely for THIS group only (no
@@ -823,9 +846,17 @@ def sync_worktrees(cfg: Config) -> dict:
     from . import repos as repos_mod
 
     home = cfg.home
+    now = now if now is not None else store.now_epoch()
     routed: list[str] = []
+    skipped_by_policy: list[str] = []
     errors: dict[str, str] = {}
     blocked: dict[str, list[str]] = {}
+    # Loaded/persisted lazily -- only "daily"-policy tickets that actually
+    # drift ever touch this file, so a quiet sweep (or a board with no
+    # "daily" repo) costs nothing.
+    daily_cursor: dict = {}
+    daily_cursor_loaded = False
+    daily_cursor_changed = False
 
     # (realpath, base_branch) -> {"binding": RepoBinding, "keys": [...]}. The
     # implicit default repo is always a group (even with no due tickets) so
@@ -901,13 +932,42 @@ def sync_worktrees(cfg: Config) -> dict:
                     count = 0
                 if count == 0:
                     continue
-                if ops.route_stale(cfg, key, base_branch=base):
+
+                policy = binding.base_drift_policy
+                if policy == "on_conflict":
+                    skipped_by_policy.append(key)
+                    continue
+                # Staleness only matters at merge time -- never restart CI that's
+                # still running, under ANY policy (this is what actually breaks
+                # the CI-restart livelock; see the ticket's evidence).
+                if snap_mod.load(home, key).ci_state == "pending":
+                    skipped_by_policy.append(key)
+                    continue
+                if policy == "daily":
+                    if not daily_cursor_loaded:
+                        daily_cursor = store.read_json(_drift_policy_cursor_path(home), {}) or {}
+                        daily_cursor_loaded = True
+                    bucket = schedule.dedup_bucket({"every": "24h"}, now)
+                    if daily_cursor.get(key) == bucket:
+                        skipped_by_policy.append(key)
+                        continue
+                    if ops.route_stale(cfg, key, base_branch=base, policy=policy):
+                        routed.append(key)
+                        daily_cursor[key] = bucket
+                        daily_cursor_changed = True
+                    continue
+                # policy == "always"
+                if ops.route_stale(cfg, key, base_branch=base, policy=policy):
                     routed.append(key)
         except Exception as e:  # noqa: BLE001 - one repo's failure must never stall siblings
             errors[f"{real}@{base}"] = f"{type(e).__name__}: {e}"
             continue
 
-    return {"fetched": fetched_default, "routed": routed, "errors": errors, "blocked": blocked}
+    if daily_cursor_changed:
+        store.write_json(_drift_policy_cursor_path(home), daily_cursor)
+
+    return {"fetched": fetched_default, "routed": routed,
+            "skipped_by_policy": skipped_by_policy, "errors": errors, "blocked": blocked}
 
 
 def _compact_cursor_path(home: Path) -> Path:
@@ -1643,7 +1703,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                                     cfg, now, default={"fired": []})["fired"]
         # sync_worktrees preflight-gates itself per repo group now (MR-5) -- no
         # outer repo_ok gate needed here; a blocked repo skips only its own group.
-        _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg)
+        _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg, now)
         vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
         worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
         _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
