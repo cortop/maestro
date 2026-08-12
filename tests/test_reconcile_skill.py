@@ -526,7 +526,10 @@ def test_implementing_restates_bans_positively():
         # ...replaced by positive restatements of the same rules.
         assert "Push normally" in text or "push normally" in text.lower()
         assert "never force-push" in text.lower()  # the rule survives, framed positively
-        assert "the dispatcher's next sweep polls CI" in text
+        # RF-7: the immediate next hop is `qa`, not CI -- CI polling happens later,
+        # once `qa` routes the ticket onward to awaiting-ci -- but the underlying ban
+        # (this session never polls CI itself) is still restated positively.
+        assert "does not poll" in text.lower() and "CI" in text
 
 
 def test_implementing_restates_never_abort_positively():
@@ -708,19 +711,30 @@ def test_skill_copies_are_byte_identical_after_stripping_frontmatter():
 
 
 # ---------------------------------------------------------------------------
-# T-3: the QA hand-off is briefed from `maestro qa-brief`, not a re-typed
-# `git diff` the implementer has to marshal.
+# T-3/RF-7: the QA hand-off is briefed from `maestro qa-brief`, not a re-typed
+# `git diff` the implementer has to marshal. RF-7 moved the whole adversarial
+# check (and so this briefing) out of `implementing` and into the independent
+# `qa` phase -- `implementing`'s own job is only to hand off via `set-phase qa`.
 # ---------------------------------------------------------------------------
 
-def test_implementing_skill_briefs_qa_from_qa_brief_verb():
-    for path in (_commands_path("implementing"), _skills_path("implementing"),
-                 _skill_commands_path("implementing")):
+def test_qa_skill_briefs_from_qa_brief_verb():
+    for path in (_commands_path("qa"), _skills_path("qa"), _skill_commands_path("qa")):
         text = path.read_text()
-        assert 'maestro qa-brief "$KEY"' in text, f"{path}: step 3 no longer calls qa-brief"
+        assert 'maestro qa-brief "$KEY"' in text, f"{path}: qa phase no longer calls qa-brief"
         assert "never write it to a file" not in text, \
             f"{path}: the old re-type-the-diff instruction is still present"
-        assert 'git -C <WT> diff "origin/<BASE>" -- .' not in text, \
+        assert "git diff origin/" not in text, \
             f"{path}: QA is still briefed from a raw git diff instead of qa-brief"
+
+
+def test_implementing_skill_no_longer_briefs_qa_itself():
+    """RF-7: `qa-brief`/`qa-verdict` are `qa`'s own job now -- `implementing`
+    hands off via `set-phase qa` instead of running the adversarial check
+    in-session."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "qa-brief" not in text
+        assert 'set-phase "$KEY" qa' in text
 
 
 # ---------------------------------------------------------------------------
