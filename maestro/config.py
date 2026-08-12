@@ -108,6 +108,16 @@ class Config:
     # only registered runner as of this ticket -- see dispatcher._REGISTERED_RUNNERS.
     runner: str = "claude"
     runner_model: str | None = None
+    # OC-3: board-wide kill switch for which runner name(s) `dispatch()` will ever
+    # spawn under -- consulted in the spawn loop BEFORE OC-2's own preflight (the
+    # binary probe, the daemon probe), so flipping a spec's `runner:` to a name
+    # this list doesn't carry never even reaches those probes. A scalar or a list
+    # in config.toml (see `_normalize_runner_enabled`); default is claude-only, so
+    # an existing home with no `[maestro] runner_enabled` line behaves exactly as
+    # before this ticket. "claude" itself is never gated by this knob -- every
+    # phase other than `implementing` always spawns claude regardless (RF-2), and
+    # gating it here would let one typo'd list wedge the entire fleet.
+    runner_enabled: list = field(default_factory=lambda: ["claude"])
     reconcile_web_tools: bool = True   # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
     # GA-10: board-wide --allowedTools additions beyond the maestro-verb grant (cli.py's
     # _AGENT_TOOL_VERBS) and reconcile_web_tools -- e.g. a repo's own git/gh/test surface.
@@ -176,6 +186,21 @@ _REPO_TABLE_KEYS = frozenset({
 
 def config_path(home: Path) -> Path:
     return home / "config.toml"
+
+
+def _normalize_runner_enabled(raw, default: list) -> list:
+    """OC-3: `[maestro] runner_enabled` accepts either a scalar (`"claude"`) or a
+    list (`["claude", "opencode"]`) -- normalize both to a list of str. `None`
+    (key absent) keeps *default*; anything else that isn't a str or a list of
+    str is ignored (falls back to *default*) rather than wedging `load()` on a
+    typo'd table or number."""
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+        return raw
+    return default
 
 
 def load(home_arg: str | None = None) -> Config:
@@ -273,6 +298,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
         cfg.runner = m.get("runner", cfg.runner)
         cfg.runner_model = m.get("runner_model", cfg.runner_model) or None
+        cfg.runner_enabled = _normalize_runner_enabled(m.get("runner_enabled"), cfg.runner_enabled)
         cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
         raw_allowed = m.get("reconcile_allowed_tools", cfg.reconcile_allowed_tools)
         cfg.reconcile_allowed_tools = raw_allowed if isinstance(raw_allowed, list) else cfg.reconcile_allowed_tools
@@ -364,6 +390,12 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # runaway_pause_cooldown = 900    # seconds dispatch() auto-arms fleet.pause for on the
                                   # same runaway signal doctor reports (0 disables the
                                   # auto-brake; runaway_spawns_per_hour = 0 disables both)
+# runner_enabled = ["claude"]     # board-wide kill switch: dispatch() only ever spawns a
+                                  # runner named here (default: claude only). A scalar
+                                  # ("claude") works too. Consulted before OC-2's own
+                                  # preflight (binary probe, daemon probe) -- flipping this
+                                  # is the only lever needed to arm/disarm a non-claude
+                                  # runner fleet-wide, no spec edits required.
 # reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
 # reconcile_allowed_tools = ["Bash(npm test:*)"]   # board-wide --allowedTools additions, unioned
                                   # with the resolved repo's own [repos.<name>]

@@ -183,7 +183,7 @@ def test_bare_env_unchanged_key_set(home, capsys):
     assert set(printed.keys()) == {"home", "repo_path", "branch_prefix", "reconcile_command",
                                     "max_concurrency", "max_impl_turns", "qa_standards_axis",
                                     "providers", "spawn_floor_s", "no_output_timeout",
-                                    "runner", "runner_model"}
+                                    "runner", "runner_model", "runner_enabled"}
     assert printed["no_output_timeout"] == cfg.no_output_timeout
 
 
