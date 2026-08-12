@@ -44,6 +44,13 @@ class Config:
     # Exempt when the claim has no `log_path` (capture_session_logs = false --
     # missing data, never reap on it; falls back to the age-based rule only).
     no_output_timeout: int = 600
+    # MTO-1: `git worktree add`/adopt's own timeout (worktree_ensure), separate from every
+    # other short git plumbing call in ops.py (those stay on the internal 30s _GIT_TIMEOUT).
+    # A monorepo checkout (~230k tracked files) measured ~56s; 30s killed it mid-checkout,
+    # after files were written but before the index was, leaving a worktree that looked
+    # complete (directory present) but wasn't. 600s is generous headroom for that case --
+    # raise it further for a larger repo still.
+    worktree_timeout: int = 600
     # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
     # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
     # by `maestro doctor` and the TUI fleet panel alongside today's actual spend.
@@ -206,6 +213,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.max_session_seconds = int(m.get("max_session_seconds", cfg.max_session_seconds))
         cfg.max_spawn_attempts = int(m.get("max_spawn_attempts", cfg.max_spawn_attempts))
         cfg.no_output_timeout = int(m.get("no_output_timeout", cfg.no_output_timeout))
+        cfg.worktree_timeout = int(m.get("worktree_timeout", cfg.worktree_timeout))
         raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
         cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
         raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
@@ -346,6 +354,10 @@ max_impl_turns = 20
                                   # to in this many seconds (0 disables); independent of
                                   # max_session_seconds above. Exempt when the claim has no
                                   # log_path (capture_session_logs = false).
+worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1); raise this
+                                  # for a monorepo whose checkout legitimately takes longer --
+                                  # never scale it down, a killed-mid-checkout worktree looks
+                                  # complete (dir present) but isn't
 daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # session spend reaches this (enforced, not advisory;
                                   # surfaced by `maestro doctor` + the TUI fleet panel).

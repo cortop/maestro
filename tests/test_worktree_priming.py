@@ -23,6 +23,7 @@ and that a real dispatcher sweep never executes `prime` itself.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -397,3 +398,235 @@ def test_dispatch_never_executes_prime(home, tmp_path):
     assert not marker.exists(), "dispatch() executed config-supplied `prime` shell directly"
     assert not (home / "worktrees" / "Q-2").exists(), \
         "dispatch() must never create the worktree either -- only the reconciler session does"
+
+
+# ---------------------------------------------------------------------------
+# MTO-1: an interrupted `worktree ensure` can never be mistaken for complete.
+#
+# `_GIT_TIMEOUT` (the short, 30s plumbing timeout) killed a real ~230k-file
+# monorepo checkout (measured ~56s) mid-write -- after files landed, before
+# the index did. The old `wt.exists()` gate then treated that half-built
+# directory as done forever. These tests prove the postcondition-based
+# replacement: a broken existing worktree is torn down and rebuilt, a timeout
+# on `worktree add` itself surfaces loudly with no partial directory left
+# behind, `worktree add` runs under a much larger config-declared timeout
+# (never the short one), and a partial `node_modules` sync completes on retry.
+# ---------------------------------------------------------------------------
+
+def _seed_many_tracked_files(repo, n):
+    for i in range(n):
+        (repo / f"file{i}.txt").write_text(f"content {i}\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "add many files", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+
+def test_worktree_health_missing_and_no_index(home, tmp_path):
+    """`worktree_health` itself: missing dir, and a dir that exists but was
+    never a real git worktree (no index at all) -- the exact false-positive
+    the old bare `wt.exists()` check fell for."""
+    wt = home / "worktrees" / "no-such-key"
+    assert ops.worktree_health(wt) == {"healthy": False, "reason": "missing"}
+
+    wt.mkdir(parents=True)
+    (wt / "some-file.txt").write_text("looks like something got written here\n")
+    assert ops.worktree_health(wt) == {"healthy": False, "reason": "no index"}
+
+
+def test_ensure_rebuilds_a_worktree_dir_with_no_index(home, tmp_path):
+    """AC1: a worktree directory that EXISTS but is not a real git worktree at
+    all is not mistaken for complete -- ensure tears it down and creates a
+    real one, rather than reporting `created: False` with exit 0 on a broken
+    directory (the pre-MTO-1 bug's exact shape)."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "H-1")
+
+    wt = store.worktree_path(home, "H-1")
+    wt.mkdir(parents=True)
+    (wt / "some-file.txt").write_text("looks like something got written here\n")
+
+    result = ops.worktree_ensure(cfg, "H-1")
+    assert result["created"] is True
+    assert ops.worktree_health(wt) == {"healthy": True, "reason": None}
+    branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert branch == "maestro/H-1"
+
+
+def test_ensure_rebuilds_a_worktree_with_a_truncated_checkout(home, tmp_path):
+    """AC1 (the real reproduction, MTO-1): a worktree dir that exists and even
+    has a real index, but whose checkout was interrupted -- files the index
+    references are missing on disk, the exact `git status` signature of the
+    2026-08-10 incident (229,695 staged deletions on a real ~230k-file repo,
+    scaled down here to stay in-tree per the ticket's testing note)."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    _seed_many_tracked_files(repo, 60)
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "H-2")
+
+    ops.worktree_ensure(cfg, "H-2")
+    wt = store.worktree_path(home, "H-2")
+    assert ops.worktree_health(wt)["healthy"] is True
+
+    # Simulate a checkout killed partway through: 55 of the 60 tracked files
+    # never got written, but the index (written first) still references them
+    # -- `git status` now reports them "deleted".
+    for i in range(55):
+        (wt / f"file{i}.txt").unlink()
+    assert ops.worktree_health(wt) == {"healthy": False, "reason": "mass deletion in git status"}
+
+    result = ops.worktree_ensure(cfg, "H-2")
+    assert result["created"] is True
+    assert ops.worktree_health(wt) == {"healthy": True, "reason": None}
+    for i in range(60):
+        assert (wt / f"file{i}.txt").exists()
+    status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"],
+                            capture_output=True, text=True, check=True)
+    assert status.stdout == ""
+
+
+def test_ensure_timeout_on_worktree_add_raises_loudly_and_leaves_no_partial_dir(
+        home, tmp_path, monkeypatch, capsys):
+    """AC2: a `TimeoutExpired` from `git worktree add` surfaces as
+    `store.MaestroError` (non-zero CLI exit), appends no event, and leaves no
+    partial worktree directory behind -- never the raw traceback the old code
+    let escape, which left a poison-pill directory for every retry to skip."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _seed_spec(home, "H-4")
+    wt = store.worktree_path(home, "H-4")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(repo), "worktree", "add"] and "-b" in cmd:
+            # A killed `git worktree add` typically wrote SOME files before
+            # being SIGKILLed -- simulate that partial artifact so the
+            # cleanup path this test is proving has something real to remove.
+            wt.mkdir(parents=True, exist_ok=True)
+            (wt / "partial-file.txt").write_text("half a checkout\n")
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-4"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "timeout" in err.lower()
+
+    assert not wt.exists()
+    assert event_log.read(home, "H-4") == []
+
+
+def test_worktree_add_uses_configured_worktree_timeout_not_the_short_git_timeout(
+        home, tmp_path, monkeypatch):
+    """AC3: `worktree add` runs under the config-declared `worktree_timeout`
+    (default 600s -- generous headroom above the ~56s a real ~230k-file
+    checkout measured), never the short 30s plumbing timeout every other git
+    call in this module uses."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 5\n")
+    assert cfg.worktree_timeout == 5
+    _seed_spec(home, "H-3")
+
+    seen_timeouts = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(repo), "worktree", "add"]:
+            seen_timeouts.append(kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    ops.worktree_ensure(cfg, "H-3")
+
+    assert seen_timeouts == [5]  # the configured worktree_timeout, not 30 or 600
+
+
+def test_worktree_timeout_defaults_to_600(home, tmp_path):
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    assert cfg.worktree_timeout == 600
+
+
+def test_ensure_completes_a_partial_node_modules_sync_on_retry(home, tmp_path):
+    """AC4: a partially-copied `node_modules` (the old gate was bare
+    `dst_nm.exists()`, so a truncated copy from a killed/timed-out earlier
+    attempt was skipped forever) is completed on the next ensure -- driven by
+    a completion marker written only after the sync succeeds, never by
+    directory existence."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    nm = repo / "node_modules"
+    (nm / "pkgA").mkdir(parents=True)
+    (nm / "pkgA" / "a.txt").write_text("a\n")
+    (nm / "pkgB").mkdir(parents=True)
+    (nm / "pkgB" / "b.txt").write_text("b\n")
+
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "H-5")
+
+    ops.worktree_ensure(cfg, "H-5")
+    wt = store.worktree_path(home, "H-5")
+    marker = ops._git_dir(wt) / ops._NODE_MODULES_SYNCED_MARKER
+    assert marker.exists()
+    assert (wt / "node_modules" / "pkgB" / "b.txt").read_text() == "b\n"
+
+    # Simulate an earlier attempt that got killed partway through the sync:
+    # pkgB never landed, and (since it never returned 0) the marker was never
+    # written -- delete both to reproduce that state honestly.
+    marker.unlink()
+    shutil.rmtree(wt / "node_modules" / "pkgB")
+    assert not (wt / "node_modules" / "pkgB").exists()
+
+    ops.worktree_ensure(cfg, "H-5")
+    assert (wt / "node_modules" / "pkgA" / "a.txt").exists()
+    assert (wt / "node_modules" / "pkgB" / "b.txt").read_text() == "b\n"
+    assert marker.exists()
+
+
+def test_ensure_interrupted_create_then_retry_never_reports_success_on_broken_worktree(
+        home, tmp_path, monkeypatch, capsys):
+    """AC5 -- the regression test the ticket asks for, driving the real CLI
+    (`cli_main(["worktree", "ensure", ...])`, not `ops.worktree_ensure`
+    directly) over a temp MAESTRO_HOME: an interrupted create (simulated
+    timeout) fails loudly with no partial directory left; the retry that
+    follows does the full real create and only THEN reports success -- at no
+    point does any call report `created: False`/exit 0 on top of a broken
+    worktree."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _seed_spec(home, "H-6")
+    wt = store.worktree_path(home, "H-6")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(repo), "worktree", "add"] and "-b" in cmd:
+            wt.mkdir(parents=True, exist_ok=True)
+            (wt / "partial-file.txt").write_text("half a checkout\n")
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capsys.readouterr()
+    rc1 = cli_main(["--home", str(home), "worktree", "ensure", "H-6"])
+    assert rc1 != 0, "the interrupted create must fail loudly, never exit 0"
+    err = capsys.readouterr().err
+    assert "timeout" in err.lower()
+    assert not wt.exists(), "the interrupted attempt must leave no partial directory"
+
+    monkeypatch.undo()  # restore the real subprocess.run for the retry
+
+    capsys.readouterr()
+    rc2 = cli_main(["--home", str(home), "worktree", "ensure", "H-6"])
+    assert rc2 == 0
+    out = capsys.readouterr().out
+    assert '"created": true' in out, (
+        f"the retry must report the real create it just did, not a stale/skipped no-op: {out!r}")
+    assert ops.worktree_health(wt) == {"healthy": True, "reason": None}
+    branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert branch == "maestro/H-6"

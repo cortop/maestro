@@ -498,7 +498,8 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "depends_on", "launchctl", "repo_preflight",
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend",
-                      "gh_credential_reachability", "ollama_models", "runner_binary"}
+                      "gh_credential_reachability", "ollama_models", "runner_binary",
+                      "worktree_health"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -548,13 +549,14 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     here rather than re-captured, since T-46's own invariant, "iterating
     doesn't silently add/drop/rename", still holds for every other name. T-33
     grew it by one more -- `ollama_models` -- same treatment. T-38 (OC-2) grew
-    it by one more still -- `runner_binary` -- same treatment.)"""
+    it by one more still -- `runner_binary` -- same treatment. MTO-1 grew it by one
+    more still -- `worktree_health` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "depends_on", "repo_preflight", "unknown_repo_bindings",
         "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
-        "runner_binary",
+        "runner_binary", "worktree_health",
     }
     code, out = _sweep(home)
     assert code == 0
@@ -887,3 +889,71 @@ def test_init_sets_a_nonzero_default_spend_ceiling(tmp_path):
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "daily_spend")
     assert check["status"] == "ok"
+
+
+# --- MTO-1: `maestro doctor` catches a broken worktree by hand ---------------
+
+
+def test_check_worktree_health_ok_with_no_worktrees_dir(home):
+    """AC6: the common case -- nothing under worktrees/ yet -- is a plain ok,
+    never a warn just for being empty."""
+    cfg = Config(home=home)
+    check = health.check_worktree_health(cfg, store.now_epoch())
+    assert check == {"name": "worktree_health", "status": "ok",
+                      "detail": "all existing worktrees have a valid index and clean status",
+                      "broken": []}
+
+
+def test_check_worktree_health_warns_on_a_directory_with_no_index(home):
+    """AC6: an existing worktree directory that was never a real git worktree
+    (no index at all) -- the exact false-positive the pre-MTO-1 bare
+    `wt.exists()` gate fell for -- is surfaced as a warn, naming the key and
+    the reason."""
+    wt_dir = home / "worktrees" / "B-1"
+    wt_dir.mkdir(parents=True)
+    (wt_dir / "stray.txt").write_text("not a real worktree\n")
+
+    cfg = Config(home=home)
+    check = health.check_worktree_health(cfg, store.now_epoch())
+    assert check["status"] == "warn"
+    assert check["broken"] == [{"key": "B-1", "reason": "no index"}]
+    assert "B-1" in check["detail"] and "no index" in check["detail"]
+
+
+def test_check_worktree_health_warns_on_a_mass_deletion_git_status(home, tmp_path):
+    """AC6, over a real git worktree (not a fake stray directory): files the
+    index references go missing on disk -- `git status` reports a mass
+    deletion block, the 2026-08-10 incident's exact signature -- and the
+    check flags it by key."""
+    from maestro import config as config_mod
+
+    from conftest import make_origin_and_repo as _make_origin_and_repo
+
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    for i in range(60):
+        (repo / f"file{i}.txt").write_text(f"content {i}\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "add many files", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    (home / "config.toml").write_text(f'[maestro]\nrepo_path = "{repo}"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    store.atomic_write(store.spec_path(home, "B-2"), "# B-2\napproval_tier: 1\n\n## Intent\nx\n")
+
+    ops.worktree_ensure(cfg, "B-2")
+    wt = store.worktree_path(home, "B-2")
+    for i in range(55):
+        (wt / f"file{i}.txt").unlink()
+
+    check = health.check_worktree_health(cfg, store.now_epoch())
+    assert check["status"] == "warn"
+    assert check["broken"] == [{"key": "B-2", "reason": "mass deletion in git status"}]
+
+
+def test_check_worktree_health_registered_in_doctor(home):
+    """AC6: `maestro doctor` runs this check as part of the real registry, not
+    just as a standalone function."""
+    assert health.check_worktree_health in health.CHECKS
+    code, out = _sweep(home)
+    assert code == 0
+    assert next(c for c in out["checks"] if c["name"] == "worktree_health")["status"] == "ok"
