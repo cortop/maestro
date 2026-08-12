@@ -718,6 +718,31 @@ def check_depends_on(cfg: Config, now: float) -> dict:
     }
 
 
+def check_worktree_health(cfg: Config, now: float) -> dict:
+    """WARN (detective, never blocks a spawn) on any EXISTING worktree dir
+    under ``<home>/worktrees`` that fails `ops.worktree_health` -- no index, or
+    a mass-deletion `git status`. MTO-1: this exact shape was invisible until a
+    human ran `git status` inside the worktree by hand; a fresh `worktree
+    ensure` on the same key already self-heals it (recreates rather than
+    skipping), so this check exists to surface it BEFORE that next reconcile,
+    not to fix it itself. Lazy `ops` import -- `ops` imports `dispatcher`,
+    which lazily imports `health` itself; importing `ops` at module level here
+    would round-trip that cycle at import time."""
+    from . import ops
+
+    worktrees_dir = cfg.home / "worktrees"
+    broken = []
+    if worktrees_dir.is_dir():
+        for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
+            health = ops.worktree_health(wt)
+            if not health["healthy"]:
+                broken.append({"key": wt.name, "reason": health["reason"]})
+    status = "warn" if broken else "ok"
+    detail = (", ".join(f"{b['key']}: {b['reason']}" for b in broken)
+              if broken else "all existing worktrees have a valid index and clean status")
+    return {"name": "worktree_health", "status": status, "detail": detail, "broken": broken}
+
+
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
@@ -730,7 +755,7 @@ CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_out
           check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
           check_daily_spend, check_gh_credential_reachability, check_launchctl, check_ollama_models,
-          check_runner_binary)
+          check_runner_binary, check_worktree_health)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:

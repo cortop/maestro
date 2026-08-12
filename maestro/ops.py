@@ -222,13 +222,21 @@ def local_write_backup(cfg: Config, key: str, *, actor: str = "reconciler",
 # ---------------------------------------------------------------------------
 
 _FETCH_TIMEOUT = 60     # seconds; a hung `git fetch` must never wedge a reconciler
-_GIT_TIMEOUT = 30       # seconds; worktree add/adopt and rev-parse plumbing calls
+_GIT_TIMEOUT = 30       # seconds; fast rev-parse/status plumbing calls only -- NOT
+                        # `worktree add`/adopt itself, see `worktree_timeout` (MTO-1: a
+                        # ~230k-file monorepo checkout measured ~56s, well past this)
 _DEFAULT_PRIME_TIMEOUT = 600  # seconds; a hanging `npm ci` etc. must not wedge a reconciler
 
 # GA-7-derived: gitignored-by-convention names a fresh `git worktree add` never
 # brings (tracked files only) that this op mirrors from the source checkout.
 _PRIMED_EXTRA_FILES = ("CLAUDE.local.md", ".claude/settings.local.json")
 _PRIMED_NODE_MODULES = "node_modules"
+_NODE_MODULES_SYNCED_MARKER = "maestro-node-modules-synced"
+
+# MTO-1: staged/unstaged deletions at or above this count reads as a truncated index (the
+# 2026-08-10 incident: 229,695), never a legitimate small in-flight delete a human or agent
+# is mid-committing inside the worktree.
+_MASS_DELETE_THRESHOLD = 50
 
 
 def _git_dir(wt: Path) -> Path:
@@ -256,10 +264,118 @@ def _has_prior_implementing_history(cfg: Config, key: str) -> bool:
     )
 
 
-def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch: str, base: str) -> None:
+def _worktree_has_index(wt: Path) -> bool:
+    """True iff `git -C wt rev-parse --git-path index` resolves to a file that
+    actually exists on disk. False (never raises) for anything that isn't a
+    usable git worktree at all: not-a-worktree, killed rev-parse, missing
+    index -- every one of those means "not safe to treat as complete"."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "--git-path", "index"],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode != 0:
+        return False
+    out = result.stdout.strip()
+    if not out:
+        return False
+    p = Path(out)
+    if not p.is_absolute():
+        p = wt / p
+    return p.exists()
+
+
+def _worktree_status_clean_enough(wt: Path) -> bool:
+    """False iff `git status --porcelain` carries a mass deletion block (>=
+    `_MASS_DELETE_THRESHOLD` lines whose worktree-status column is `D`) -- the
+    signature of a truncated index (files present on disk, index believes
+    them gone). Also false on anything that can't even run the check."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(wt), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode != 0:
+        return False
+    deletions = sum(1 for line in result.stdout.splitlines() if line[1:2] == "D")
+    return deletions < _MASS_DELETE_THRESHOLD
+
+
+def worktree_health(wt: Path) -> dict:
+    """The postcondition for "is *wt* a complete, usable worktree" -- used by
+    both `worktree_ensure`'s recreate-vs-skip gate and `maestro doctor`'s
+    detective check (health.py). Bare directory existence (the pre-MTO-1
+    check) says nothing about whether `git worktree add` actually finished;
+    an interrupted one can leave the directory behind with no index at all,
+    or an index that never got the checkout it describes -- `git status` then
+    reports every tracked file as a staged deletion. Two independent probes
+    because MTO-1's one root cause (an interrupted `worktree add`) produced
+    both symptoms depending on exactly when it was killed.
+
+    Returns ``{"healthy": bool, "reason": str | None}`` -- never raises."""
+    if not wt.exists():
+        return {"healthy": False, "reason": "missing"}
+    if not _worktree_has_index(wt):
+        return {"healthy": False, "reason": "no index"}
+    if not _worktree_status_clean_enough(wt):
+        return {"healthy": False, "reason": "mass deletion in git status"}
+    return {"healthy": True, "reason": None}
+
+
+def _cleanup_partial_worktree(repo: str, wt: Path, *, branch: str | None = None,
+                              base: str | None = None) -> None:
+    """Tear down *wt* regardless of how far its creation got -- git may or may
+    not have finished registering it. `git worktree remove --force` first
+    (the clean path: deregisters the repo's own worktree admin dir too, not
+    just the directory); if git itself doesn't consider *wt* a worktree yet
+    (e.g. `worktree add` was killed before it linked anything), fall back to a
+    raw `rmtree`. Either way, finish with `worktree prune` so a half-linked
+    admin entry never makes the next `worktree add` for the same path fail
+    with "already exists".
+
+    When *branch*/*base* are given, ALSO discards the local *branch* ref if it
+    carries zero commits beyond ``origin/<base>`` -- indistinguishable from a
+    branch `worktree add -b` just created (fast) moments before being killed
+    mid-checkout (slow), never touched since. Left alone otherwise: a branch
+    WITH real commits ahead is the genuine T-44 resume case
+    (`_worktree_create_or_adopt`'s adopt fallback exists for exactly that) and
+    must never be discarded here. This is what lets the very next
+    `_worktree_create_or_adopt` call recreate with a plain `-b` instead of
+    colliding with its own interrupted attempt's leftover empty branch and
+    falling through to the T-44 guard, which would then correctly-but-
+    unhelpfully refuse (no prior `implementing` history yet, this early)."""
+    removed = subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", str(wt)],
+                             capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    if removed.returncode != 0 and wt.exists():
+        shutil.rmtree(wt, ignore_errors=True)
+    subprocess.run(["git", "-C", repo, "worktree", "prune"],
+                   capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    if branch and base:
+        ahead = subprocess.run(
+            ["git", "-C", repo, "rev-list", "--count", f"origin/{base}..{branch}"],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+        if ahead.returncode == 0 and ahead.stdout.strip() == "0":
+            subprocess.run(["git", "-C", repo, "branch", "-D", branch],
+                           capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+
+def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch: str, base: str,
+                              *, timeout: int) -> None:
     """Create *wt* on a fresh branch off ``origin/<base>``, or adopt *branch*
     if it already exists -- the same create-then-fallback the old ready.md
     prose did. Raises loudly (never a silent no-op) if both attempts fail.
+
+    *timeout* bounds each `worktree add`/adopt attempt (`worktree_timeout`,
+    config-declared, NOT the short `_GIT_TIMEOUT` used for plumbing calls
+    elsewhere in this module -- MTO-1: a real monorepo checkout took ~56s).
+    A `TimeoutExpired` on the CREATE attempt is caught, the partial worktree
+    AND its just-orphaned empty branch cleaned up (`_cleanup_partial_worktree`,
+    branch-pruning armed only here -- never on the adopt attempt below, which
+    exists specifically to preserve a branch's real commits), and re-raised as
+    `store.MaestroError` -- never left to escape as a raw traceback that
+    leaves a poison-pill directory for every retry to skip past.
 
     The adopt fallback exists ONLY to resume a branch THIS TICKET'S CURRENT RUN
     already pushed commits to (its worktree dir got removed, the branch
@@ -279,9 +395,21 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
         raise store.MaestroError(
             f"git fetch origin {base!r} in {repo} failed (rc={fetch.returncode}): "
             f"{fetch.stderr.strip()}")
-    created = subprocess.run(
-        ["git", "-C", repo, "worktree", "add", str(wt), "-b", branch, f"origin/{base}"],
-        capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+    def _add(args: list[str], attempt: str, *, prune_branch: bool) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(["git", "-C", repo, "worktree", "add", *args],
+                                  capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _cleanup_partial_worktree(repo, wt, branch=branch if prune_branch else None,
+                                      base=base if prune_branch else None)
+            raise store.MaestroError(
+                f"{key}: `git worktree add` ({attempt}) exceeded its {timeout}s "
+                f"worktree_timeout in {repo} -- killed and cleaned up the partial worktree "
+                f"at {wt}; raise `worktree_timeout` in config.toml if this repo's checkout "
+                f"legitimately takes longer.")
+
+    created = _add([str(wt), "-b", branch, f"origin/{base}"], "create", prune_branch=True)
     if created.returncode != 0:
         if not _has_prior_implementing_history(cfg, key):
             raise store.MaestroError(
@@ -291,9 +419,7 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
                 f"almost certainly a stale branch left by an earlier ticket that reused this key "
                 f"-- archive or rename it (e.g. `git -C {repo} branch -m {branch} "
                 f"archive/{branch}`) and re-run `maestro worktree ensure {key}`.")
-        adopted = subprocess.run(
-            ["git", "-C", repo, "worktree", "add", str(wt), branch],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+        adopted = _add([str(wt), branch], "adopt", prune_branch=False)
         if adopted.returncode != 0:
             raise store.MaestroError(
                 f"git worktree add failed for {wt} in {repo}: create "
@@ -334,24 +460,33 @@ def _prime_worktree_extras(repo: str, wt: Path) -> None:
 
     src_nm = repo_path / _PRIMED_NODE_MODULES
     dst_nm = wt / _PRIMED_NODE_MODULES
-    if src_nm.is_dir() and not dst_nm.exists():
-        # cp -c is an APFS copy-on-write clone (write-isolated, near-instant);
-        # --reflink=auto is its GNU/Linux equivalent (CoW on btrfs/xfs, falling
-        # back to a deep copy itself when unsupported); cp -R is the last-resort
-        # deep copy for any other cp. Deliberately no hardlink rung -- a
-        # hardlink shares one inode, so an in-place write mutates both copies
-        # at once (not write-isolated). The trailing "/." copies node_modules'
-        # *contents* into place instead of nesting a second node_modules inside it.
-        rungs = (
-            ["cp", "-c", "-R", f"{src_nm}/.", str(dst_nm)],
-            ["cp", "--reflink=auto", "-R", f"{src_nm}/.", str(dst_nm)],
-            ["cp", "-R", f"{src_nm}/.", str(dst_nm)],
-        )
-        for rung in rungs:
-            if subprocess.run(rung, capture_output=True, text=True).returncode == 0:
-                break
-        else:
-            raise store.MaestroError(f"node_modules copy into {dst_nm} failed on every cp rung")
+    if src_nm.is_dir():
+        # MTO-1: gated by a completion marker written ONLY after the sync returns 0 --
+        # never by `dst_nm.exists()`, which a partial copy (killed/timed-out mid-run)
+        # already satisfies, so every retry used to skip it forever (the 2.6-of-5.2 GB
+        # truncation this ticket reproduced). The marker lives under the worktree's OWN
+        # git dir (see `_git_dir`), same as `maestro-primed` below, so it self-cleans on
+        # `git worktree remove`.
+        #
+        # rsync -a preserves the write-isolated, real-copy guarantee the old `cp` ladder
+        # gave (never a symlink/hardlink -- an in-place write inside *wt* must never reach
+        # *repo* or a sibling worktree); unlike a one-shot `cp`, it is also idempotent and
+        # resumable -- a re-run only transfers what's missing or size/mtime-mismatched, so
+        # completing a partial copy from a prior kill is a normal, cheap re-run rather than
+        # a full re-copy. `--delete` clears anything rsync's own check finds truncated.
+        # Trailing "/" on both sides syncs node_modules' *contents* into place instead of
+        # nesting a second node_modules inside it.
+        marker = _git_dir(wt) / _NODE_MODULES_SYNCED_MARKER
+        if not marker.exists():
+            dst_nm.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(["rsync", "-a", "--delete", f"{src_nm}/", f"{dst_nm}/"],
+                                    capture_output=True, text=True)
+            if result.returncode != 0:
+                raise store.MaestroError(
+                    f"node_modules sync into {dst_nm} failed (rsync rc={result.returncode}): "
+                    f"{result.stderr.strip()}")
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(store.iso_now() + "\n", encoding="utf-8")
 
 
 def _run_prime(binding: repos_mod.RepoBinding, wt: Path, repo: str, key: str, timeout: int) -> None:
@@ -378,19 +513,23 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     field or a ``TicketCreated`` payload, neither of which this function or
     anything it calls ever reads.
 
-    Idempotence: a fresh ``git worktree add`` is skipped once the worktree dir
-    already exists; `prime` is skipped once its worktree-local marker (under
-    the worktree's OWN git dir -- see `_git_dir` -- so it self-cleans when the
-    worktree is removed) is present. If a fresh branch can't be created (it
-    already exists), the adopt fallback (see `_worktree_create_or_adopt`) only
-    fires when *key*'s own event log shows it was already `implementing`
-    before -- otherwise it refuses (`store.MaestroError` naming the branch,
-    T-44) rather than silently binding this run to a stale branch left by an
-    earlier ticket that reused this key. Raises ``store.MaestroError`` -- never a
-    silent success -- if worktree add/adopt fails, or if `prime` exits non-zero
-    or exceeds *prime_timeout*; the CLI wrapper surfaces that as a non-zero
-    exit with the repo name and rc in stderr, and appends no event, so no
-    phase transition follows a failed ensure.
+    Idempotence: a fresh ``git worktree add`` is skipped once `worktree_health`
+    finds the worktree dir complete (MTO-1: NOT bare directory existence -- a
+    real git index that resolves, plus no mass-deletion `git status`; an
+    unhealthy directory is torn down via `_cleanup_partial_worktree` and
+    recreated rather than skipped). `prime` is skipped once its worktree-local
+    marker (under the worktree's OWN git dir -- see `_git_dir` -- so it
+    self-cleans when the worktree is removed) is present. If a fresh branch
+    can't be created (it already exists), the adopt fallback (see
+    `_worktree_create_or_adopt`) only fires when *key*'s own event log shows
+    it was already `implementing` before -- otherwise it refuses
+    (`store.MaestroError` naming the branch, T-44) rather than silently
+    binding this run to a stale branch left by an earlier ticket that reused
+    this key. Raises ``store.MaestroError`` -- never a silent success -- if
+    worktree add/adopt fails or times out (`worktree_timeout`), or if `prime`
+    exits non-zero or exceeds *prime_timeout*; the CLI wrapper surfaces that
+    as a non-zero exit with the repo name and rc in stderr, and appends no
+    event, so no phase transition follows a failed ensure.
 
     AD-6 ``mode = "local"`` bindings have no worktree at all: a successful,
     side-effect-free no-op.
@@ -404,9 +543,12 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     repo = binding.path
     wt = store.worktree_path(cfg.home, key)
     created = False
-    if not wt.exists():
+    if not worktree_health(wt)["healthy"]:
         branch = f"{binding.branch_prefix}{key}"
-        _worktree_create_or_adopt(cfg, key, repo, wt, branch, binding.base_branch)
+        if wt.exists():
+            _cleanup_partial_worktree(repo, wt, branch=branch, base=binding.base_branch)
+        _worktree_create_or_adopt(cfg, key, repo, wt, branch, binding.base_branch,
+                                  timeout=cfg.worktree_timeout)
         created = True
 
     _prime_worktree_extras(repo, wt)
