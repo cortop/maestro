@@ -35,30 +35,22 @@ def _print(obj) -> None:
 
 
 # Verbs a spawned reconciler may invoke via the maestro CLI, rendered into
-# `Bash(maestro <verb>:*)` rules by `_reconciler_tool_grants` below. Kept as an
-# explicit constant rather than derived from build_parser()'s "[agent]" help
-# tags at runtime -- reading argparse's per-choice help strings means reaching
-# into a private API (`_SubParsersAction._choices_actions`), fine for a test's
-# drift guard but too fragile to depend on in production code. See
-# tests/test_web_tools.py::test_agent_grant_matches_cli_agent_tags, which walks
-# build_parser() with that private API and fails if this list and the
-# "[agent]"-tagged verbs there ever drift apart.
+# `Bash(maestro <verb>:*)` rules by `_reconciler_tool_grants` below.
 #
-# NEVER add "approve" (self-clears the tier-2 gate AD-1 exists to enforce),
-# "restore" (the one irreversible verb), "fleet" (launchd + the pause kill
-# switch), or any other human-only verb here -- and never collapse this to
-# the bare wildcard "maestro:*", which grants all of those at once.
-_AGENT_TOOL_VERBS = (
-    # The 21 "[agent]"-tagged verbs registered in build_parser().
-    "local-backup", "snapshot", "events", "append", "set-phase", "ask",
-    "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-    "verify-ac", "qa-brief", "qa-verdict", "finalize", "release",
-    "check-conflicts", "check-merged", "fold-steps", "worktree",
-    # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
-    "env",     # every phase preamble's first command, all phase files
-    "show",    # maestro-reconcile-passive.md reads pending_inbox through it
-    "create",  # maestro-reconcile-awaiting-human.md mints implementation tickets
-)
+# MTO-5: sourced from `dispatcher.AGENT_TOOL_VERBS`, not defined locally here
+# -- so `health.check_reconciler_permissions` can read the exact same tuple
+# without an import cycle (health.py -> cli.py would cycle back through
+# cli.py's own `from . import health`; `dispatcher` has neither problem,
+# cli.py already imports it). Re-exported under this name for backward-compat
+# imports (`tests/test_web_tools.py` imports `_AGENT_TOOL_VERBS` from here).
+# Kept as an explicit constant rather than derived from build_parser()'s
+# "[agent]" help tags at runtime -- reading argparse's per-choice help strings
+# means reaching into a private API (`_SubParsersAction._choices_actions`),
+# fine for a test's drift guard but too fragile to depend on in production
+# code. See tests/test_web_tools.py::test_agent_grant_matches_cli_agent_tags,
+# which walks build_parser() with that private API and fails if this list and
+# the "[agent]"-tagged verbs there ever drift apart.
+_AGENT_TOOL_VERBS = disp.AGENT_TOOL_VERBS
 
 
 def _reconciler_tool_grants(cfg: Config) -> list[str]:
@@ -77,15 +69,16 @@ def _reconciler_tool_grants(cfg: Config) -> list[str]:
     into this same list at spawn time (ClaudeCliSessions.base_allowed_tools),
     so there is exactly one --allowedTools flag in the final argv, never two.
 
-    GA-16: health.check_reconciler_permissions treats this whole per-verb grant
-    as satisfied by the coarser ``Bash(maestro:*)`` pattern -- the assert below
-    reads dispatcher.RECONCILER_REQUIRED_TOOLS (the same shared constant that
-    check reads) so the two can never silently drift apart; it never changes
-    this function's returned grant.
+    GA-16 / MTO-5: health.check_reconciler_permissions accepts this whole
+    per-verb grant as satisfying the 'maestro' requirement, dual with the
+    coarser ``Bash(maestro:*)`` pattern a human grants by hand -- the assert
+    below reads dispatcher.RECONCILER_REQUIRED_TOOLS (the same shared constant
+    that check reads) so the two can never silently drift apart; it never
+    changes this function's returned grant.
     """
-    assert disp.RECONCILER_REQUIRED_TOOLS[0] == "Bash(maestro:*)", \
+    assert disp.RECONCILER_REQUIRED_TOOLS[0] == disp.MAESTRO_COARSE_GRANT == "Bash(maestro:*)", \
         "dispatcher.RECONCILER_REQUIRED_TOOLS's maestro-verb entry moved -- update both sites"
-    rules = [f"Bash(maestro {verb}:*)" for verb in _AGENT_TOOL_VERBS]
+    rules = disp.maestro_verb_grant(_AGENT_TOOL_VERBS)
     if cfg.reconcile_web_tools:
         rules += ["WebSearch", "WebFetch"]
     return rules

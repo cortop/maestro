@@ -118,12 +118,17 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
    until the no-progress watchdog eventually reacts, ~20 spawns and two hours later, and blames
    the reconciler logic rather than permissions). Either write a `permissions.allow` list in the
    new repo's `.claude/settings.json` (or `.claude/settings.local.json`, or your user-scope
-   `~/.claude/settings.json`) covering `Bash(maestro:*)`, `Bash(git:*)`, `Bash(gh:*)`,
-   `Bash(python3:*)`, `Bash(.venv/bin/:*)` — this repo's own `.claude/settings.json` is a working
-   example — or set `permission_mode = "bypassPermissions"` in `config.toml` (the escape hatch
-   above) to skip the settings-file check for the whole home. Verify with `maestro doctor` (the
-   `reconciler_permissions` check names any repo and pattern still missing; `maestro doctor
-   --strict` exits 1 while any check, including this one, isn't `ok`).
+   `~/.claude/settings.json`) covering `Bash(git:*)`, `Bash(gh:*)`, `Bash(python3:*)`, plus the
+   `maestro` verb surface — either the coarse `Bash(maestro:*)` wildcard (this repo's own
+   `.claude/settings.json` is a working example) or the narrower per-verb rules the spawner
+   itself emits (`maestro.dispatcher.maestro_verb_grant()`); either satisfies the check
+   (`maestro.health.check_reconciler_permissions`, MTO-5). `Bash(.venv/bin/:*)` is required only
+   of the repo maestro's own reconciler code is running from — a yarn/Bazel-bound repo with no
+   such path never needs it — or set `permission_mode = "bypassPermissions"` in `config.toml`
+   (the escape hatch above) to skip the settings-file check for the whole home. Verify with
+   `maestro doctor` (the `reconciler_permissions` check names any repo and pattern still missing
+   — matching is exact-string, so an equivalent but differently-spelled grant still reports
+   missing; `maestro doctor --strict` exits 1 while any check, including this one, isn't `ok`).
 5. If the new repo is owned by a *different* `gh` account than the one already bound elsewhere on
    this board, bind its credential explicitly: `gh_account = "<login>"` (resolved via `gh auth
    token --user <login>` at spawn/poll time) or `token_env = "GH_TOKEN_..."` (read from that env

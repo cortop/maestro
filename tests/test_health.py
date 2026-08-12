@@ -764,6 +764,86 @@ def test_reconciler_permissions_ok_when_permission_mode_bypasses(home, tmp_path,
     assert "bypassed" in check["detail"]
 
 
+def test_reconciler_permissions_emitted_maestro_grant_satisfies_check(home, tmp_path, monkeypatch):
+    """MTO-5 AC1: the exact --allowedTools grant cli._reconciler_tool_grants
+    emits at spawn time (the narrow per-verb form -- never the bare wildcard,
+    test_bare_wildcard_never_appears) satisfies the 'maestro' portion of this
+    check. The check and the spawner now agree on what 'granted' means,
+    instead of the check demanding a literal (Bash(maestro:*)) the spawner is
+    tested to never emit."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    cfg = Config(home=home, repo_path=str(repo), reconcile_web_tools=False)
+    emitted = cli._reconciler_tool_grants(cfg)   # the real spawn-time grant
+    assert "Bash(maestro:*)" not in emitted      # never the bare wildcard (AD-1)
+    _write_repo_settings(repo, allow=emitted + ["Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)"])
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+    assert check["missing_by_repo"] == {}
+
+
+def test_reconciler_permissions_ok_without_venv_for_non_self_repo(home, tmp_path, monkeypatch):
+    """MTO-5 AC2: a bound repo with no .venv/bin/ (a yarn or Bazel toolchain)
+    reaches an ok reconciler_permissions check -- Bash(.venv/bin/:*) is not
+    board-wide required, only for the binding that IS maestro's own repo (see
+    test_reconciler_permissions_venv_required_only_for_own_repo below)."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "web-ui"
+    _init_plain_repo(repo)
+    assert "Bash(.venv/bin/:*)" not in disp.RECONCILER_REQUIRED_TOOLS
+    _write_repo_settings(repo, allow=list(disp.RECONCILER_REQUIRED_TOOLS))
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+
+
+def test_reconciler_permissions_venv_required_only_for_own_repo(home, tmp_path, monkeypatch):
+    """MTO-5: Bash(.venv/bin/:*) IS required of the binding that resolves to
+    maestro's own repo checkout -- simulated via monkeypatching
+    health._maestro_self_root so the test doesn't depend on where this test
+    process itself happens to be installed from."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    monkeypatch.setattr(health, "_maestro_self_root", lambda: repo.resolve())
+    _write_repo_settings(repo, allow=list(disp.RECONCILER_REQUIRED_TOOLS))  # everything but venv
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert check["missing_by_repo"]["default"] == ["Bash(.venv/bin/:*)"]
+
+    _write_repo_settings(repo, allow=list(disp.RECONCILER_REQUIRED_TOOLS) +
+                          list(disp.MAESTRO_OWN_REPO_EXTRA_TOOLS))
+    checks2 = health.run_checks(cfg, 1000)
+    check2 = next(c for c in checks2 if c["name"] == "reconciler_permissions")
+    assert check2["status"] == "ok"
+
+
+def test_reconciler_permissions_detail_states_exact_string_matching(home, tmp_path, monkeypatch):
+    """MTO-5 AC4: the WARN detail states that matching is exact-string, so an
+    operator who granted an equivalent but differently-spelled rule (e.g.
+    Bash(gh pr:*) instead of Bash(gh:*)) understands why it still reports
+    missing."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _write_repo_settings(repo, allow=["Bash(gh pr:*)", "Bash(gh api:*)"])
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "Bash(gh:*)" in check["missing_by_repo"]["default"]
+    assert "exact-string" in check["detail"]
+
+
 def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypatch, capsys):
     """AC7 + AC10: the global doctor exit contract stays 0 no matter what;
     `--strict` exits 1 while the reconciler_permissions check is not ok and 0
