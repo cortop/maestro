@@ -1977,6 +1977,24 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                     # fix the spec, so no attempts-ledger spend either (AC3/AC4).
                     # Never falls through to `sessions.spawn` on any branch, so
                     # a bad runner can never silently spawn under claude (AC6).
+                    # OC-3: the board-wide kill switch -- consulted before ANY of
+                    # OC-2's own preflight (before the binary probe, before the
+                    # daemon probe). A disabled runner is a config problem, not a
+                    # transient one, so it gets the same PERMANENT `ops.ask`
+                    # treatment as `runner_unregistered`/`runner_model_unavailable`
+                    # above: no attempts-ledger spend, a stable qid, parked in
+                    # awaiting-human for a human to flip `runner_enabled` or fix
+                    # the spec's `runner:` line.
+                    if runner not in cfg.runner_enabled:
+                        decisions[key]["outcome"] = "runner_disabled"
+                        from . import ops
+                        ops.ask(cfg, key,
+                                f"runner {runner!r} is not enabled on this board "
+                                f"(runner_enabled={sorted(cfg.runner_enabled)}) -- flip "
+                                "the board config's `runner_enabled` or fix the spec's "
+                                "`runner:` line",
+                                qid=f"runner-disabled-{key}-{runner}", actor="dispatcher")
+                        continue
                     probe_fn = runner_probe or _default_runner_probe
                     if runner not in runner_probe_cache:
                         runner_probe_cache[runner] = probe_fn(runner)

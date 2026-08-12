@@ -1053,7 +1053,8 @@ def cmd_env(args) -> int:
             "qa_standards_axis": cfg.qa_standards_axis, "providers": cfg.providers,
             "spawn_floor_s": disp.spawn_floor(cfg),
             "no_output_timeout": cfg.no_output_timeout,
-            "runner": cfg.runner, "runner_model": cfg.runner_model})
+            "runner": cfg.runner, "runner_model": cfg.runner_model,
+            "runner_enabled": cfg.runner_enabled})
     return 0
 
 

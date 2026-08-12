@@ -42,6 +42,14 @@ def _register(monkeypatch, *names):
     monkeypatch.setattr(disp, "_REGISTERED_RUNNERS", frozenset({"claude", *names}))
 
 
+def _enable(cfg, *names):
+    # OC-3: the board-wide `runner_enabled` kill switch (default: claude only)
+    # sits in front of OC-2's own preflight -- tests exercising THAT preflight
+    # (this file) must flip it on for the runner under test, same as
+    # `_register` admits the name past the earlier `_REGISTERED_RUNNERS` gate.
+    cfg.runner_enabled = ["claude", *names]
+
+
 def _seed(home, key, *, phase=Phase.IMPLEMENTING, runner=None, runner_model=None, approval_tier=0):
     extra = ""
     if runner:
@@ -75,6 +83,7 @@ def _counting_probe(result):
 
 def test_daemon_unreachable_skips_no_event_no_attempts_sibling_still_spawns(home, cfg, monkeypatch):
     _register(monkeypatch, RUNNER)
+    _enable(cfg, RUNNER)
     _seed(home, "BAD-1", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b")
     _seed(home, "OK-1", phase=Phase.READY)
     probe = _counting_probe({"binary_ok": True, "models": None, "daemon_reason": "refused"})
@@ -114,6 +123,7 @@ def test_daemon_unreachable_never_spawns_the_key_under_claude(home, cfg, monkeyp
 
 def test_two_keys_sharing_a_runner_probe_it_once_not_twice(home, cfg, monkeypatch):
     _register(monkeypatch, RUNNER)
+    _enable(cfg, RUNNER)
     _seed(home, "BAD-1", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b")
     _seed(home, "BAD-2", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b")
     probe = _counting_probe({"binary_ok": True, "models": None, "daemon_reason": "refused"})
@@ -130,6 +140,7 @@ def test_two_keys_sharing_a_runner_probe_it_once_not_twice(home, cfg, monkeypatc
 
 def test_ten_consecutive_sweeps_daemon_unreachable_zero_spawns_zero_failed(home, cfg, monkeypatch):
     _register(monkeypatch, RUNNER)
+    _enable(cfg, RUNNER)
     _seed(home, "BAD-1", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b")
     probe = _counting_probe({"binary_ok": True, "models": None, "daemon_reason": "refused"})
 
@@ -149,6 +160,7 @@ def test_ten_consecutive_sweeps_daemon_unreachable_zero_spawns_zero_failed(home,
 
 def test_model_absent_asks_with_stable_qid_awaiting_human_no_failure_count_burn(home, cfg, monkeypatch):
     _register(monkeypatch, RUNNER)
+    _enable(cfg, RUNNER)
     _seed(home, "BAD-1", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="ghost-model:1b")
     probe = _counting_probe({"binary_ok": True, "models": [], "daemon_reason": None})
 
@@ -189,6 +201,7 @@ def test_model_absent_never_spawns_the_key_under_claude(home, cfg, monkeypatch):
 
 def test_model_not_tool_capable_names_the_capability_in_the_question(home, cfg, monkeypatch):
     _register(monkeypatch, RUNNER)
+    _enable(cfg, RUNNER)
     _seed(home, "BAD-1", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="embed-only:7b")
     probe = _counting_probe({
         "binary_ok": True,
@@ -214,6 +227,7 @@ def test_model_not_tool_capable_names_the_capability_in_the_question(home, cfg, 
 
 def test_binary_missing_appends_no_event_byte_compared(home, cfg, monkeypatch):
     _register(monkeypatch, RUNNER)
+    _enable(cfg, RUNNER)
     _seed(home, "BAD-1", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b")
     before = _events_path(home, "BAD-1").read_bytes()
     probe = _counting_probe({"binary_ok": False, "models": None, "daemon_reason": None})
