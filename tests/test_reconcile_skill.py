@@ -22,8 +22,11 @@ single-repo shapes -- proven against the real CLI, not a re-typed copy of its lo
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -336,6 +339,105 @@ def test_every_maestro_verb_named_in_implementing_resolves():
         assert verbs, f"{path}: verb scan found nothing -- the regex is broken"
         unknown = verbs - valid_verbs
         assert not unknown, f"{path}: `maestro {unknown}` is not a real subcommand"
+
+
+# ---------------------------------------------------------------------------
+# MTO-3: the verb-only check above would have missed `maestro create --title`
+# entirely (the verb "create" is real; only the flag is not) -- that exact bug
+# shipped four times because nothing parsed the full argument list any real
+# skill emits. This generalizes the check to every `maestro ...` invocation
+# (fenced multi-line commands *and* inline backtick mentions) in every phase
+# skill, parsed against the real argparse parser -- and fails specifically on
+# an unrecognized argument (a missing *required* one, e.g. a bare backtick
+# mention like `` `maestro fail` `` with no key, is expected and not a bug).
+# ---------------------------------------------------------------------------
+
+_BACKTICK_INVOCATION_RE = re.compile(r"`(maestro [a-z][a-z-]*[^`\n]*)`")
+
+
+def _strip_inline_comment(line: str) -> str:
+    """Drop a trailing ``# ...`` shell comment -- but only outside quotes, so
+    e.g. an argparse help string or a `#` inside `--payload "{...}"` JSON
+    survives untouched."""
+    in_quotes = False
+    for i, c in enumerate(line):
+        if c == '"' and (i == 0 or line[i - 1] != "\\"):
+            in_quotes = not in_quotes
+        elif c == "#" and not in_quotes:
+            return line[:i].rstrip()
+    return line
+
+
+def _join_bash_fence_logical_commands(fence: str) -> list[str]:
+    """Physical lines in a bash fence, joined into logical shell commands: a
+    trailing backslash continues onto the next line (bash line continuation --
+    the form every multi-line `maestro ask`/`create`/`append` call in these
+    skills uses), and an odd count of unescaped double quotes continues until
+    the quote closes (the multi-line `gh pr create --body` case). Blank lines
+    and `#` comments (whole-line or trailing) are dropped."""
+    lines = fence.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        raw = _strip_inline_comment(lines[i])
+        if not raw.strip():
+            i += 1
+            continue
+        buf = raw.rstrip()
+        i += 1
+        while i < len(lines) and (buf.endswith("\\") or buf.count('"') % 2 == 1):
+            if buf.endswith("\\"):
+                buf = buf[:-1].rstrip()
+            buf = f"{buf} {_strip_inline_comment(lines[i]).strip()}"
+            i += 1
+        out.append(buf)
+    return out
+
+
+def _maestro_invocations(text: str) -> list[str]:
+    """Every full `maestro ...` command string in `text`: one per logical line
+    in a ```bash fence whose first token is `maestro`, plus one per inline
+    `` `maestro ...` `` backtick mention."""
+    invocations = []
+    for fence in _bash_fences(text):
+        for command in _join_bash_fence_logical_commands(fence):
+            if command.lstrip().startswith("maestro "):
+                invocations.append(command.strip())
+    invocations += [m.group(1) for m in _BACKTICK_INVOCATION_RE.finditer(text)]
+    return invocations
+
+
+def test_every_maestro_invocation_in_every_phase_skill_parses():
+    from maestro.cli import build_parser
+
+    parser = build_parser()
+    checked = 0
+    for phase in PHASE_FILES:
+        for path in (_commands_path(phase), _skills_path(phase)):
+            for command in _maestro_invocations(path.read_text()):
+                try:
+                    tokens = shlex.split(command)
+                except ValueError as exc:
+                    raise AssertionError(
+                        f"{path}: `{command}` is not valid shell syntax: {exc}") from None
+                argv = tokens[1:]  # drop the literal "maestro" token
+                if not argv:
+                    continue  # a bare "`maestro`" mention, nothing to parse
+                checked += 1
+                stderr = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(stderr):
+                        parser.parse_args(argv)
+                except SystemExit:
+                    message = stderr.getvalue()
+                    # A missing *required* argument is expected -- many invocations
+                    # here are illustrative backtick mentions that omit "$KEY" etc.
+                    # An *unrecognized* argument is exactly the MTO-3 bug class: a
+                    # flag the real parser has never heard of.
+                    if "unrecognized arguments" in message:
+                        raise AssertionError(
+                            f"{path}: `{command}` does not parse:\n{message}") from None
+    assert checked > 50, "invocation scan found suspiciously few commands -- the regex is broken"
 
 
 def test_preamble_resolves_via_env_key_for_repo_aware_phases():
