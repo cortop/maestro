@@ -711,20 +711,24 @@ def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "recon
 
 
 def route_stale(cfg: Config, key: str, *, base_branch: str = "main",
-                actor: str = "dispatcher") -> bool:
+                policy: str = "always", actor: str = "dispatcher") -> bool:
     """Route a ticket whose worktree has drifted behind its repo's base branch
     back into `implementing` so the reconciler rebases (idempotent — a no-op if
     already implementing). Mirrors `route_conflict`'s auto-resolution path, but
     fires from the dispatcher's proactive drift check
     (`dispatcher.sync_worktrees`) rather than a GitHub-reported CONFLICTING PR.
     `base_branch` names the ticket's actual resolved repo binding (`main` for
-    an unbound ticket / single-repo board). Returns True if it moved the
-    ticket."""
+    an unbound ticket / single-repo board). `policy` (MTO-2: the
+    `base_drift_policy` that decided this call should fire at all — the
+    caller, `dispatcher.sync_worktrees`, already gated on it) is recorded in
+    the reason so the event log explains *why* a given re-route was allowed.
+    Returns True if it moved the ticket."""
     snap = snap_mod.load(cfg.home, key)
     if snap.phase == Phase.IMPLEMENTING.value:
         return False
     set_phase(cfg, key, Phase.IMPLEMENTING,
-              reason=f"origin/{base_branch} advanced — rebase worktree onto latest {base_branch}",
+              reason=(f"origin/{base_branch} advanced (policy={policy}) — "
+                      f"rebase worktree onto latest {base_branch}"),
               actor=actor, expect=snap.observed_seq)
     return True
 

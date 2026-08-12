@@ -237,6 +237,7 @@ def test_hook_sync_worktrees_is_absent_under_dry_run(home, cfg, tmp_path):
     merged origin/main) back into implementing -- exactly
     test_worktree_sync.py's own real-git setup, run once under dry_run (must be
     a no-op) and once for real (must route)."""
+    cfg.base_drift_policy = "always"  # MTO-2: new default (on_conflict) never routes on drift alone
     origin, repo = _make_origin_and_repo(tmp_path)
     cfg.repo_path = str(repo)
 

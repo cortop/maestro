@@ -140,6 +140,7 @@ def test_dispatch_spawn_cwd_is_owning_repo_for_bound_pre_worktree_ticket(home, t
 # --- AC2: two-repo sync_worktrees routes only the affected repo ---
 
 def test_sync_worktrees_two_repo_routes_only_affected_repo(home, cfg, tmp_path):
+    cfg.base_drift_policy = "always"  # MTO-2: new default (on_conflict) never routes on drift alone
     alpha_origin, alpha_repo = make_origin_and_repo(tmp_path, "alpha", base_branch="main")
     _beta_origin, beta_repo = make_origin_and_repo(tmp_path, "beta", base_branch="main")
     cfg.repo_path = str(alpha_repo)
@@ -165,6 +166,7 @@ def test_sync_worktrees_two_repo_routes_only_affected_repo(home, cfg, tmp_path):
 
 
 def test_sync_worktrees_non_main_base_branch_fetched_and_ff_merged(home, cfg, tmp_path):
+    cfg.base_drift_policy = "always"  # MTO-2: new default (on_conflict) never routes on drift alone
     dev_origin, dev_repo = make_origin_and_repo(tmp_path, "devrepo", base_branch="develop")
     # `default=True` makes this table double as the implicit default too (so a
     # human pointing cfg.repo_path at the same checkout without marking it
@@ -310,6 +312,7 @@ def test_dispatch_cli_dry_run_never_syncs_vcs_or_removes_worktrees(
 # --- AC5: one repo's fetch failure never stalls sibling sync or the sweep ---
 
 def test_bad_repo_fetch_failure_contained_sweep_still_progresses(home, cfg, tmp_path):
+    cfg.base_drift_policy = "always"  # MTO-2: new default (on_conflict) never routes on drift alone
     alpha_origin, alpha_repo = make_origin_and_repo(tmp_path, "alpha", base_branch="main")
     _beta_origin, beta_repo = make_origin_and_repo(tmp_path, "beta", base_branch="main")
     cfg.repo_path = str(alpha_repo)
