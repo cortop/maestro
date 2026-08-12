@@ -15,6 +15,8 @@ help:
 	@echo "make status      ticket counts by phase"
 	@echo "make doctor      fleet health (heartbeat, dead-letters)"
 	@echo "make reconcile KEY=M-1   run ONE reconcile in the foreground (for testing)"
+	@echo "  (for a REAL sweep scoped to one ticket instead -- due-checking/throttling"
+	@echo "  included -- use 'maestro dispatch --key M-1', repeatable/comma-separated)"
 	@echo "make fleet-up / fleet-down   install / remove the launchd dispatcher"
 	@echo "make fleet-pause REASON=... [FOR=2h]   launchctl-free kill switch (no new spawns)"
 	@echo "make fleet-resume            lift the pause"
@@ -60,6 +62,14 @@ project:
 # off the same `maestro env --key` call -- "claude" is the only registered runner
 # (dispatcher._REGISTERED_RUNNERS), so a non-claude runner has no Make/bash path yet and
 # fails fast here rather than silently running `claude -p` under the wrong runner's name.
+#
+# `make reconcile` vs `maestro dispatch --key KEY`: this target skips straight to invoking
+# the resolved reconcile command on an already-due ticket -- no due-check, no throttle, no
+# ledger. `maestro dispatch --key KEY` instead runs a REAL sweep whose candidate set is
+# restricted to just KEY (repeatable/comma-separated) -- due-checking, throttling, claims,
+# and the spawn ledger all behave normally but scoped to that key, and a throttled target
+# idles instead of a normal sweep's slot-substitution. Reach for `--key` to exercise/watch
+# that machinery for one ticket; reach for this target to just watch the next step run.
 reconcile:
 	@test -n "$(KEY)" || (echo "usage: make reconcile KEY=M-1" && exit 1)
 	@ENV_JSON=$$(maestro env --key "$(KEY)"); \
