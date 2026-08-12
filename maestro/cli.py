@@ -221,7 +221,12 @@ def _stdin_intent() -> str | None:
 
 def cmd_create(args) -> int:
     cfg = _cfg(args)
-    title = args.title
+    title_flag = getattr(args, "title_flag", None)
+    if title_flag is not None and args.title is not None:
+        print("error: pass the title either positionally or via --title, not both",
+              file=sys.stderr)
+        return 2
+    title = args.title if title_flag is None else title_flag
 
     if title is None:
         if not sys.stdin.isatty():
@@ -1059,6 +1064,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("create", cmd_create, "queue a new ticket (no args = interactive)")
     sp.add_argument("title", nargs="?", default=None,
                     help="ticket title; omit for guided interactive flow")
+    sp.add_argument("--title", dest="title_flag", default=None,
+                    help="ticket title, as a flag (alias for the positional title)")
     sp.add_argument("--key"); sp.add_argument("--tier", type=int, default=1)
     sp.add_argument("--priority", type=int, default=3); sp.add_argument("--intent")
     sp.add_argument("--kind", default=None, help="ticket kind (e.g. research, implementation)")
