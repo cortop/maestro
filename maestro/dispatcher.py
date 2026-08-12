@@ -120,21 +120,80 @@ def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution
     return credentials.resolve_cached(gh_account, token_env, cache)
 
 
-# GA-16: the whole spawned-reconciler Bash surface, as it would appear in a
-# ``.claude/settings.json`` allow list -- the single shared constant
-# ``health.check_reconciler_permissions`` checks a bound repo's resolved
-# permissions against. Two already-specified sources, unioned:
-#   (1) GA-3's maestro-verb grant -- ``cli._AGENT_TOOL_VERBS`` expands to one
-#       ``Bash(maestro <verb>:*)`` rule per registered CLI verb at spawn time
-#       (``cli._reconciler_tool_grants``, which asserts against this constant's
-#       first entry so the two can't silently drift); this constant names the
-#       coarser ``Bash(maestro:*)`` pattern instead, matching how a human
-#       actually grants it in a settings file (see this repo's own
-#       ``.claude/settings.json``) rather than one line per verb.
-#   (2) the git/gh/venv+pytest commands
+# GA-16: the verb whitelist a spawned reconciler is granted via one
+# ``Bash(maestro <verb>:*)`` rule per entry, unioned into --allowedTools at
+# spawn time (``cli._reconciler_tool_grants``). Lives here, not cli.py, so
+# ``health.check_reconciler_permissions`` can read the very same tuple
+# ``cli._reconciler_tool_grants`` builds from without an import cycle
+# (cli.py already imports this module; the reverse would be circular) --
+# MTO-5, replacing a hand-maintained duplicate in ``RECONCILER_REQUIRED_TOOLS``
+# below that had silently drifted from what GA-3 actually emits.
+# ``cli._AGENT_TOOL_VERBS`` re-exports this tuple under its old name for
+# backward-compat imports.
+#
+# NEVER add "approve" (self-clears the tier-2 gate AD-1 exists to enforce),
+# "restore" (the one irreversible verb), "fleet" (launchd + the pause kill
+# switch), or any other human-only verb here -- and never collapse this to
+# the bare wildcard "maestro:*", which grants all of those at once.
+AGENT_TOOL_VERBS = (
+    # The 21 "[agent]"-tagged verbs registered in build_parser().
+    "local-backup", "snapshot", "events", "append", "set-phase", "ask",
+    "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
+    "verify-ac", "qa-brief", "qa-verdict", "finalize", "release",
+    "check-conflicts", "check-merged", "fold-steps", "worktree",
+    # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
+    "env",     # every phase preamble's first command, all phase files
+    "show",    # maestro-reconcile-passive.md reads pending_inbox through it
+    "create",  # maestro-reconcile-awaiting-human.md mints implementation tickets
+)
+
+# The coarse wildcard a human grants by hand in a settings file (see this
+# repo's own ``.claude/settings.json``) -- a different trust boundary than the
+# spawner emitting it itself (AD-1's concern is specifically the spawner
+# self-widening), so it stays an accepted -- but no longer the *only*
+# accepted -- form of the 'maestro' requirement below. MUST equal
+# ``AGENT_TOOL_VERBS``'s render prefix; ``cli._reconciler_tool_grants``
+# asserts this constant is ``RECONCILER_REQUIRED_TOOLS[0]`` so the two can
+# never silently drift apart.
+MAESTRO_COARSE_GRANT = "Bash(maestro:*)"
+
+
+def maestro_verb_grant(verbs=AGENT_TOOL_VERBS) -> list[str]:
+    """The narrowed, verb-scoped ``Bash(maestro <verb>:*)`` rules a spawned
+    reconciler is actually granted -- the literal form GA-3 emits in place of
+    the bare ``Bash(maestro:*)`` wildcard, which the spawner is tested to
+    never emit (AD-1, ``tests/test_web_tools.py::test_bare_wildcard_never_appears``).
+    MTO-5: the single source both ``cli._reconciler_tool_grants`` (spawn time)
+    and ``health.check_reconciler_permissions`` (the permission check) build
+    from, so the emitted grant and the required grant can't drift the way the
+    old hand-maintained ``RECONCILER_REQUIRED_TOOLS`` tuple did.
+    """
+    return [f"Bash(maestro {verb}:*)" for verb in verbs]
+
+
+# GA-16 / MTO-5: the spawned-reconciler Bash surface a bound repo's Claude Code
+# settings must grant, as ``health.check_reconciler_permissions`` checks it.
+# Two already-specified sources, unioned:
+#   (1) GA-3's maestro-verb grant, represented here by ``MAESTRO_COARSE_GRANT``
+#       -- but ``check_reconciler_permissions`` treats this one entry
+#       specially (dual acceptance, decided explicitly in MTO-5 rather than
+#       drifted into): a repo's settings satisfy it via EITHER this coarse
+#       wildcard OR the full narrowed ``maestro_verb_grant()`` set (the
+#       literal form the spawner actually emits) -- so the requirement is
+#       satisfiable by what GA-3 really emits, not only by a pattern the
+#       spawner is forbidden to emit. The remaining entries below are plain
+#       literals, matched exact-string (see ``check_reconciler_permissions``'s
+#       detail message).
+#   (2) the git/gh/test-runner commands
 #       ``skills/maestro-reconcile-implementing.md`` runs post-GA-12 --
-#       fetch/rebase (:73-74), venv+pip+pytest (:102-103), add/commit/push
-#       (:167-168), ``gh pr create``/``gh pr view`` (:171-180).
+#       fetch/rebase, add/commit/push, ``gh pr create``/``gh pr view``.
+#       ``.venv/bin/`` -- maestro's own venv, used by that skill's
+#       ``.venv/bin/python -m pytest`` -- used to live in this board-wide
+#       tuple too, demanded of every bound repo regardless of toolchain
+#       (wrong: a yarn/Bazel-bound repo has no such path and never will,
+#       MTO-5). It now lives in ``MAESTRO_OWN_REPO_EXTRA_TOOLS`` below and is
+#       required only of the binding that resolves to maestro's own repo
+#       checkout (``health._is_maestro_own_repo``).
 # GA-10's per-repo ``reconcile_allowed_tools`` is the *mechanism* a human uses
 # to grant (2) via ``--allowedTools`` instead of a settings file -- not a fixed
 # pattern list itself, so there is nothing to union in from it here.
@@ -142,10 +201,16 @@ def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution
 # bash, so a preamble-derived list would collapse to just the maestro verbs
 # and miss exactly the git/gh/test-runner gap this ticket exists to catch.
 RECONCILER_REQUIRED_TOOLS = (
-    "Bash(maestro:*)",
+    MAESTRO_COARSE_GRANT,
     "Bash(git:*)",
     "Bash(gh:*)",
     "Bash(python3:*)",
+)
+
+# MTO-5: required only of the binding that resolves to maestro's own repo
+# checkout -- see ``health._is_maestro_own_repo``. A foreign yarn/Bazel-bound
+# repo is never measured against this.
+MAESTRO_OWN_REPO_EXTRA_TOOLS = (
     "Bash(.venv/bin/:*)",
 )
 

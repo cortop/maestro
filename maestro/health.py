@@ -436,18 +436,66 @@ def _repo_permission_surface(repo_path: Path, cfg: Config) -> tuple[set, set]:
     return allow, deny
 
 
+def _maestro_self_root() -> Path:
+    """The repo this running maestro package's own source lives in -- the
+    only binding ``dispatcher.MAESTRO_OWN_REPO_EXTRA_TOOLS`` (``.venv/bin/``)
+    genuinely describes (MTO-5). A separate, monkeypatchable function rather
+    than inlined into ``_is_maestro_own_repo`` so tests can simulate 'this
+    binding IS maestro's own repo' without depending on where the test
+    process itself happens to be installed from."""
+    return Path(__file__).resolve().parents[1]
+
+
+def _is_maestro_own_repo(path: Path) -> bool:
+    """True when *path* resolves to the same repo ``_maestro_self_root``
+    names -- i.e. this binding is maestro's own checkout, not a foreign
+    yarn/Bazel-bound repo that has no ``.venv/bin/`` and never will."""
+    try:
+        return Path(path).resolve() == _maestro_self_root()
+    except OSError:
+        return False
+
+
+def _missing_maestro_grant(allow: set, deny: set) -> list[str]:
+    """MTO-5: dual acceptance for the 'maestro' requirement -- satisfied by
+    EITHER the coarse ``dispatcher.MAESTRO_COARSE_GRANT`` wildcard (how a
+    human grants it by hand in their own settings file; a different trust
+    boundary than the spawner emitting it itself, AD-1's actual concern) OR
+    the full narrowed ``dispatcher.maestro_verb_grant()`` set (the literal
+    form GA-3 actually emits at spawn time). Returns ``[]`` when either is
+    satisfied, else ``[MAESTRO_COARSE_GRANT]`` -- the coarse literal alone, so
+    a genuinely-broken repo's report reads as one missing item, not ~24."""
+    coarse = dispatcher.MAESTRO_COARSE_GRANT
+    if coarse in allow and coarse not in deny:
+        return []
+    narrow = dispatcher.maestro_verb_grant()
+    if all(tool in allow and tool not in deny for tool in narrow):
+        return []
+    return [coarse]
+
+
 def check_reconciler_permissions(cfg: Config, now: float) -> dict:
     """WARN (never blocks a spawn) when a repo bound by a current ticket has no
     Claude Code permission grant for the reconciler's whole Bash surface
-    (``dispatcher.RECONCILER_REQUIRED_TOOLS``) -- the "This command needs your
-    approval to run." stall (GA-16's Intent) that the dispatcher never
-    observes (it doesn't read a spawned session's exit status), so today only
-    the no-progress watchdog eventually reacts, after ~20 full ``claude -p``
-    sessions per ticket, and blames the reconciler rather than permissions.
+    (``dispatcher.RECONCILER_REQUIRED_TOOLS``, plus
+    ``dispatcher.MAESTRO_OWN_REPO_EXTRA_TOOLS`` when the binding is maestro's
+    own repo) -- the "This command needs your approval to run." stall (GA-16's
+    Intent) that the dispatcher never observes (it doesn't read a spawned
+    session's exit status), so today only the no-progress watchdog eventually
+    reacts, after ~20 full ``claude -p`` sessions per ticket, and blames the
+    reconciler rather than permissions.
 
     Moot (reports ``ok``) when the home's ``permission_mode`` is
     ``bypassPermissions`` -- Claude Code never consults a settings file in
     that mode, so there is nothing to check.
+
+    The 'maestro' requirement is dual-accepted (``_missing_maestro_grant``);
+    every other literal is matched exact-string -- an equivalent but
+    differently-spelled grant (e.g. ``Bash(gh pr:*)`` + ``Bash(gh api:*)`` in
+    place of ``Bash(gh:*)``) does NOT satisfy it, and the WARN detail says so.
+    ``.venv/bin/`` is only required of the binding that resolves to maestro's
+    own repo checkout (``_is_maestro_own_repo``) -- a foreign yarn/Bazel-bound
+    repo is never measured against it (MTO-5).
 
     Modeled byte-for-byte on ``check_missing_reconcile_skill`` above: iterate
     ``dispatcher.referenced_repo_bindings``, skip a binding whose path doesn't
@@ -460,14 +508,20 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
 
     home = cfg.home
     bindings = dispatcher.referenced_repo_bindings(cfg, home, dispatcher.list_keys(home))
-    required = dispatcher.RECONCILER_REQUIRED_TOOLS
+    literal_required = [tool for tool in dispatcher.RECONCILER_REQUIRED_TOOLS
+                         if tool != dispatcher.MAESTRO_COARSE_GRANT]
     missing_by_repo: dict[str, list[str]] = {}
     denied_by_repo: dict[str, list[str]] = {}
     for name, binding in bindings.items():
         if not binding.path or not Path(binding.path).exists():
             continue
-        allow, deny = _repo_permission_surface(Path(binding.path), cfg)
-        missing = [tool for tool in required if tool not in allow or tool in deny]
+        repo_path = Path(binding.path)
+        allow, deny = _repo_permission_surface(repo_path, cfg)
+        missing = _missing_maestro_grant(allow, deny)
+        missing += [tool for tool in literal_required if tool not in allow or tool in deny]
+        if _is_maestro_own_repo(repo_path):
+            missing += [tool for tool in dispatcher.MAESTRO_OWN_REPO_EXTRA_TOOLS
+                        if tool not in allow or tool in deny]
         if missing:
             missing_by_repo[name] = missing
         denied = [tool for tool in missing if tool in deny]
@@ -482,7 +536,10 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
             if name in denied_by_repo:
                 note += f" (denied by settings: {', '.join(denied_by_repo[name])})"
             parts.append(note)
-        detail = "; ".join(parts)
+        detail = ("; ".join(parts) +
+                   ". Matching is exact-string -- an equivalent but "
+                   "differently-spelled grant (e.g. Bash(gh pr:*) in place of "
+                   "Bash(gh:*)) is still reported missing.")
     else:
         detail = "all referenced repos grant the full reconciler surface"
     return {"name": "reconciler_permissions", "status": status, "detail": detail,
