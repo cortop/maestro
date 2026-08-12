@@ -221,7 +221,12 @@ def _stdin_intent() -> str | None:
 
 def cmd_create(args) -> int:
     cfg = _cfg(args)
-    title = args.title
+    title_flag = getattr(args, "title_flag", None)
+    if title_flag is not None and args.title is not None:
+        print("error: pass the title either positionally or via --title, not both",
+              file=sys.stderr)
+        return 2
+    title = args.title if title_flag is None else title_flag
 
     if title is None:
         if not sys.stdin.isatty():
@@ -438,8 +443,22 @@ def cmd_runners(args) -> int:
 
 
 # --- dispatcher / projection (launchd) --------------------------------------
+def _parse_key_filter(raw: list[str] | None) -> list[str] | None:
+    """``--key`` is repeatable (``--key A --key B``) and each occurrence may
+    also be comma-separated (``--key A,B``) -- flatten both into one list.
+    ``None`` (the flag was never passed) means "no restriction", distinct
+    from an empty list."""
+    if not raw:
+        return None
+    keys: list[str] = []
+    for group in raw:
+        keys.extend(k.strip() for k in group.split(",") if k.strip())
+    return keys
+
+
 def cmd_dispatch(args) -> int:
     cfg = _cfg(args)
+    key_filter = _parse_key_filter(args.keys)
     if args.dry_run:
         sessions = DryRunSessions()
     else:
@@ -452,7 +471,8 @@ def cmd_dispatch(args) -> int:
             capture_session_logs=cfg.capture_session_logs,
             session_log_format=cfg.session_log_format,
             unverified_claim_max_age=cfg.unverified_claim_max_age)})
-    report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run)
+    report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run,
+                            key_filter=key_filter)
     projection.write(cfg.home)
     out = {"minted" if not args.dry_run else "would_mint":
                report.minted if not args.dry_run else report.would_mint,
@@ -1059,6 +1079,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("create", cmd_create, "queue a new ticket (no args = interactive)")
     sp.add_argument("title", nargs="?", default=None,
                     help="ticket title; omit for guided interactive flow")
+    sp.add_argument("--title", dest="title_flag", default=None,
+                    help="ticket title, as a flag (alias for the positional title)")
     sp.add_argument("--key"); sp.add_argument("--tier", type=int, default=1)
     sp.add_argument("--priority", type=int, default=3); sp.add_argument("--intent")
     sp.add_argument("--kind", default=None, help="ticket kind (e.g. research, implementation)")
@@ -1119,6 +1141,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "except regenerated dashboards (see what WOULD happen, no "
                          "sessions launched, nothing minted, ledger/attempts untouched)")
     sp.add_argument("--model", default=None, help="override reconcile_model from config")
+    sp.add_argument("--key", dest="keys", action="append", metavar="KEY",
+                    help="restrict this sweep's candidate set to only the named ticket(s), "
+                         "so due-checking/throttling/claims/the spawn ledger all behave "
+                         "normally but scoped to just them -- repeatable (--key A --key B) "
+                         "or comma-separated (--key A,B); composes with --dry-run and "
+                         "--model. A throttled target idles instead of substituting a "
+                         "different due key (unrestricted sweeps keep today's "
+                         "substitution). Nothing is minted from the _new inbox on a "
+                         "--key sweep, and an unknown key is a clear error, not a silent "
+                         "empty sweep. For a foreground single-step reconcile of an "
+                         "already-due ticket instead of a real sweep, see `make reconcile "
+                         "KEY=...`.")
     add("project", cmd_project, "regenerate dashboards")
     sp = add("env", cmd_env, "resolved config (home, repo_path, ...)")
     sp.add_argument("--key", default=None,

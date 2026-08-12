@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from maestro import dispatcher as disp, event_log, inbox, ops, snapshot as snap_mod, store
+from maestro.cli import main as cli_main
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
@@ -105,20 +106,20 @@ def _sim_awaiting_human_approve(cfg, key: str, answer: str, proposal_path: Path)
     else:
         section = _extract_section(proposal_text, "## Recommended")
 
-    # Create implementation ticket via inbox (as the reconciler would via `maestro create`)
+    # MTO-3: mint the implementation ticket through the real CLI, with the exact
+    # flag shape maestro-reconcile-awaiting-human.md emits (positional title --
+    # `--title` never existed on this subparser, which is why every one of the
+    # skill's four prior drifts to `--title` broke this step silently).
     impl_key = f"IMPL-{key}"
-    inbox.append_new(
-        cfg.home,
-        f"Implement: caching strategies ({key})",
-        key=impl_key,
-        args={
-            "approval_tier": 0,
-            "kind": "implementation",
-            "intent": section,
-            "notes": f"Seeded from {key} proposal. See tickets/{key}/proposal.md for full context.",
-            "depends_on": [key],
-        },
-    )
+    impl_title = f"Implement: caching strategies ({key})"
+    rc = cli_main([
+        "--home", str(cfg.home), "create", impl_title,
+        "--tier", "0", "--kind", "implementation",
+        "--intent", section,
+        "--notes", f"Seeded from {key} proposal. See tickets/{key}/proposal.md for full context.",
+        "--depends-on", key, "--key", impl_key, "--no-nudge",
+    ])
+    assert rc == 0, f"`maestro create` failed to mint {impl_key} (rc={rc})"
 
     # Append NOTE breadcrumb
     event_log.append(

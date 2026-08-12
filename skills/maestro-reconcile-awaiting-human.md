@@ -61,8 +61,7 @@ Read the proposal at `$MHOME/tickets/$KEY/proposal.md`. Inspect the answer:
 
 Then mint the implementation ticket using the chosen approach as intent:
 ```bash
-maestro create --tier 0 --kind implementation \
-  --title "Implement: <research-title-without-Research-prefix>" \
+maestro create "Implement: <research-title-without-Research-prefix>" --tier 0 --kind implementation \
   --intent "<chosen approach text>" \
   --notes "Seeded from $KEY proposal. See tickets/$KEY/proposal.md for full context." \
   --depends-on "$KEY" --no-nudge
