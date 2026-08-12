@@ -27,6 +27,15 @@ file. Read `DESIGN.md` for the full rationale, `README.md` for the quickstart.
 - `make reconcile KEY=<KEY>` — run ONE reconcile in the foreground (best way to watch a step).
 - `make dry` — one dispatcher sweep, read-only preview (`would_mint` + `would_spawn`, no
   `TicketCreated` appended, no sessions launched).
+- `maestro dispatch --key <KEY>` (repeatable, or comma-separated) — a REAL sweep restricted to
+  just the named ticket(s): due-checking, throttling, claims, and the spawn ledger all run
+  normally but only ever consider that candidate set, so it also exercises minting-adjacent
+  machinery `make reconcile` skips entirely. Composes with `--dry-run`/`--model`. A throttled
+  target idles instead of the normal sweep's slot-substitution (spawning a different due key);
+  nothing is minted from the `_new` inbox on a `--key` sweep; an unknown key is a clear error.
+  Use this over `make reconcile` when you need to watch due-checking/throttling itself for one
+  ticket, not just its next reconcile step — `make reconcile` skips straight to invoking the
+  reconcile command on an already-due ticket, bypassing the sweep machinery altogether.
 
 ## ⚠️ MAESTRO_HOME (read this before any `maestro` command)
 

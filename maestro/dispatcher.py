@@ -22,7 +22,7 @@ import shutil
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
@@ -1472,7 +1472,8 @@ def key_decisions(home: Path, key: str, *, tail: int = 20) -> list[dict]:
 
 
 def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = False, *,
-             runner_probe: Callable[[str], dict] | None = None) -> DispatchReport:
+             runner_probe: Callable[[str], dict] | None = None,
+             key_filter: Iterable[str] | None = None) -> DispatchReport:
     """One sweep. ``sessions`` decides whether spawns actually launch (use
     ``DryRunSessions`` to record-without-launch). Always idempotent and safe to
     run on a timer — minting and folding are no-ops when nothing changed.
@@ -1481,6 +1482,21 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     non-claude runner preflight below -- tests inject a fake to assert every
     transient/permanent branch without a real binary or ollama daemon; real
     callers never pass it.
+
+    ``key_filter`` (MTO-4) restricts the candidate set to exactly these keys,
+    resolved before due-checking so everything downstream -- due-checking,
+    throttling, claims, the spawn ledger -- behaves normally but only ever
+    considers them. An unknown key raises ``MaestroError`` (checked up front,
+    before the fleet-pause gate, so a typo is never swallowed by a paused
+    board). Minting is skipped entirely (the ``_new`` inbox holds keyless
+    create-requests, so there is no way to scope it to a key that doesn't
+    exist yet) -- a ``--key`` sweep drives an already-minted ticket, never
+    creates one. Because the candidate set is restricted before the throttle
+    check, a throttled target simply has no other candidate to fall back to:
+    it idles rather than substituting a different key -- the substitution
+    that makes an unrestricted sweep spawn a different due key when the
+    floored one is skipped still applies exactly as before when
+    ``key_filter`` is ``None``.
 
     ``dry_run`` (GA-4) makes the sweep strictly read-only: no ``TicketCreated``
     (``would_mint`` reports what mint_new_tickets would have minted, read via
@@ -1498,6 +1514,14 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     regenerable, never the sole source of truth.
     """
     home = cfg.home
+
+    filter_keys: frozenset[str] | None = None
+    if key_filter is not None:
+        filter_keys = frozenset(key_filter)
+        unknown = sorted(k for k in filter_keys if k not in set(list_keys(home)))
+        if unknown:
+            raise store.MaestroError(
+                f"dispatch --key: unknown ticket key(s): {', '.join(unknown)}")
 
     if fleet.pause_state(home, now) is not None:
         # The kill switch. Ahead of EVERYTHING else — mint/sync/scheduled-tasks/
@@ -1526,7 +1550,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # preview still owes the caller, computed by reading (not draining)
         # inbox/_new instead of calling mint_new_tickets.
         minted: list[str] = []
-        would_mint = _would_mint_keys(home)
+        would_mint = [] if filter_keys is not None else _would_mint_keys(home)
         scheduled_fired: list[str] = []
         worktree_removal_errors: dict = {}
         reaped: list[str] = []
@@ -1534,7 +1558,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         pruned_bytes = 0
         errors: dict = {}
     else:
-        minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
+        # MTO-4: a --key sweep never mints -- the _new inbox is keyless (a
+        # request may not even carry the target key yet), so there is no way
+        # to scope draining it to just `filter_keys` without either minting
+        # an unrelated pending request or silently ack-ing it away unminted.
+        # Left to the next unrestricted sweep instead.
+        minted = ([] if filter_keys is not None else
+                  _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[]))
         would_mint = []
         _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
         scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
@@ -1579,7 +1609,12 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     phase_by_key: dict[str, str] = {}
     decisions: dict[str, dict] = {}
 
-    for key in list_keys(home):
+    # MTO-4: the candidate set, restricted to `filter_keys` when given -- every
+    # downstream step (due-check, throttle, claims, spawn ledger) only ever
+    # sees these keys, so an unrestricted key's due-ness never even gets
+    # computed, let alone spawned.
+    candidates = sorted(filter_keys, key=split_key) if filter_keys is not None else list_keys(home)
+    for key in candidates:
         # RB-2: `snapshot.fold` is total by construction (never raises), but this
         # is defense-in-depth against a future/unforeseen corruption -- ONE bad
         # ticket must never abort the sweep for every other ticket on the board.
