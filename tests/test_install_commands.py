@@ -57,6 +57,52 @@ def test_install_repo_copies_six_files_byte_identical(home, tmp_path):
         assert (commands_dir / name).read_text() == (COMMANDS_DIR / name).read_text()
 
 
+# ---------------------------------------------------------------------------
+# OC-1 AC1: --repo ALSO installs an opencode copy from the same source, one
+# documented frontmatter transform apart -- byte-identical body, no third
+# hand-maintained source file.
+# ---------------------------------------------------------------------------
+
+def test_install_repo_also_installs_opencode_copy_with_documented_frontmatter_transform(home, tmp_path):
+    repo = tmp_path / "acme"
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+
+    rc = cli_main(["--home", str(home), "install-commands", "--repo", "acme"])
+    assert rc == 0
+
+    opencode_dir = repo / ".opencode" / "command"
+    installed = sorted(p.name for p in opencode_dir.iterdir())
+    assert installed == sorted(skills_install.PAYLOAD_NAMES)
+    for name in skills_install.PAYLOAD_NAMES:
+        source = (COMMANDS_DIR / name).read_text()
+        opencode_content = (opencode_dir / name).read_text()
+        # The documented transform, asserted (not just trusted): exactly what
+        # `_opencode_frontmatter` produces from the SAME source.
+        assert opencode_content == skills_install._opencode_frontmatter(source)
+
+        src_front, src_body = source.split("---\n", 2)[1:]
+        oc_front, oc_body = opencode_content.split("---\n", 2)[1:]
+        assert oc_body == src_body                     # body, incl. `$1`, byte-identical
+        assert "allowed-tools:" not in oc_front         # Claude-only -- no opencode equivalent
+        assert "argument-hint:" not in oc_front         # Claude-only -- no opencode equivalent
+        assert "description:" in oc_front               # the one line that DOES carry over
+        assert "allowed-tools:" in src_front             # sanity: the source really has it
+
+
+def test_install_repo_opencode_copy_idempotent_no_duplication(home, tmp_path):
+    repo = tmp_path / "acme"
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+
+    assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
+    opencode_dir = repo / ".opencode" / "command"
+    before = {p.name: (p.read_text(), p.stat().st_mtime) for p in opencode_dir.iterdir()}
+
+    assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
+    after = {p.name: (p.read_text(), p.stat().st_mtime) for p in opencode_dir.iterdir()}
+    assert before == after
+    assert [p for p in opencode_dir.iterdir() if p.is_dir()] == []
+
+
 def test_install_repo_is_idempotent_no_duplication(home, tmp_path):
     repo = tmp_path / "acme"
     _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
@@ -107,6 +153,37 @@ def test_install_user_symlinks_six_and_repo_working_tree_untouched(home, tmp_pat
     out = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
                          capture_output=True, text=True, check=True)
     assert out.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# OC-1 AC1: --user ALSO installs an opencode copy, from the same source, into
+# opencode's own user-scope command directory -- a real (transformed) file,
+# not a symlink, since its content is derived rather than identical.
+# ---------------------------------------------------------------------------
+
+def test_install_user_also_installs_opencode_copy(home, tmp_path, monkeypatch):
+    repo = tmp_path / "bound-repo"
+    _init_git_repo(repo)
+    user_dir = tmp_path / "user-commands"
+    opencode_user_dir = tmp_path / "opencode-user-commands"
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(opencode_user_dir))
+    _write_config(home, f'[maestro]\nrepo_path = "{repo}"\n')
+
+    rc = cli_main(["--home", str(home), "install-commands", "--user"])
+    assert rc == 0
+
+    installed = sorted(p.name for p in opencode_user_dir.iterdir())
+    assert installed == sorted(skills_install.PAYLOAD_NAMES)
+    for name in skills_install.PAYLOAD_NAMES:
+        dest = opencode_user_dir / name
+        assert not dest.is_symlink()   # derived content -- can't be a symlink to the source
+        assert dest.read_text() == skills_install._opencode_frontmatter(
+            (COMMANDS_DIR / name).read_text())
+
+    out = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                         capture_output=True, text=True, check=True)
+    assert out.stdout == ""    # repo untouched, same as the Claude side
 
 
 def test_install_user_idempotent_leaves_correct_symlink_alone_and_repoints_stale(

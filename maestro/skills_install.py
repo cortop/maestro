@@ -20,6 +20,20 @@ byte-editable source of truth: hatchling dereferences those symlinks into real
 file content when it builds a wheel, and under an editable install the
 symlinks resolve on disk exactly as they do in this checkout — either way
 ``payload_dir()`` finds real, readable files with no build step.
+
+OC-1: both targets ALSO install an opencode copy of the same payload, from the
+SAME source — opencode resolves its own custom commands from a directory it
+defines (``.opencode/command/`` in a repo checkout, ``~/.config/opencode/
+command/`` user-scope), not Claude Code's. The only difference between the two
+installed copies is frontmatter (``_opencode_frontmatter`` strips the two
+Claude-only lines, ``allowed-tools:``/``argument-hint:``, that have no opencode
+counterpart) — the body, including the ``$1`` substitution, is byte-identical.
+Never a third hand-maintained source file: both copies are derived from
+``payload_dir()`` at install time. Unlike the Claude ``--user`` symlink (which
+can tell "ours" from "a human's file" by target equality), the opencode copy is
+always a real, transformed file, so it is kept in sync unconditionally
+(``_write_if_changed``, no refuse-to-clobber) for both targets — the same
+posture ``install_repo``'s Claude side already has.
 """
 from __future__ import annotations
 
@@ -59,6 +73,53 @@ def user_commands_dir(cfg: Config | None = None) -> Path:
     return Path.home() / ".claude" / "commands"
 
 
+def opencode_user_commands_dir(cfg: Config | None = None) -> Path:
+    """OC-1: the opencode counterpart of ``user_commands_dir`` above -- where
+    ``--user`` installs opencode's copy and where the doctor check falls back
+    to for a non-``claude`` runner.
+
+    Override precedence: ``MAESTRO_OPENCODE_COMMANDS_DIR`` env var >
+    ``cfg.opencode_user_commands_dir`` > ``~/.config/opencode/command``. Same
+    injectability rationale as ``user_commands_dir`` -- no test (or doctor's
+    machine-independence requirement) depends on a developer's real
+    ``~/.config/opencode``.
+    """
+    env = os.environ.get("MAESTRO_OPENCODE_COMMANDS_DIR")
+    if env:
+        return Path(env).expanduser()
+    if cfg is not None and cfg.opencode_user_commands_dir:
+        return Path(cfg.opencode_user_commands_dir).expanduser()
+    return Path.home() / ".config" / "opencode" / "command"
+
+
+def opencode_repo_commands_dir(repo_path: Path) -> Path:
+    """OC-1: where an opencode copy of the payload lands inside a repo checkout
+    -- opencode's own project-scope command directory, mirroring
+    ``<repo>/.claude/commands/`` one-for-one."""
+    return Path(repo_path) / ".opencode" / "command"
+
+
+def _opencode_frontmatter(content: str) -> str:
+    """OC-1's one documented frontmatter transform (AC1): from a source file's
+    Claude Code frontmatter block, drop the two lines that have no opencode
+    counterpart -- ``allowed-tools:`` (Claude Code's per-command tool
+    allowlist; opencode enforces permissions through its own, board-wide
+    declarative ``permission.bash`` config instead, see
+    ``runner_permissions.opencode_bash_permissions``, not a per-command list)
+    and ``argument-hint:`` (a Claude Code slash-command UI hint opencode has no
+    equivalent surface for). Every other frontmatter line (``description:``)
+    and the ENTIRE body — including the ``$1`` substitution — passes through
+    byte-identical; tests assert exactly that.
+    """
+    parts = content.split("---\n", 2)
+    if len(parts) != 3:
+        return content  # no frontmatter block -- nothing to transform
+    _, front, body = parts
+    kept = [line for line in front.splitlines()
+            if not line.startswith(("allowed-tools:", "argument-hint:"))]
+    return "---\n" + "\n".join(kept) + "\n---\n" + body
+
+
 def _configured_repo_names(cfg: Config) -> list[str]:
     names = sorted(cfg.repos.keys())
     if cfg.repo_path:
@@ -94,16 +155,28 @@ def _write_if_changed(target: Path, content: str) -> bool:
 def install_repo(cfg: Config, name: str) -> dict:
     """Copy the six payload files into ``<repo>/.claude/commands/`` as real,
     byte-identical files — the target repo may not be this one, and needs to
-    be able to commit + review them like any other change."""
-    target_dir = resolve_repo_target(cfg, name) / ".claude" / "commands"
+    be able to commit + review them like any other change.
+
+    OC-1: also copies an opencode-frontmatter (``_opencode_frontmatter``)
+    transform of the SAME payload into ``<repo>/.opencode/command/`` — same
+    filenames, body byte-identical, one source."""
+    repo_root = resolve_repo_target(cfg, name)
+    target_dir = repo_root / ".claude" / "commands"
+    opencode_dir = opencode_repo_commands_dir(repo_root)
     src_dir = payload_dir()
     written = []
+    opencode_written = []
     for filename in PAYLOAD_NAMES:
         content = (src_dir / filename).read_text(encoding="utf-8")
         dest = target_dir / filename
         if _write_if_changed(dest, content):
             written.append(filename)
-    return {"target": str(target_dir), "installed": list(PAYLOAD_NAMES), "written": written}
+        opencode_dest = opencode_dir / filename
+        if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
+            opencode_written.append(filename)
+    return {"target": str(target_dir), "opencode_target": str(opencode_dir),
+            "installed": list(PAYLOAD_NAMES), "written": written,
+            "opencode_written": opencode_written}
 
 
 def install_user(cfg: Config) -> dict:
@@ -114,10 +187,19 @@ def install_user(cfg: Config) -> dict:
     moved ``payload_dir()``) is repointed; a real file at that path that this
     verb didn't create is never touched — refuse instead of clobbering
     whatever a human put there.
+
+    OC-1: also installs an opencode-frontmatter transform of the SAME payload
+    into ``opencode_user_commands_dir()``. Unlike the Claude side, this copy
+    can't be a symlink (its content is derived, not identical to the source),
+    so it has no "is this ours" signal to refuse-to-clobber on — it is kept in
+    sync unconditionally, the same posture ``install_repo`` already has for
+    both of its copies.
     """
     target_dir = user_commands_dir(cfg)
+    opencode_dir = opencode_user_commands_dir(cfg)
     src_dir = payload_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
+    opencode_dir.mkdir(parents=True, exist_ok=True)
 
     conflicts = []
     for filename in PAYLOAD_NAMES:
@@ -130,13 +212,21 @@ def install_user(cfg: Config) -> dict:
             + ", ".join(conflicts))
 
     written = []
+    opencode_written = []
     for filename in PAYLOAD_NAMES:
         src = src_dir / filename
         dest = target_dir / filename
         if dest.is_symlink() and Path(os.readlink(dest)) == src:
-            continue  # already correct -- leave it alone
-        if dest.is_symlink() or dest.exists():
-            dest.unlink()  # stale symlink (or something we already validated isn't a real file)
-        dest.symlink_to(src)
-        written.append(filename)
-    return {"target": str(target_dir), "installed": list(PAYLOAD_NAMES), "written": written}
+            pass  # already correct -- leave it alone
+        else:
+            if dest.is_symlink() or dest.exists():
+                dest.unlink()  # stale symlink (or something we already validated isn't a real file)
+            dest.symlink_to(src)
+            written.append(filename)
+
+        opencode_dest = opencode_dir / filename
+        if _write_if_changed(opencode_dest, _opencode_frontmatter(src.read_text(encoding="utf-8"))):
+            opencode_written.append(filename)
+    return {"target": str(target_dir), "opencode_target": str(opencode_dir),
+            "installed": list(PAYLOAD_NAMES), "written": written,
+            "opencode_written": opencode_written}

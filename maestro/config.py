@@ -77,6 +77,11 @@ class Config:
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
     user_commands_dir: str | None = None
+    # OC-1: the opencode counterpart of `user_commands_dir` above -- opencode
+    # resolves its own custom commands from a directory it defines, not Claude
+    # Code's. None = ~/.config/opencode/command (MAESTRO_OPENCODE_COMMANDS_DIR
+    # env var takes precedence -- see skills_install.opencode_user_commands_dir).
+    opencode_user_commands_dir: str | None = None
     # GA-16: override for the doctor permission-surface check's user-scope settings
     # layer (Claude Code resolves permissions across a repo's settings.local.json/
     # settings.json AND this file). None = ~/.claude/settings.json
@@ -271,6 +276,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
         cfg.prime = m.get("prime", cfg.prime) or None
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
+        cfg.opencode_user_commands_dir = m.get(
+            "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
         cfg.user_settings_path = m.get("user_settings_path", cfg.user_settings_path)
         raw_repos = data.get("repos", {})
         if isinstance(raw_repos, dict):
