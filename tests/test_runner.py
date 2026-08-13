@@ -87,10 +87,12 @@ def test_no_runner_override_sweep_is_byte_identical_baseline(home, cfg):
     report = disp.dispatch(cfg, sessions, now=1000)
     assert report.spawned == ["T-1"]
 
-    key, prompt, cwd, model, effort, disallowed, allowed, overlay, runner = sessions.spawned[0]
+    key, prompt, cwd, model, effort, disallowed, allowed, overlay, runner, runner_model = (
+        sessions.spawned[0])
     assert (key, prompt, cwd, model, effort, disallowed, allowed, overlay) == (
         "T-1", "/maestro-reconcile-ready T-1", str(home), "sonnet", None, [], [], {})
     assert runner == "claude"
+    assert runner_model is None
 
     snap = snap_mod.load(home, "T-1")
     snap_dict = snap.to_dict()
@@ -144,7 +146,7 @@ def test_dispatch_forces_claude_for_triaging_ticket_with_opencode_spec_override(
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert "T-1" in report.spawned
-    runner_by_key = {s[0]: s[-1] for s in sessions.spawned}
+    runner_by_key = {s[0]: s[-2] for s in sessions.spawned}  # -1 is `runner_model` (OC-4)
     assert runner_by_key["T-1"] == "claude"
 
 
