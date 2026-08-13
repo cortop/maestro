@@ -88,8 +88,13 @@ def _reconciler_tool_grants(cfg: Config) -> list[str]:
 def _nudge(cfg: Config) -> disp.DispatchReport:
     """In-process dispatch sweep after a human-input verb (ans/cmd/create).
 
-    Spawns are detached Popen so this returns quickly. The existing per-key
-    claim dedup prevents double-spawning if a reconciler is already live.
+    Spawns are detached Popen so this returns quickly. This call can race a
+    concurrent launchd-timer sweep -- disp.dispatch() serialises the two via
+    its own spawn-region lock (T-52, see dispatcher._spawn_lock_target), so
+    whichever one loses the race simply blocks until the other has committed
+    its spawns, then reads them in its own ``active`` set. The per-key claim
+    file is what lets that read recognize an already-live reconciler; the lock
+    is what makes the read-then-spawn decision itself safe to race at all.
     Returns the report so callers can react (e.g. a paused-fleet notice); every
     call site inherits that notice for free since the print lives here.
 
