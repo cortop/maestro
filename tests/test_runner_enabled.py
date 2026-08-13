@@ -27,7 +27,7 @@ import io
 import json
 import sys
 
-from maestro import cli, config as config_mod, dispatcher as disp, event_log, store
+from maestro import cli, config as config_mod, dispatcher as disp, event_log, snapshot as snap_mod, store
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
@@ -166,6 +166,50 @@ def test_cmd_init_does_not_write_runner_enabled_into_an_existing_home(tmp_path):
 
 
 # --- AC1 (env clause): real `maestro env` prints the effective value ---------
+
+
+# --- UX-1 AC9: agent-minted `runner: opencode` is inert at the default ------
+# (the containment for `--runner`'s exposure through the `Bash(maestro
+# create:*)` prefix-grant an `[agent]` "create" caller already holds -- OC-3's
+# `runner_enabled` gate is what must block it, not merely the accident that no
+# real second SessionManager is registered yet, so this admits RUNNER past
+# `_REGISTERED_RUNNERS` too, same as every other test in this file.)
+
+
+def test_agent_minted_runner_is_inert_at_default_runner_enabled(home, cfg, monkeypatch):
+    _register(monkeypatch, RUNNER)
+    assert cfg.runner_enabled == ["claude"]  # default: claude only
+
+    rc = cli.main(["--home", str(home), "create", "Non-claude via agent",
+                   "--key", "BAD-2", "--runner", RUNNER,
+                   "--runner-model", "qwen3-coder:30b", "--no-nudge"])
+    assert rc == 0
+
+    # Mint only (no due-check/spawn yet) -- a full sweep here would also spawn
+    # BAD-2's `triaging` reconciler (claude-only, unaffected by `runner:`),
+    # which is not what this AC is about.
+    minted = disp.mint_new_tickets(cfg)
+    assert minted == ["BAD-2"]
+    spec_text = store.spec_path(home, "BAD-2").read_text()
+    assert f"runner: {RUNNER}" in spec_text
+
+    # Reaching `implementing` through the real triage/approval workflow is
+    # orthogonal to what this AC proves -- force it directly, keeping the
+    # CLI-minted spec (and its `runner:` line) untouched.
+    event_log.append(home, "BAD-2", "PhaseChanged", {"phase": Phase.IMPLEMENTING.value}, actor="r")
+    snap_mod.rebuild(home, "BAD-2")
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1001, runner_probe=_counting_probe(
+        {"binary_ok": True, "models": [], "daemon_reason": None}))
+
+    assert "BAD-2" not in report.spawned
+    assert not any(s[0] == "BAD-2" for s in sessions.spawned)
+
+    events = event_log.read(home, "BAD-2")
+    asked = [e for e in events if e["type"] == "QuestionAsked"]
+    assert len(asked) == 1
+    assert asked[0]["payload"]["qid"] == f"runner-disabled-BAD-2-{RUNNER}"
 
 
 def test_real_maestro_env_prints_the_effective_runner_enabled(tmp_path):

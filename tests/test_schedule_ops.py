@@ -16,7 +16,8 @@ def test_cli_schedule_add_roundtrips_all_fields(home):
                    "--kind", "research", "--approval-tier", "2", "--priority", "5",
                    "--prefix", "S", "--title", "Morning digest", "--repo", "alpha",
                    "--model", "sonnet", "--effort", "high", "--notes", "Skip weekends.",
-                   "--depends-on", "T-1", "T-2"])
+                   "--depends-on", "T-1", "T-2",
+                   "--runner", "opencode", "--runner-model", "qwen3-coder:30b"])
     assert rc == 0
     cfg = config_mod.load(str(home))
     assert cfg.scheduled == [{
@@ -25,7 +26,28 @@ def test_cli_schedule_add_roundtrips_all_fields(home):
         "enabled": True, "title": "Morning digest", "repo": "alpha",
         "model": "sonnet", "effort": "high", "notes": "Skip weekends.",
         "depends_on": ["T-1", "T-2"],
+        "runner": "opencode", "runner_model": "qwen3-coder:30b",
     }]
+
+
+# --- UX-1 AC8: `schedule add --runner` mints a ticket whose spec carries it -
+
+
+def test_cli_schedule_add_runner_mints_a_ticket_with_the_field(home):
+    rc = cli_main(["--home", str(home), "schedule", "add", "nightly",
+                   "--prompt", "Do the thing", "--every", "1h",
+                   "--runner", "opencode", "--runner-model", "qwen3-coder:30b"])
+    assert rc == 0
+    cfg = config_mod.load(str(home))
+
+    disp.run_scheduled_tasks(cfg, now=1_000_000)
+    disp.dispatch(cfg, DryRunSessions(), now=1_000_000)
+
+    keys = disp.list_keys(home)
+    assert len(keys) == 1
+    spec_text = store.spec_path(home, keys[0]).read_text()
+    assert "runner: opencode" in spec_text
+    assert "runner_model: qwen3-coder:30b" in spec_text
 
 
 def test_cli_schedule_add_missing_required_flags_exits_nonzero(home):

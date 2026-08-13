@@ -12,7 +12,7 @@ from maestro.cli import cmd_create
 class _Args:
     def __init__(self, title=None, key=None, tier=1, priority=3, intent=None,
                  home=None, no_nudge=True, kind=None, model=None, effort=None,
-                 notes=None, depends_on=None, prefix=None):
+                 notes=None, depends_on=None, prefix=None, runner=None, runner_model=None):
         self.title = title
         self.key = key
         self.tier = tier
@@ -25,6 +25,8 @@ class _Args:
         self.notes = notes
         self.depends_on = depends_on
         self.prefix = prefix
+        self.runner = runner
+        self.runner_model = runner_model
         self.no_nudge = no_nudge
 
 
@@ -277,3 +279,125 @@ def test_create_cli_main_with_all_flags(cfg):
     assert "dependsOn: [T-1, T-2]" in spec_text
     assert "## Notes" in spec_text
     assert "CLI-driven note" in spec_text
+
+
+# --- UX-1: --runner / --runner-model ------------------------------------------
+
+def test_flag_runner_and_runner_model_stored_in_args(cfg):
+    rc, entry = _run_create_with_flags(
+        cfg, title="Non-claude task", runner="opencode", runner_model="qwen3-coder:30b")
+    assert rc == 0
+    assert entry["args"]["runner"] == "opencode"
+    assert entry["args"]["runner_model"] == "qwen3-coder:30b"
+
+
+def test_create_cli_runner_flags_round_trip_through_a_real_sweep(cfg):
+    """AC1: real `maestro create ... --runner opencode --runner-model
+    qwen3-coder:30b` writes both into inbox/_new.jsonl args, a real sweep
+    mints a spec whose front-matter carries exactly those two lines, and
+    `gates.parse_spec_overrides` reads them back."""
+    from maestro.cli import main
+    from maestro import dispatcher as disp, store
+    from maestro.gates import parse_spec_overrides
+    from maestro.sessions import DryRunSessions
+
+    rc = main([
+        "--home", str(cfg.home), "create", "Non-claude via CLI",
+        "--key", "R-3",
+        "--runner", "opencode", "--runner-model", "qwen3-coder:30b",
+        "--no-nudge",
+    ])
+    assert rc == 0
+    _, entry = inbox.pending_new(cfg.home)[0]
+    assert entry["args"]["runner"] == "opencode"
+    assert entry["args"]["runner_model"] == "qwen3-coder:30b"
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    spec_text = store.spec_path(cfg.home, "R-3").read_text()
+    assert "runner: opencode" in spec_text
+    assert "runner_model: qwen3-coder:30b" in spec_text
+    overrides = parse_spec_overrides(spec_text)
+    assert overrides["runner"] == "opencode"
+    assert overrides["runner_model"] == "qwen3-coder:30b"
+
+
+def test_create_with_no_runner_flags_mints_no_runner_lines(cfg):
+    """AC2 (create half): with no runner flags, the seeded spec carries no
+    runner:/runner_model: lines at all."""
+    from maestro.cli import main
+    from maestro import dispatcher as disp, store
+    from maestro.sessions import DryRunSessions
+
+    rc = main(["--home", str(cfg.home), "create", "Plain ticket",
+              "--key", "R-4", "--no-nudge"])
+    assert rc == 0
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    spec_text = store.spec_path(cfg.home, "R-4").read_text()
+    assert "runner:" not in spec_text
+    assert "runner_model:" not in spec_text
+
+
+def test_interactive_flow_does_not_prompt_for_or_set_runner(cfg):
+    """AC3: the guided interactive flow deliberately stays minimal and never
+    collects a runner choice -- documented in cmd_create's interactive
+    branch. Same stdin script as test_interactive_guided_flow proves no extra
+    prompt was inserted (it still consumes exactly 4 lines)."""
+    def fake_editor(title, tier, priority):
+        return "Intent text"
+
+    rc = _run_create(cfg, stdin_text="My new ticket\n\n\n\n", fake_editor=fake_editor)
+    assert rc == 0
+    _, entry = inbox.pending_new(cfg.home)[0]
+    assert "runner" not in entry["args"]
+    assert "runner_model" not in entry["args"]
+
+
+def test_create_flag_runner_model_missing_exits_zero_with_suggestion_warning(cfg, monkeypatch, capsys):
+    """AC4: an unrecognized/not-installed runner_model never gates creation --
+    exits 0, stores the value verbatim, and warns naming installed
+    tool-capable models as suggestions."""
+    monkeypatch.setattr(
+        "maestro.providers.ollama.fetch_models",
+        lambda *a, **kw: ([{"name": "llama3:8b", "capabilities": ["tools"]},
+                           {"name": "embed:1b", "capabilities": []}], None))
+
+    rc, entry = _run_create_with_flags(
+        cfg, title="Non-claude", runner="opencode", runner_model="not-installed:1b")
+
+    assert rc == 0
+    assert entry["args"]["runner_model"] == "not-installed:1b"  # stored verbatim
+    err = capsys.readouterr().err
+    assert "warning" in err
+    assert "llama3:8b" in err
+    assert "embed:1b" not in err  # not tool-capable -- not suggested
+
+
+def test_create_flag_runner_daemon_unreachable_exits_zero_with_warning(cfg, monkeypatch, capsys):
+    """AC4: an unreachable ollama daemon also exits 0, with a "not validated"
+    warning instead of a gate."""
+    monkeypatch.setattr(
+        "maestro.providers.ollama.fetch_models",
+        lambda *a, **kw: (None, "connection refused"))
+
+    rc, entry = _run_create_with_flags(
+        cfg, title="Non-claude", runner="opencode", runner_model="qwen3-coder:30b")
+
+    assert rc == 0
+    assert entry["args"]["runner_model"] == "qwen3-coder:30b"
+    err = capsys.readouterr().err
+    assert "unreachable" in err
+    assert "not validated" in err
+
+
+def test_create_flag_runner_claude_never_warns(cfg, monkeypatch, capsys):
+    """The default runner never triggers the ollama lookup at all."""
+    calls = []
+    monkeypatch.setattr(
+        "maestro.providers.ollama.fetch_models",
+        lambda *a, **kw: calls.append(1) or ([], None))
+
+    rc, entry = _run_create_with_flags(cfg, title="Default runner")
+
+    assert rc == 0
+    assert calls == []
+    assert capsys.readouterr().err == ""
