@@ -332,6 +332,79 @@ def _report_rejected_mint(home: Path, key: str, reason: str) -> None:
     store.atomic_write(path, body)
 
 
+def _mint_lock_target(home: Path) -> Path:
+    """Fed to ``store.file_lock`` (which locks a sidecar ``.<name>.lock`` next to
+    it, e.g. ``derived/.mint.lock``) to guard the "pick an auto-key, then create
+    its ticket dir + TicketCreated event" critical section -- shared by the
+    batch ``_new``-inbox drain (``mint_new_tickets``) and the synchronous
+    single-ticket mint ``create --json`` performs (``mint_one``), so the two can
+    never race each other onto the same auto-assigned key."""
+    return home / "derived" / "mint"
+
+
+def _mint_ticket(home: Path, key: str, title: str, ticket_args: dict, *,
+                  actor: str, source: str) -> None:
+    """Seed the spec (if absent) and append the ``TicketCreated`` event for an
+    already-resolved, already-validated *key*. The tail both mint paths share."""
+    spec = store.spec_path(home, key)
+    title = title or key
+    if not spec.exists():
+        store.atomic_write(spec, _seed_spec(key, title, ticket_args))
+    ticket_payload: dict = {
+        "title": title,
+        "source": source,
+        "spec_hash": spec_hash_on_disk(home, key),
+    }
+    if ticket_args.get("kind"):
+        ticket_payload["kind"] = ticket_args["kind"]
+    if ticket_args.get("repo"):
+        ticket_payload["repo"] = ticket_args["repo"]
+    if ticket_args.get("external_source"):
+        ticket_payload["external_source"] = ticket_args["external_source"]
+    if ticket_args.get("external_id"):
+        ticket_payload["external_id"] = ticket_args["external_id"]
+    if ticket_args.get("scheduled_by"):
+        ticket_payload["scheduled_by"] = ticket_args["scheduled_by"]
+    event_log.append(
+        home, key, E.TICKET_CREATED,
+        ticket_payload,
+        actor=actor,
+        step_id=f"create-{key}",
+    )
+    snap_mod.rebuild(home, key)
+
+
+def mint_one(cfg: Config, *, key: str | None, prefix: str | None, title: str,
+             ticket_args: dict, actor: str = "reconciler") -> str:
+    """Synchronously mint exactly one ticket -- the ``create --json`` counterpart
+    to the batch ``_new``-inbox drain ``mint_new_tickets`` performs on a sweep.
+    Bypasses the inbox entirely, so the caller learns the assigned key
+    immediately instead of having to wait for (and then re-derive) the next
+    dispatcher sweep's mint.
+
+    Locked (``_mint_lock_target``) against a concurrent call -- this or another
+    process's sweep -- racing to pick the same auto-key. Raises
+    ``MaestroError`` on an invalid or case-colliding explicit key. A key that
+    already has events is treated as an idempotent no-op (retry-safe, exactly
+    like ``mint_new_tickets``' own crash-safety semantics) and its existing key
+    is returned unchanged rather than re-minted.
+    """
+    home = cfg.home
+    with store.file_lock(_mint_lock_target(home)):
+        resolved = key or _auto_key(home, prefix=prefix or "T")
+        store.validate_key(resolved)
+        collision = _case_collision(home, resolved)
+        if collision:
+            raise store.MaestroError(
+                f"{resolved!r} differs from existing key {collision!r} only by "
+                "letter case -- would alias its event log on a case-insensitive filesystem"
+            )
+        if event_log.last_seq(home, resolved) > 0:
+            return resolved  # already minted -- idempotent no-op
+        _mint_ticket(home, resolved, title, ticket_args, actor=actor, source="cli/create --json")
+        return resolved
+
+
 def mint_new_tickets(cfg: Config) -> list[str]:
     """Drain the keyless ``_new`` inbox into real ticket dirs + TicketCreated events.
 
@@ -345,68 +418,50 @@ def mint_new_tickets(cfg: Config) -> list[str]:
     (``validate_key``, e.g. a trailing ``.archive``) or on a case-insensitive
     filesystem (``_case_collision``) -- is rejected rather than minted, and the
     rejection is reported via ``_report_rejected_mint`` instead of dropped (RB-3).
+
+    Locked (``_mint_lock_target``) around the per-entry auto-key-through-mint
+    section so a concurrent synchronous ``mint_one`` call can never pick the
+    same auto-assigned key as this sweep.
     """
     home = cfg.home
     minted: list[str] = []
     minted_path = home / "derived" / ".schedule_minted.json"
     minted_dedup = store.read_json(minted_path, {}) or {}
     dedup_changed = False
+    lock_target = _mint_lock_target(home)
     for _idx, entry in inbox.pending_new(home):
         ticket_args = entry.get("args") or {}
         dedup = ticket_args.get("dedup")
         if dedup and dedup in minted_dedup:
             continue  # already minted this period — guaranteed no-op
         prefix = entry.get("prefix") or None
-        key = entry.get("key") or _auto_key(home, prefix=prefix or "T")
-        try:
-            store.validate_key(key)
-        except store.MaestroError as e:
-            _report_rejected_mint(home, key, str(e))
-            continue
-        collision = _case_collision(home, key)
-        if collision:
-            _report_rejected_mint(
-                home, key,
-                f"differs from existing key {collision!r} only by letter case -- "
-                "would alias its event log on a case-insensitive filesystem",
-            )
-            continue
-        if event_log.last_seq(home, key) > 0:
-            # Key already has events -- it was triaged (or otherwise advanced)
-            # before this mint sweep drained the matching inbox/_new entry.
-            # Appending another TicketCreated here would clobber snapshot.fold's
-            # phase back to triaging, silently orphaning any progress since.
-            # Treat the request as a no-op: the ticket already exists.
-            if dedup:
-                minted_dedup[dedup] = key
-                dedup_changed = True
-            continue
-        spec = store.spec_path(home, key)
-        title = entry.get("title") or key
-        if not spec.exists():
-            store.atomic_write(spec, _seed_spec(key, title, ticket_args))
-        ticket_payload: dict = {
-            "title": title,
-            "source": "inbox/_new",
-            "spec_hash": spec_hash_on_disk(home, key),
-        }
-        if ticket_args.get("kind"):
-            ticket_payload["kind"] = ticket_args["kind"]
-        if ticket_args.get("repo"):
-            ticket_payload["repo"] = ticket_args["repo"]
-        if ticket_args.get("external_source"):
-            ticket_payload["external_source"] = ticket_args["external_source"]
-        if ticket_args.get("external_id"):
-            ticket_payload["external_id"] = ticket_args["external_id"]
-        if ticket_args.get("scheduled_by"):
-            ticket_payload["scheduled_by"] = ticket_args["scheduled_by"]
-        event_log.append(
-            home, key, E.TICKET_CREATED,
-            ticket_payload,
-            actor="dispatcher",
-            step_id=f"create-{key}",
-        )
-        snap_mod.rebuild(home, key)
+        with store.file_lock(lock_target):
+            key = entry.get("key") or _auto_key(home, prefix=prefix or "T")
+            try:
+                store.validate_key(key)
+            except store.MaestroError as e:
+                _report_rejected_mint(home, key, str(e))
+                continue
+            collision = _case_collision(home, key)
+            if collision:
+                _report_rejected_mint(
+                    home, key,
+                    f"differs from existing key {collision!r} only by letter case -- "
+                    "would alias its event log on a case-insensitive filesystem",
+                )
+                continue
+            if event_log.last_seq(home, key) > 0:
+                # Key already has events -- it was triaged (or otherwise advanced)
+                # before this mint sweep drained the matching inbox/_new entry.
+                # Appending another TicketCreated here would clobber snapshot.fold's
+                # phase back to triaging, silently orphaning any progress since.
+                # Treat the request as a no-op: the ticket already exists.
+                if dedup:
+                    minted_dedup[dedup] = key
+                    dedup_changed = True
+                continue
+            title = entry.get("title") or key
+            _mint_ticket(home, key, title, ticket_args, actor="dispatcher", source="inbox/_new")
         minted.append(key)
         if dedup:
             minted_dedup[dedup] = key

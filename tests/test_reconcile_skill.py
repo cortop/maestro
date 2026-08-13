@@ -456,6 +456,39 @@ def test_every_maestro_invocation_in_every_phase_skill_parses():
     assert checked > 50, "invocation scan found suspiciously few commands -- the regex is broken"
 
 
+# ---------------------------------------------------------------------------
+# MTO-6: the eval-free contract (GA-10) was only ever checked over each phase
+# file's own preamble fence. `maestro-reconcile-awaiting-human.md`'s own
+# `## awaiting-human` branch -- well below the preamble -- still shelled out to
+# `python3` twice (a `KIND` lookup piped through `python3 -c`, and an
+# `inbox/_new.jsonl` scrape) because nothing checked the rest of the body.
+# This generalizes the ban to every ```bash fence in every phase file, both
+# copies -- not just the preamble. Word-boundary matching (not a plain
+# substring check like the preamble test above uses) is required here: a
+# naive substring scan over every fence false-positives on ordinary identifiers
+# that merely contain one of these short tokens, e.g. `researching.md`'s own
+# `ResearchProposed` event type ends in "...sed".
+# ---------------------------------------------------------------------------
+
+_BANNED_INTERPRETERS = ("eval", "python3", "sed", "cat")
+
+
+def test_no_phase_skill_bash_fence_shells_out_to_a_banned_interpreter():
+    """AC1 (MTO-6): no `eval`/`python3`/`sed`/`cat` in any ```bash fence of any
+    phase file (either copy) -- not just the preamble. The prose explaining the
+    eval-free contract itself (which literally names these words) lives outside
+    every fence, so it never trips this check."""
+    checked = 0
+    for path in ALL_PHASE_PATHS:
+        text = _strip_frontmatter(path.read_text())
+        for fence in _bash_fences(text):
+            checked += 1
+            for banned in _BANNED_INTERPRETERS:
+                assert not re.search(rf"\b{banned}\b", fence), \
+                    f"{path}: a bash fence still shells out to {banned}:\n{fence}"
+    assert checked > 20, "fence scan found suspiciously few bash blocks -- the regex is broken"
+
+
 def test_preamble_resolves_via_env_key_for_repo_aware_phases():
     """GA-10: no `eval`/`python3`/`sed`/`cat` anywhere in the preamble block, and no
     `VAR=` shell assignment either -- `maestro env --key`/`maestro env` are still run for

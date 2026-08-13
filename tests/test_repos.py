@@ -154,7 +154,10 @@ def test_env_key_prints_resolved_binding(home, capsys):
                         "disallowed_tools": ["Bash(gh pr merge:*)"],
                         # RF-2: per-key resolved spawn args, same as a real spawn would use.
                         "model": "sonnet", "effort": None,
-                        "runner": "claude", "runner_model": None}
+                        "runner": "claude", "runner_model": None,
+                        # MTO-6: served here so awaiting-human.md's KIND lookup needs no
+                        # interpreter -- reused from GA-10's per-key env seam.
+                        "kind": "implementation"}
 
 
 def test_env_key_unknown_repo_exits_nonzero(home, capsys):
