@@ -232,17 +232,34 @@ class ClaudeCliSessions:
         else:
             log_handle = None
 
+        # T-52: reserve the claim BEFORE Popen, not after. Writing it after (the
+        # old order) left a window where a crash between Popen returning and the
+        # write landing left a live, fully-detached (start_new_session=True)
+        # reconciler with NO claim -- invisible to max_concurrency and to
+        # run_watchdog (which iterates claims only), so the orphan was never
+        # reaped. The reservation's pid is THIS process's own -- alive for
+        # exactly as long as the launch call takes -- so a crash between the
+        # reservation and the real-pid write below self-heals the moment this
+        # process dies too, rather than permanently squatting the key's slot.
+        # Rolled back (released) if Popen itself raises, so a failed launch
+        # never leaves a phantom claim behind either.
+        claims.write_claim(self.home, key, os.getpid(), session_name(key),
+                           log_path=log_path, cwd=str(cwd), prompt=prompt)
         try:
-            proc = subprocess.Popen(
-                cmd, cwd=str(cwd), env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
-                stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        finally:
-            if log_handle is not None:
-                log_handle.close()
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=str(cwd), env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
+                    stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            finally:
+                if log_handle is not None:
+                    log_handle.close()
+        except Exception:
+            claims.release(self.home, key)
+            raise
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
                            log_path=log_path, cwd=str(cwd), prompt=prompt)
@@ -394,17 +411,27 @@ class OpencodeCliSessions:
         else:
             log_handle = None
 
+        # T-52: reserve before Popen, commit the real pid after, roll back on a
+        # failed launch -- see ClaudeCliSessions.spawn's comment for the full
+        # rationale (claims are runner-agnostic, so this backend needs the
+        # identical fix).
+        claims.write_claim(self.home, key, os.getpid(), session_name(key),
+                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd))
         try:
-            proc = subprocess.Popen(
-                cmd, cwd=str(cwd), env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
-                stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        finally:
-            if log_handle is not None:
-                log_handle.close()
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=str(cwd), env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
+                    stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            finally:
+                if log_handle is not None:
+                    log_handle.close()
+        except Exception:
+            claims.release(self.home, key)
+            raise
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
                            log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd))

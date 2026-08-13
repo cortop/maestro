@@ -76,6 +76,44 @@ def test_cwd_and_prompt_stored_in_claim(home):
     assert c["prompt"] == "/maestro-reconcile-implementing T-1"
 
 
+# --- T-52: claim reserved before Popen, rolled back on a failed launch ------
+
+def test_claim_reserved_before_popen_launches(home):
+    """The claim must already exist -- under THIS process's own pid, since the
+    eventual worker pid isn't known until Popen returns -- by the time Popen is
+    actually called, not written only after it succeeds."""
+    sess = _make_sessions(home, capture=False)
+    seen = {}
+
+    def capture_popen(*args, **kwargs):
+        seen["reservation"] = claims.read_claim(home, "T-1")
+        fake_proc = MagicMock()
+        fake_proc.pid = 999999
+        return fake_proc
+
+    with patch("subprocess.Popen", side_effect=capture_popen):
+        pid = sess.spawn("T-1", "p", cwd=home)
+
+    reservation = seen["reservation"]
+    assert reservation is not None, "no claim existed yet when Popen was called"
+    assert reservation["pid"] == os.getpid()
+    # ...then committed with the REAL worker pid once Popen succeeds.
+    assert pid == 999999
+    final = claims.read_claim(home, "T-1")
+    assert final["pid"] == 999999
+
+
+def test_claim_rolled_back_when_popen_raises(home):
+    """A launch failure must never leave a phantom claim behind -- if Popen
+    raises, the reservation is released rather than left pointing at a pid
+    that never became a real reconciler."""
+    sess = _make_sessions(home, capture=False)
+    with patch("subprocess.Popen", side_effect=OSError("boom")):
+        with pytest.raises(OSError):
+            sess.spawn("T-1", "p", cwd=home)
+    assert claims.read_claim(home, "T-1") is None
+
+
 def test_distinct_keys_write_distinct_log_files(home):
     _fake_popen(home, "T-1", capture=True, clock_val=1_000.0)
     _fake_popen(home, "T-2", capture=True, clock_val=2_000.0)
