@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from maestro import claims, dispatcher as disp, store
 from maestro.sessions import OpencodeCliSessions, session_name
 
@@ -131,6 +133,40 @@ def test_unused_claude_only_kwargs_are_accepted_and_ignored(home):
     # no exception -- ignored, never surfaced in argv
     c = claims.read_claim(home, "T-1")
     assert c is not None
+
+
+# --- T-52: claim reserved before Popen, rolled back on a failed launch ------
+# (claims are runner-agnostic -- this backend needs the identical fix
+# ClaudeCliSessions gets, see tests/test_sessions.py's counterparts.)
+
+def test_claim_reserved_before_popen_launches(home):
+    sess = _make_sessions(home, capture_session_logs=False)
+    seen = {}
+
+    def capture_popen(*args, **kwargs):
+        seen["reservation"] = claims.read_claim(home, "T-1")
+        fake_proc = MagicMock()
+        fake_proc.pid = 999999
+        return fake_proc
+
+    with patch("subprocess.Popen", side_effect=capture_popen):
+        pid = sess.spawn("T-1", "/maestro-reconcile-implementing", cwd=home,
+                         runner_model="a:1b")
+
+    reservation = seen["reservation"]
+    assert reservation is not None, "no claim existed yet when Popen was called"
+    assert reservation["pid"] == os.getpid()
+    assert pid == 999999
+    assert claims.read_claim(home, "T-1")["pid"] == 999999
+
+
+def test_claim_rolled_back_when_popen_raises(home):
+    sess = _make_sessions(home, capture_session_logs=False)
+    with patch("subprocess.Popen", side_effect=OSError("boom")):
+        with pytest.raises(OSError):
+            sess.spawn("T-1", "/maestro-reconcile-implementing", cwd=home,
+                       runner_model="a:1b")
+    assert claims.read_claim(home, "T-1") is None
 
 
 # --- claim shape: same field shape a Claude spawn writes (AC3) --------------

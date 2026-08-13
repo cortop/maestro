@@ -342,6 +342,27 @@ def _mint_lock_target(home: Path) -> Path:
     return home / "derived" / "mint"
 
 
+def _spawn_lock_target(home: Path) -> Path:
+    """Fed to ``store.file_lock`` (-> sidecar ``derived/.spawn.lock``) to guard
+    dispatch()'s read-active / compute-slots / spawn region (T-52). Nothing
+    previously serialised that region: launchd's timer tick and the in-process
+    ``cli._nudge`` sweep (fired on every ``maestro ans``/``cmd``/``create``) could
+    overlap, both read the same stale ``active`` set, both decide the same key
+    has a free slot, and both spawn it -- and since the claim was written AFTER
+    Popen (see ``sessions.ClaudeCliSessions.spawn``), the second write clobbered
+    the first, leaving one live reconciler with NO claim: invisible to
+    ``max_concurrency`` and to ``run_watchdog`` (which iterates claims only), so
+    the orphan was never reaped. Holding this lock from the ``active`` read
+    through the very last claim commit in the spawn loop makes that whole
+    decision one atomic step: a second, concurrent ``dispatch()`` call blocks
+    here and only proceeds once the first has fully committed its spawns, so it
+    always sees them in the ``active`` set it reads next. Scoped to exactly this
+    region (not the whole sweep) so the mint/sync/backup/watchdog hooks above it
+    -- several of which touch the network -- never contend with each other's
+    dispatch() calls over this lock."""
+    return home / "derived" / "spawn"
+
+
 def _mint_ticket(home: Path, key: str, title: str, ticket_args: dict, *,
                   actor: str, source: str) -> None:
     """Seed the spec (if absent) and append the ``TicketCreated`` event for an
@@ -1792,376 +1813,379 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             if per_key_errors:
                 errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
 
-    active = sessions.list_active()
-    due: list[tuple[str, str]] = []
-    claimed: list[str] = []
-    observed_seq_by_key: dict[str, int] = {}
-    tier_by_key: dict[str, int] = {}
-    phase_by_key: dict[str, str] = {}
-    decisions: dict[str, dict] = {}
+    # T-52: hold the spawn-region lock from the active-read through the
+    # last claim commit below -- see _spawn_lock_target's docstring for why.
+    with store.file_lock(_spawn_lock_target(home)):
+        active = sessions.list_active()
+        due: list[tuple[str, str]] = []
+        claimed: list[str] = []
+        observed_seq_by_key: dict[str, int] = {}
+        tier_by_key: dict[str, int] = {}
+        phase_by_key: dict[str, str] = {}
+        decisions: dict[str, dict] = {}
 
-    # MTO-4: the candidate set, restricted to `filter_keys` when given -- every
-    # downstream step (due-check, throttle, claims, spawn ledger) only ever
-    # sees these keys, so an unrestricted key's due-ness never even gets
-    # computed, let alone spawned.
-    candidates = sorted(filter_keys, key=split_key) if filter_keys is not None else list_keys(home)
-    for key in candidates:
-        # RB-2: `snapshot.fold` is total by construction (never raises), but this
-        # is defense-in-depth against a future/unforeseen corruption -- ONE bad
-        # ticket must never abort the sweep for every other ticket on the board.
-        # Same pattern as `_run_hook`, keyed per-ticket instead of per-hook-name.
-        snap = _run_hook(f"fold:{key}", hook_errors, _load_and_refresh_snapshot, home, key)
-        if snap is None:
-            decisions[key] = {"outcome": "fold_error",
-                               "reason": hook_errors.get(f"fold:{key}", "fold failed")}
-            continue
-        observed_seq_by_key[key] = snap.observed_seq
-        phase_by_key[key] = snap.phase
-        blocked_dep = _has_unmet_deps(home, key)
-        tier = spec_tier(home, key)
-        tier_by_key[key] = tier
-        res = is_due(
-            home, key, snap,
-            inbox_pending=inbox.has_pending(home, key),
-            current_spec_hash=spec_hash_on_disk(home, key),
-            now=now,
-            blocked_dep=blocked_dep,
-        )
-        if not res.due:
-            decisions[key] = {"outcome": "not_due", "reason": res.reason}
-            continue
-        if key in active:
-            claimed.append(key)        # per-key serialization: one reconciler per key
-            decisions[key] = {"outcome": "claimed", "reason": res.reason}
-            continue
-        due.append((key, res.reason))
-        decisions[key] = {"outcome": "due", "reason": res.reason}
-
-    # MTO-7: order the due set by (priority, key) -- a preference over WHICH due
-    # key is considered first, upstream of every existing brake (spawn floor,
-    # repo-blocked, max_spawns_per_sweep, max_concurrency slots, the runaway
-    # brake/rate-limit/spend-ceiling gates below). It decides nothing about
-    # whether a key is due, throttled, or spawnable -- only their relative order
-    # through those unchanged filters, so a throttled/capped/blocked high-priority
-    # ticket still can't starve the rest of the board. `spec_priority` reads fresh
-    # from disk per sweep (never the folded snapshot) with the same total-and-
-    # never-raises contract as `spec_tier`; `split_key` is the tiebreaker so
-    # ordering stays deterministic when priorities are equal (including the
-    # all-default-3 case, which reduces to today's plain lexical order).
-    due.sort(key=lambda kr: (spec_priority(home, kr[0]), split_key(kr[0])))
-
-    # Per-repo preflight, scoped to the repos this sweep's due tickets (plus the
-    # implicit default) actually reference -- a 1-repo board still runs exactly
-    # one probe. `repo_blockers` is the flat union, kept for existing readers
-    # (heartbeat/_nudge/cmd_dispatch); `repo_blockers_by_repo` is the new
-    # per-repo mapping the spawn gate below keys off of.
-    preflight = repo_preflight_all(cfg, home, [k for k, _ in due])
-    repo_blockers_by_repo = preflight["blockers_by_repo"]
-    repo_blockers = preflight["blockers"]
-    bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in due}
-
-    # Fleet-wide rate-limit gate. Above the human-signal bypass below: an inbox
-    # answer must not punch through a 429, since that spawn would be rejected too.
-    # While paused, nothing spawns and the spawn ledger is left untouched.
-    paused_until_ts = ratelimit.paused_until(home, now)
-    # GA-5: the runaway auto-brake, beside the rate-limit gate above. Only
-    # evaluated when the rate-limit gate didn't already decide this sweep spawns
-    # nothing, and never during dry_run (a strictly read-only preview must not
-    # arm a pause). Arming it also makes THIS sweep spawn nothing -- mirroring
-    # the rate-limit gate exactly -- while the next sweep short-circuits at G1.
-    runaway_armed = (None if paused_until_ts is not None or dry_run
-                     else _maybe_trip_runaway_brake(cfg, home, now, health))
-    # GA-11: the daily spend ceiling, a third reason to take the same
-    # spawn-nothing branch. spend.over_ceiling is a pure read, never folds --
-    # so it still applies even under dry_run, off whatever spend.probe last
-    # persisted (the ratelimit gate above is read the same way).
-    spend_ceiling_reason = (None if paused_until_ts is not None or runaway_armed is not None
-                            else spend.over_ceiling(cfg, now))
-    # RB-12: the detection-channel alarm, off the exact signals just computed above --
-    # never recomputed, so it can't drift from what actually gated this sweep. A write
-    # (persists derived/.alarm.json, may fire notify_command/webhooks), so it's skipped
-    # under dry_run like every other hook here, and never reached at all while a
-    # fleet-wide pause already short-circuited the whole sweep at G1 (top of dispatch()).
-    if not dry_run:
-        _run_hook("alarm", hook_errors, alarm.check, cfg, now, health,
-                   runaway_reason=runaway_armed, spend_ceiling_reason=spend_ceiling_reason)
-    if paused_until_ts is not None or runaway_armed is not None or spend_ceiling_reason is not None:
-        spawned: list[str] = []
-        throttled: list[str] = []
-        capacity_skipped: list[str] = []
-    else:
-        # Spawn-rate floor. The claim file is the ONLY other per-key spawn memory and it
-        # is unlinked the moment the worker dies — so a session that exits in under a
-        # second (a rate-limit rejection, a crash) leaves nothing behind and the key is
-        # instantly re-spawnable. This ledger outlives the process and bounds the rate no
-        # matter how often the dispatcher itself is fired.
-        floor = spawn_floor(cfg)
-        ledger_path = _spawn_ledger_path(home)
-        ledger = store.read_json(ledger_path, {}) or {}
-        throttled = []
-        if floor:
-            eligible: list[tuple[str, str]] = []
-            for key, reason in due:
-                entry = ledger.get(key)
-                last = entry.get("last") if isinstance(entry, dict) else entry
-                if (reason not in _UNTHROTTLED_REASONS
-                        and isinstance(last, (int, float)) and now - last < floor):
-                    throttled.append(key)
-                    decisions[key]["outcome"] = "throttled"
-                    continue
-                eligible.append((key, reason))
-        else:
-            eligible = due
-
-        # Per-key repo-blocked gate. NOT bypassable by an _UNTHROTTLED_REASONS
-        # human signal — a human answering a question is exactly the moment you
-        # must not launch an agent into a half-merged tree. Skipped keys stay
-        # "due" (report.due is never filtered) so the very next sweep retries
-        # them once their repo is healthy again.
-        repo_gated: list[tuple[str, str]] = []
-        for key, reason in eligible:
-            binding = bindings_by_key.get(key)
-            if binding is not None and binding.name in repo_blockers_by_repo:
-                decisions[key]["outcome"] = "repo_blocked"
+        # MTO-4: the candidate set, restricted to `filter_keys` when given -- every
+        # downstream step (due-check, throttle, claims, spawn ledger) only ever
+        # sees these keys, so an unrestricted key's due-ness never even gets
+        # computed, let alone spawned.
+        candidates = sorted(filter_keys, key=split_key) if filter_keys is not None else list_keys(home)
+        for key in candidates:
+            # RB-2: `snapshot.fold` is total by construction (never raises), but this
+            # is defense-in-depth against a future/unforeseen corruption -- ONE bad
+            # ticket must never abort the sweep for every other ticket on the board.
+            # Same pattern as `_run_hook`, keyed per-ticket instead of per-hook-name.
+            snap = _run_hook(f"fold:{key}", hook_errors, _load_and_refresh_snapshot, home, key)
+            if snap is None:
+                decisions[key] = {"outcome": "fold_error",
+                                   "reason": hook_errors.get(f"fold:{key}", "fold failed")}
                 continue
-            repo_gated.append((key, reason))
-        eligible = repo_gated
+            observed_seq_by_key[key] = snap.observed_seq
+            phase_by_key[key] = snap.phase
+            blocked_dep = _has_unmet_deps(home, key)
+            tier = spec_tier(home, key)
+            tier_by_key[key] = tier
+            res = is_due(
+                home, key, snap,
+                inbox_pending=inbox.has_pending(home, key),
+                current_spec_hash=spec_hash_on_disk(home, key),
+                now=now,
+                blocked_dep=blocked_dep,
+            )
+            if not res.due:
+                decisions[key] = {"outcome": "not_due", "reason": res.reason}
+                continue
+            if key in active:
+                claimed.append(key)        # per-key serialization: one reconciler per key
+                decisions[key] = {"outcome": "claimed", "reason": res.reason}
+                continue
+            due.append((key, res.reason))
+            decisions[key] = {"outcome": "due", "reason": res.reason}
 
-        # Per-repo max_spawns_per_sweep safety rail (MR-5): bounds one repo's
-        # blast radius on the sweep's spawn budget without touching the per-key
-        # min_spawn_interval floor, the max_spawn_attempts watchdog, or this
-        # fleet-wide rate gate -- all three still apply on top. None (default)
-        # is uncapped, i.e. today's behavior by construction.
-        per_repo_spawn_count: dict[str, int] = {}
-        capped: list[tuple[str, str]] = []
-        for key, reason in eligible:
-            binding = bindings_by_key.get(key)
-            cap = binding.max_spawns_per_sweep if binding is not None else None
-            if cap is not None:
-                name = binding.name
-                seen = per_repo_spawn_count.get(name, 0)
-                if seen >= cap:
-                    decisions[key]["outcome"] = "repo_capped"
-                    continue
-                per_repo_spawn_count[name] = seen + 1
-            capped.append((key, reason))
-        eligible = capped
+        # MTO-7: order the due set by (priority, key) -- a preference over WHICH due
+        # key is considered first, upstream of every existing brake (spawn floor,
+        # repo-blocked, max_spawns_per_sweep, max_concurrency slots, the runaway
+        # brake/rate-limit/spend-ceiling gates below). It decides nothing about
+        # whether a key is due, throttled, or spawnable -- only their relative order
+        # through those unchanged filters, so a throttled/capped/blocked high-priority
+        # ticket still can't starve the rest of the board. `spec_priority` reads fresh
+        # from disk per sweep (never the folded snapshot) with the same total-and-
+        # never-raises contract as `spec_tier`; `split_key` is the tiebreaker so
+        # ordering stays deterministic when priorities are equal (including the
+        # all-default-3 case, which reduces to today's plain lexical order).
+        due.sort(key=lambda kr: (spec_priority(home, kr[0]), split_key(kr[0])))
 
-        slots = max(0, cfg.max_concurrency - len(active))
-        to_spawn = eligible[:slots]
-        capacity_skipped = [k for k, _ in eligible[slots:]]
-        for key in capacity_skipped:
-            decisions[key]["outcome"] = "capacity_skipped"
+        # Per-repo preflight, scoped to the repos this sweep's due tickets (plus the
+        # implicit default) actually reference -- a 1-repo board still runs exactly
+        # one probe. `repo_blockers` is the flat union, kept for existing readers
+        # (heartbeat/_nudge/cmd_dispatch); `repo_blockers_by_repo` is the new
+        # per-repo mapping the spawn gate below keys off of.
+        preflight = repo_preflight_all(cfg, home, [k for k, _ in due])
+        repo_blockers_by_repo = preflight["blockers_by_repo"]
+        repo_blockers = preflight["blockers"]
+        bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in due}
 
-        # T-34/RF-5: the interlock -- config-only, computed once per sweep, not
-        # per-key, and read here (before the dry_run split) so the read-only
-        # preview reports the same refusal a real sweep would act on -- a
-        # dry_run that still showed "would_spawn" for an interlocked backend
-        # would make `make dry` lie about the one thing this ticket exists to
-        # guarantee. While it returns a reason, no key spawns into this
-        # backend at all until a bypass-resistant guard exists and is added
-        # to gates.BYPASS_RESISTANT_IMPLEMENTERS (see that function's
-        # docstring).
-        interlock_reason = backend_interlock_reason(cfg)
-
-        if dry_run:
-            # No _allow_spawn (it can call ops.fail -> Failed/RequeueScheduled
-            # events, exactly the bug this ticket exists to stop), no real
-            # sessions.spawn(), no ledger/attempts write. Every to_spawn key is
-            # reported as would-spawn (or would-ask, if interlocked); the next
-            # REAL sweep decides for itself.
-            spawned = []
-            for key, _reason in to_spawn:
-                if interlock_reason is not None:
-                    decisions[key]["outcome"] = "would_ask_backend_interlocked"
-                    continue
-                spawned.append(key)
-                decisions[key]["outcome"] = "would_spawn"
+        # Fleet-wide rate-limit gate. Above the human-signal bypass below: an inbox
+        # answer must not punch through a 429, since that spawn would be rejected too.
+        # While paused, nothing spawns and the spawn ledger is left untouched.
+        paused_until_ts = ratelimit.paused_until(home, now)
+        # GA-5: the runaway auto-brake, beside the rate-limit gate above. Only
+        # evaluated when the rate-limit gate didn't already decide this sweep spawns
+        # nothing, and never during dry_run (a strictly read-only preview must not
+        # arm a pause). Arming it also makes THIS sweep spawn nothing -- mirroring
+        # the rate-limit gate exactly -- while the next sweep short-circuits at G1.
+        runaway_armed = (None if paused_until_ts is not None or dry_run
+                         else _maybe_trip_runaway_brake(cfg, home, now, health))
+        # GA-11: the daily spend ceiling, a third reason to take the same
+        # spawn-nothing branch. spend.over_ceiling is a pure read, never folds --
+        # so it still applies even under dry_run, off whatever spend.probe last
+        # persisted (the ratelimit gate above is read the same way).
+        spend_ceiling_reason = (None if paused_until_ts is not None or runaway_armed is not None
+                                else spend.over_ceiling(cfg, now))
+        # RB-12: the detection-channel alarm, off the exact signals just computed above --
+        # never recomputed, so it can't drift from what actually gated this sweep. A write
+        # (persists derived/.alarm.json, may fire notify_command/webhooks), so it's skipped
+        # under dry_run like every other hook here, and never reached at all while a
+        # fleet-wide pause already short-circuited the whole sweep at G1 (top of dispatch()).
+        if not dry_run:
+            _run_hook("alarm", hook_errors, alarm.check, cfg, now, health,
+                       runaway_reason=runaway_armed, spend_ceiling_reason=spend_ceiling_reason)
+        if paused_until_ts is not None or runaway_armed is not None or spend_ceiling_reason is not None:
+            spawned: list[str] = []
+            throttled: list[str] = []
+            capacity_skipped: list[str] = []
         else:
-            attempts_path = _spawn_attempts_path(home)
-            attempts = store.read_json(attempts_path, {}) or {}
-            attempts_changed = False
-            # GA-17: memoized per (gh_account, token_env) for this whole sweep -- N
-            # keys bound to the same repo resolve the credential once, not once each.
-            credential_cache: dict = {}
-            # OC-2: memoized per runner name for this whole sweep -- N keys bound
-            # to the same non-claude runner probe its binary/daemon once, not once
-            # each ("Probe once per sweep, cached — never per key").
-            runner_probe_cache: dict = {}
-            # OC-4: {runner name: count}, seeded lazily (once per runner name, on
-            # first key that reaches the cap check below) from keys already in
-            # `active` this sweep, then incremented in-place as this sweep spawns
-            # more of that runner -- so two due opencode keys in the SAME sweep
-            # can't both slip through a cap computed from a snapshot taken before
-            # either spawned.
-            runner_active_counts: dict[str, int] = {}
+            # Spawn-rate floor. The claim file is the ONLY other per-key spawn memory and it
+            # is unlinked the moment the worker dies — so a session that exits in under a
+            # second (a rate-limit rejection, a crash) leaves nothing behind and the key is
+            # instantly re-spawnable. This ledger outlives the process and bounds the rate no
+            # matter how often the dispatcher itself is fired.
+            floor = spawn_floor(cfg)
+            ledger_path = _spawn_ledger_path(home)
+            ledger = store.read_json(ledger_path, {}) or {}
+            throttled = []
+            if floor:
+                eligible: list[tuple[str, str]] = []
+                for key, reason in due:
+                    entry = ledger.get(key)
+                    last = entry.get("last") if isinstance(entry, dict) else entry
+                    if (reason not in _UNTHROTTLED_REASONS
+                            and isinstance(last, (int, float)) and now - last < floor):
+                        throttled.append(key)
+                        decisions[key]["outcome"] = "throttled"
+                        continue
+                    eligible.append((key, reason))
+            else:
+                eligible = due
 
-            spawned = []
-            for key, _reason in to_spawn:
-                if interlock_reason is not None:
-                    # Ask (not fail): this is a config/backend gap, not a per-key
-                    # error, and asking parks the key in awaiting-human -- visibly,
-                    # once (idempotent qid) -- instead of respawning it into the same
-                    # refusal every sweep. No attempts-ledger spend either, same as
-                    # the credential_unresolvable branch below.
-                    decisions[key]["outcome"] = "backend_interlocked"
-                    from . import ops
-                    ops.ask(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
-                            actor="dispatcher")
-                    continue
+            # Per-key repo-blocked gate. NOT bypassable by an _UNTHROTTLED_REASONS
+            # human signal — a human answering a question is exactly the moment you
+            # must not launch an agent into a half-merged tree. Skipped keys stay
+            # "due" (report.due is never filtered) so the very next sweep retries
+            # them once their repo is healthy again.
+            repo_gated: list[tuple[str, str]] = []
+            for key, reason in eligible:
                 binding = bindings_by_key.get(key)
-                cred = resolve_credential(binding, credential_cache)
-                if not cred.ok:
-                    # Fail closed (GA-17): never spawn into a repo whose configured
-                    # credential can't be resolved, and never fall back to the
-                    # ambient `gh` account -- that's precisely the silent-404 mode
-                    # this ticket exists to remove. No attempts-ledger spend either;
-                    # this is a config problem, not a no-progress spawn.
-                    decisions[key]["outcome"] = "credential_unresolvable"
-                    from . import ops
-                    ops.fail(cfg, key,
-                            f"gh credential unresolvable for repo "
-                            f"'{binding.name if binding is not None else 'default'}': {cred.error}",
-                            actor="dispatcher")
+                if binding is not None and binding.name in repo_blockers_by_repo:
+                    decisions[key]["outcome"] = "repo_blocked"
                     continue
-                runner, runner_model = resolve_runner(cfg, key, phase_by_key.get(key, ""))
-                if runner not in _REGISTERED_RUNNERS:
-                    # RF-2: fail closed (never fall back to Claude, same rule GA-17
-                    # states verbatim for credentials) -- ask, don't fail, and spend
-                    # no attempts-ledger slot: this is a config problem for a human
-                    # to fix (register the runner, or fix the spec's `runner:` line),
-                    # not a no-progress spawn attempt.
-                    decisions[key]["outcome"] = "runner_unregistered"
-                    from . import ops
-                    ops.ask(cfg, key,
-                            f"spec names runner {runner!r}, which has no registered "
-                            f"SessionManager (registered: {sorted(_REGISTERED_RUNNERS)}) -- "
-                            "fix the spec's `runner:` line or register the runner",
-                            qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher")
-                    continue
-                if runner != "claude":
-                    # OC-2: fail-closed preflight for a registered non-claude
-                    # runner -- a fast-failing runner is the worst failure mode
-                    # here (a claim file is the ONLY other per-key spawn memory
-                    # and is unlinked the moment the worker dies, so a runner
-                    # that exits in under a second leaves nothing behind and the
-                    # key is instantly re-spawnable, the 21,731-spawn/~$845
-                    # shape). Binary missing/unexecutable or the ollama daemon
-                    # unreachable are TRANSIENT: a group-level skip modelled on
-                    # `repo_blocked` above -- no event, no attempts-ledger spend,
-                    # so a 30s daemon outage doesn't walk the board into
-                    # `degraded` one ticket at a time (AC1/AC2/AC5). Model
-                    # absent or not tool-capable is PERMANENT: `ops.ask`, same
-                    # shape as `runner_unregistered` just above -- a human must
-                    # fix the spec, so no attempts-ledger spend either (AC3/AC4).
-                    # Never falls through to `sessions.spawn` on any branch, so
-                    # a bad runner can never silently spawn under claude (AC6).
-                    # OC-3: the board-wide kill switch -- consulted before ANY of
-                    # OC-2's own preflight (before the binary probe, before the
-                    # daemon probe). A disabled runner is a config problem, not a
-                    # transient one, so it gets the same PERMANENT `ops.ask`
-                    # treatment as `runner_unregistered`/`runner_model_unavailable`
-                    # above: no attempts-ledger spend, a stable qid, parked in
-                    # awaiting-human for a human to flip `runner_enabled` or fix
-                    # the spec's `runner:` line.
-                    if runner not in cfg.runner_enabled:
-                        decisions[key]["outcome"] = "runner_disabled"
+                repo_gated.append((key, reason))
+            eligible = repo_gated
+
+            # Per-repo max_spawns_per_sweep safety rail (MR-5): bounds one repo's
+            # blast radius on the sweep's spawn budget without touching the per-key
+            # min_spawn_interval floor, the max_spawn_attempts watchdog, or this
+            # fleet-wide rate gate -- all three still apply on top. None (default)
+            # is uncapped, i.e. today's behavior by construction.
+            per_repo_spawn_count: dict[str, int] = {}
+            capped: list[tuple[str, str]] = []
+            for key, reason in eligible:
+                binding = bindings_by_key.get(key)
+                cap = binding.max_spawns_per_sweep if binding is not None else None
+                if cap is not None:
+                    name = binding.name
+                    seen = per_repo_spawn_count.get(name, 0)
+                    if seen >= cap:
+                        decisions[key]["outcome"] = "repo_capped"
+                        continue
+                    per_repo_spawn_count[name] = seen + 1
+                capped.append((key, reason))
+            eligible = capped
+
+            slots = max(0, cfg.max_concurrency - len(active))
+            to_spawn = eligible[:slots]
+            capacity_skipped = [k for k, _ in eligible[slots:]]
+            for key in capacity_skipped:
+                decisions[key]["outcome"] = "capacity_skipped"
+
+            # T-34/RF-5: the interlock -- config-only, computed once per sweep, not
+            # per-key, and read here (before the dry_run split) so the read-only
+            # preview reports the same refusal a real sweep would act on -- a
+            # dry_run that still showed "would_spawn" for an interlocked backend
+            # would make `make dry` lie about the one thing this ticket exists to
+            # guarantee. While it returns a reason, no key spawns into this
+            # backend at all until a bypass-resistant guard exists and is added
+            # to gates.BYPASS_RESISTANT_IMPLEMENTERS (see that function's
+            # docstring).
+            interlock_reason = backend_interlock_reason(cfg)
+
+            if dry_run:
+                # No _allow_spawn (it can call ops.fail -> Failed/RequeueScheduled
+                # events, exactly the bug this ticket exists to stop), no real
+                # sessions.spawn(), no ledger/attempts write. Every to_spawn key is
+                # reported as would-spawn (or would-ask, if interlocked); the next
+                # REAL sweep decides for itself.
+                spawned = []
+                for key, _reason in to_spawn:
+                    if interlock_reason is not None:
+                        decisions[key]["outcome"] = "would_ask_backend_interlocked"
+                        continue
+                    spawned.append(key)
+                    decisions[key]["outcome"] = "would_spawn"
+            else:
+                attempts_path = _spawn_attempts_path(home)
+                attempts = store.read_json(attempts_path, {}) or {}
+                attempts_changed = False
+                # GA-17: memoized per (gh_account, token_env) for this whole sweep -- N
+                # keys bound to the same repo resolve the credential once, not once each.
+                credential_cache: dict = {}
+                # OC-2: memoized per runner name for this whole sweep -- N keys bound
+                # to the same non-claude runner probe its binary/daemon once, not once
+                # each ("Probe once per sweep, cached — never per key").
+                runner_probe_cache: dict = {}
+                # OC-4: {runner name: count}, seeded lazily (once per runner name, on
+                # first key that reaches the cap check below) from keys already in
+                # `active` this sweep, then incremented in-place as this sweep spawns
+                # more of that runner -- so two due opencode keys in the SAME sweep
+                # can't both slip through a cap computed from a snapshot taken before
+                # either spawned.
+                runner_active_counts: dict[str, int] = {}
+
+                spawned = []
+                for key, _reason in to_spawn:
+                    if interlock_reason is not None:
+                        # Ask (not fail): this is a config/backend gap, not a per-key
+                        # error, and asking parks the key in awaiting-human -- visibly,
+                        # once (idempotent qid) -- instead of respawning it into the same
+                        # refusal every sweep. No attempts-ledger spend either, same as
+                        # the credential_unresolvable branch below.
+                        decisions[key]["outcome"] = "backend_interlocked"
                         from . import ops
-                        ops.ask(cfg, key,
-                                f"runner {runner!r} is not enabled on this board "
-                                f"(runner_enabled={sorted(cfg.runner_enabled)}) -- flip "
-                                "the board config's `runner_enabled` or fix the spec's "
-                                "`runner:` line",
-                                qid=f"runner-disabled-{key}-{runner}", actor="dispatcher")
-                        continue
-                    probe_fn = runner_probe or _default_runner_probe
-                    if runner not in runner_probe_cache:
-                        runner_probe_cache[runner] = probe_fn(runner)
-                    probed = runner_probe_cache[runner]
-                    if not probed.get("binary_ok"):
-                        decisions[key]["outcome"] = "runner_binary_missing"
-                        runner_blockers[runner] = f"{runner!r} binary not found on PATH"
-                        continue
-                    if probed.get("models") is None:
-                        decisions[key]["outcome"] = "runner_daemon_unreachable"
-                        runner_blockers[runner] = (f"ollama daemon unreachable: "
-                                                    f"{probed.get('daemon_reason')}")
-                        continue
-                    if not runner_model:
-                        verdict, vreason = "missing", "no runner_model configured"
-                    else:
-                        from .providers import ollama as ollama_mod
-                        verdict, vreason = ollama_mod.verdict_for_model(
-                            probed["models"], probed.get("daemon_reason"), runner_model)
-                    if verdict != "ok":
-                        decisions[key]["outcome"] = "runner_model_unavailable"
-                        from . import ops
-                        ops.ask(cfg, key,
-                                f"runner {runner!r} model {runner_model!r} unavailable: "
-                                f"{vreason} -- fix the spec's `runner_model:` line or "
-                                "install/pull the model",
-                                qid=f"runner-model-{key}-{runner}-{runner_model}",
+                        ops.ask(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
                                 actor="dispatcher")
                         continue
-                    # OC-4: per-runner concurrency cap -- still OC-2's own preflight
-                    # (before `_allow_spawn`, no attempts-ledger spend), because the
-                    # thing bounding a fast-failing runner's spawn RATE must never be
-                    # the no-progress circuit breaker (that would burn `max_failures`
-                    # attempts and dead-letter the ticket over what is, here, pure
-                    # capacity -- not a broken ticket). Group-level skip, modelled on
-                    # `repo_capped`/`repo_blocked`: no event, ticket stays due, retried
-                    # next sweep once a slot frees up.
-                    cap = _runner_concurrency_cap(cfg, runner)
-                    if cap is not None:
-                        if runner not in runner_active_counts:
-                            runner_active_counts[runner] = sum(
-                                1 for k in active
-                                if resolve_runner(cfg, k, phase_by_key.get(k, ""))[0] == runner)
-                        if runner_active_counts[runner] >= cap:
-                            decisions[key]["outcome"] = "runner_capped"
+                    binding = bindings_by_key.get(key)
+                    cred = resolve_credential(binding, credential_cache)
+                    if not cred.ok:
+                        # Fail closed (GA-17): never spawn into a repo whose configured
+                        # credential can't be resolved, and never fall back to the
+                        # ambient `gh` account -- that's precisely the silent-404 mode
+                        # this ticket exists to remove. No attempts-ledger spend either;
+                        # this is a config problem, not a no-progress spawn.
+                        decisions[key]["outcome"] = "credential_unresolvable"
+                        from . import ops
+                        ops.fail(cfg, key,
+                                f"gh credential unresolvable for repo "
+                                f"'{binding.name if binding is not None else 'default'}': {cred.error}",
+                                actor="dispatcher")
+                        continue
+                    runner, runner_model = resolve_runner(cfg, key, phase_by_key.get(key, ""))
+                    if runner not in _REGISTERED_RUNNERS:
+                        # RF-2: fail closed (never fall back to Claude, same rule GA-17
+                        # states verbatim for credentials) -- ask, don't fail, and spend
+                        # no attempts-ledger slot: this is a config problem for a human
+                        # to fix (register the runner, or fix the spec's `runner:` line),
+                        # not a no-progress spawn attempt.
+                        decisions[key]["outcome"] = "runner_unregistered"
+                        from . import ops
+                        ops.ask(cfg, key,
+                                f"spec names runner {runner!r}, which has no registered "
+                                f"SessionManager (registered: {sorted(_REGISTERED_RUNNERS)}) -- "
+                                "fix the spec's `runner:` line or register the runner",
+                                qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher")
+                        continue
+                    if runner != "claude":
+                        # OC-2: fail-closed preflight for a registered non-claude
+                        # runner -- a fast-failing runner is the worst failure mode
+                        # here (a claim file is the ONLY other per-key spawn memory
+                        # and is unlinked the moment the worker dies, so a runner
+                        # that exits in under a second leaves nothing behind and the
+                        # key is instantly re-spawnable, the 21,731-spawn/~$845
+                        # shape). Binary missing/unexecutable or the ollama daemon
+                        # unreachable are TRANSIENT: a group-level skip modelled on
+                        # `repo_blocked` above -- no event, no attempts-ledger spend,
+                        # so a 30s daemon outage doesn't walk the board into
+                        # `degraded` one ticket at a time (AC1/AC2/AC5). Model
+                        # absent or not tool-capable is PERMANENT: `ops.ask`, same
+                        # shape as `runner_unregistered` just above -- a human must
+                        # fix the spec, so no attempts-ledger spend either (AC3/AC4).
+                        # Never falls through to `sessions.spawn` on any branch, so
+                        # a bad runner can never silently spawn under claude (AC6).
+                        # OC-3: the board-wide kill switch -- consulted before ANY of
+                        # OC-2's own preflight (before the binary probe, before the
+                        # daemon probe). A disabled runner is a config problem, not a
+                        # transient one, so it gets the same PERMANENT `ops.ask`
+                        # treatment as `runner_unregistered`/`runner_model_unavailable`
+                        # above: no attempts-ledger spend, a stable qid, parked in
+                        # awaiting-human for a human to flip `runner_enabled` or fix
+                        # the spec's `runner:` line.
+                        if runner not in cfg.runner_enabled:
+                            decisions[key]["outcome"] = "runner_disabled"
+                            from . import ops
+                            ops.ask(cfg, key,
+                                    f"runner {runner!r} is not enabled on this board "
+                                    f"(runner_enabled={sorted(cfg.runner_enabled)}) -- flip "
+                                    "the board config's `runner_enabled` or fix the spec's "
+                                    "`runner:` line",
+                                    qid=f"runner-disabled-{key}-{runner}", actor="dispatcher")
                             continue
-                        runner_active_counts[runner] += 1
-                if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
+                        probe_fn = runner_probe or _default_runner_probe
+                        if runner not in runner_probe_cache:
+                            runner_probe_cache[runner] = probe_fn(runner)
+                        probed = runner_probe_cache[runner]
+                        if not probed.get("binary_ok"):
+                            decisions[key]["outcome"] = "runner_binary_missing"
+                            runner_blockers[runner] = f"{runner!r} binary not found on PATH"
+                            continue
+                        if probed.get("models") is None:
+                            decisions[key]["outcome"] = "runner_daemon_unreachable"
+                            runner_blockers[runner] = (f"ollama daemon unreachable: "
+                                                        f"{probed.get('daemon_reason')}")
+                            continue
+                        if not runner_model:
+                            verdict, vreason = "missing", "no runner_model configured"
+                        else:
+                            from .providers import ollama as ollama_mod
+                            verdict, vreason = ollama_mod.verdict_for_model(
+                                probed["models"], probed.get("daemon_reason"), runner_model)
+                        if verdict != "ok":
+                            decisions[key]["outcome"] = "runner_model_unavailable"
+                            from . import ops
+                            ops.ask(cfg, key,
+                                    f"runner {runner!r} model {runner_model!r} unavailable: "
+                                    f"{vreason} -- fix the spec's `runner_model:` line or "
+                                    "install/pull the model",
+                                    qid=f"runner-model-{key}-{runner}-{runner_model}",
+                                    actor="dispatcher")
+                            continue
+                        # OC-4: per-runner concurrency cap -- still OC-2's own preflight
+                        # (before `_allow_spawn`, no attempts-ledger spend), because the
+                        # thing bounding a fast-failing runner's spawn RATE must never be
+                        # the no-progress circuit breaker (that would burn `max_failures`
+                        # attempts and dead-letter the ticket over what is, here, pure
+                        # capacity -- not a broken ticket). Group-level skip, modelled on
+                        # `repo_capped`/`repo_blocked`: no event, ticket stays due, retried
+                        # next sweep once a slot frees up.
+                        cap = _runner_concurrency_cap(cfg, runner)
+                        if cap is not None:
+                            if runner not in runner_active_counts:
+                                runner_active_counts[runner] = sum(
+                                    1 for k in active
+                                    if resolve_runner(cfg, k, phase_by_key.get(k, ""))[0] == runner)
+                            if runner_active_counts[runner] >= cap:
+                                decisions[key]["outcome"] = "runner_capped"
+                                continue
+                            runner_active_counts[runner] += 1
+                    if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
+                        attempts_changed = True
+                        reaped.append(key)
+                        decisions[key]["outcome"] = "attempts_exhausted"
+                        continue
                     attempts_changed = True
-                    reaped.append(key)
-                    decisions[key]["outcome"] = "attempts_exhausted"
-                    continue
-                attempts_changed = True
-                cwd = _worker_cwd(cfg, key)
-                command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
-                model, effort = _resolve_model_effort(cfg, key)
-                disallowed_tools = tier_denylist(tier_by_key.get(key, 1)) + phase_denylist(
-                    phase_by_key.get(key, ""))
-                allowed_tools = resolved_allowed_tools(cfg, binding)
-                # RF-1: hand the resolved command and key to spawn() as separate
-                # arguments -- each backend composes its own invocation (the Claude
-                # CLI concatenates "<command> <key>" into one prompt string; a
-                # non-Claude backend, e.g. opencode, can take them as distinct
-                # `--command <name>` + argument instead of string-parsing a slash
-                # command back out of a prompt maestro pre-flattened).
-                sessions.spawn(key, command, cwd, model=model, effort=effort,
-                               disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
-                               env_overlay=cred.env, runner=runner, runner_model=runner_model)
-                spawned.append(key)
-                decisions[key]["outcome"] = "spawned"
-                weight = spawn_weight(cfg, phase_by_key.get(key, ""))
-                prev = ledger.get(key)
-                recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
-                recent.append([now, weight])
-                recent = [e for e in recent
-                          if (ts := _ledger_entry_ts(e)) is not None
-                          and now - ts <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
-                ledger[key] = {"last": now, "recent": recent}
+                    cwd = _worker_cwd(cfg, key)
+                    command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
+                    model, effort = _resolve_model_effort(cfg, key)
+                    disallowed_tools = tier_denylist(tier_by_key.get(key, 1)) + phase_denylist(
+                        phase_by_key.get(key, ""))
+                    allowed_tools = resolved_allowed_tools(cfg, binding)
+                    # RF-1: hand the resolved command and key to spawn() as separate
+                    # arguments -- each backend composes its own invocation (the Claude
+                    # CLI concatenates "<command> <key>" into one prompt string; a
+                    # non-Claude backend, e.g. opencode, can take them as distinct
+                    # `--command <name>` + argument instead of string-parsing a slash
+                    # command back out of a prompt maestro pre-flattened).
+                    sessions.spawn(key, command, cwd, model=model, effort=effort,
+                                   disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
+                                   env_overlay=cred.env, runner=runner, runner_model=runner_model)
+                    spawned.append(key)
+                    decisions[key]["outcome"] = "spawned"
+                    weight = spawn_weight(cfg, phase_by_key.get(key, ""))
+                    prev = ledger.get(key)
+                    recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
+                    recent.append([now, weight])
+                    recent = [e for e in recent
+                              if (ts := _ledger_entry_ts(e)) is not None
+                              and now - ts <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
+                    ledger[key] = {"last": now, "recent": recent}
 
-            if spawned:
-                # Keep the ledger from growing without bound as keys come and go.
-                known = set(list_keys(home))
-                store.write_json(ledger_path,
-                                 {k: v for k, v in ledger.items() if k in known})
-            if attempts_changed:
-                known = set(list_keys(home))
-                store.write_json(attempts_path,
-                                 {k: v for k, v in attempts.items() if k in known})
+                if spawned:
+                    # Keep the ledger from growing without bound as keys come and go.
+                    known = set(list_keys(home))
+                    store.write_json(ledger_path,
+                                     {k: v for k, v in ledger.items() if k in known})
+                if attempts_changed:
+                    known = set(list_keys(home))
+                    store.write_json(attempts_path,
+                                     {k: v for k, v in attempts.items() if k in known})
 
     # Heartbeat/decision-ledger writes are dashboards, not the source of truth --
     # both regenerate from state, so they're written either way. Under dry_run,
