@@ -350,10 +350,40 @@ def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
             "unknown": unknown}
 
 
+def _implementing_runner(cfg: Config, key: str) -> str:
+    """OC-1: the runner *key* would spawn under for its `implementing` phase,
+    regardless of *key*'s CURRENT phase -- `dispatcher.resolve_runner` only
+    ever returns non-``claude`` for that one phase, and that phase is exactly
+    what the reconcile-skill-location and permission-surface checks below
+    care about (a `researching`/`qa`/etc. ticket always spawns `claude`
+    either way, so its binding's Claude-side surface is what matters even if
+    its spec names a `runner:` override for later)."""
+    runner, _ = dispatcher.resolve_runner(cfg, key, Phase.IMPLEMENTING.value)
+    return runner
+
+
+def _runners_by_binding(cfg: Config, home: Path, keys) -> dict:
+    """{repo binding name: runner} for the two runner-aware checks below -- one
+    runner per binding, resolved from whichever key(s) reference it (see
+    `_implementing_runner`). A binding referenced by keys with different
+    runners keeps the FIRST seen (mirrors `referenced_repo_bindings`'s own
+    first-seen-wins rule) -- a real board binds one runner per repo in
+    practice; this doesn't attempt to represent a mixed-runner repo. A binding
+    with no referencing key (e.g. the implicit default on a board with no live
+    tickets yet) is absent here -- callers fall back to `cfg.runner`."""
+    from . import repos as repos_mod  # lazy: repos imports dispatcher at module load time
+
+    out: dict = {}
+    for key in keys:
+        binding = repos_mod.resolve(cfg, home, key)
+        out.setdefault(binding.name, _implementing_runner(cfg, key))
+    return out
+
+
 def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     """WARN (never blocks a spawn) when a repo bound by a current ticket is
-    missing the per-phase reconcile commands under ``.claude/commands/`` (T-22
-    split the single ``maestro-reconcile.md`` into
+    missing the per-phase reconcile commands from ITS runner's own command
+    location (T-22 split the single ``maestro-reconcile.md`` into
     ``maestro-reconcile-<phase>.md`` files for progressive disclosure) -- a
     reconciler spawned into that repo's worktree would hit an undefined slash
     command every turn.
@@ -363,19 +393,37 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     board doesn't own) puts the files in the user commands directory instead,
     which resolves from any cwd. Check there before flagging, via the same
     injectable ``skills_install.user_commands_dir`` the doctor tests override.
+
+    OC-1: runner-aware -- a binding whose referencing ticket(s) resolve to a
+    non-``claude`` runner (`_runners_by_binding`) is checked against
+    opencode's OWN command location (``.opencode/command/`` /
+    ``skills_install.opencode_user_commands_dir``) instead of
+    ``.claude/commands/`` -- checking the Claude-side location for an
+    opencode-runner ticket would be a check of the wrong file, not a
+    meaningful ok/warn.
     """
     home = cfg.home
-    bindings = dispatcher.referenced_repo_bindings(cfg, home, dispatcher.list_keys(home))
+    keys = dispatcher.list_keys(home)
+    bindings = dispatcher.referenced_repo_bindings(cfg, home, keys)
+    runners_by_binding = _runners_by_binding(cfg, home, keys)
     user_dir = skills_install.user_commands_dir(cfg)
     user_has_skill = any(user_dir.glob("maestro-reconcile-*.md"))
+    opencode_user_dir = skills_install.opencode_user_commands_dir(cfg)
+    opencode_user_has_skill = any(opencode_user_dir.glob("maestro-reconcile-*.md"))
     missing = []
     for name, binding in bindings.items():
         if not binding.path or not Path(binding.path).exists():
             continue
-        commands_dir = Path(binding.path) / ".claude" / "commands"
+        runner = runners_by_binding.get(name, cfg.runner)
+        if runner == "claude":
+            commands_dir = Path(binding.path) / ".claude" / "commands"
+            user_has = user_has_skill
+        else:
+            commands_dir = skills_install.opencode_repo_commands_dir(binding.path)
+            user_has = opencode_user_has_skill
         if any(commands_dir.glob("maestro-reconcile-*.md")):
             continue
-        if user_has_skill:
+        if user_has:
             continue
         missing.append(name)
     status = "warn" if missing else "ok"
@@ -500,20 +548,40 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
     Modeled byte-for-byte on ``check_missing_reconcile_skill`` above: iterate
     ``dispatcher.referenced_repo_bindings``, skip a binding whose path doesn't
     exist (fails open, same as that check and ``repo_preflight_all``).
+
+    OC-1: runner-aware -- this check only knows how to read Claude Code's own
+    settings.json permission layers. A binding whose referencing ticket(s)
+    resolve to a non-``claude`` runner (`_runners_by_binding`) enforces
+    permissions through a structurally different, runner-owned surface (e.g.
+    opencode's declarative ``permission.bash`` config, see
+    ``runner_permissions.opencode_bash_permissions``) that this check does not
+    read -- reporting ``ok`` for it would claim a verification that never
+    happened (the exact silent-``ok`` class QW-1 exists to prevent). Such a
+    binding is reported ``not_applicable_by_repo`` with a named reason instead
+    of being folded into ``missing_by_repo``/``ok``.
     """
     if cfg.permission_mode == "bypassPermissions":
         return {"name": "reconciler_permissions", "status": "ok",
                 "detail": "permissions bypassed for this home (permission_mode = bypassPermissions)",
-                "missing_by_repo": {}}
+                "missing_by_repo": {}, "not_applicable_by_repo": {}}
 
     home = cfg.home
-    bindings = dispatcher.referenced_repo_bindings(cfg, home, dispatcher.list_keys(home))
+    keys = dispatcher.list_keys(home)
+    bindings = dispatcher.referenced_repo_bindings(cfg, home, keys)
+    runners_by_binding = _runners_by_binding(cfg, home, keys)
     literal_required = [tool for tool in dispatcher.RECONCILER_REQUIRED_TOOLS
                          if tool != dispatcher.MAESTRO_COARSE_GRANT]
     missing_by_repo: dict[str, list[str]] = {}
     denied_by_repo: dict[str, list[str]] = {}
+    not_applicable_by_repo: dict[str, str] = {}
     for name, binding in bindings.items():
         if not binding.path or not Path(binding.path).exists():
+            continue
+        runner = runners_by_binding.get(name, cfg.runner)
+        if runner != "claude":
+            not_applicable_by_repo[name] = (
+                f"runner {runner!r} enforces permissions through its own config, "
+                "not Claude Code settings.json -- this check does not inspect it")
             continue
         repo_path = Path(binding.path)
         allow, deny = _repo_permission_surface(repo_path, cfg)
@@ -542,8 +610,11 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
                    "Bash(gh:*)) is still reported missing.")
     else:
         detail = "all referenced repos grant the full reconciler surface"
+    if not_applicable_by_repo:
+        detail += ("; not inspected (non-claude runner): "
+                   + ", ".join(f"{name} ({reason})" for name, reason in not_applicable_by_repo.items()))
     return {"name": "reconciler_permissions", "status": status, "detail": detail,
-            "missing_by_repo": missing_by_repo}
+            "missing_by_repo": missing_by_repo, "not_applicable_by_repo": not_applicable_by_repo}
 
 
 def check_spawn_floor(cfg: Config, now: float) -> dict:

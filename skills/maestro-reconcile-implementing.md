@@ -10,7 +10,7 @@ currently in the `implementing` phase. Take **exactly ONE** step toward its desi
 record it only through the `maestro` CLI, then exit. The dispatcher re-spawns you next sweep,
 routing to whichever phase file matches the ticket's phase at that time — this file only ever
 handles `implementing`. QA is a separate, independent phase (`qa`) the dispatcher spawns on its
-own next sweep once you hand off below — not an `Agent`-tool sub-agent you spawn here.
+own next sweep once you hand off below — never something this session spawns itself.
 
 ## Always: load state first
 Resolve this ticket's bound repo and the board-wide home as literals — this preamble runs no
@@ -143,8 +143,8 @@ Otherwise implement the spec's Acceptance criteria:
    .venv/bin/python -m pytest -q
    ```
    **Pytest's permission story, decided:** `.venv/bin/python` stays cwd-anchored above, never
-   absolutized to an absolute path rooted at `<WT>` — `.claude/settings.json` grants only the
-   *relative* prefix `Bash(.venv/bin/:*)`, which matches the command string solely while the
+   absolutized to an absolute path rooted at `<WT>` — the reconciler's own Bash permission grant
+   matches only the *relative* prefix `.venv/bin/`, which matches the command string solely while the
    shell's cwd is the worktree, and `dispatcher._worker_cwd`
    (`maestro/dispatcher.py:1369`) already runs this session with `<WT>` as cwd — so the relative
    form is both correct and the only one that avoids a permission prompt. Do not "fix" this back

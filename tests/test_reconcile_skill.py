@@ -307,16 +307,32 @@ def test_implementing_venv_bootstrap_is_gone_pytest_invocation_stays():
 def test_implementing_pytest_permission_story_is_decided_and_relative():
     """The pytest-permission AC (GA-12): the file states in prose which option was
     chosen -- (a), cwd-anchored -- and, since (a) was chosen, no absolute `.venv/bin/`
-    path appears anywhere in the file: `Bash(.venv/bin/:*)` in `.claude/settings.json`
-    is a RELATIVE-prefix grant that only matches while the shell's cwd is the
-    worktree."""
+    path appears anywhere in the file: a RELATIVE-prefix `.venv/bin/` grant only
+    matches while the shell's cwd is the worktree. OC-1: phrased runner-agnostically
+    (no literal `.claude/settings.json`/`Bash(...)` allowedTools syntax -- that's
+    Claude Code-specific and this file also runs under a non-claude runner)."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         assert "cwd-anchored" in text
-        assert "Bash(.venv/bin/:*)" in text
+        assert "relative* prefix `.venv/bin/`" in text
         assert "_worker_cwd" in text
+        assert ".claude/settings.json" not in text
         assert not re.search(r"\S/\.venv/bin/", text), \
             f"{path}: an absolute .venv/bin/ path snuck back in"
+
+
+def test_implementing_skill_has_no_agent_tool_instruction_after_rf7():
+    """OC-1 AC4: RF-7 moved the adversarial QA loop out of `implementing` and
+    into its own independent `qa` phase (T-36), so `implementing` no longer
+    needs the `Agent` tool at all -- no reference to it should remain in
+    either copy (both the '`Agent`-tool sub-agent' aside and, more generally,
+    any bare `Agent` tool mention), and the two copies stay byte-identical."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "Agent" not in text, f"{path}: still references the Agent tool"
+    commands_body = _strip_frontmatter(_commands_path("implementing").read_text())
+    skills_body = _strip_frontmatter(_skills_path("implementing").read_text())
+    assert commands_body == skills_body
 
 
 def _maestro_verbs_named(text: str) -> set[str]:

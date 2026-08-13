@@ -923,6 +923,120 @@ def test_user_settings_path_injectable_never_reads_real_home(tmp_path, monkeypat
     assert health.user_settings_path(cfg) == env_path
 
 
+# --- OC-1: both checks become runner-aware instead of silently checking the
+# wrong (Claude-only) surface for a non-claude-runner ticket -------------------
+
+from maestro import event_log as event_log_mod  # noqa: E402
+from maestro import snapshot as snap_mod  # noqa: E402
+
+
+def _seed_with_runner(home, key, *, phase=Phase.IMPLEMENTING, runner=None, tier=0):
+    extra = f"runner: {runner}\n" if runner else ""
+    spec = f"# {key}\napproval_tier: {tier}\n{extra}dependsOn: []\n"
+    store.atomic_write(store.spec_path(home, key), spec)
+    event_log_mod.append(home, key, "TicketCreated",
+                          {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    event_log_mod.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def test_missing_reconcile_skill_checks_opencode_location_for_non_claude_runner(home, tmp_path, monkeypatch):
+    """AC2: a repo bound by an opencode-runner ticket is checked against
+    opencode's OWN command location, not `.claude/commands/` -- warn while
+    absent, ok once present."""
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(tmp_path / "no-opencode-user-commands"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed_with_runner(home, "T-1", runner="opencode")
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "warn"
+    assert "default" in check["missing"]
+
+    (repo / ".opencode" / "command").mkdir(parents=True)
+    (repo / ".opencode" / "command" / "maestro-reconcile-implementing.md").write_text("# stub\n")
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "ok"
+    assert check["missing"] == []
+
+
+def test_missing_reconcile_skill_claude_side_install_alone_does_not_satisfy_opencode_runner(
+        home, tmp_path, monkeypatch):
+    """Checking `.claude/commands/` for an opencode-runner ticket would be a
+    check of the wrong file -- a Claude-side install alone must NOT read ok."""
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(tmp_path / "no-opencode-user-commands"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".claude" / "commands").mkdir(parents=True)
+    (repo / ".claude" / "commands" / "maestro-reconcile-implementing.md").write_text("# stub\n")
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed_with_runner(home, "T-1", runner="opencode")
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "warn"
+    assert "default" in check["missing"]
+
+
+def test_doctor_cli_missing_reconcile_skill_warn_then_ok_for_opencode_runner_ticket(
+        home, tmp_path, capsys, monkeypatch):
+    """Same AC2 contract, proven over the real `maestro doctor --json` CLI."""
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(tmp_path / "no-opencode-user-commands"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (home / "config.toml").write_text(
+        f'[maestro]\nrepo_path = "{repo}"\nmin_spawn_interval = 0\n')
+    _seed_with_runner(home, "T-1", runner="opencode")
+
+    assert cli.main(["--home", str(home), "doctor"]) == 0
+    warn_check = next(c for c in json.loads(capsys.readouterr().out)["checks"]
+                       if c["name"] == "missing_reconcile_skill")
+    assert warn_check["status"] == "warn"
+
+    (repo / ".opencode" / "command").mkdir(parents=True)
+    (repo / ".opencode" / "command" / "maestro-reconcile-implementing.md").write_text("# stub\n")
+
+    assert cli.main(["--home", str(home), "doctor"]) == 0
+    ok_check = next(c for c in json.loads(capsys.readouterr().out)["checks"]
+                     if c["name"] == "missing_reconcile_skill")
+    assert ok_check["status"] == "ok"
+
+
+def test_reconciler_permissions_not_applicable_for_non_claude_runner(home, tmp_path, monkeypatch):
+    """AC3: a repo bound by a non-claude-runner ticket is reported
+    `not_applicable_by_repo` with a reason naming the runner -- this check only
+    knows how to read Claude Code's settings.json layers, so it must never fold
+    a runner it did not inspect into a bare ok/warn."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed_with_runner(home, "T-1", runner="opencode")
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["missing_by_repo"] == {}          # nothing CLAUDE-scoped was found missing
+    assert "default" in check["not_applicable_by_repo"]
+    assert "opencode" in check["not_applicable_by_repo"]["default"]
+
+
+def test_reconciler_permissions_claude_runner_ticket_unaffected_by_opencode_check(home, tmp_path, monkeypatch):
+    """A claude-runner ticket's binding still gets the full Claude Code
+    settings.json inspection -- OC-1 doesn't weaken the existing check."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed_with_runner(home, "T-1", runner=None)   # default runner: claude
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "default" in check["missing_by_repo"]
+    assert check["not_applicable_by_repo"] == {}
+
+
 # --- RB-8: an unset daily_spend_ceiling_usd is a visible doctor warning -------
 
 
