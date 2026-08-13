@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json as _json
 
-from ..steplog import classify_result, format_resets_at
+from ..steplog import (OC_STEP_FINISH_TYPES, OC_STEP_START_TYPES,
+                        OC_TEXT_TYPES, OC_TOOL_USE_TYPES, classify_result,
+                        format_resets_at, oc_part, oc_summary)
 
 _EM = "—"
 _TAIL_N = 20
@@ -110,3 +112,29 @@ def render_log_line(obj: dict) -> list[str]:
         resets_at = format_resets_at(info.get("resetsAt"))
         return [f"[yellow]── rate_limit:{kind} status={status} resetsAt={resets_at}[/yellow]"]
     return []
+
+
+def render_opencode_log_line(obj: dict) -> list[str]:
+    """Convert one opencode.jsonl record (OC-5) to Rich markup lines for the logs
+    pane -- the tool_use/text vocabulary mirrors ``render_log_line`` above but
+    keyed on opencode's own type/part shape (``steplog.oc_part``). Falls back to
+    any bare ``text`` field for a record outside the verified vocabulary (RF-3:
+    an unrecognized opencode shape must still render SOMETHING, never blank)."""
+    type_, part = oc_part(obj)
+    if type_ in OC_TEXT_TYPES:
+        text = (part.get("text") or "").rstrip()
+        return [_esc_log(text)] if text else []
+    if type_ in OC_TOOL_USE_TYPES:
+        name = part.get("tool", "?")
+        summary = _esc_log(oc_summary(name, part))
+        return [f"[dim bold]▶ {name}[/dim bold] [dim]{summary}[/dim]"]
+    if type_ in OC_STEP_FINISH_TYPES:
+        reason = part.get("reason")
+        if not reason:
+            return []
+        color = "green" if reason != "error" else "red"
+        return [f"[{color}]── {_esc_log(reason)}[/{color}]"]
+    if type_ in OC_STEP_START_TYPES:
+        return []
+    text = obj.get("text")
+    return [_esc_log(text)] if isinstance(text, str) and text else []

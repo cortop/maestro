@@ -34,6 +34,18 @@ def _write_session(home, key, epoch, outcome):
     return path
 
 
+def _write_opencode_session(home, key, epoch, reason):
+    """An opencode-runner session log (OC-5's own verified vocabulary) -- a
+    different provider than the Anthropic one this check probes."""
+    session_id = f"reconcile-{key}-{epoch:.6f}"
+    path = store.session_opencode_path(home, key, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"type": "step_start", "part": {}},
+             {"type": "step_finish", "part": {"reason": reason, "cost": 0}}]
+    path.write_text("\n".join(json.dumps(o) for o in lines) + "\n", encoding="utf-8")
+    return path
+
+
 def _boom_probe():
     raise AssertionError("must not call the probe when the primary signal hasn't tripped")
 
@@ -114,6 +126,19 @@ def test_streak_is_computed_fleet_wide_across_tickets(cfg, home):
     result = health.check_provider_availability(cfg, 1000, probe=lambda: (True, "ok"))
     assert result["error_streak"] == 3
     assert result["state"] == "erroring"
+
+
+def test_opencode_runner_errors_never_count_toward_the_anthropic_streak(cfg, home):
+    """OC-5: now that `steplog.session_outcome` can classify an opencode log's
+    own success/error (it used to always report 'unknown' here), this check
+    must still never fold it in -- it probes api.anthropic.com, not ollama."""
+    seed_ticket(home, "T-1", "x", phase="implementing")
+    _write_opencode_session(home, "T-1", 100.0, "error")
+    _write_opencode_session(home, "T-1", 200.0, "error")
+    _write_opencode_session(home, "T-1", 300.0, "error")
+    result = health.check_provider_availability(cfg, 1000, probe=_boom_probe)
+    assert result["status"] == "ok"
+    assert result["error_streak"] == 0
 
 
 def test_a_running_session_in_the_window_is_skipped_not_counted(cfg, home):

@@ -951,6 +951,43 @@ def _print_assistant_message(obj: dict) -> None:
             print(f"[tool_use:{block['name']}] {inp_preview}")
 
 
+def _print_opencode_part(obj: dict) -> None:
+    """Render one opencode.jsonl record (OC-5) human-readably. Falls back to
+    printing any bare ``text`` field for a record outside the verified
+    vocabulary (RF-3: an opencode log's grammar the reader doesn't recognize
+    must still show SOMETHING, never a blank render)."""
+    t, part = steplog.oc_part(obj)
+    if t in steplog.OC_TEXT_TYPES:
+        text = part.get("text")
+        if text:
+            print(text)
+    elif t in steplog.OC_TOOL_USE_TYPES:
+        tool_name = part.get("tool", "?")
+        print(f"[tool_use:{tool_name}] {steplog.oc_summary(tool_name, part)}")
+    elif t in steplog.OC_STEP_FINISH_TYPES:
+        reason = part.get("reason")
+        if reason:
+            print(f"[step_finish] reason={reason}")
+    elif t not in steplog.OC_STEP_START_TYPES:
+        text = obj.get("text")
+        if isinstance(text, str) and text:
+            print(text)
+
+
+def _render_opencode_jsonl(path: Path) -> None:
+    """Print a human-readable view of an opencode.jsonl session log (OC-5)."""
+    with path.open(encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            _print_opencode_part(obj)
+
+
 def cmd_logs(args) -> int:
     cfg = _cfg(args)
     key = getattr(args, "key_flag", None) or args.key
@@ -977,6 +1014,7 @@ def cmd_logs(args) -> int:
 
     log_path = Path(sess["path"])
     is_stream = sess["format"] == "stream-json"
+    is_opencode = sess["format"] == "opencode"
 
     if args.follow:
         # Tail the file; stop when the session process is gone OR its identity is
@@ -991,7 +1029,7 @@ def cmd_logs(args) -> int:
                 chunk = f.read(4096)
                 if chunk:
                     buf += chunk
-                    if is_stream and not args.json:
+                    if (is_stream or is_opencode) and not args.json:
                         # Emit complete lines only, rendered human-readable
                         while "\n" in buf:
                             line, buf = buf.split("\n", 1)
@@ -1002,7 +1040,9 @@ def cmd_logs(args) -> int:
                                 obj = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            if obj.get("type") == "assistant":
+                            if is_opencode:
+                                _print_opencode_part(obj)
+                            elif obj.get("type") == "assistant":
                                 _print_assistant_message(obj)
                             elif obj.get("type") == "rate_limit_event":
                                 print(_render_rate_limit_line(obj))
@@ -1021,9 +1061,11 @@ def cmd_logs(args) -> int:
                     time.sleep(0.25)
         return 0
 
-    if args.json or not is_stream:
+    if args.json or not (is_stream or is_opencode):
         with log_path.open(encoding="utf-8", errors="replace") as f:
             sys.stdout.write(f.read())
+    elif is_opencode:
+        _render_opencode_jsonl(log_path)
     else:
         _render_stream_jsonl(log_path)
     return 0
