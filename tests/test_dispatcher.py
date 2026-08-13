@@ -780,7 +780,48 @@ def test_seed_spec_no_extra_fields_by_default(home, cfg):
     assert "kind:" not in spec_text
     assert "model:" not in spec_text
     assert "effort:" not in spec_text
+    assert "runner:" not in spec_text
+    assert "runner_model:" not in spec_text
     assert "dependsOn: []" in spec_text
+
+
+# --- UX-1: _seed_spec with runner/runner_model --------------------------------
+
+def test_seed_spec_includes_runner_and_runner_model(home, cfg):
+    inbox.append_new(home, "Non-claude task", key="R-2", args={
+        "approval_tier": 1, "priority": 2,
+        "runner": "opencode", "runner_model": "qwen3-coder:30b",
+    })
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    spec_text = store.spec_path(home, "R-2").read_text()
+    assert "runner: opencode" in spec_text
+    assert "runner_model: qwen3-coder:30b" in spec_text
+
+    from maestro.gates import parse_spec_overrides
+    overrides = parse_spec_overrides(spec_text)
+    assert overrides["runner"] == "opencode"
+    assert overrides["runner_model"] == "qwen3-coder:30b"
+
+
+def test_seed_spec_with_neither_runner_field_matches_golden_fixture():
+    """AC2: `_seed_spec` with neither field set returns a string byte-identical
+    to the pre-runner-field baseline -- the same shape it always rendered."""
+    text = disp._seed_spec("T-91", "Plain ticket", {"approval_tier": 1, "priority": 3})
+    assert text == (
+        "# T-91: Plain ticket\n"
+        "\n"
+        "<!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->\n"
+        "\n"
+        "approval_tier: 1\n"
+        "priority: 3\n"
+        "dependsOn: []\n"
+        "\n"
+        "## Intent\n"
+        "(describe what done looks like)\n"
+        "\n"
+        "## Acceptance criteria\n"
+        "- \n"
+    )
 
 
 def test_mint_tolerates_explicit_null_fields(home, cfg):
@@ -843,7 +884,8 @@ def test_run_scheduled_tasks_mint_args_pass_optional_fields_when_set(home, cfg):
     the [[scheduled]] block sets them, and the four task-only fields (name/every/
     enabled/prefix) never leak into the ticket args."""
     _sched_cfg(cfg, repo="alpha", model="sonnet", effort="high",
-              notes="Skip weekends.", depends_on=["T-1"])
+              notes="Skip weekends.", depends_on=["T-1"],
+              runner="opencode", runner_model="qwen3-coder:30b")
     disp.run_scheduled_tasks(cfg, now=1_000_000)
     args = inbox.pending_new(home)[0][1]["args"]
     assert args["repo"] == "alpha"
@@ -851,6 +893,8 @@ def test_run_scheduled_tasks_mint_args_pass_optional_fields_when_set(home, cfg):
     assert args["effort"] == "high"
     assert args["notes"] == "Skip weekends."
     assert args["depends_on"] == ["T-1"]
+    assert args["runner"] == "opencode"
+    assert args["runner_model"] == "qwen3-coder:30b"
     for leaked in ("name", "every", "enabled", "prefix"):
         assert leaked not in args
 
@@ -858,10 +902,10 @@ def test_run_scheduled_tasks_mint_args_pass_optional_fields_when_set(home, cfg):
 def test_run_scheduled_tasks_mint_args_omit_unset_optional_fields(home, cfg):
     """The complement of the above: when a [[scheduled]] block doesn't set an
     optional field, the mint args omit the key entirely rather than passing None."""
-    _sched_cfg(cfg)  # no repo/model/effort/notes/depends_on
+    _sched_cfg(cfg)  # no repo/model/effort/notes/depends_on/runner/runner_model
     disp.run_scheduled_tasks(cfg, now=1_000_000)
     args = inbox.pending_new(home)[0][1]["args"]
-    for field in ("repo", "model", "effort", "notes", "depends_on"):
+    for field in ("repo", "model", "effort", "notes", "depends_on", "runner", "runner_model"):
         assert field not in args
 
 

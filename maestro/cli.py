@@ -212,6 +212,29 @@ def _stdin_intent() -> str | None:
     return "\n".join(lines).strip() or None
 
 
+def _warn_runner_model(runner, runner_model) -> None:
+    """UX-1: WARN-only, never gates creation -- prints when a non-claude
+    `runner_model` is absent locally / not tool-capable, or the ollama daemon
+    itself is unreachable. Mirrors the exact verdict
+    `health.check_ollama_models` computes board-wide, just run here so the
+    human sees it immediately at `create`/`runner` time instead of waiting
+    for the next `maestro doctor`. A model released after this code was
+    written must still be accepted with no code change -- this only ever
+    prints to stderr, it never changes the caller's exit code."""
+    if not runner or runner == "claude" or not runner_model:
+        return
+    from .providers import ollama as ollama_mod
+    models, reason = ollama_mod.fetch_models()
+    verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+    if verdict == "unreachable":
+        print(f"warning: ollama daemon unreachable ({vreason}) -- "
+              "runner_model not validated", file=sys.stderr)
+    elif verdict == "missing":
+        suggestions = ollama_mod.model_names(models, tool_capable_only=True)
+        print(f"warning: {vreason}; installed tool-capable models: {suggestions or '(none)'}",
+              file=sys.stderr)
+
+
 def cmd_create(args) -> int:
     cfg = _cfg(args)
     title_flag = getattr(args, "title_flag", None)
@@ -261,6 +284,13 @@ def cmd_create(args) -> int:
         except (EOFError, KeyboardInterrupt):
             print("\nAborted.")
             return 0
+        # UX-1 AC3: the guided flow deliberately stays title/tier/priority/intent
+        # only -- it already silently drops kind/model/effort/repo/notes/depends_on
+        # today, and stacking on more "blank = default" prompts would trade away
+        # the guided flow's whole point (a fast, low-friction path) for parity the
+        # flag form already gives you. Set the runner via `maestro runner <KEY>`
+        # (before implementation starts) or `--runner`/`--runner-model` on the
+        # flag form instead.
         a: dict = {"approval_tier": tier, "priority": priority}
         if intent:
             a["intent"] = intent
@@ -292,9 +322,18 @@ def cmd_create(args) -> int:
     depends_on = getattr(args, "depends_on", None) or []
     if depends_on:
         a["depends_on"] = depends_on
+    runner = getattr(args, "runner", None)
+    runner_model = getattr(args, "runner_model", None)
+    if runner:
+        a["runner"] = runner
+    if runner_model:
+        a["runner_model"] = runner_model
     inbox.append_new(cfg.home, title, key=args.key, args=a,
                      prefix=getattr(args, "prefix", None))
     _print(f"queued create: {args.key or '(auto-key)'} — {title}")
+    # UX-1 AC4: never gates creation on a model being locally installed/reachable
+    # -- WARN only, after the ticket is already queued.
+    _warn_runner_model(runner, runner_model)
     if not args.no_nudge and cfg.nudge_on_human_input:
         _nudge(cfg)
     return 0
@@ -435,6 +474,24 @@ def cmd_runners(args) -> int:
     return 0
 
 
+def cmd_runner(args) -> int:
+    """[human] Change one ticket's `runner:`/`runner_model:` spec front-matter
+    -- before implementation begins (UX-1). This is *the human* acting through
+    deterministic Python, not an agent rewriting a human-owned file: unlike
+    `create` (granted to agents for `awaiting-human`'s ticket-minting flow),
+    this verb is never added to `_AGENT_TOOL_VERBS`."""
+    cfg = _cfg(args)
+    try:
+        result = ops.set_runner(cfg, args.key, runner=args.runner, runner_model=args.runner_model)
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if result.get("warning"):
+        print(f"warning: {result['warning']}", file=sys.stderr)
+    _print(result)
+    return 0
+
+
 # --- dispatcher / projection (launchd) --------------------------------------
 def _parse_key_filter(raw: list[str] | None) -> list[str] | None:
     """``--key`` is repeatable (``--key A --key B``) and each occurrence may
@@ -501,7 +558,7 @@ def cmd_ratelimit(args) -> int:
 
 _SCHEDULE_TASK_FLAGS = ("prompt", "every", "cron", "tz", "kind", "approval_tier", "priority",
                         "prefix", "title", "repo", "model", "effort", "notes",
-                        "depends_on", "enabled")
+                        "depends_on", "runner", "runner_model", "enabled")
 
 
 def cmd_schedule(args) -> int:
@@ -530,7 +587,8 @@ def cmd_schedule(args) -> int:
                     "approval_tier": args.approval_tier if args.approval_tier is not None else 1,
                     "priority": args.priority if args.priority is not None else 3,
                     "enabled": args.enabled if args.enabled is not None else True}
-            for field in ("prefix", "title", "repo", "model", "effort", "notes", "depends_on"):
+            for field in ("prefix", "title", "repo", "model", "effort", "notes", "depends_on",
+                          "runner", "runner_model"):
                 task[field] = getattr(args, field)
             result = ops.schedule_add(cfg, task)
         elif args.action == "edit":
@@ -1085,6 +1143,11 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="KEY", help="ticket keys this ticket depends on")
     sp.add_argument("--repo", default=None,
                     help="[repos.<name>] binding for this ticket's reconciler")
+    sp.add_argument("--runner", default=None,
+                    help="non-default runner for this ticket's `implementing` step "
+                         "(e.g. opencode); requires board config `runner_enabled` to admit it")
+    sp.add_argument("--runner-model", dest="runner_model", default=None,
+                    help="model override passed to --runner (never validated at create time)")
     sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
                     help="skip in-process dispatch nudge after queuing")
 
@@ -1118,6 +1181,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
     add("runners", cmd_runners, "which local models can drive an agent (claude + tool-capable ollama)")
+    sp = add("runner", cmd_runner,
+             "[human] change a ticket's runner/runner-model before implementation begins")
+    sp.add_argument("key")
+    sp.add_argument("--runner", default=None, help="non-default runner for the `implementing` step")
+    sp.add_argument("--runner-model", dest="runner_model", default=None,
+                    help="model override passed to --runner")
     sp = add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
     sp.add_argument("--strict", action="store_true",
                     help="exit 1 when any check is not ok (default: only the runaway check gates exit code)")
@@ -1177,6 +1246,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--effort", default=None)
     sp.add_argument("--notes", default=None)
     sp.add_argument("--depends-on", dest="depends_on", nargs="+", default=None, metavar="KEY")
+    sp.add_argument("--runner", default=None, help="non-default runner for the minted ticket")
+    sp.add_argument("--runner-model", dest="runner_model", default=None,
+                    help="model override passed to --runner")
     sp.add_argument("--enabled", dest="enabled", action="store_true", default=None)
     sp.add_argument("--disabled", dest="enabled", action="store_false", default=None)
 

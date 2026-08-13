@@ -608,6 +608,8 @@ implementer = "claude_skill"
 # effort = "high"                  # optional; passed through to the minted ticket
 # notes = "Skip weekends."         # optional; passed through to the minted ticket's ## Notes
 # depends_on = ["T-1"]             # optional; passed through to the minted ticket's dependsOn
+# runner = "opencode"              # optional; passed through to the minted ticket's runner
+# runner_model = "qwen3-coder:30b" # optional; passed through with `runner`
 """
 
 # Field order used when serializing a task back to config.toml (see write_scheduled).

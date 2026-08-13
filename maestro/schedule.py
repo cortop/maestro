@@ -52,7 +52,7 @@ _EVERY_RE = re.compile(r"^(\d+)([smhd])?$")
 # with ``config._SCHEDULED_FIELDS`` so the mint-args allowlist and the config.toml
 # round-trip allowlist can't drift apart. ``cron``/``tz`` are NOT here -- they
 # configure the cadence itself, they never flow into the minted ticket.
-OPTIONAL_MINT_FIELDS = ("repo", "model", "effort", "notes", "depends_on")
+OPTIONAL_MINT_FIELDS = ("repo", "model", "effort", "notes", "depends_on", "runner", "runner_model")
 
 # Bound on how many days a cron search walks before giving up -- generous for
 # any realistic daily/weekly/monthly cadence (a bit over a year), but a search

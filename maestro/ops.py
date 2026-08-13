@@ -19,6 +19,7 @@ from . import backup
 from . import events as E
 from . import context as context_mod
 from . import config as config_mod
+from . import gates
 from . import event_log, inbox, repos as repos_mod, schedule as schedule_mod, snapshot as snap_mod, store
 from .config import Config
 from .dispatcher import spec_hash_on_disk
@@ -911,6 +912,98 @@ def approve(cfg: Config, key: str, *, actor: str = "human") -> None:
     repeat calls are a no-op). Once appended, `dispatcher.is_due` finds
     `snap.approved` and the ticket is due on the very next sweep."""
     _append(cfg, key, E.APPROVED, {}, actor=actor, sid=f"approve-{key}")
+
+
+# UX-1: same loose-frontmatter grammar `gates.parse_spec_overrides` scans
+# (stop at the first `##` header) -- kept as its own copy here, matching
+# `health._spec_runner_fields`'s precedent, rather than importing a private
+# name out of `gates`.
+_FRONTMATTER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
+
+
+def _set_frontmatter_fields(spec_text: str, fields: dict) -> str:
+    """Insert or replace each ``key: value`` line in *spec_text*'s loose
+    frontmatter block (everything before the first ``##`` header), preserving
+    every other byte untouched -- an existing field's line is rewritten in
+    place (same position, same trailing newline style); a field not already
+    present is inserted right before the first ``##`` header (or at the end
+    of the file, if there is none). Never touches a line at or past the first
+    ``##`` header, so a body mention of e.g. ``runner: foo`` in prose is
+    immune."""
+    lines = spec_text.splitlines(keepends=True)
+    remaining = dict(fields)
+    out: list[str] = []
+    insert_at = None
+    for line in lines:
+        stripped = line.rstrip("\n")
+        if insert_at is None and stripped.startswith("##"):
+            insert_at = len(out)
+        m = _FRONTMATTER_FIELD_RE.match(stripped) if insert_at is None else None
+        if m and m.group(1) in remaining:
+            newline = "\n" if line.endswith("\n") else ""
+            out.append(f"{m.group(1)}: {remaining.pop(m.group(1))}{newline}")
+        else:
+            out.append(line)
+    if insert_at is None:
+        insert_at = len(out)
+    if remaining:
+        out[insert_at:insert_at] = [f"{k}: {v}\n" for k, v in remaining.items()]
+    return "".join(out)
+
+
+def set_runner(cfg: Config, key: str, *, runner: str | None = None,
+               runner_model: str | None = None) -> dict:
+    """[human] Rewrite *key*'s spec `runner:`/`runner_model:` front-matter
+    line(s) surgically (`_set_frontmatter_fields`) -- the write-through this
+    ticket's `gates.runner_editable`/`ops.schedule_*`'s `_validate_cadence`
+    precedent both point at, so the CLI and (later) the TUI share one
+    validating function.
+
+    Raises `store.MaestroError` -- never a bare exception -- if neither field
+    is given, no spec.md exists, or `gates.runner_editable` says *key* has
+    already moved past the point a runner choice can still take effect (a
+    running session's spawn args were frozen at launch; a late edit would
+    silently apply only to the *next* session, which is worse than
+    refusing). Appends NO event: the spec hash on disk no longer matching the
+    snapshot's own recorded hash is what wakes the ticket next sweep
+    (`dispatcher.is_due`'s "spec-changed" branch) -- the same mechanism any
+    other direct human spec edit already relies on.
+
+    Never gates on the model being locally installed/reachable -- WARNs only,
+    the same three-valued verdict `health.check_ollama_models` computes,
+    just run here so the human sees it immediately rather than waiting for
+    the next `maestro doctor`. Returns
+    ``{"runner", "runner_model", "warning": str | None}``.
+    """
+    if runner is None and runner_model is None:
+        raise store.MaestroError(
+            f"runner {key}: at least one of --runner/--runner-model is required")
+    spec_file = store.spec_path(cfg.home, key)
+    if not spec_file.exists():
+        raise store.MaestroError(f"{key}: no spec.md to set runner on")
+    snap = snap_mod.load(cfg.home, key)
+    if not gates.runner_editable(cfg.home, key, snap):
+        raise store.MaestroError(
+            f"runner {key}: no longer editable -- implementation has already begun "
+            "(past ready/awaiting-human/triaging, a worktree exists, or a live claim "
+            "holds it); a running session's spawn args were already frozen at launch")
+
+    updates = {f: v for f, v in (("runner", runner), ("runner_model", runner_model))
+              if v is not None}
+    text = spec_file.read_text(encoding="utf-8")
+    store.atomic_write(spec_file, _set_frontmatter_fields(text, updates))
+
+    warning = None
+    if runner and runner != "claude" and runner_model:
+        from .providers import ollama as ollama_mod
+        models, reason = ollama_mod.fetch_models()
+        verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+        if verdict == "unreachable":
+            warning = f"ollama daemon unreachable ({vreason}) -- runner_model not validated"
+        elif verdict == "missing":
+            suggestions = ollama_mod.model_names(models, tool_capable_only=True)
+            warning = f"{vreason}; installed tool-capable models: {suggestions or '(none)'}"
+    return {"runner": runner, "runner_model": runner_model, "warning": warning}
 
 
 def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | None:

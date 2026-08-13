@@ -484,6 +484,10 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
         lines.append(f"effort: {args['effort']}")
     if args.get("repo"):
         lines.append(f"repo: {args['repo']}")
+    if args.get("runner"):
+        lines.append(f"runner: {args['runner']}")
+    if args.get("runner_model"):
+        lines.append(f"runner_model: {args['runner_model']}")
     lines.append(f"dependsOn: [{deps_str}]")
     lines.append("")
     lines.append("## Intent")

@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import claims
 from . import snapshot as snap_mod
 from . import store
 from .config import Config
@@ -80,6 +81,45 @@ def needs_approval(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
     return (Phase(snap.phase) == Phase.IMPLEMENTING
             and spec_tier(home, key) >= 2
             and not snap.approved)
+
+
+# UX-1: phases where a ticket's `runner:`/`runner_model:` choice may still be
+# changed -- before a worktree/reconciler for the `implementing` step exists,
+# so an edit can't be silently ignored by a session already spawned.
+_RUNNER_EDITABLE_PHASES = frozenset({Phase.TRIAGING, Phase.AWAITING_HUMAN, Phase.READY})
+
+
+def runner_editable(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
+    """True iff *key*'s spec `runner:`/`runner_model:` front-matter may still
+    be rewritten through ``ops.set_runner`` (UX-1). THE RULE MUST HAVE EXACTLY
+    ONE DEFINITION -- this is it, called by both the CLI ``runner`` verb and
+    (later) the TUI's runner modal.
+
+    Three conditions, all required: *key* is still in ``triaging``/
+    ``awaiting-human``/``ready`` (``implementing``, or anything past it, means
+    a reconciler for that step may already exist); no worktree exists on disk
+    yet (``store.worktree_path`` -- never ``ops``, so this stays a cheap,
+    side-effect-free filesystem check); and its claim, if any, is not
+    CONFIRMED-live (``claims.verify_claim`` -- never ``claims.is_claimed``,
+    which *releases* a stale claim as a side effect; a guard/display predicate
+    must never mutate state).
+
+    A running session's spawn args -- runner included -- were frozen at
+    launch time; a late edit would silently apply only to the *next* session,
+    which is worse than refusing outright, so this is a hard gate, not a
+    warning.
+    """
+    try:
+        phase_ok = Phase(snap.phase) in _RUNNER_EDITABLE_PHASES
+    except ValueError:
+        phase_ok = False
+    if not phase_ok:
+        return False
+    if store.worktree_path(home, key).exists():
+        return False
+    if claims.verify_claim(home, key) == "confirmed":
+        return False
+    return True
 
 
 # T-34/RF-5: implementer providers this dispatcher trusts to already carry a
