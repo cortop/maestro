@@ -5,6 +5,7 @@ makes forgetting `make diagram` after touching either source fail `make test`.""
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from maestro import diagram
@@ -109,7 +110,7 @@ def test_make_diagram_is_idempotent(tmp_path):
     contents = []
     for _ in range(2):
         result = subprocess.run(
-            [".venv/bin/python", "-m", "maestro.diagram", "--docs-dir", str(out_dir)],
+            [sys.executable, "-m", "maestro.diagram", "--docs-dir", str(out_dir)],
             cwd=str(REPO_ROOT), capture_output=True, text=True,
         )
         assert result.returncode == 0, f"maestro.diagram failed:\n{result.stderr}"
