@@ -6,49 +6,60 @@ Derived from `maestro/statemachine.py` (`TRANSITIONS`, `SLEEPING_PHASES`, `TERMI
 
 ```mermaid
 stateDiagram-v2
-    triaging --> awaiting-human
+    state "triaging" as triaging
+    state "awaiting-human" as awaiting_human
+    state "ready" as ready
+    state "implementing" as implementing
+    state "qa" as qa
+    state "researching" as researching
+    state "awaiting-ci" as awaiting_ci
+    state "in-review" as in_review
+    state "degraded" as degraded
+    state "terminating" as terminating
+    state "done" as done
+    triaging --> awaiting_human
     triaging --> degraded
     triaging --> ready
     triaging --> terminating
-    awaiting-human --> awaiting-ci
-    awaiting-human --> degraded
-    awaiting-human --> implementing
-    awaiting-human --> ready
-    awaiting-human --> researching
-    awaiting-human --> terminating
-    awaiting-human --> triaging
-    ready --> awaiting-human
+    awaiting_human --> awaiting_ci
+    awaiting_human --> degraded
+    awaiting_human --> implementing
+    awaiting_human --> ready
+    awaiting_human --> researching
+    awaiting_human --> terminating
+    awaiting_human --> triaging
+    ready --> awaiting_human
     ready --> degraded
     ready --> implementing
     ready --> researching
     ready --> terminating
-    implementing --> awaiting-ci
-    implementing --> awaiting-human
+    implementing --> awaiting_ci
+    implementing --> awaiting_human
     implementing --> degraded
     implementing --> done
-    implementing --> in-review
+    implementing --> in_review
     implementing --> qa
     implementing --> terminating
-    qa --> awaiting-ci
-    qa --> awaiting-human
+    qa --> awaiting_ci
+    qa --> awaiting_human
     qa --> degraded
     qa --> implementing
     qa --> terminating
-    researching --> awaiting-human
+    researching --> awaiting_human
     researching --> degraded
     researching --> done
     researching --> terminating
-    awaiting-ci --> awaiting-human
-    awaiting-ci --> degraded
-    awaiting-ci --> done
-    awaiting-ci --> implementing
-    awaiting-ci --> in-review
-    awaiting-ci --> terminating
-    in-review --> awaiting-ci
-    in-review --> awaiting-human
-    in-review --> done
-    in-review --> implementing
-    in-review --> terminating
+    awaiting_ci --> awaiting_human
+    awaiting_ci --> degraded
+    awaiting_ci --> done
+    awaiting_ci --> implementing
+    awaiting_ci --> in_review
+    awaiting_ci --> terminating
+    in_review --> awaiting_ci
+    in_review --> awaiting_human
+    in_review --> done
+    in_review --> implementing
+    in_review --> terminating
     degraded --> ready
     degraded --> terminating
     degraded --> triaging
@@ -57,7 +68,7 @@ stateDiagram-v2
     classDef sleeping fill:#fff3cd,stroke:#997404
     classDef terminal fill:#d1e7dd,stroke:#0f5132
     classDef active fill:#cfe2ff,stroke:#084298
-    class awaiting-ci awaiting-human in-review sleeping
+    class awaiting_ci awaiting_human in_review sleeping
     class done terminal
     class degraded implementing qa ready researching terminating triaging active
 ```

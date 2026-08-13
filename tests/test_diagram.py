@@ -42,6 +42,28 @@ def test_state_diagram_covers_every_phase_and_is_valid_mermaid():
     assert "```mermaid" in text and "stateDiagram-v2" in text
     for phase in diagram.statemachine.Phase:
         assert phase.value in text, f"{phase.value} missing from docs/state-machine.md"
+        # A real hyphenated phase name (e.g. "awaiting-human") used as a bare
+        # mermaid state id -- not just quoted as a `state "..." as ...` alias
+        # label -- fails the real mermaid parser (confirmed against mermaid
+        # v11.16.1, the engine GitHub's renderer uses: a bare hyphenated id
+        # collides with the `-->` arrow tokenizer). Every phase must instead
+        # be aliased to `diagram._safe_id(phase.value)`, which never contains
+        # a hyphen -- guard both halves of that contract structurally, since
+        # this suite can't assume a JS/mermaid toolchain is available.
+        alias = diagram._safe_id(phase.value)
+        assert f'state "{phase.value}" as {alias}' in text, (
+            f"{phase.value} must be aliased via `state \"...\" as {alias}`, "
+            "not used as a bare (possibly hyphenated) mermaid state id")
+        assert "-" not in alias, f"_safe_id({phase.value}!r) still contains a hyphen"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("state ", "classDef", "%%", "```", "#", "<!--")) or not stripped:
+            continue
+        if "-->" in stripped:
+            src, dst = (tok.strip() for tok in stripped.split("-->", 1))
+            assert "-" not in src and "-" not in dst, (
+                f"bare hyphenated state id in transition line {line!r} -- mermaid's "
+                "parser rejects a hyphen in an unquoted state id")
 
 
 def test_dispatch_gates_row_count_matches_source_today():
