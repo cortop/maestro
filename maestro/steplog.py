@@ -1,7 +1,9 @@
-"""Step-log folder — reads a stream.jsonl session log and appends IMPL_STEP events.
+"""Step-log folder — reads a session log (Claude ``.stream.jsonl`` or opencode
+``.opencode.jsonl``) and appends IMPL_STEP events.
 
-Extracts notable tool_use blocks from a Claude stream log (Edit/Write/Bash/Agent) and
-records each as an ``ImplStepRecorded`` event against the ticket log.  Idempotent:
+Extracts notable tool_use blocks from a Claude stream log (Edit/Write/Bash/Agent), or
+notable tool-part records from an opencode log (OC-5), and records each as an
+``ImplStepRecorded`` event against the ticket log. Idempotent:
 ``step_id = f"step-{key}-{session_id}-{tool_id}"`` prevents re-appending on replay.
 
 Also the one place that classifies a session's terminal outcome (``classify_result``,
@@ -45,6 +47,117 @@ def _summary(tool_name: str, inp: dict) -> str:
     if tool_name == "Agent":
         return (inp.get("description") or inp.get("prompt", ""))[:120]
     return tool_name
+
+
+# ---------------------------------------------------------------------------
+# OC-5: opencode's own log grammar -- verified vocabulary (see spec T-41 Notes):
+# a "step_start"/"tool_use"/"text"/"step_finish" record per line, each carrying
+# its payload under a nested "part" object (tool name at ``part.tool``, per-call
+# id at ``part.callID``, terminal reason at ``step_finish``'s ``part.reason``,
+# tokens under ``part.tokens``). Both the underscored spelling above and
+# opencode's own internal hyphenated Part.type spelling ("step-start"/"tool"/
+# "step-finish") are accepted, since the exact wire spelling of a third-party
+# CLI's --format json output is not something this package controls.
+# ---------------------------------------------------------------------------
+OC_STEP_START_TYPES = frozenset({"step_start", "step-start"})
+OC_TOOL_USE_TYPES = frozenset({"tool_use", "tool"})
+OC_TEXT_TYPES = frozenset({"text"})
+OC_STEP_FINISH_TYPES = frozenset({"step_finish", "step-finish"})
+
+# opencode tool ids (lowercase) mapped onto the SAME kind vocabulary as Claude's
+# _kind above -- OC-5's Notes: "map opencode tools onto the existing ImplStep
+# vocabulary rather than inventing a parallel one".
+_OC_EDIT_TOOLS = frozenset({"edit", "write", "patch"})
+_OC_COMMAND_TOOLS = frozenset({"bash"})
+_OC_SUBAGENT_TOOLS = frozenset({"task", "agent", "subtask"})
+
+
+def oc_part(obj: dict) -> tuple[str | None, dict]:
+    """Extract ``(type, part)`` from one opencode.jsonl record. Accepts both the
+    documented ``{"type": ..., "part": {...}}`` wrapper and a bare part object
+    (``obj`` itself carrying ``type``/``tool``/``callID``/... directly)."""
+    t = obj.get("type")
+    part = obj.get("part") if isinstance(obj.get("part"), dict) else obj
+    return t, part
+
+
+def _oc_kind(tool_name: str, inp: dict) -> str:
+    name = tool_name.lower()
+    if name in _OC_EDIT_TOOLS:
+        return "edit"
+    if name in _OC_SUBAGENT_TOOLS:
+        return "subagent"
+    if name in _OC_COMMAND_TOOLS:
+        cmd = inp.get("command", "")
+        if "gh pr" in cmd:
+            return "pr"
+        return "command"
+    return "note"
+
+
+def oc_summary(tool_name: str, part: dict) -> str:
+    """Human-readable one-liner for an opencode tool-part -- prefers the tool's
+    own ``state.title`` (opencode's own human-readable label, present once a
+    call is running/completed), falls back to the raw input, falls back to the
+    bare tool name so a summary is never blank."""
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+    title = state.get("title")
+    name = tool_name.lower()
+    if name in _OC_COMMAND_TOOLS:
+        text = inp.get("command") or title
+    elif name in _OC_EDIT_TOOLS:
+        text = inp.get("filePath") or inp.get("path") or title
+    else:
+        text = title
+    return (text or tool_name)[:120]
+
+
+def _opencode_session_key(path: Path) -> str:
+    """The per-session discriminator for an opencode log: the log FILENAME's own
+    session slug (``reconcile-<key>-<epoch>``, group 1 of
+    ``sessions._SESSION_FILE_RE`` -- the same string ``sessions.list_sessions``
+    reports as ``session_id``), never anything derived from the payload. Trap
+    (spec Notes): opencode's own log carries no ``system`` record the way Claude's
+    does, and whether ``part.callID`` is unique ACROSS sessions is UNVERIFIED --
+    two different sessions could reuse the same callID, so the discriminator has
+    to come from something that's unique per-session by construction: the epoch
+    already embedded in the filename at spawn time."""
+    from .sessions import _SESSION_FILE_RE
+
+    m = _SESSION_FILE_RE.match(path.name)
+    return m.group(1) if m else path.stem
+
+
+def _iter_opencode_steps(
+    path: Path, session_key: str
+) -> Iterator[tuple[str, str, int, str, str, str, str]]:
+    """Yield ``(session_id, tool_id, turn, role, kind, tool_name, summary)`` for
+    notable tool-part records in an opencode ``.opencode.jsonl`` log. ``turn``
+    increments on each ``step_start`` record (opencode's own turn boundary)."""
+    turn = 0
+    for _offset, obj in iter_records(path):
+        t, part = oc_part(obj)
+        if t in OC_STEP_START_TYPES:
+            turn += 1
+            continue
+        if t not in OC_TOOL_USE_TYPES:
+            continue
+        tool_name = part.get("tool", "")
+        tool_id = part.get("callID", "")
+        if not tool_name or not tool_id:
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+        yield (
+            session_key,
+            tool_id,
+            turn,
+            "assistant",
+            _oc_kind(tool_name, inp),
+            tool_name,
+            oc_summary(tool_name, part),
+        )
 
 
 def iter_records(path: Path, *, start: int = 0) -> Iterator[tuple[int, dict]]:
@@ -110,9 +223,17 @@ def _iter_steps(
 def fold_stream(
     home: Path, key: str, stream_path: Path, *, actor: str = "reconciler"
 ) -> int:
-    """Append one IMPL_STEP per notable tool_use in *stream_path*. Returns count appended."""
+    """Append one IMPL_STEP per notable tool_use in *stream_path*. Returns count
+    appended. Dispatches on filename suffix: a Claude ``.stream.jsonl`` walks
+    ``_iter_steps`` (session id from the log's own ``system`` record); an opencode
+    ``.opencode.jsonl`` (OC-5) walks ``_iter_opencode_steps`` (session id from the
+    filename, per ``_opencode_session_key``'s docstring)."""
+    if stream_path.name.endswith(".opencode.jsonl"):
+        records = _iter_opencode_steps(stream_path, _opencode_session_key(stream_path))
+    else:
+        records = _iter_steps(stream_path)
     appended = 0
-    for session_id, tool_id, turn, role, kind, tool_name, summary in _iter_steps(stream_path):
+    for session_id, tool_id, turn, role, kind, tool_name, summary in records:
         sid = f"step-{key}-{session_id}-{tool_id}"
         ev = event_log.append(
             home,
@@ -165,16 +286,47 @@ def classify_result(obj: dict) -> dict:
     }
 
 
+def _opencode_session_outcome(path: Path) -> dict:
+    """Tail-scan an opencode ``.opencode.jsonl`` log for its terminal
+    ``step_finish`` record (OC-5). ``reason`` other than the clean-stop value
+    reports ``error`` -- opencode's own log carries no separate rate-limit
+    signal the way Claude's ``rate_limit_event`` does, and ``cost: 0`` here is
+    genuinely a local model's true cost, never a reason to report
+    ``unavailable`` (``spend.py``'s ``over_ceiling`` fails OPEN on that, which
+    would disarm the ceiling -- see spec Notes)."""
+    reason: str | None = None
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            t, part = oc_part(obj)
+            if t in OC_STEP_FINISH_TYPES:
+                reason = part.get("reason")
+    if reason is None:
+        return {"outcome": "running", "result": None, "rate_limit_info": None}
+    outcome = "error" if reason == "error" else "success"
+    return {"outcome": outcome, "result": {"reason": reason}, "rate_limit_info": None}
+
+
 def session_outcome(stream_path: Path) -> dict:
     """Tail-scan *stream_path* for its terminal ``result`` and any ``rate_limit_event``.
 
     Returns ``{"outcome": ..., "result": <result obj or None>, "rate_limit_info": ...}``.
     ``outcome`` is one of ``success`` / ``error`` / ``rate_limited`` (terminal result seen),
-    ``running`` (stream-json log with no terminal result yet), or ``unknown`` (not a
-    ``.stream.jsonl`` log — e.g. a plain-text session). A rejected ``rate_limit_event``
-    only escalates an already-errored result to ``rate_limited``; it never overrides an
-    otherwise-``success`` result — the event is context, not the verdict.
+    ``running`` (no terminal record yet), or ``unknown`` (neither a ``.stream.jsonl`` nor an
+    ``.opencode.jsonl`` log — e.g. a plain-text session). An opencode ``.opencode.jsonl`` log
+    (OC-5) is dispatched to ``_opencode_session_outcome`` instead of the Claude-shaped parse
+    below. A rejected ``rate_limit_event`` only escalates an already-errored result to
+    ``rate_limited``; it never overrides an otherwise-``success`` result — the event is
+    context, not the verdict.
     """
+    if stream_path.name.endswith(".opencode.jsonl"):
+        return _opencode_session_outcome(stream_path)
     if not stream_path.name.endswith(".stream.jsonl"):
         return {"outcome": "unknown", "result": None, "rate_limit_info": None}
 

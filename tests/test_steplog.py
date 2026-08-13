@@ -189,6 +189,27 @@ def test_cli_fold_steps_with_log_arg(home, tmp_path):
     assert len(evs) == 1
 
 
+def test_cli_fold_steps_with_opencode_log_arg_is_idempotent(home, tmp_path):
+    """AC1: real `maestro fold-steps <KEY>` over a captured opencode log appends
+    one ImplStep per tool call; a second run folds 0."""
+    from maestro.cli import main
+
+    log = _write_opencode(tmp_path, "T-1", "1000.000000", [
+        _oc_step_start(),
+        _oc_tool_use("call_1", "bash", command="make install"),
+        _oc_step_finish(),
+    ])
+    rc = main(["--home", str(home), "fold-steps", "T-1", "--log", str(log)])
+    assert rc == 0
+    evs = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs) == 1
+
+    rc2 = main(["--home", str(home), "fold-steps", "T-1", "--log", str(log)])
+    assert rc2 == 0
+    evs2 = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs2) == 1
+
+
 # ---------------------------------------------------------------------------
 # classify_result: is_error/api_error_status drive the verdict, not subtype
 # ---------------------------------------------------------------------------
@@ -255,9 +276,105 @@ def test_session_outcome_unknown_for_plain_text_log(tmp_path):
     assert session_outcome(p)["outcome"] == "unknown"
 
 
-def test_session_outcome_unknown_never_running_for_third_format_log(tmp_path):
-    """RF-3: a non-Claude session's own log grammar reports 'unknown', not 'running'
-    -- session_outcome's suffix guard only recognizes '.stream.jsonl' as parseable."""
-    p = tmp_path / "reconcile-T-1-1.opencode.jsonl"
+def test_session_outcome_unknown_for_a_grammar_neither_suffix_recognizes(tmp_path):
+    """A suffix that is neither Claude's '.stream.jsonl' nor opencode's
+    '.opencode.jsonl' (OC-5 made the latter parseable) stays 'unknown'."""
+    p = tmp_path / "reconcile-T-1-1.weird.jsonl"
     p.write_text(json.dumps({"type": "result", "subtype": "success"}) + "\n", encoding="utf-8")
     assert session_outcome(p)["outcome"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# OC-5: opencode log folding and session_outcome
+# ---------------------------------------------------------------------------
+
+def _write_opencode(tmp_path: Path, key: str, epoch: str, records: list[dict]) -> Path:
+    p = tmp_path / f"reconcile-{key}-{epoch}.opencode.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return p
+
+
+def _oc_step_start() -> dict:
+    return {"type": "step_start", "part": {}}
+
+
+def _oc_tool_use(call_id: str, tool: str, **input_kv) -> dict:
+    part = {"tool": tool, "callID": call_id}
+    if input_kv:
+        part["state"] = {"status": "completed", "input": input_kv}
+    return {"type": "tool_use", "part": part}
+
+
+def _oc_text(text: str) -> dict:
+    return {"type": "text", "part": {"text": text}}
+
+
+def _oc_step_finish(reason: str = "stop") -> dict:
+    return {"type": "step_finish", "part": {"reason": reason, "cost": 0, "tokens": {"input": 1, "output": 1}}}
+
+
+def test_fold_opencode_stream_appends_impl_step_and_is_idempotent(home, tmp_path):
+    log = _write_opencode(tmp_path, "T-1", "1000.000000", [
+        _oc_step_start(),
+        _oc_tool_use("call_1", "bash", command="pytest"),
+        _oc_tool_use("call_2", "edit", filePath="maestro/ops.py"),
+        _oc_step_finish(),
+    ])
+    n = fold_stream(home, "T-1", log)
+    assert n == 2
+    evs = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs) == 2
+    kinds = {e["payload"]["kind"] for e in evs}
+    assert kinds == {"command", "edit"}
+
+    n2 = fold_stream(home, "T-1", log)
+    assert n2 == 0
+    evs2 = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs2) == 2
+
+
+def test_fold_opencode_cross_session_callid_reuse_yields_distinct_steps(home, tmp_path):
+    """AC2: two different opencode sessions that reuse a callID (the payload's
+    own callID uniqueness is UNVERIFIED per spec Notes) must not collapse into
+    one ImplStep -- the session discriminator comes from the filename epoch."""
+    log1 = _write_opencode(tmp_path, "T-1", "1000.000000", [
+        _oc_step_start(),
+        _oc_tool_use("call_1", "bash", command="pytest"),
+        _oc_step_finish(),
+    ])
+    log2 = _write_opencode(tmp_path, "T-1", "2000.000000", [
+        _oc_step_start(),
+        _oc_tool_use("call_1", "bash", command="make test"),
+        _oc_step_finish(),
+    ])
+    fold_stream(home, "T-1", log1)
+    fold_stream(home, "T-1", log2)
+    evs = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs) == 2
+    assert len({e["step_id"] for e in evs}) == 2
+
+
+def test_opencode_session_outcome_success_from_step_finish_reason(tmp_path):
+    log = _write_opencode(tmp_path, "T-1", "1000.000000", [
+        _oc_step_start(),
+        _oc_tool_use("call_1", "bash", command="pytest"),
+        _oc_step_finish("stop"),
+    ])
+    assert session_outcome(log)["outcome"] == "success"
+
+
+def test_opencode_session_outcome_error_from_step_finish_reason(tmp_path):
+    log = _write_opencode(tmp_path, "T-1", "1000.000000", [
+        _oc_step_start(),
+        _oc_tool_use("call_1", "bash", command="pytest"),
+        _oc_step_finish("error"),
+    ])
+    assert session_outcome(log)["outcome"] == "error"
+
+
+def test_opencode_session_outcome_running_while_no_terminal_record(tmp_path):
+    log = _write_opencode(tmp_path, "T-1", "1000.000000", [
+        _oc_step_start(),
+        _oc_tool_use("call_1", "bash", command="pytest"),
+    ])
+    assert session_outcome(log)["outcome"] == "running"

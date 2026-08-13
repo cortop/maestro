@@ -141,7 +141,11 @@ def test_cli_logs_list_no_sessions(home, capsys):
 
 
 def test_cli_logs_list_third_format_without_raising(home, capsys):
-    """AC3: a third-format log neither raises nor is misreported as 'running'."""
+    """AC3: a third-format log neither raises nor is misreported as anything
+    other than 'running' while it carries no terminal step_finish record --
+    OC-5 made '.opencode.jsonl' genuinely parseable, so a record outside the
+    verified vocabulary (no step_finish seen) reports 'running', not the old
+    blanket 'unknown'."""
     path = home / "agent-logs" / "T-1" / "reconcile-T-1-9000.000000.opencode.jsonl"
     _make_text_log(path, '{"type": "message", "text": "hi"}\n')
 
@@ -151,7 +155,53 @@ def test_cli_logs_list_third_format_without_raising(home, capsys):
     out = json.loads(capsys.readouterr().out)
     assert len(out) == 1
     assert out[0]["format"] == "opencode"
-    assert out[0]["outcome"] == "unknown"
+    assert out[0]["outcome"] == "running"
+
+
+def test_cli_logs_list_opencode_success_and_error_outcome(home, capsys):
+    """AC3: real `maestro logs --list` reports success/error, derived from
+    step_finish.part.reason, for a completed opencode session."""
+    ok_path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.opencode.jsonl"
+    _make_text_log(ok_path, "\n".join(json.dumps(r) for r in [
+        {"type": "step_start", "part": {}},
+        {"type": "tool_use", "part": {"tool": "bash", "callID": "call_1"}},
+        {"type": "step_finish", "part": {"reason": "stop", "cost": 0}},
+    ]) + "\n")
+
+    err_path = home / "agent-logs" / "T-1" / "reconcile-T-1-2000.000000.opencode.jsonl"
+    _make_text_log(err_path, "\n".join(json.dumps(r) for r in [
+        {"type": "step_start", "part": {}},
+        {"type": "step_finish", "part": {"reason": "error", "cost": 0}},
+    ]) + "\n")
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1", "--list"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    by_epoch = {s["epoch"]: s["outcome"] for s in out}
+    assert by_epoch[1000.0] == "success"
+    assert by_epoch[2000.0] == "error"
+
+
+def test_cli_logs_opencode_renders_tool_use_and_text(home, capsys):
+    """AC4: `maestro logs` renders opencode's own tool_use/text vocabulary
+    (OC-5), not just a raw byte dump."""
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-9000.000000.opencode.jsonl"
+    records = [
+        {"type": "step_start", "part": {}},
+        {"type": "text", "part": {"text": "Reading the ticket spec."}},
+        {"type": "tool_use", "part": {"tool": "bash", "callID": "call_1",
+                                       "state": {"input": {"command": "pytest"}}}},
+        {"type": "step_finish", "part": {"reason": "stop", "cost": 0}},
+    ]
+    _make_text_log(path, "\n".join(json.dumps(r) for r in records) + "\n")
+
+    from maestro.cli import main
+    rc = main(["--home", str(home), "logs", "T-1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Reading the ticket spec." in out
+    assert "tool_use:bash" in out
 
 
 # ---------------------------------------------------------------------------
