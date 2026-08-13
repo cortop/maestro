@@ -292,6 +292,24 @@ def cmd_create(args) -> int:
     depends_on = getattr(args, "depends_on", None) or []
     if depends_on:
         a["depends_on"] = depends_on
+
+    if getattr(args, "json", False):
+        # Synchronous mint (bypasses the `_new` inbox entirely) -- so a caller
+        # that needs the assigned key right away (e.g. the awaiting-human
+        # reconciler minting an implementation ticket from an approved
+        # proposal) gets it back from this call instead of having to wait for,
+        # then re-derive, the next dispatcher sweep's async mint.
+        try:
+            key = disp.mint_one(cfg, key=args.key, prefix=getattr(args, "prefix", None),
+                                 title=title, ticket_args=a)
+        except store.MaestroError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        _print({"key": key})
+        if not args.no_nudge and cfg.nudge_on_human_input:
+            _nudge(cfg)
+        return 0
+
     inbox.append_new(cfg.home, title, key=args.key, args=a,
                      prefix=getattr(args, "prefix", None))
     _print(f"queued create: {args.key or '(auto-key)'} — {title}")
@@ -1045,7 +1063,8 @@ def cmd_env(args) -> int:
                 "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase),
                 "disallowed_tools": disallowed_tools,
                 "model": model, "effort": effort,
-                "runner": runner, "runner_model": runner_model})
+                "runner": runner, "runner_model": runner_model,
+                "kind": snap.kind})
         return 0
     _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
@@ -1085,6 +1104,9 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="KEY", help="ticket keys this ticket depends on")
     sp.add_argument("--repo", default=None,
                     help="[repos.<name>] binding for this ticket's reconciler")
+    sp.add_argument("--json", action="store_true",
+                    help="mint synchronously (bypassing the _new inbox) and print "
+                         "the assigned key as JSON: {\"key\": ...}")
     sp.add_argument("--no-nudge", action="store_true", dest="no_nudge",
                     help="skip in-process dispatch nudge after queuing")
 
