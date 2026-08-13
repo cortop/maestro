@@ -51,12 +51,13 @@ def test_dispatch_sweep_then_tui_reflects_board(home, cfg):
     assert "T-9" in report.minted
     assert "T-1" in report.spawned
     # GA-10 appended allowed_tools as a 7th element, GA-17 env_overlay as an 8th,
-    # RF-2 runner as a 9th (see DryRunSessions.spawned's docstring) -- named
-    # unpack, not a length check, so this doesn't become a trap the next
-    # appended spawn input has to dodge.
+    # RF-2 runner as a 9th, OC-4 runner_model as a 10th (see DryRunSessions.spawned's
+    # docstring) -- named unpack, not a length check, so this doesn't become a trap
+    # the next appended spawn input has to dodge.
     for s in sessions.spawned:
         assert isinstance(s, tuple)
-        key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner = s
+        (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner,
+         runner_model) = s
     assert {k for k, *_ in sessions.spawned} == set(report.spawned)
 
     # Now mount the REAL TUI over that same home and confirm it renders the board.

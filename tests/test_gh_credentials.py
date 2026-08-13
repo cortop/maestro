@@ -358,7 +358,7 @@ def test_dispatch_spawn_site_threads_correct_overlay_per_repo(home, monkeypatch)
     report = disp.dispatch(cfg, sessions, now=1000)
     assert set(report.spawned) == {"A-1", "B-1"}
 
-    overlay_by_key = {s[0]: s[-2] for s in sessions.spawned}  # -1 is now `runner` (RF-2)
+    overlay_by_key = {s[0]: s[-3] for s in sessions.spawned}  # -2 is `runner` (RF-2), -1 `runner_model` (OC-4)
     assert overlay_by_key["A-1"] == {"GH_TOKEN": "tok-alpha"}
     assert overlay_by_key["B-1"] == {"GH_TOKEN": "tok-beta"}
 
@@ -368,7 +368,7 @@ def test_dispatch_spawn_site_no_overlay_when_nothing_configured(home):
     _seed(home, "A-1", Phase.READY, repo="alpha")
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
-    assert sessions.spawned[0][-2] == {}  # -1 is now `runner` (RF-2)
+    assert sessions.spawned[0][-3] == {}  # -2 is `runner` (RF-2), -1 `runner_model` (OC-4)
 
 
 def test_dispatch_spawn_site_memoizes_credential_resolution_per_sweep(home, monkeypatch):

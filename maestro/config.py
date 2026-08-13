@@ -116,8 +116,8 @@ class Config:
     research_effort: str = "high"      # effort for kind=research tickets
     default_effort: str | None = None  # global effort default; None = omit --effort entirely
     # RF-2: board-wide fallback for the implementation-spawn runner, when a spec carries
-    # no `runner:`/`runner_model:` override (dispatcher.resolve_runner). "claude" is the
-    # only registered runner as of this ticket -- see dispatcher._REGISTERED_RUNNERS.
+    # no `runner:`/`runner_model:` override (dispatcher.resolve_runner). "claude" and
+    # "opencode" (OC-4) are the registered runners -- see dispatcher._REGISTERED_RUNNERS.
     runner: str = "claude"
     runner_model: str | None = None
     # OC-3: board-wide kill switch for which runner name(s) `dispatch()` will ever
@@ -215,6 +215,17 @@ _REPO_TABLE_KEYS = frozenset({
 # naming this set in the error, rather than silently falling back to a mode
 # that can livelock a fast-moving base branch.
 _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
+
+# OC-4: [runner.opencode]'s whole recognized key set. Unlike every other
+# [runner.<name>] table (free-form, riding cfg.provider_config with zero
+# config.py awareness -- see the `provider_config` field's own docstring),
+# opencode's is explicitly validated here, fail-closed like _REPO_TABLE_KEYS,
+# per the spec's Notes ("that passthrough is not fail-closed the way
+# _REPO_TABLE_KEYS is, so a typo is silent and silently means wrong model / no
+# permission block"). `concurrency` is the per-runner concurrency cap
+# (dispatcher._runner_concurrency_cap; default 1 -- see
+# dispatcher._RUNNER_DEFAULT_CONCURRENCY for why).
+_RUNNER_OPENCODE_KEYS = frozenset({"concurrency"})
 
 
 def config_path(home: Path) -> Path:
@@ -384,6 +395,19 @@ def load(home_arg: str | None = None) -> Config:
         cfg.alarm_cooldown_s = int(al.get("cooldown_s", cfg.alarm_cooldown_s))
         if "providers" in data:
             cfg.providers.update(data["providers"])
+        # OC-4: [runner.opencode] is the one provider_config table this module
+        # explicitly validates (fail-closed, same posture as _REPO_TABLE_KEYS) --
+        # every other [runner.<name>]/[tracker.*]/[vcs.*]/etc table stays free-form,
+        # opaque to config.py, per `provider_config`'s own docstring.
+        raw_runner_table = data.get("runner", {})
+        if isinstance(raw_runner_table, dict):
+            raw_opencode_table = raw_runner_table.get("opencode")
+            if isinstance(raw_opencode_table, dict):
+                unknown = set(raw_opencode_table) - _RUNNER_OPENCODE_KEYS
+                if unknown:
+                    raise store.MaestroError(
+                        f"config.toml: [runner.opencode] has unrecognized key(s): "
+                        f"{', '.join(sorted(unknown))}")
         cfg.provider_config = {
             k: v for k, v in data.items()
             if k not in {"maestro", "providers"}
@@ -568,6 +592,15 @@ implementer = "claude_skill"
                                      # reconciler session -- never by the dispatcher. Unset =
                                      # nothing runs (today's behavior). A non-zero exit or a
                                      # timeout fails `worktree ensure` loudly, never silently.
+
+# [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
+                                     # keys here fail config.load (fail-closed, see
+                                     # config._RUNNER_OPENCODE_KEYS)
+# concurrency = 1                   # cap on concurrently-running opencode reconcilers,
+                                     # independent of (and typically tighter than) the
+                                     # fleet-wide max_concurrency above -- default 1 until
+                                     # measured: opencode wedges intermittently at `init`
+                                     # and every process shares one on-disk sqlite db
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""

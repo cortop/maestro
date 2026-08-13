@@ -95,7 +95,8 @@ class SessionManager(Protocol):
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
-              runner: str | None = None) -> int | None:
+              runner: str | None = None,
+              runner_model: str | None = None) -> int | None:
         """Launch a detached reconciler for ``key``; return its pid (or None).
 
         *command* (RF-1) is the resolved reconcile slash-command (see
@@ -128,6 +129,14 @@ class SessionManager(Protocol):
         only ever speaks one backend (e.g. ``ClaudeCliSessions``) may ignore it;
         ``RoutingSessions`` uses it to pick which delegate's ``spawn`` to call.
         None means "the default runner" (``"claude"``).
+
+        *runner_model* (OC-4) is the resolved, already-preflighted-ok bare model
+        tag for a non-claude runner (the second element ``dispatcher.resolve_runner``
+        returns beside *runner* itself) -- ``ClaudeCliSessions`` ignores it (its own
+        *model*/*effort* params cover the Claude case); ``OpencodeCliSessions`` is
+        the one implementation that actually composes it (prefixed with
+        ``ollama/`` -- see its own docstring for why that composition happens
+        there and nowhere else).
         """
 
 
@@ -167,12 +176,15 @@ class ClaudeCliSessions:
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
-              runner: str | None = None) -> int | None:
+              runner: str | None = None,
+              runner_model: str | None = None) -> int | None:
         # RF-2: this backend only ever speaks Claude -- `runner` is accepted (so
         # callers can pass it uniformly, e.g. via RoutingSessions) but otherwise
         # unused; the caller (dispatcher.dispatch) has already validated it's
         # either None or "claude" before routing a spawn to this instance.
-        del runner
+        # OC-4: `runner_model` is the opencode-shaped bare tag -- meaningless here,
+        # this backend's own `model`/`effort` params are what drive a Claude spawn.
+        del runner, runner_model
         session_id = f"{session_name(key)}-{self._clock():.6f}"
         effective_model = model or self.model
         # RF-1: compose the flattened prompt here, from the separate command/key
@@ -242,17 +254,18 @@ class DryRunSessions:
 
     def __init__(self, active: set[str] | None = None):
         self._active = set(active or set())   # KEYS
-        # 9-tuple: (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools,
-        # env_overlay, runner). GA-10 appended allowed_tools as the 7th element; GA-17
-        # appended env_overlay as the 8th; RF-2 appends runner as the 9th -- the SAME
-        # way -- any later per-key spawn input appends here too, rather than opening a
-        # second per-key channel. Unpack by name or by negative index, never assume
-        # this stays exactly 9 long. RF-1: spawn()'s own 2nd parameter is now
-        # ``command`` (no key appended) -- this ``prompt`` element is the composed
-        # "<command> <key>" string built inside spawn() itself, so existing readers of
-        # element 1 see the same value as before this ticket.
+        # 10-tuple: (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools,
+        # env_overlay, runner, runner_model). GA-10 appended allowed_tools as the 7th
+        # element; GA-17 appended env_overlay as the 8th; RF-2 appended runner as the
+        # 9th; OC-4 appends runner_model as the 10th -- the SAME way -- any later
+        # per-key spawn input appends here too, rather than opening a second per-key
+        # channel. Unpack by name or by negative index, never assume this stays
+        # exactly 10 long. RF-1: spawn()'s own 2nd parameter is now ``command`` (no
+        # key appended) -- this ``prompt`` element is the composed "<command> <key>"
+        # string built inside spawn() itself, so existing readers of element 1 see
+        # the same value as before this ticket.
         self.spawned: list[tuple[str, str, str, str | None, str | None, list[str], list[str],
-                                 dict[str, str], str]] = []
+                                 dict[str, str], str, str | None]] = []
 
     def list_active(self) -> set[str]:
         return set(self._active)
@@ -262,13 +275,140 @@ class DryRunSessions:
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
-              runner: str | None = None) -> int | None:
+              runner: str | None = None,
+              runner_model: str | None = None) -> int | None:
         prompt = f"{command} {key}"
         self.spawned.append((key, prompt, str(cwd), model, effort,
                              list(disallowed_tools or []), list(allowed_tools or []),
-                             dict(env_overlay or {}), runner or "claude"))
+                             dict(env_overlay or {}), runner or "claude", runner_model))
         self._active.add(key)
         return None
+
+
+class OpencodeCliSessions:
+    """OC-4: the second real ``SessionManager`` backend -- speaks the opencode
+    CLI instead of the Claude CLI. Reuses ``claims`` unchanged (RF-2's Notes:
+    ``claims._verdict`` keys only on pid + ``start_epoch``, never the spawned
+    command string, so the claim/watchdog/``max_concurrency`` machinery is
+    already runner-agnostic -- there is no excuse to invent a second one here).
+
+    Verified spawn shape (spec Notes): ``opencode run --command <name> --model
+    ollama/<bare-tag> --format json --dir <cwd> --agent <name>``. opencode's
+    blanket-approve-everything flag (see ``test_runner_permissions.py``'s
+    whole-package sweep for the literal it forbids) must NEVER appear in this
+    argv -- it inverts opencode's permission model (interactive, ask-by-default
+    -> silently approve everything). The ``ollama/`` prefix
+    is composed HERE and nowhere else -- *runner_model* (``dispatcher.resolve_runner``'s
+    second return value, already validated by OC-2's preflight before a spawn
+    ever reaches this method) carries only the bare tag (e.g. ``qwen3-coder:30b``),
+    matching what a spec's ``runner_model:`` line and ``[maestro] runner_model``
+    both store verbatim. ``<name>`` -- reused for both ``--command`` and
+    ``--agent`` -- is *command* (``dispatcher.resolve_reconcile_command``'s
+    return value, e.g. ``/maestro-reconcile-implementing``) with its leading
+    ``/`` stripped, matching the filename ``skills_install.install_repo``/
+    ``install_user`` install under ``.opencode/command/<name>.md`` (OC-1). The
+    ticket key is never passed as a CLI argument -- unlike Claude's flattened
+    ``f"{command} {key}"`` prompt, opencode resolves it implicitly from *cwd*
+    (a worktree is always ``<MHOME>/worktrees/<KEY>``, so the command body can
+    read its own key back out of ``$(basename "$PWD")``), which is exactly why
+    the verified argv carries no separate key/prompt token.
+
+    Keeps ``start_new_session=True`` (matching ``ClaudeCliSessions``) so pid ==
+    pgid -- ``dispatcher.run_watchdog`` kills by pgid, and without this a wedged
+    opencode session (spec Notes: opencode wedges intermittently at ``init`` and
+    every process shares one on-disk sqlite db) would survive the watchdog as an
+    orphan while ``ops.fail`` records it as killed.
+
+    NOT done here (out of THIS ticket's tested scope -- no AC below exercises
+    it, and no writer for it exists anywhere in the package yet):
+    forbidding sub-agent ("task" tool) nesting via opencode's own declarative
+    config, same as `runner_permissions.opencode_bash_permissions` (T-34/RF-5)
+    describes the bash-tool permission block but is itself still never called
+    outside its own tests -- there is no `.opencode/opencode.json`-equivalent
+    WRITE path in the package yet for either. Left for whichever ticket adds
+    that write path; both belong there together, not invented ad hoc here.
+    """
+
+    def __init__(self, home: Path, model_prefix: str = "ollama",
+                 capture_session_logs: bool = True,
+                 clock: Callable[[], float] | None = None,
+                 unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
+                 claims_run=subprocess.run):
+        self.home = Path(home)
+        self.model_prefix = model_prefix
+        self.capture_session_logs = capture_session_logs
+        self._clock: Callable[[], float] = clock or store.now_epoch
+        self._unverified_claim_max_age = unverified_claim_max_age
+        self._claims_run = claims_run
+
+    def list_active(self) -> set[str]:
+        # Same claim files, same verified-pid liveness check ClaudeCliSessions
+        # uses -- claims are runner-agnostic (see class docstring above).
+        return claims.active_keys(self.home, run=self._claims_run,
+                                  max_age=self._unverified_claim_max_age)
+
+    def spawn(self, key: str, command: str, cwd: Path,
+              model: str | None = None, effort: str | None = None,
+              disallowed_tools: list[str] | None = None,
+              allowed_tools: list[str] | None = None,
+              env_overlay: dict[str, str] | None = None,
+              runner: str | None = None,
+              runner_model: str | None = None) -> int | None:
+        # This backend only ever speaks opencode; `runner` is accepted (RoutingSessions
+        # passes it uniformly) but unused. opencode has no equivalent of Claude's
+        # --model tier (`model`/`effort`), --disallowedTools, or --allowedTools --
+        # its permission surface is the board-wide, declarative
+        # `runner_permissions.opencode_bash_permissions` block instead, not a
+        # per-spawn flag -- so those four are accepted (for call-site uniformity
+        # through RoutingSessions) and otherwise unused.
+        del runner, model, effort, disallowed_tools, allowed_tools
+        if not runner_model:
+            # Must never happen: OC-2's preflight (dispatcher.dispatch) already
+            # verified a real, tool-capable runner_model before routing a spawn
+            # here. Fail loud rather than silently composing "ollama/None".
+            raise store.MaestroError(
+                f"OpencodeCliSessions.spawn({key!r}): no runner_model resolved -- "
+                "OC-2's preflight must run before a spawn reaches this backend")
+        session_id = f"{session_name(key)}-{self._clock():.6f}"
+        name = command.lstrip("/")
+        cmd = ["opencode", "run",
+               "--command", name,
+               "--model", f"{self.model_prefix}/{runner_model}",
+               "--format", "json",
+               "--dir", str(cwd),
+               "--agent", name]
+
+        env = dict(os.environ)
+        env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
+        if env_overlay:
+            env.update(env_overlay)
+
+        log_path: str | None = None
+        if self.capture_session_logs:
+            # RF-3: opencode's own log-identity slot -- never "stream-json" (see
+            # store.session_opencode_path's docstring).
+            log_file = store.session_opencode_path(self.home, key, session_id)
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = log_file.open("w", encoding="utf-8")
+            log_path = str(log_file)
+        else:
+            log_handle = None
+
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(cwd), env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
+                stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        finally:
+            if log_handle is not None:
+                log_handle.close()
+
+        claims.write_claim(self.home, key, proc.pid, session_name(key),
+                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd))
+        return proc.pid
 
 
 class RoutingSessions:
@@ -303,7 +443,8 @@ class RoutingSessions:
               disallowed_tools: list[str] | None = None,
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
-              runner: str | None = None) -> int | None:
+              runner: str | None = None,
+              runner_model: str | None = None) -> int | None:
         name = runner or "claude"
         try:
             delegate = self.delegates[name]
@@ -314,4 +455,4 @@ class RoutingSessions:
                 "validate the runner before calling spawn") from None
         return delegate.spawn(key, command, cwd, model=model, effort=effort,
                               disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
-                              env_overlay=env_overlay, runner=name)
+                              env_overlay=env_overlay, runner=name, runner_model=runner_model)

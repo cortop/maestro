@@ -5,11 +5,10 @@ transient one, so it gets the same PERMANENT `ops.ask` treatment
 `runner_unregistered`/`runner_model_unavailable` already use: no attempts-
 ledger spend, a stable qid, parked in awaiting-human.
 
-`_REGISTERED_RUNNERS` (RF-2) is still `{"claude"}` -- no real second
-`SessionManager` delegate exists yet -- so, exactly like
-`test_runner_preflight.py`, every test here monkeypatches it to admit a fake
-non-claude runner name past that earlier gate and into this ticket's new
-`runner_enabled` gate.
+`_REGISTERED_RUNNERS` is `{"claude", "opencode"}` as of OC-4 -- every test here
+still monkeypatches it (redundantly, now that "opencode" is real), exactly
+like `test_runner_preflight.py`, so this file stays independent of whatever
+runner names happen to be registered.
 
 ## Notes
 The first real bring-up (spec AC4) ran against a **scratch** MAESTRO_HOME --

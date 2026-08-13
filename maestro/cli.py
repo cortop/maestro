@@ -18,7 +18,8 @@ from . import backup, claims, credentials, event_log, events, fleet, health, inb
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .providers import ollama as ollama_mod
-from .sessions import ClaudeCliSessions, DryRunSessions, RoutingSessions, list_sessions
+from .sessions import (ClaudeCliSessions, DryRunSessions, OpencodeCliSessions,
+                       RoutingSessions, list_sessions)
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
@@ -104,17 +105,27 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     which fails loudly if a future param is added to one site and not the
     other.
     """
-    # RF-2: route through RoutingSessions -- "claude" is the only registered
-    # runner (dispatcher._REGISTERED_RUNNERS), so this wraps the exact same
-    # ClaudeCliSessions construction as before, unchanged in every kwarg.
-    sessions = RoutingSessions({"claude": ClaudeCliSessions(
-        cfg.home, model=cfg.reconcile_model,
-        permission_mode=cfg.permission_mode,
-        base_allowed_tools=_reconciler_tool_grants(cfg),
-        capture_session_logs=cfg.capture_session_logs,
-        session_log_format=cfg.session_log_format,
-        unverified_claim_max_age=cfg.unverified_claim_max_age,
-    )})
+    # RF-2: route through RoutingSessions -- the ClaudeCliSessions construction
+    # is unchanged in every kwarg. OC-4: also wires the opencode delegate
+    # (dispatcher._REGISTERED_RUNNERS admits both names now) -- every
+    # RoutingSessions construction site wires every registered non-claude
+    # backend, so adding a THIRD means touching this dict too (see
+    # dispatcher._REGISTERED_RUNNERS's own docstring).
+    sessions = RoutingSessions({
+        "claude": ClaudeCliSessions(
+            cfg.home, model=cfg.reconcile_model,
+            permission_mode=cfg.permission_mode,
+            base_allowed_tools=_reconciler_tool_grants(cfg),
+            capture_session_logs=cfg.capture_session_logs,
+            session_log_format=cfg.session_log_format,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+        "opencode": OpencodeCliSessions(
+            cfg.home,
+            capture_session_logs=cfg.capture_session_logs,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+    })
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     if report.repo_blockers:
         if cfg.repos:
@@ -533,15 +544,20 @@ def cmd_dispatch(args) -> int:
     if args.dry_run:
         sessions = DryRunSessions()
     else:
-        # RF-2: same wrap as _nudge above -- "claude" is the only registered
-        # runner, so this is a drop-in replacement, not a behavior change.
-        sessions = RoutingSessions({"claude": ClaudeCliSessions(
-            cfg.home, model=args.model or cfg.reconcile_model,
-            permission_mode=cfg.permission_mode,
-            base_allowed_tools=_reconciler_tool_grants(cfg),
-            capture_session_logs=cfg.capture_session_logs,
-            session_log_format=cfg.session_log_format,
-            unverified_claim_max_age=cfg.unverified_claim_max_age)})
+        # RF-2/OC-4: same wrap as _nudge above -- both registered backends wired.
+        sessions = RoutingSessions({
+            "claude": ClaudeCliSessions(
+                cfg.home, model=args.model or cfg.reconcile_model,
+                permission_mode=cfg.permission_mode,
+                base_allowed_tools=_reconciler_tool_grants(cfg),
+                capture_session_logs=cfg.capture_session_logs,
+                session_log_format=cfg.session_log_format,
+                unverified_claim_max_age=cfg.unverified_claim_max_age),
+            "opencode": OpencodeCliSessions(
+                cfg.home,
+                capture_session_logs=cfg.capture_session_logs,
+                unverified_claim_max_age=cfg.unverified_claim_max_age),
+        })
     report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run,
                             key_filter=key_filter)
     projection.write(cfg.home)

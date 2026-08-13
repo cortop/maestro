@@ -1988,6 +1988,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             # to the same non-claude runner probe its binary/daemon once, not once
             # each ("Probe once per sweep, cached — never per key").
             runner_probe_cache: dict = {}
+            # OC-4: {runner name: count}, seeded lazily (once per runner name, on
+            # first key that reaches the cap check below) from keys already in
+            # `active` this sweep, then incremented in-place as this sweep spawns
+            # more of that runner -- so two due opencode keys in the SAME sweep
+            # can't both slip through a cap computed from a snapshot taken before
+            # either spawned.
+            runner_active_counts: dict[str, int] = {}
 
             spawned = []
             for key, _reason in to_spawn:
@@ -2096,6 +2103,24 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                                 qid=f"runner-model-{key}-{runner}-{runner_model}",
                                 actor="dispatcher")
                         continue
+                    # OC-4: per-runner concurrency cap -- still OC-2's own preflight
+                    # (before `_allow_spawn`, no attempts-ledger spend), because the
+                    # thing bounding a fast-failing runner's spawn RATE must never be
+                    # the no-progress circuit breaker (that would burn `max_failures`
+                    # attempts and dead-letter the ticket over what is, here, pure
+                    # capacity -- not a broken ticket). Group-level skip, modelled on
+                    # `repo_capped`/`repo_blocked`: no event, ticket stays due, retried
+                    # next sweep once a slot frees up.
+                    cap = _runner_concurrency_cap(cfg, runner)
+                    if cap is not None:
+                        if runner not in runner_active_counts:
+                            runner_active_counts[runner] = sum(
+                                1 for k in active
+                                if resolve_runner(cfg, k, phase_by_key.get(k, ""))[0] == runner)
+                        if runner_active_counts[runner] >= cap:
+                            decisions[key]["outcome"] = "runner_capped"
+                            continue
+                        runner_active_counts[runner] += 1
                 if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
                     attempts_changed = True
                     reaped.append(key)
@@ -2116,7 +2141,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 # command back out of a prompt maestro pre-flattened).
                 sessions.spawn(key, command, cwd, model=model, effort=effort,
                                disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
-                               env_overlay=cred.env, runner=runner)
+                               env_overlay=cred.env, runner=runner, runner_model=runner_model)
                 spawned.append(key)
                 decisions[key]["outcome"] = "spawned"
                 weight = spawn_weight(cfg, phase_by_key.get(key, ""))
@@ -2225,12 +2250,41 @@ def _resolve_model_effort(cfg: Config, key: str) -> tuple[str, str | None]:
     return model, effort
 
 
-# RF-2: the ONLY registered runner as of this ticket -- the seam this ticket lands
-# (spec `runner:`/`runner_model:` -> resolve_runner -> RoutingSessions) is proved
-# byte-identical-by-default before a second backend can be added, per the ticket's
-# Intent. Adding a runner means adding it here AND wiring a delegate into every
-# RoutingSessions construction site (cli.py) -- one is meaningless without the other.
-_REGISTERED_RUNNERS = frozenset({"claude"})
+# RF-2/OC-4: the registered runners -- the seam RF-2 landed (spec
+# `runner:`/`runner_model:` -> resolve_runner -> RoutingSessions) was proved
+# byte-identical-by-default before a second backend was added, per RF-2's ticket
+# Intent. OC-4 is that second backend (``sessions.OpencodeCliSessions``); adding a
+# THIRD means adding it here AND wiring a delegate into every RoutingSessions
+# construction site (cli.py) -- one is meaningless without the other.
+_REGISTERED_RUNNERS = frozenset({"claude", "opencode"})
+
+# OC-4: per-runner concurrency cap defaults, consulted by `_runner_concurrency_cap`
+# below when `[runner.<name>]`'s `concurrency` key (cfg.provider_config) is unset.
+# "claude" is never looked up here -- the fleet-wide `max_concurrency` already
+# bounds it, and it never reaches the non-claude branch this cap gates. opencode
+# defaults to 1 (spec Notes, QW-3): it wedges intermittently at `init` and every
+# process shares one on-disk sqlite db (`~/.local/share/opencode/opencode.db` +
+# WAL), so two concurrent opencode reconcilers is a measured risk until proven
+# otherwise -- raise this via config, not by editing the default.
+_RUNNER_DEFAULT_CONCURRENCY = {"opencode": 1}
+
+
+def _runner_concurrency_cap(cfg: Config, runner: str) -> int | None:
+    """The per-runner concurrency cap (OC-4) for *runner* -- `[runner.<name>]`'s
+    `concurrency` key (``cfg.provider_config["runner"][name]["concurrency"]``,
+    validated at ``config.load`` against the fail-closed key allowlist there) if
+    set, else ``_RUNNER_DEFAULT_CONCURRENCY.get(runner)`` (None = uncapped, e.g.
+    every runner besides opencode until one is configured). Never raises -- a
+    malformed value (not int-able) falls back to the default rather than wedging
+    the spawn loop over a config typo `config.load` didn't already reject."""
+    table = (cfg.provider_config.get("runner") or {}).get(runner) or {}
+    raw = table.get("concurrency")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return _RUNNER_DEFAULT_CONCURRENCY.get(runner)
 
 
 def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:

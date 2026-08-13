@@ -747,9 +747,10 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
     report = disp.dispatch(cfg, sessions, now=1000)
     assert report.spawned == ["T-1"]
     assert len(sessions.spawned) == 1
-    key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner = \
-        sessions.spawned[0]
-    assert (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner) == (
+    key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner, \
+        runner_model = sessions.spawned[0]
+    assert (key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner,
+            runner_model) == (
         "T-1",
         "/maestro-reconcile-ready T-1",
         str(home),
@@ -759,6 +760,7 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
         [],
         {},
         "claude",  # RF-2: READY forces "claude" regardless of any spec runner: override
+        None,      # OC-4: no non-claude runner in play here
     )
 
 
@@ -1890,10 +1892,11 @@ class _ZeroTurnSessions(DryRunSessions):
         return set()
 
     def spawn(self, key, prompt, cwd, model=None, effort=None,
-              disallowed_tools=None, allowed_tools=None, env_overlay=None, runner=None):
+              disallowed_tools=None, allowed_tools=None, env_overlay=None, runner=None,
+              runner_model=None):
         super().spawn(key, prompt, cwd, model=model, effort=effort,
                       disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
-                      env_overlay=env_overlay, runner=runner)
+                      env_overlay=env_overlay, runner=runner, runner_model=runner_model)
         self._n += 1
         session_id = f"reconcile-{key}-{self._n}.000000"
         command = prompt.split()[0]

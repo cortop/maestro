@@ -7,11 +7,13 @@ attempts-ledger spend); model absent or not tool-capable is PERMANENT --
 branch, so it lands in NEEDS-YOU instead of sleeping forever. Never falls
 through to a claude spawn on any branch.
 
-`_REGISTERED_RUNNERS` (RF-2) is `{"claude"}` today -- no real second
-`SessionManager` delegate exists yet, so every test here monkeypatches it to
-admit a fake non-claude runner name past that earlier gate and into OC-2's new
-preflight code, exactly like `test_ollama_health.py` fakes the ollama
-transport rather than depending on a real daemon.
+`_REGISTERED_RUNNERS` is `{"claude", "opencode"}` as of OC-4 -- every test here
+still monkeypatches it (redundantly, now that "opencode" is real) so this file
+stays independent of whatever runner names happen to be registered, exactly
+like `test_ollama_health.py` fakes the ollama transport rather than depending
+on a real daemon. This file exercises the preflight gate itself with plain
+`DryRunSessions`, never a real `OpencodeCliSessions` spawn -- see
+`test_opencode_sessions.py` for that.
 """
 from __future__ import annotations
 
