@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 from . import claims, credentials, dispatcher, fleet, skills_install, spend as spend_mod, store
+from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
 from .config import Config
 from .providers import ollama as ollama_mod
@@ -831,6 +832,123 @@ def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
     return {"name": "ollama_models", "status": status, "detail": detail, "tickets": tickets}
 
 
+# MTO-8: consecutive non-429 error outcomes across the fleet's most recent
+# terminal sessions before check_provider_availability treats it as a
+# provider problem OBSERVED (not a guess off one flaky session).
+_PROVIDER_ERROR_STREAK = 3
+# Bound on how many of the fleet's most-recent session log FILENAMES are even
+# considered -- filename-only, no file opened -- before the (small) prefix of
+# those gets tail-scanned for its outcome. Keeps this check's cost independent
+# of how long the fleet's full history is.
+_PROVIDER_SESSION_SCAN = 12
+_PROVIDER_PROBE_HOST = "api.anthropic.com"
+_PROVIDER_PROBE_PORT = 443
+_PROVIDER_PROBE_TIMEOUT = 5.0
+
+
+def _recent_fleet_outcomes(home: Path, keys: list[str], scan: int) -> list[str]:
+    """Newest-first terminal outcomes (``success``/``error``/``rate_limited``)
+    across EVERY current ticket's session logs, capped to the *scan*
+    most-recent session files fleet-wide -- sorted by the epoch already
+    embedded in each filename (``sessions.list_sessions`` with
+    ``with_outcome=False``, so this opens NO log file just to rank them), then
+    only the top *scan* get their outcome tail-scanned
+    (``steplog.session_outcome``). A ``running`` (still-active claim) or
+    ``unknown`` (non-stream-json log, e.g. a non-claude runner's own grammar)
+    entry carries no verdict about provider availability and is skipped
+    rather than counted or treated as breaking a streak."""
+    candidates: list[dict] = []
+    for key in keys:
+        candidates.extend(sessions_mod.list_sessions(home, key))
+    candidates.sort(key=lambda d: d["epoch"], reverse=True)
+    outcomes = []
+    for entry in candidates[:scan]:
+        outcome = steplog.session_outcome(Path(entry["path"]))["outcome"]
+        if outcome in ("running", "unknown"):
+            continue
+        outcomes.append(outcome)
+    return outcomes
+
+
+def _default_provider_probe() -> tuple[bool, str]:
+    """Real confirmation probe -- a bare TCP connect to the provider's own
+    host, no TLS handshake, no request, no API key spent. Cheap enough to run
+    as a confirmation step, but ``check_provider_availability`` only ever
+    reaches this once the session-log primary signal has already tripped --
+    never on a bare sweep with nothing wrong, so this can't turn the health
+    check into a traffic generator. A successful connect means "this box has
+    a network path to the provider"; it says nothing about whether the
+    provider itself is erroring -- that distinction is exactly what the
+    already-tripped session-log streak answered."""
+    import socket
+    try:
+        with socket.create_connection(
+            (_PROVIDER_PROBE_HOST, _PROVIDER_PROBE_PORT), timeout=_PROVIDER_PROBE_TIMEOUT
+        ):
+            return True, f"TCP connect to {_PROVIDER_PROBE_HOST}:{_PROVIDER_PROBE_PORT} ok"
+    except OSError as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
+    """Report-only (MTO-8; this ticket's Notes call for that explicitly --
+    never blocks a spawn, so a broken detector can't halt the board), and
+    distinguishes the three states the operator actually needs to tell apart:
+    provider fine, provider reachable but erroring, or this box has no
+    network at all. None of those are visible today above the level of one
+    session's own log (``steplog.classify_result``).
+
+    PRIMARY signal, no network call: the fleet's most recent terminal session
+    outcomes (``_recent_fleet_outcomes``, bounded scan) -- if the most recent
+    ``_PROVIDER_ERROR_STREAK`` of them are ALL plain ``error``, this reports a
+    provider problem OBSERVED, not probed. A ``rate_limited`` (429) outcome
+    breaks the streak rather than counting toward it -- rate limiting is
+    already handled by ``ratelimit.py``'s own gate and must never be
+    conflated with unreachability (the operator's next action differs: wait
+    vs. investigate). Fewer than the threshold, or any success/rate_limited
+    among the scanned window: ``ok``, no probe -- this is also how a fresh
+    home with no session logs at all fails open, matching
+    ``check_gh_credential_reachability``.
+
+    CONFIRMATION probe, reached ONLY once the primary signal has already
+    tripped: a bare TCP connect to the provider's own host
+    (``_default_provider_probe``). Connects -> ``erroring`` (network is up,
+    the provider itself is degraded); fails -> ``no_network`` (this box is
+    offline). Injectable ``probe``, same shape as
+    ``check_gh_credential_reachability``'s ``run``/``check_ollama_models``'s
+    ``transport``, so tests never open a real socket.
+    """
+    home = cfg.home
+    keys = dispatcher.list_keys(home)
+    outcomes = _recent_fleet_outcomes(home, keys, _PROVIDER_SESSION_SCAN)
+    streak = 0
+    for outcome in outcomes:
+        if outcome != "error":
+            break
+        streak += 1
+        if streak >= _PROVIDER_ERROR_STREAK:
+            break
+    if streak < _PROVIDER_ERROR_STREAK:
+        return {"name": "provider_availability", "status": "ok", "state": "ok",
+                "detail": "provider reachable, no recent error streak",
+                "error_streak": streak}
+
+    reachable, reason = (probe or _default_provider_probe)()
+    if reachable:
+        return {
+            "name": "provider_availability", "status": "warn", "state": "erroring",
+            "detail": (f"{streak} consecutive session(s) ended in a provider error; "
+                       f"network reachable ({reason}) -- the provider itself appears degraded"),
+            "error_streak": streak,
+        }
+    return {
+        "name": "provider_availability", "status": "fail", "state": "no_network",
+        "detail": (f"{streak} consecutive session(s) ended in a provider error; "
+                   f"network unreachable ({reason}) -- this machine appears offline"),
+        "error_streak": streak,
+    }
+
+
 def check_depends_on(cfg: Config, now: float) -> dict:
     home = cfg.home
     graph = _depends_on_graph(home)
@@ -883,7 +1001,7 @@ CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_out
           check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
           check_daily_spend, check_gh_credential_reachability, check_launchctl, check_ollama_models,
-          check_runner_binary, check_worktree_health)
+          check_runner_binary, check_worktree_health, check_provider_availability)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:

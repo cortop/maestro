@@ -979,6 +979,46 @@ def test_fleet_screen_renders_runaway_board_differently(seeded_home):
     asyncio.run(_inner())
 
 
+def test_fleet_screen_shows_provider_no_network_distinguishably(seeded_home, monkeypatch):
+    """MTO-8: a fleet whose recent sessions all ended in a non-429 provider
+    error, with the confirmation probe unable to reach the network, must
+    render distinguishably (NO NETWORK, red) from the healthy seeded_home
+    above -- proven by mounting the real app, matching the ``runaway`` test
+    right above."""
+    import json as json_mod
+    from maestro import health, store
+
+    key = "T-3"  # seed_ticket'd into `implementing` by the seeded_home fixture
+    for epoch in (100.0, 200.0, 300.0):
+        session_id = f"reconcile-{key}-{epoch:.6f}"
+        path = store.session_stream_path(seeded_home, key, session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json_mod.dumps({"type": "system", "subtype": "init", "session_id": session_id}) + "\n" +
+            json_mod.dumps({"type": "result", "subtype": "error_during_execution",
+                             "is_error": True}) + "\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(health, "_default_provider_probe", lambda: (False, "offline"))
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status = app.screen_stack[-1].query_one("#fleet-status", Static)
+            content = str(status.content)
+            assert "Provider" in content
+            assert "NO NETWORK" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_header_badge_shows_paused_state(seeded_home):
     """AC (T-15): the header badge reflects a paused board."""
     from maestro import fleet

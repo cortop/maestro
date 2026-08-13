@@ -62,6 +62,17 @@ def _render_badge(status: dict) -> str:
     return badge
 
 
+def _find_check(doctor: dict, name: str) -> dict:
+    """The one ``doctor["checks"]`` entry named *name*, or ``{}`` if the
+    registry doesn't carry it (an older cached doctor payload in a test, say)
+    -- callers read fields off the result with ``.get`` so a missing check
+    renders as the same "nothing wrong" default an ``ok`` one would."""
+    for check in doctor.get("checks", []):
+        if check.get("name") == name:
+            return check
+    return {}
+
+
 def _render_fleet(status: dict, doctor: dict) -> str:
     loaded = "[green]yes[/green]" if status.get("loaded") else "[red]no[/red]"
     age = _fmt_age(status.get("heartbeat_age_s"))
@@ -108,6 +119,19 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         spend_str = (f"[red bold]{today_str}[/red bold] / {ceiling_str}" if over
                      else f"{today_str} / {ceiling_str}")
 
+    # MTO-8: the provider-availability check's three states -- ok / erroring
+    # (network up, provider degraded) / no_network (this box is offline) --
+    # rendered distinguishably so the operator's next action (nothing / wait
+    # on the provider / check this machine's connection) is unambiguous.
+    provider = _find_check(doctor, "provider_availability")
+    provider_state = provider.get("state", "ok")
+    if provider_state == "no_network":
+        provider_str = f"[red bold]NO NETWORK[/red bold] -- {provider.get('detail', '')}"
+    elif provider_state == "erroring":
+        provider_str = f"[yellow bold]ERRORING[/yellow bold] -- {provider.get('detail', '')}"
+    else:
+        provider_str = "[green]ok[/green]"
+
     lines = [
         "[bold]Fleet & Health[/bold]",
         "",
@@ -132,6 +156,7 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         f"  Spawn floor:     {floor_str}",
         f"  Runaway:         {runaway_str}",
         f"  Spend today:     {spend_str}",
+        f"  Provider:        {provider_str}",
     ]
     rl = doctor.get("rate_limit") or {}
     if rl.get("paused"):

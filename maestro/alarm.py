@@ -42,6 +42,14 @@ level-triggered sweep doesn't re-fire every tick:
   threshold, so the two can never disagree. Independent of ``brake``: it fires even
   when ``runaway_pause_cooldown`` disables the auto-brake, or while a prior arm's
   own cooldown is still suppressing a new pause.
+- ``provider_availability``: ``health.check_provider_availability(cfg, now)`` reports
+  something other than ``ok`` (MTO-8) -- the fleet is quietly burning spawn attempts
+  against a down provider or an offline box, exactly the shape of the 2026-07-19
+  incident. Computed here (not threaded in from ``dispatch()`` like
+  ``runaway_reason``/``spend_ceiling_reason``) since it never gates the sweep itself
+  (report-only, see that check's own docstring) -- there is nothing for the caller to
+  precompute. Its own probe is already behind a primary signal, so calling it every
+  sweep costs nothing extra on a healthy board.
 
 This module changes no gate behavior -- it only reads state GA-5/GA-8/GA-11/health
 already compute and pushes a notification. ``derived/.alarm.json`` is disposable,
@@ -211,6 +219,12 @@ def check(cfg: Config, now: float, health_mod, *,
         state.get("spawn_rate", {}), runaway_now, now, cfg.alarm_cooldown_s)
     note("spawn_rate", rate_fire, rate_entry, (
         f"spawn rate {rate}/hour exceeds budget {budget}/hour ({health_mod.SPAWN_RATE_UNIT})"))
+
+    provider = health_mod.check_provider_availability(cfg, now)
+    provider_fire, provider_entry = _edge_or_cooldown(
+        state.get("provider_availability", {}), provider["status"] != "ok",
+        now, cfg.alarm_cooldown_s)
+    note("provider_availability", provider_fire, provider_entry, provider["detail"])
 
     if changed:
         store.write_json(_state_path(home), state)  # persisted BEFORE firing -- see docstring
