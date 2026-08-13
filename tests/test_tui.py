@@ -354,6 +354,28 @@ def test_render_detail_no_open_questions_shows_emdash():
     assert any("—" in l for l in lines)
 
 
+# --- Runner row (UX-2) --------------------------------------------------------
+
+def test_render_detail_runner_row_defaults_to_claude():
+    """No spec override (runner=None) renders the board default, not an em-dash --
+    an absent override is a normal, common state."""
+    snap = snap_mod.Snapshot(key="T-1", phase="ready")
+    out = _render_detail(snap)
+    lines = [l for l in out.splitlines() if "Runner" in l]
+    assert lines
+    assert "claude" in lines[0]
+    assert "—" not in lines[0]
+
+
+def test_render_detail_runner_row_shows_override_and_model():
+    snap = snap_mod.Snapshot(key="T-1", phase="ready")
+    out = _render_detail(snap, runner="opencode", runner_model="qwen3-coder:30b")
+    lines = [l for l in out.splitlines() if "Runner" in l]
+    assert lines
+    assert "opencode" in lines[0]
+    assert "qwen3-coder:30b" in lines[0]
+
+
 # --- detail markup is valid for every phase (regression: awaiting-ci crashed) ----
 
 import pytest  # noqa: E402
@@ -1504,6 +1526,18 @@ def test_render_env_matches_maestro_env_fields(tmp_path):
     for field in ("home", "repo_path", "branch_prefix", "reconcile_command",
                    "max_concurrency", "max_impl_turns"):
         assert field in out, f"Expected field '{field}' in env panel output"
+
+
+def test_render_env_shows_board_wide_runner_default(home):
+    """UX-2 AC6: EnvScreen surfaces the board-wide runner default + kill switch."""
+    cfg = _make_cfg(home)
+    cfg.runner = "opencode"
+    cfg.runner_model = "qwen3-coder:30b"
+    cfg.runner_enabled = ["claude", "opencode"]
+    out = _render_env(cfg)
+    assert "opencode" in out
+    assert "qwen3-coder:30b" in out
+    assert "runner_enabled" in out
 
 
 def test_env_screen_constructs(home):

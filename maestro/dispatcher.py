@@ -27,7 +27,7 @@ from typing import Callable, Iterable
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
 from .config import Config
-from .gates import backend_interlock_reason, needs_approval, parse_spec_overrides, spec_priority, spec_tier  # noqa: F401 (re-export)
+from .gates import backend_interlock_reason, needs_approval, parse_spec_overrides, spec_priority, spec_runner, spec_tier  # noqa: F401 (re-export)
 from .idempotency import content_hash
 from .sessions import SessionManager
 from .statemachine import Phase, SLEEPING_PHASES, TERMINAL_PHASES
