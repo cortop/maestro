@@ -16,7 +16,7 @@ from .. import claims, config as config_mod, event_log, fleet as fleet_mod, heal
 from ..dispatcher import schedule_status, spec_runner, spec_tier
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
-from .events import render_log, render_log_line
+from .events import render_log, render_log_line, render_opencode_log_line
 from .modals import _IntervalModal, _ScheduleModal
 from .render import _fmt_epoch, _render_env, _render_fleet
 
@@ -101,6 +101,8 @@ class LogsScreen(Screen):
             return
 
         is_stream = log_path.name.endswith(".stream.jsonl")
+        is_opencode = log_path.name.endswith(".opencode.jsonl")
+        render_line = render_opencode_log_line if is_opencode else render_log_line
 
         with log_path.open(encoding="utf-8", errors="replace") as f:
             buf = ""
@@ -108,7 +110,7 @@ class LogsScreen(Screen):
                 chunk = f.read(4096)
                 if chunk:
                     buf += chunk
-                    if is_stream:
+                    if is_stream or is_opencode:
                         while "\n" in buf:
                             line, buf = buf.split("\n", 1)
                             line = line.strip()
@@ -118,7 +120,7 @@ class LogsScreen(Screen):
                                 obj = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            for rendered in render_log_line(obj):
+                            for rendered in render_line(obj):
                                 self.app.call_from_thread(log_widget.write, rendered)
                     else:
                         self.app.call_from_thread(log_widget.write, chunk)

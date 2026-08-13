@@ -853,13 +853,18 @@ def _recent_fleet_outcomes(home: Path, keys: list[str], scan: int) -> list[str]:
     embedded in each filename (``sessions.list_sessions`` with
     ``with_outcome=False``, so this opens NO log file just to rank them), then
     only the top *scan* get their outcome tail-scanned
-    (``steplog.session_outcome``). A ``running`` (still-active claim) or
-    ``unknown`` (non-stream-json log, e.g. a non-claude runner's own grammar)
-    entry carries no verdict about provider availability and is skipped
-    rather than counted or treated as breaking a streak."""
+    (``steplog.session_outcome``). This check is Anthropic-provider-specific
+    (see ``_PROVIDER_PROBE_HOST`` below) -- a non-Claude runner's own log
+    grammar (opencode) is filtered out BEFORE the scan window even though
+    ``steplog.session_outcome`` can parse it for its own purposes now (OC-5);
+    it is unrelated evidence about api.anthropic.com and must never occupy a
+    scan slot or be folded into this streak. A ``running`` (still-active
+    claim) entry carries no verdict either and is skipped rather than counted
+    or treated as breaking a streak."""
     candidates: list[dict] = []
     for key in keys:
         candidates.extend(sessions_mod.list_sessions(home, key))
+    candidates = [c for c in candidates if c["format"] == "stream-json"]
     candidates.sort(key=lambda d: d["epoch"], reverse=True)
     outcomes = []
     for entry in candidates[:scan]:
