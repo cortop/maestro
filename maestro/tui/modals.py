@@ -9,6 +9,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, Select, Static, TextArea
 
 from .. import schedule
+from ..providers import ollama as ollama_mod
 from ..statemachine import Phase
 
 
@@ -537,3 +538,90 @@ class _ScheduleModal(ModalScreen):
             "approval_tier": tier, "priority": priority, "prefix": prefix,
             "enabled": enabled, "title": title, "repo": repo,
         })
+
+
+class _RunnerModal(ModalScreen):
+    """Edit one ticket's `runner:`/`runner_model:` spec front-matter (UX-2);
+    dismisses with ``{"runner", "runner_model"}`` or ``None`` on cancel. Copies
+    `_ScheduleModal`'s "edit an existing record" shape and
+    `_CreateModal.on_select_changed`'s kind -> field reshape. All state
+    mutation happens in the caller's `_on_dismiss` (via `ops.set_runner`) --
+    this modal only collects the two values, it never touches the spec file
+    itself."""
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+enter", "submit", "Submit"),
+    ]
+
+    # UX-1's known runner names (`maestro runners`) -- "claude" is always
+    # available; anything else is opt-in via the board's `runner_enabled`.
+    _RUNNER_OPTIONS = [("claude", "claude"), ("opencode", "opencode")]
+
+    def __init__(self, key: str, runner: str | None, runner_model: str | None) -> None:
+        super().__init__()
+        self._key = key
+        self._runner = runner or "claude"
+        self._runner_model = runner_model or ""
+        # UX-1's model catalogue (`ollama_mod.fetch_models`) -- fetched once,
+        # up front, so both `compose` and `on_select_changed` decide the model
+        # field's shape off the same result. Never raises (see ollama.py); a
+        # down/unreachable daemon just means an empty catalogue, handled below.
+        self._models, self._daemon_reason = ollama_mod.fetch_models()
+
+    def _model_names(self) -> list[str]:
+        return ollama_mod.model_names(self._models, tool_capable_only=True) if self._models else []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="runner-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] — runner")
+            yield Label("Runner")
+            yield Select(options=self._RUNNER_OPTIONS, id="runner-kind",
+                        allow_blank=False, value=self._runner)
+            yield Label("Model (optional; only meaningful for a non-claude runner)")
+            if self._models is not None:
+                model_options = [(m, m) for m in self._model_names()]
+                default = self._runner_model if self._runner_model in dict(model_options) else Select.NULL
+                yield Select(options=model_options, id="runner-model", allow_blank=True, value=default)
+            else:
+                yield Input(value=self._runner_model,
+                           placeholder="model name (daemon unreachable)", id="runner-model")
+            yield Label("[dim]Tab/Enter → next · Ctrl+Enter → submit · Esc → cancel[/dim]")
+
+    def on_mount(self) -> None:
+        if self._models is None:
+            self.notify(
+                f"ollama daemon unreachable ({self._daemon_reason}) -- "
+                "type a model name manually", severity="warning",
+            )
+        self.query_one("#runner-kind", Select).focus()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "runner-kind":
+            return
+        # Mirrors _CreateModal.on_select_changed's kind -> field reshape: a
+        # runner_model override is only ever meaningful for a non-claude
+        # runner (ops.set_runner only validates/warns on it then), so clear
+        # whatever the model field holds the moment the kind flips to claude.
+        if event.value == "claude":
+            model_widget = self.query_one("#runner-model")
+            if isinstance(model_widget, Select):
+                model_widget.value = Select.NULL
+            else:
+                model_widget.value = ""
+
+    def action_submit(self) -> None:
+        self._submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _submit(self) -> None:
+        # runner-kind has allow_blank=False, so .value is always a real option.
+        runner = str(self.query_one("#runner-kind", Select).value)
+        model_widget = self.query_one("#runner-model")
+        if isinstance(model_widget, Select):
+            runner_model = None if model_widget.value is Select.NULL else str(model_widget.value)
+        else:
+            runner_model = model_widget.value.strip() or None
+        self.dismiss({"runner": runner, "runner_model": runner_model})

@@ -10,14 +10,16 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod
+from .. import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
-from ..dispatcher import existing_prefixes, needs_approval, spec_tier
+from ..dispatcher import existing_prefixes, needs_approval, spec_runner, spec_tier
 from ..projection import phase_predicate, ticket_rows
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
-from .modals import _ACCEPT_ALL, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal, _InboxModal
+from .modals import (
+    _ACCEPT_ALL, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal, _InboxModal, _RunnerModal,
+)
 from .render import _render_badge, _styled_row
 from .screens import (
     DetailScreen,
@@ -91,6 +93,7 @@ class MaestroTUI(App):
         Binding("z", "release", "Release", show=False),
         Binding("p", "project_rebuild", "Project", show=False),
         Binding("l", "view_logs", "Logs", show=False),
+        Binding("o", "runner", "Runner", show=False),
     ]
 
     _selected_key: str | None = None
@@ -160,8 +163,10 @@ class MaestroTUI(App):
             self.query_one("#events", RichLog).clear()
             return
         snap = snap_mod.load(self._home, key)
+        runner, runner_model = spec_runner(self._home, key)
         detail.update(_render_detail(snap, spec_tier(self._home, key),
-                                     snap_mod.display_title(self._home, snap)))
+                                     snap_mod.display_title(self._home, snap),
+                                     runner, runner_model))
         self._refresh_events()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -233,6 +238,34 @@ class MaestroTUI(App):
             return
         self.push_screen(SpecScreen(self._home, self._selected_key))
 
+    def action_runner(self) -> None:
+        """UX-2: open the runner modal for the selected ticket. All state
+        mutation goes through UX-1's `ops.set_runner` in `_on_dismiss` -- the
+        TUI never hand-edits the spec file. The `key is None` guard is required
+        by the binding sweep, which presses every key with no ticket selected."""
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        runner, runner_model = spec_runner(self._home, key)
+
+        def _on_dismiss(result: dict | None) -> None:
+            if result is None:
+                return
+            cfg = Config(home=self._home)
+            try:
+                outcome = ops_mod.set_runner(cfg, key, runner=result["runner"],
+                                             runner_model=result["runner_model"])
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
+            if outcome.get("warning"):
+                self.notify(outcome["warning"], severity="warning")
+            else:
+                self.notify(f"runner updated for {key}")
+
+        self.push_screen(_RunnerModal(key, runner, runner_model), _on_dismiss)
+
     def action_env_panel(self) -> None:
         self.push_screen(EnvScreen(self._home))
 
@@ -295,9 +328,11 @@ class MaestroTUI(App):
             if answered:
                 self.notify(f"{answered} answer(s) queued for {key}")
                 snap = snap_mod.load(self._home, key)
+                runner, runner_model = spec_runner(self._home, key)
                 self.query_one("#detail", Static).update(
                     _render_detail(snap, spec_tier(self._home, key),
-                                   snap_mod.display_title(self._home, snap)))
+                                   snap_mod.display_title(self._home, snap),
+                                   runner, runner_model))
             return
         qid, text = questions[idx]
         remaining = len(questions) - idx

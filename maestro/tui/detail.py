@@ -14,7 +14,8 @@ def _esc(s: str) -> str:
 
 
 def render(snap: snap_mod.Snapshot, tier: int | None = None,
-           title: str | None = None) -> str:
+           title: str | None = None, runner: str | None = None,
+           runner_model: str | None = None) -> str:
     """Build Rich markup string for the snapshot detail pane.
 
     `tier` comes from the caller (`dispatcher.spec_tier`) -- the snapshot itself
@@ -28,6 +29,12 @@ def render(snap: snap_mod.Snapshot, tier: int | None = None,
     but still has its title in its spec's H1, and this module stays filesystem-
     free so it remains importable in tests. Omitted, it falls back to the folded
     `snap.title`, so every existing caller renders exactly as before.
+
+    `runner`/`runner_model` (UX-2) come the same way, from `dispatcher.spec_runner`
+    -- the snapshot carries no runner field either, and this module stays
+    filesystem-free. A `None` runner means "no spec override", which renders as
+    the board default (`"claude"`), not an em-dash -- an absent override is a
+    normal, common state, not a missing value.
     """
     def v(val: object) -> str:
         return _esc(str(val)) if val is not None and val != "" else _EM
@@ -51,11 +58,16 @@ def render(snap: snap_mod.Snapshot, tier: int | None = None,
             lines.append(line)
         questions = "\n  ".join(lines)
 
+    runner_info = _esc(runner if runner else "claude")
+    if runner_model:
+        runner_info += f" [dim]({_esc(runner_model)})[/dim]"
+
     return (
         f"[bold]{v(title if title is not None else snap.title)}[/bold]\n\n"
         f"[dim]Key[/dim]           {v(snap.key)}\n"
         f"[dim]Phase[/dim]         {v(snap.phase)}\n"
         f"[dim]Tier[/dim]          {str(tier) if tier is not None else _EM}\n"
+        f"[dim]Runner[/dim]        {runner_info}\n"
         f"[dim]Source[/dim]        {v(snap.source)}\n"
         f"[dim]PR[/dim]            {pr_info}\n"
         f"[dim]CI[/dim]            {v(snap.ci_state)}\n"

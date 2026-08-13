@@ -180,6 +180,8 @@ def _render_env(cfg: config_mod.Config) -> str:
         f"  reconcile_command:  {cfg.reconcile_command}",
         f"  max_concurrency:    {cfg.max_concurrency}",
         f"  max_impl_turns:     {cfg.max_impl_turns}",
+        f"  runner:             {cfg.runner}" + (f" (model: {cfg.runner_model})" if cfg.runner_model else ""),
+        f"  runner_enabled:     {', '.join(cfg.runner_enabled) if cfg.runner_enabled else '—'}",
         "",
         "[bold]Providers[/bold]",
         "",

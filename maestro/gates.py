@@ -100,6 +100,22 @@ def needs_approval(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
             and not snap.approved)
 
 
+def spec_runner(home: Path, key: str) -> tuple[str | None, str | None]:
+    """*key*'s `runner:`/`runner_model:` spec front-matter overrides, read
+    straight from the spec file on disk -- mirrors `spec_tier`/`spec_priority`
+    exactly, so a human's `maestro runner` edit (or the TUI's runner modal,
+    UX-2) is visible to display surfaces the very next render, without waiting
+    for a fold. Missing file or missing field both come back `None` -- there is
+    no numeric-style safe default for a runner name, so unlike `spec_tier` this
+    does not default to `"claude"`; a display caller treats `None` as "board
+    default" (`cfg.runner`), not as an error."""
+    spec_file = store.spec_path(home, key)
+    if not spec_file.exists():
+        return None, None
+    overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
+    return overrides.get("runner"), overrides.get("runner_model")
+
+
 # UX-1: phases where a ticket's `runner:`/`runner_model:` choice may still be
 # changed -- before a worktree/reconciler for the `implementing` step exists,
 # so an edit can't be silently ignored by a session already spawned.
