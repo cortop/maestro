@@ -607,7 +607,14 @@ def test_mint_ticket_prefix_skips_existing(home, cfg):
 # --- RT-1: parse_spec_overrides ---
 
 def test_parse_spec_overrides_tier_only():
-    assert disp.parse_spec_overrides("approval_tier: 1\npriority: 3\n") == {"approval_tier": 1}
+    assert disp.parse_spec_overrides("approval_tier: 1\n") == {"approval_tier": 1}
+
+
+def test_parse_spec_overrides_tier_and_priority():
+    # MTO-7: priority is now a recognized override, parsed to int like approval_tier.
+    assert disp.parse_spec_overrides("approval_tier: 1\npriority: 3\n") == {
+        "approval_tier": 1, "priority": 3,
+    }
 
 
 def test_parse_spec_overrides_model_only():

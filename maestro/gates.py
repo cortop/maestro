@@ -26,15 +26,16 @@ _FRONTMATTER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
 
 
 def parse_spec_overrides(spec_text: str) -> dict:
-    """Extract optional kind/model/effort/repo/runner/runner_model/approval_tier from a
-    spec's loose frontmatter. Stops at the first ## section header. Returns only keys
-    that are present. ``approval_tier`` is parsed to int; a malformed value (not an
-    int) is simply omitted -- callers fall back to the safe, more-restrictive
-    default (see ``spec_tier``) rather than this function ever raising. RF-2:
-    ``runner``/``runner_model`` follow ``model``/``effort``'s precedent exactly --
-    returned verbatim, no normalisation, no validation (that's
-    ``dispatcher.resolve_runner``'s job, and the fail-closed-on-unregistered-name
-    check is the dispatcher's, not this function's).
+    """Extract optional kind/model/effort/repo/runner/runner_model/approval_tier/
+    priority from a spec's loose frontmatter. Stops at the first ## section
+    header. Returns only keys that are present. ``approval_tier``/``priority``
+    are parsed to int; a malformed value (not an int) is simply omitted --
+    callers fall back to the safe default (see ``spec_tier``/``spec_priority``)
+    rather than this function ever raising. RF-2: ``runner``/``runner_model``
+    follow ``model``/``effort``'s precedent exactly -- returned verbatim, no
+    normalisation, no validation (that's ``dispatcher.resolve_runner``'s job,
+    and the fail-closed-on-unregistered-name check is the dispatcher's, not
+    this function's).
     """
     result: dict = {}
     for line in spec_text.splitlines():
@@ -46,7 +47,7 @@ def parse_spec_overrides(spec_text: str) -> dict:
         field, val = m.group(1), m.group(2).strip()
         if field in ("kind", "model", "effort", "repo", "runner", "runner_model"):
             result[field] = val
-        elif field == "approval_tier":
+        elif field in ("approval_tier", "priority"):
             try:
                 result[field] = int(val)
             except ValueError:
@@ -66,6 +67,22 @@ def spec_tier(home: Path, key: str) -> int:
         return 1
     overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
     return overrides.get("approval_tier", 1)
+
+
+def spec_priority(home: Path, key: str) -> int:
+    """*key*'s dispatch-ordering preference, read straight from the spec file on
+    disk (not the snapshot, so a human edit takes effect the very next sweep) --
+    mirrors ``spec_tier`` exactly. Missing file, missing field, or a malformed
+    value all fall back to the default (3), the same default ``_seed_spec``
+    already coerces to, so a sweep can never raise on a bad/absent value
+    (MTO-7). Lower sorts first -- see ``dispatcher.dispatch``'s ordering of the
+    due set, upstream of every existing throttle/cap; this function is only a
+    read, it decides nothing about whether a key is due or spawnable."""
+    spec_file = store.spec_path(home, key)
+    if not spec_file.exists():
+        return 3
+    overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
+    return overrides.get("priority", 3)
 
 
 def needs_approval(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:

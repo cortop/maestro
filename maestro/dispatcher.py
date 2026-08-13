@@ -27,7 +27,7 @@ from typing import Callable, Iterable
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
 from .config import Config
-from .gates import backend_interlock_reason, needs_approval, parse_spec_overrides, spec_tier  # noqa: F401 (re-export)
+from .gates import backend_interlock_reason, needs_approval, parse_spec_overrides, spec_priority, spec_tier  # noqa: F401 (re-export)
 from .idempotency import content_hash
 from .sessions import SessionManager
 from .statemachine import Phase, SLEEPING_PHASES, TERMINAL_PHASES
@@ -1777,6 +1777,19 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             continue
         due.append((key, res.reason))
         decisions[key] = {"outcome": "due", "reason": res.reason}
+
+    # MTO-7: order the due set by (priority, key) -- a preference over WHICH due
+    # key is considered first, upstream of every existing brake (spawn floor,
+    # repo-blocked, max_spawns_per_sweep, max_concurrency slots, the runaway
+    # brake/rate-limit/spend-ceiling gates below). It decides nothing about
+    # whether a key is due, throttled, or spawnable -- only their relative order
+    # through those unchanged filters, so a throttled/capped/blocked high-priority
+    # ticket still can't starve the rest of the board. `spec_priority` reads fresh
+    # from disk per sweep (never the folded snapshot) with the same total-and-
+    # never-raises contract as `spec_tier`; `split_key` is the tiebreaker so
+    # ordering stays deterministic when priorities are equal (including the
+    # all-default-3 case, which reduces to today's plain lexical order).
+    due.sort(key=lambda kr: (spec_priority(home, kr[0]), split_key(kr[0])))
 
     # Per-repo preflight, scoped to the repos this sweep's due tickets (plus the
     # implicit default) actually reference -- a 1-repo board still runs exactly
