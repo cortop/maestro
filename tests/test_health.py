@@ -507,7 +507,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend",
                       "gh_credential_reachability", "ollama_models", "runner_binary",
-                      "worktree_health"}
+                      "worktree_health", "provider_availability"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -558,13 +558,14 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     doesn't silently add/drop/rename", still holds for every other name. T-33
     grew it by one more -- `ollama_models` -- same treatment. T-38 (OC-2) grew
     it by one more still -- `runner_binary` -- same treatment. MTO-1 grew it by one
-    more still -- `worktree_health` -- same treatment.)"""
+    more still -- `worktree_health` -- same treatment. MTO-8 grew it by one more
+    still -- `provider_availability` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "depends_on", "repo_preflight", "unknown_repo_bindings",
         "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
-        "runner_binary", "worktree_health",
+        "runner_binary", "worktree_health", "provider_availability",
     }
     code, out = _sweep(home)
     assert code == 0
