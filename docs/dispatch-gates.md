@@ -8,19 +8,19 @@ Every `decisions[key]["outcome"]` a sweep can assign, in the source order `maest
 
 | # | outcome | source |
 |---|---------|--------|
-| 1 | `throttled` | `maestro/dispatcher.py:1910` |
-| 2 | `repo_blocked` | `maestro/dispatcher.py:1925` |
-| 3 | `repo_capped` | `maestro/dispatcher.py:1944` |
-| 4 | `capacity_skipped` | `maestro/dispatcher.py:1954` |
-| 5 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:1976` |
-| 6 | `would_spawn` | `maestro/dispatcher.py:1979` |
-| 7 | `backend_interlocked` | `maestro/dispatcher.py:2007` |
-| 8 | `credential_unresolvable` | `maestro/dispatcher.py:2020` |
-| 9 | `runner_unregistered` | `maestro/dispatcher.py:2034` |
-| 10 | `runner_disabled` | `maestro/dispatcher.py:2068` |
-| 11 | `runner_binary_missing` | `maestro/dispatcher.py:2082` |
-| 12 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2086` |
-| 13 | `runner_model_unavailable` | `maestro/dispatcher.py:2097` |
-| 14 | `runner_capped` | `maestro/dispatcher.py:2121` |
-| 15 | `attempts_exhausted` | `maestro/dispatcher.py:2127` |
-| 16 | `spawned` | `maestro/dispatcher.py:2146` |
+| 1 | `throttled` | `maestro/dispatcher.py:1934` |
+| 2 | `repo_blocked` | `maestro/dispatcher.py:1949` |
+| 3 | `repo_capped` | `maestro/dispatcher.py:1968` |
+| 4 | `capacity_skipped` | `maestro/dispatcher.py:1978` |
+| 5 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2000` |
+| 6 | `would_spawn` | `maestro/dispatcher.py:2003` |
+| 7 | `backend_interlocked` | `maestro/dispatcher.py:2031` |
+| 8 | `credential_unresolvable` | `maestro/dispatcher.py:2044` |
+| 9 | `runner_unregistered` | `maestro/dispatcher.py:2058` |
+| 10 | `runner_disabled` | `maestro/dispatcher.py:2092` |
+| 11 | `runner_binary_missing` | `maestro/dispatcher.py:2106` |
+| 12 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2110` |
+| 13 | `runner_model_unavailable` | `maestro/dispatcher.py:2121` |
+| 14 | `runner_capped` | `maestro/dispatcher.py:2145` |
+| 15 | `attempts_exhausted` | `maestro/dispatcher.py:2151` |
+| 16 | `spawned` | `maestro/dispatcher.py:2170` |
