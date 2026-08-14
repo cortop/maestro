@@ -1479,11 +1479,38 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    err = _empty_key_error(args)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
     try:
         return args.func(args)
     except store.MaestroError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+
+def _empty_key_error(args) -> str | None:
+    """T-66: a ticket key is either a real key or absent (``None``/omitted,
+    meaning "board-wide" or "all tickets" for the handful of verbs that allow
+    that) -- an explicit empty string is neither, and must be a hard, clear
+    error at the CLI boundary rather than silently degrading to the board-wide
+    or "all" behavior. This is exactly what let the opencode reconciler start
+    guessing (spec Notes): ``KEY=""`` looked survivable instead of stopping.
+    Checked centrally here (once, before any ``cmd_*`` dispatch) rather than
+    in each ``cmd_*`` so every current and future key-taking verb is covered
+    uniformly -- ``key``/``keys``/``key_flag`` are the only attribute names
+    any subcommand's parser binds a ticket key to (see ``build_parser``)."""
+    key = getattr(args, "key", None)
+    if isinstance(key, str) and key == "":
+        return "a ticket key is required, got an empty string"
+    key_flag = getattr(args, "key_flag", None)
+    if isinstance(key_flag, str) and key_flag == "":
+        return "a ticket key is required, got an empty string"
+    keys = getattr(args, "keys", None)
+    if keys and any(isinstance(k, str) and k == "" for k in keys):
+        return "a ticket key is required, got an empty string"
+    return None
 
 
 if __name__ == "__main__":

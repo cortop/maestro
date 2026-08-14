@@ -55,7 +55,37 @@ def test_argv_is_exact_list(home):
         "--format", "json",
         "--dir", str(worktree),
         "--agent", "maestro-reconcile-implementing",
+        "T-9",
     ]
+
+
+# --- T-66: the ticket key IS passed as a trailing positional (opencode's own
+# `$1` substitution, verified empirically -- spec Notes) -- unlike the rest of
+# this argv, this must NOT depend on cwd, so a `mode: local` (AD-6) ticket
+# whose cwd is some unrelated plain directory still gets its own correct key.
+
+def test_key_is_the_trailing_positional_argument(home):
+    cmd, _ = _capture_cmd(home, key="T-42")
+    assert cmd[-1] == "T-42"
+
+
+def test_two_distinct_keys_produce_two_distinct_trailing_positionals(home):
+    cmd_a, _ = _capture_cmd(home, key="T-1")
+    cmd_b, _ = _capture_cmd(home, key="T-2")
+    assert cmd_a[-1] == "T-1"
+    assert cmd_b[-1] == "T-2"
+    assert cmd_a[-1] != cmd_b[-1]
+
+
+def test_key_argv_present_regardless_of_cwd_mode_local(home, tmp_path):
+    """AC4: a `mode: local` ticket's cwd is a plain directory, not
+    `<MHOME>/worktrees/<KEY>` -- the key must still resolve correctly, because
+    nothing about it depends on cwd anymore."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    cmd, kwargs = _capture_cmd(home, key="V-1", cwd=vault)
+    assert cmd[-1] == "V-1"
+    assert kwargs["cwd"] == str(vault)
 
 
 def test_argv_never_carries_auto_flag(home):
