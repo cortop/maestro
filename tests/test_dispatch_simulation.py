@@ -7,17 +7,19 @@ advance, crash, or keep running exactly as the test schedules. Existing dispatch
 tests (``test_dispatcher.py``, ``test_dispatcher_exhaustive.py``,
 ``test_priority_ordering.py``) are sequential-only -- one sweep, or several sweeps
 run one after another. The genuinely new piece here is ``test_two_overlapping_
-sweeps_...``: two REAL, concurrently-running ``dispatch()`` calls, forced to
-interleave at a specific point via a ``threading.Barrier`` (never ``time.sleep`` --
-a deterministic rendezvous, not a race against the scheduler).
+sweeps_...``: two REAL, concurrently-running ``dispatch()`` calls (real threads,
+one per key), never a ``time.sleep``-based race against the scheduler.
 
 This is docs/formal-methods-evaluation.md's own rank-2 technique (deterministic
 simulation, FoundationDB/TigerBeetle style) applied to the resource layer MTO-9's
 proposal names: it asserts the six invariants proposal §1/§4(B) enumerates, and
 confirms or dismisses the two MTO-9 §3 candidate defects held back for this ticket
 ((3) the spawn ledger's last-writer-wins overlap, (4) the intent-counted spawn cap
-and same-priority-tier starvation). Defects (1) and (2) are explicitly out of scope
-here -- they were filed as their own tickets per the human's approval.
+and same-priority-tier starvation). Defect (3) was CONFIRMED against an unguarded
+ledger write, then DISMISSED once T-52 (#164) landed its broader spawn-region lock
+-- see ``test_two_overlapping_sweeps_dismiss_defect_3_ledger_survives_spawn_lock``
+for the detail. Defects (1) and (2) are explicitly out of scope here -- they were
+filed as their own tickets per the human's approval.
 """
 from __future__ import annotations
 
@@ -256,67 +258,64 @@ def test_runaway_brake_bounds_spawn_rate_near_the_budget(home):
 
 # ---------------------------------------------------------------------------
 # MTO-9 §3 defect (3): the spawn ledger is a last-writer-wins whole-file
-# replace -- an overlapping sweep can drop another key's `last`.
+# replace -- an overlapping sweep can drop another key's `last`. DISMISSED:
+# T-52's spawn-region lock already wraps the ledger read-modify-write.
 # ---------------------------------------------------------------------------
 
-def test_two_overlapping_sweeps_confirm_defect_3_ledger_last_writer_wins(home):
-    """CONFIRMED. Two genuinely concurrent `dispatch()` calls (real threads, one
-    per key via `key_filter` so they never contend over the SAME key), forced to
-    both read `.spawn_ledger.json` before either writes back, via a
-    ``threading.Barrier`` -- not a sleep, so this is deterministic, not a race
-    against the OS scheduler. `dispatcher.py`'s ledger write
-    (`store.write_json(ledger_path, {...})`) is not guarded by `store.file_lock`
-    the way the event log is -- so the second writer's whole-file replace drops
-    the first writer's entry outright, and the dropped key's `min_spawn_interval`
-    floor is gone: a sweep milliseconds later re-spawns it as if it had never
-    run, defeating the very floor built in response to 2026-07-19."""
+def test_two_overlapping_sweeps_dismiss_defect_3_ledger_survives_spawn_lock(home):
+    """DISMISSED -- superseded by T-52 (#164, merged before this test landed).
+    This test originally forced two genuinely concurrent `dispatch()` calls to
+    both read `.spawn_ledger.json` before either wrote back, via a
+    ``threading.Barrier`` rendezvous planted inside a patched `store.read_json`,
+    reproducing a last-writer-wins clobber from an unguarded ledger
+    read-modify-write. T-52 now holds `store.file_lock(_spawn_lock_target(home))`
+    across dispatch()'s ENTIRE spawn region -- active-read through the ledger
+    write below it (`dispatcher.py`, the block starting at the `# T-52:` comment)
+    -- so the ledger read-modify-write is already inside that lock. The old
+    barrier placement deadlocks under it: the second thread blocks acquiring the
+    lock before it ever reaches the patched `read_json` call, so the first
+    thread's `barrier.wait()` (party of one) times out with `BrokenBarrierError`.
+    There is no longer a point in `dispatch()` where two callers can observe the
+    same stale ledger, so this now asserts the fix holds instead: two real
+    concurrent `dispatch()` calls (one per key via `key_filter`, no artificial
+    rendezvous needed -- the lock itself serializes them) both land their ledger
+    entry, and `min_spawn_interval`'s floor holds for both on the very next
+    sweep. (T-62, filed for this same defect before this was traced back to
+    T-52's already-broader fix, remains its own ticket for the human to close
+    out separately.)"""
     cfg = Config(home=home, max_concurrency=10, min_spawn_interval=100,
                  runaway_pause_cooldown=0)  # brake irrelevant here; keep it out of the way
     _seed(home, "T-1")
     _seed(home, "T-2")
-
-    ledger_path = disp._spawn_ledger_path(home)
-    barrier = threading.Barrier(2, timeout=10)
-    real_read_json = store.read_json
-
-    def racy_read_json(path, default=None):
-        result = real_read_json(path, default)
-        if path == ledger_path:
-            barrier.wait()  # rendezvous: both threads have now read the SAME stale ledger
-        return result
 
     results: dict[str, disp.DispatchReport] = {}
 
     def run(key, slot):
         results[slot] = disp.dispatch(cfg, DryRunSessions(), 1000, key_filter=[key])
 
-    store.read_json = racy_read_json
-    try:
-        t1 = threading.Thread(target=run, args=("T-1", "a"))
-        t2 = threading.Thread(target=run, args=("T-2", "b"))
-        t1.start()
-        t2.start()
-        t1.join(timeout=15)
-        t2.join(timeout=15)
-    finally:
-        store.read_json = real_read_json  # restore before any further real read
+    t1 = threading.Thread(target=run, args=("T-1", "a"))
+    t2 = threading.Thread(target=run, args=("T-2", "b"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
 
-    assert not t1.is_alive() and not t2.is_alive(), "the barrier rendezvous never completed"
+    assert not t1.is_alive() and not t2.is_alive(), "a dispatch() call hung"
     assert results["a"].spawned == ["T-1"]
     assert results["b"].spawned == ["T-2"]
 
+    ledger_path = disp._spawn_ledger_path(home)
     ledger = store.read_json(ledger_path, {})
-    assert len(ledger) == 1, (
-        f"expected the overlapping writes to clobber one key's entry, got both survive: {ledger}"
+    assert len(ledger) == 2, (
+        f"expected T-52's spawn-region lock to serialize both writers so neither "
+        f"entry is dropped, got: {ledger}"
     )
-    dropped = "T-1" if "T-1" not in ledger else "T-2"
 
-    # The floor is gone for the dropped key: a sweep 1 second later (nowhere near
-    # the 100s floor) re-spawns it, which a correctly-recorded ledger would throttle.
-    report3 = disp.dispatch(cfg, DryRunSessions(), 1001, key_filter=[dropped])
-    assert report3.spawned == [dropped], (
-        "defect (3) DISMISSED: the dropped key's floor still held -- the ledger race did not "
-        "defeat min_spawn_interval in this run"
+    # The floor holds for BOTH keys on the very next sweep, 1s later (nowhere
+    # near the 100s floor) -- neither entry was clobbered by the other.
+    report2 = disp.dispatch(cfg, DryRunSessions(), 1001, key_filter=["T-1", "T-2"])
+    assert report2.spawned == [], (
+        f"expected min_spawn_interval to throttle both keys, spawned {report2.spawned}"
     )
 
 
