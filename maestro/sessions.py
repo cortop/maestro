@@ -20,6 +20,14 @@ from . import claims, store
 
 RECONCILE_PREFIX = "reconcile-"
 
+# OC-6: the opencode provider id `OpencodeCliSessions` composes its `ollama/<tag>`
+# --model flag against (see that class's docstring for why the composition itself
+# stays in exactly this one place) -- also the provider key
+# `skills_install._opencode_provider_block` registers in the generated
+# opencode.jsonc, imported from here rather than a second hand-typed "ollama"
+# literal so the two can never drift apart.
+OPENCODE_MODEL_PROVIDER = "ollama"
+
 # Filename pattern: reconcile-<KEY>-<epoch>.{log,stream.jsonl,opencode.jsonl,pi.jsonl}
 _SESSION_FILE_RE = re.compile(
     r"^(reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+))\.(?P<ext>log|stream\.jsonl|opencode\.jsonl|pi\.jsonl)$"
@@ -346,17 +354,21 @@ class OpencodeCliSessions:
     every process shares one on-disk sqlite db) would survive the watchdog as an
     orphan while ``ops.fail`` records it as killed.
 
-    NOT done here (out of THIS ticket's tested scope -- no AC below exercises
-    it, and no writer for it exists anywhere in the package yet):
-    forbidding sub-agent ("task" tool) nesting via opencode's own declarative
-    config, same as `runner_permissions.opencode_bash_permissions` (T-34/RF-5)
-    describes the bash-tool permission block but is itself still never called
-    outside its own tests -- there is no `.opencode/opencode.json`-equivalent
-    WRITE path in the package yet for either. Left for whichever ticket adds
-    that write path; both belong there together, not invented ad hoc here.
+    T-64 added the write path this docstring used to say didn't exist yet --
+    `maestro install-commands` now writes both a real `.opencode/opencode.jsonc`
+    (`skills_install._opencode_declarative_config`: `permission` from
+    `runner_permissions.opencode_permission_block`, `provider` from
+    `skills_install._opencode_provider_block`) and a `--agent <name>` stub per
+    phase (`skills_install._opencode_agent_stub`), so both the `--agent` flag
+    below and the bash/external_directory permission block now resolve against
+    real, generated files instead of nothing.
+
+    STILL not done here (out of scope for T-64 too -- no AC exercises it, no
+    writer exists for it): forbidding sub-agent ("task" tool) nesting via
+    opencode's own declarative config. Left for whichever ticket adds that.
     """
 
-    def __init__(self, home: Path, model_prefix: str = "ollama",
+    def __init__(self, home: Path, model_prefix: str = OPENCODE_MODEL_PROVIDER,
                  capture_session_logs: bool = True,
                  clock: Callable[[], float] | None = None,
                  unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,

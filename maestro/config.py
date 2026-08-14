@@ -224,8 +224,14 @@ _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 # _REPO_TABLE_KEYS is, so a typo is silent and silently means wrong model / no
 # permission block"). `concurrency` is the per-runner concurrency cap
 # (dispatcher._runner_concurrency_cap; default 1 -- see
-# dispatcher._RUNNER_DEFAULT_CONCURRENCY for why).
-_RUNNER_OPENCODE_KEYS = frozenset({"concurrency"})
+# dispatcher._RUNNER_DEFAULT_CONCURRENCY for why). OC-6: `models` (list of bare
+# ollama tags, e.g. ["qwen3-coder:30b"]) and `host` (optional `OLLAMA_HOST`
+# override) are what `skills_install`'s generated opencode.jsonc registers its
+# local "ollama" provider from (`skills_install._opencode_provider_block`) --
+# pinned, explicit config, not code scraping ticket specs for whatever model
+# tag happens to be in use. `models` unset falls back to the board-wide
+# `runner_model` default (see that function's own docstring).
+_RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "models", "host"})
 
 
 def config_path(home: Path) -> Path:
@@ -601,6 +607,14 @@ implementer = "claude_skill"
                                      # fleet-wide max_concurrency above -- default 1 until
                                      # measured: opencode wedges intermittently at `init`
                                      # and every process shares one on-disk sqlite db
+# models = ["qwen3-coder:30b"]      # OC-6: ollama tags to register in the generated
+                                     # opencode.jsonc's local "ollama" provider (each pinned
+                                     # tool_call = true); unset falls back to [maestro]
+                                     # runner_model. `maestro install-commands` is what writes
+                                     # the file this actually feeds.
+# host = "127.0.0.1:11434"          # OC-6: optional OLLAMA_HOST override for that same
+                                     # provider's baseURL; unset resolves the ambient
+                                     # OLLAMA_HOST env var same as `maestro runners` does
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""

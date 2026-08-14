@@ -34,15 +34,29 @@ can tell "ours" from "a human's file" by target equality), the opencode copy is
 always a real, transformed file, so it is kept in sync unconditionally
 (``_write_if_changed``, no refuse-to-clobber) for both targets — the same
 posture ``install_repo``'s Claude side already has.
+
+T-64: both targets ALSO install the two other pieces of opencode declarative
+config ``sessions.py:341-347`` left waiting on a write path — an ``--agent``
+stub per phase (``.opencode/agent/<phase>.md`` / ``~/.config/opencode/agent/``)
+and a single ``opencode.jsonc`` (``permission`` from
+``runner_permissions.opencode_permission_block`` + a ``provider`` block for
+the local ``ollama`` model registration, ``_opencode_provider_block``). Same
+posture as the opencode command copy: always real, transformed files, kept in
+sync unconditionally, never hand-maintained (the spec Notes call this out by
+name for ``opencode.jsonc`` specifically — a human hand-wrote one on the real
+dogfood board before this ticket existed; this generator now owns that file).
 """
 from __future__ import annotations
 
 import importlib.resources
+import json
 import os
 from pathlib import Path
 
-from . import store
+from . import runner_permissions, store
 from .config import Config
+from .providers import ollama as ollama_mod
+from .sessions import OPENCODE_MODEL_PROVIDER
 
 # The phase files T-22 split the reconcile skill into, plus RF-6's `qa` (see
 # tests/test_reconcile_skill.py:36). Excludes maestro-task.md — a human
@@ -92,11 +106,44 @@ def opencode_user_commands_dir(cfg: Config | None = None) -> Path:
     return Path.home() / ".config" / "opencode" / "command"
 
 
+def opencode_user_agent_dir(cfg: Config | None = None) -> Path:
+    """T-64: user-scope counterpart of ``opencode_repo_agent_dir`` -- sibling of
+    ``opencode_user_commands_dir`` under the same ``~/.config/opencode/``
+    (verified against a real installed opencode's own on-disk layout: `command/`
+    and `opencode.jsonc` are already siblings there), so every override that
+    redirects ``opencode_user_commands_dir`` (env var, ``cfg``) redirects this
+    too, with no separate knob to keep in sync."""
+    return opencode_user_commands_dir(cfg).parent / "agent"
+
+
+def opencode_user_config_path(cfg: Config | None = None) -> Path:
+    """T-64: user-scope counterpart of ``opencode_repo_config_path`` -- see that
+    function's docstring. This is the exact path (``~/.config/opencode/
+    opencode.jsonc``) a human had been hand-maintaining on the real dogfood
+    board before this ticket (spec Notes) -- this generator now owns it."""
+    return opencode_user_commands_dir(cfg).parent / "opencode.jsonc"
+
+
 def opencode_repo_commands_dir(repo_path: Path) -> Path:
     """OC-1: where an opencode copy of the payload lands inside a repo checkout
     -- opencode's own project-scope command directory, mirroring
     ``<repo>/.claude/commands/`` one-for-one."""
     return Path(repo_path) / ".opencode" / "command"
+
+
+def opencode_repo_agent_dir(repo_path: Path) -> Path:
+    """T-64: opencode's own project-scope agent directory -- sibling of
+    ``opencode_repo_commands_dir`` under the same ``.opencode/``, derived from
+    it rather than a second ``Path(repo_path) / ".opencode" / ...`` literal."""
+    return opencode_repo_commands_dir(repo_path).parent / "agent"
+
+
+def opencode_repo_config_path(repo_path: Path) -> Path:
+    """T-64: where the generated ``opencode.jsonc`` (permission + provider
+    blocks) lands inside a repo checkout -- verified against a real installed
+    opencode (``opencode debug config`` picks up ``.opencode/opencode.jsonc``
+    project-scope overrides, spiked manually for this ticket)."""
+    return opencode_repo_commands_dir(repo_path).parent / "opencode.jsonc"
 
 
 def _opencode_frontmatter(content: str) -> str:
@@ -118,6 +165,104 @@ def _opencode_frontmatter(content: str) -> str:
     kept = [line for line in front.splitlines()
             if not line.startswith(("allowed-tools:", "argument-hint:"))]
     return "---\n" + "\n".join(kept) + "\n---\n" + body
+
+
+def _frontmatter_description(content: str) -> str:
+    """The bare ``description:`` value from a payload file's own frontmatter --
+    never a second hand-typed description, so an agent stub's one-liner (below)
+    can't drift from the command file it's paired with."""
+    parts = content.split("---\n", 2)
+    if len(parts) != 3:
+        return ""
+    for line in parts[1].splitlines():
+        if line.startswith("description:"):
+            return line[len("description:"):].strip()
+    return ""
+
+
+def _opencode_agent_stub(description: str) -> str:
+    """T-64: the ``--agent <name>`` file ``OpencodeCliSessions.spawn``
+    (``sessions.py:396``) has been passing at a path nothing ever wrote --
+    every spawn logged ``agent "..." not found. Falling back to default agent``
+    (spec Notes). Verified empirically (spiked against a real opencode run): a
+    bare ``mode: primary`` stub with no body resolves the flag cleanly -- the
+    actual prompt/body comes from the paired ``--command <name>`` (the payload
+    file itself), so this file's only job is to make the name resolve.
+    ``primary`` (not ``subagent``) matches ``sessions.py``'s own docstring: a
+    reconciler is a TOP-LEVEL session, never a subagent."""
+    return f"---\ndescription: {description}\nmode: primary\n---\n"
+
+
+def _opencode_provider_block(cfg: Config) -> dict:
+    """OC-6: opencode 1.18.x ships only ``ollama-cloud`` out of the box (spec
+    Notes) -- a bare ``--model ollama/<tag>`` (``sessions.OPENCODE_MODEL_PROVIDER``,
+    composed only in ``sessions.py``) fails with ``ProviderModelNotFoundError``
+    unless a local ``ollama`` provider is registered declaratively, verified
+    against a real ``opencode run`` for this ticket. Model tags come from the
+    pinned, explicit ``[runner.opencode].models`` (same "pinned, generated from
+    [runner.<name>] config" posture T-56 specifies for ``pi`` -- a human decides
+    what to register, this never scrapes ticket specs for whatever tag happens
+    to be in use), falling back to the board-wide ``runner_model`` default when
+    unset. Returns ``{}`` (no ``provider`` key at all) when neither is
+    configured -- nothing to register yet.
+    """
+    table = (cfg.provider_config.get("runner") or {}).get("opencode") or {}
+    tags = table.get("models")
+    if not isinstance(tags, list) or not tags:
+        tags = [cfg.runner_model] if cfg.runner_model else []
+    tags = [t for t in dict.fromkeys(tags) if t]
+    if not tags:
+        return {}
+    base_url = ollama_mod.base_url(table.get("host")) + "/v1"
+    return {
+        OPENCODE_MODEL_PROVIDER: {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": base_url},
+            "models": {tag: {"tool_call": True} for tag in tags},
+        }
+    }
+
+
+def _opencode_declarative_config(cfg: Config) -> dict:
+    """T-64: the whole generated ``opencode.jsonc`` payload -- ``permission``
+    (``runner_permissions.opencode_permission_block``) always present, the local
+    ``ollama`` ``provider`` block only when there's a model tag to register
+    (``_opencode_provider_block``). One source both install targets serialize
+    (``json.dumps(..., indent=2)`` -- pure JSON despite the ``.jsonc`` name, so
+    reading it back (``read_opencode_config``, used by the doctor check) never
+    needs a comment-stripping parser: this generator's own output has none, and
+    unlike the Claude ``--user`` symlink this file is never left for a human to
+    hand-edit -- see the module docstring)."""
+    config: dict = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": runner_permissions.opencode_permission_block(cfg.home),
+    }
+    provider = _opencode_provider_block(cfg)
+    if provider:
+        config["provider"] = provider
+    return config
+
+
+def _dump_opencode_config(cfg: Config) -> str:
+    return json.dumps(_opencode_declarative_config(cfg), indent=2) + "\n"
+
+
+def read_opencode_config(path: Path) -> dict | None:
+    """Parse a generated ``opencode.jsonc`` back into a dict -- ``None`` on a
+    missing file or any parse error, never raising (health checks must never
+    block a spawn on a malformed/foreign file at this path). Plain
+    ``json.loads`` is sufficient: this module's own generator never emits
+    comments (see ``_opencode_declarative_config``'s docstring) and always
+    overwrites unconditionally, so a file at this path was either written by
+    this generator or doesn't exist yet -- there is no third, hand-edited case
+    to tolerate."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _configured_repo_names(cfg: Config) -> list[str]:
@@ -159,13 +304,20 @@ def install_repo(cfg: Config, name: str) -> dict:
 
     OC-1: also copies an opencode-frontmatter (``_opencode_frontmatter``)
     transform of the SAME payload into ``<repo>/.opencode/command/`` — same
-    filenames, body byte-identical, one source."""
+    filenames, body byte-identical, one source.
+
+    T-64: also writes a ``--agent`` stub per phase into ``<repo>/.opencode/
+    agent/`` (same filenames again — ``<name>`` is reused for both ``--command``
+    and ``--agent``, per ``sessions.py``'s own docstring) and one
+    ``<repo>/.opencode/opencode.jsonc`` (permission + provider blocks)."""
     repo_root = resolve_repo_target(cfg, name)
     target_dir = repo_root / ".claude" / "commands"
     opencode_dir = opencode_repo_commands_dir(repo_root)
+    opencode_agent_dir = opencode_repo_agent_dir(repo_root)
     src_dir = payload_dir()
     written = []
     opencode_written = []
+    opencode_agent_written = []
     for filename in PAYLOAD_NAMES:
         content = (src_dir / filename).read_text(encoding="utf-8")
         dest = target_dir / filename
@@ -174,9 +326,18 @@ def install_repo(cfg: Config, name: str) -> dict:
         opencode_dest = opencode_dir / filename
         if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
             opencode_written.append(filename)
+        agent_dest = opencode_agent_dir / filename
+        if _write_if_changed(agent_dest, _opencode_agent_stub(_frontmatter_description(content))):
+            opencode_agent_written.append(filename)
+    config_dest = opencode_repo_config_path(repo_root)
+    config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
     return {"target": str(target_dir), "opencode_target": str(opencode_dir),
+            "opencode_agent_target": str(opencode_agent_dir),
+            "opencode_config_target": str(config_dest),
             "installed": list(PAYLOAD_NAMES), "written": written,
-            "opencode_written": opencode_written}
+            "opencode_written": opencode_written,
+            "opencode_agent_written": opencode_agent_written,
+            "opencode_config_written": config_written}
 
 
 def install_user(cfg: Config) -> dict:
@@ -194,12 +355,21 @@ def install_user(cfg: Config) -> dict:
     so it has no "is this ours" signal to refuse-to-clobber on — it is kept in
     sync unconditionally, the same posture ``install_repo`` already has for
     both of its copies.
+
+    T-64: also writes a ``--agent`` stub per phase into
+    ``opencode_user_agent_dir()`` and one ``opencode_user_config_path()``
+    (permission + provider blocks) — same unconditional-sync posture as the
+    opencode command copy, and the exact path (``~/.config/opencode/
+    opencode.jsonc``) a human had been hand-maintaining before this ticket
+    (spec Notes) — this generator now owns it.
     """
     target_dir = user_commands_dir(cfg)
     opencode_dir = opencode_user_commands_dir(cfg)
+    opencode_agent_dir = opencode_user_agent_dir(cfg)
     src_dir = payload_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     opencode_dir.mkdir(parents=True, exist_ok=True)
+    opencode_agent_dir.mkdir(parents=True, exist_ok=True)
 
     conflicts = []
     for filename in PAYLOAD_NAMES:
@@ -213,6 +383,7 @@ def install_user(cfg: Config) -> dict:
 
     written = []
     opencode_written = []
+    opencode_agent_written = []
     for filename in PAYLOAD_NAMES:
         src = src_dir / filename
         dest = target_dir / filename
@@ -224,9 +395,19 @@ def install_user(cfg: Config) -> dict:
             dest.symlink_to(src)
             written.append(filename)
 
+        content = src.read_text(encoding="utf-8")
         opencode_dest = opencode_dir / filename
-        if _write_if_changed(opencode_dest, _opencode_frontmatter(src.read_text(encoding="utf-8"))):
+        if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
             opencode_written.append(filename)
+        agent_dest = opencode_agent_dir / filename
+        if _write_if_changed(agent_dest, _opencode_agent_stub(_frontmatter_description(content))):
+            opencode_agent_written.append(filename)
+    config_dest = opencode_user_config_path(cfg)
+    config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
     return {"target": str(target_dir), "opencode_target": str(opencode_dir),
+            "opencode_agent_target": str(opencode_agent_dir),
+            "opencode_config_target": str(config_dest),
             "installed": list(PAYLOAD_NAMES), "written": written,
-            "opencode_written": opencode_written}
+            "opencode_written": opencode_written,
+            "opencode_agent_written": opencode_agent_written,
+            "opencode_config_written": config_written}
