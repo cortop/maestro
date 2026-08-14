@@ -33,13 +33,9 @@ bug that made v1 unsafe to touch **cannot occur**. Dashboards (`derived/WORKSTAT
 
 ## How a ticket flows
 
-```
-triaging ──tier0──▶ ready ──slot+deps──▶ implementing ──QA+review PASS──▶ in-review ──merged──▶ done
-   │                  ▲                       │                                              
- tier1/2              │                  stall/maxturns                                      
-   ▼                  │                       ▼                                              
-awaiting-human ─answer┘                   degraded (dead-letter; you decide)                 
-```
+See [`docs/state-machine.md`](docs/state-machine.md) for the maintained phase diagram —
+generated straight from `maestro/statemachine.py` (`make diagram`; a drift-guard test keeps
+it honest), never hand-drawn.
 
 `awaiting-human` and `awaiting-ci` are **sleeping** states — no process is held. The
 reconciler records the gate and exits; the dispatcher re-wakes the ticket on a signal

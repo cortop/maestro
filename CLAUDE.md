@@ -88,6 +88,9 @@ how the dogfood board was lost once (2026-07-18). Guard against it:
 - `idempotency.py` — deterministic `step_id = hash(key, phase, observed_seq, action)`.
 - `inbox.py` — per-key append-only human inbox. `projection.py` — snapshots → dashboards.
 - `config.py` — project-agnostic config (`config.toml`). `fleet.py` — launchd LaunchAgent mgmt.
+- `diagram.py` — generates `docs/state-machine.md` (mermaid) + `docs/dispatch-gates.md`
+  (`make diagram`) from `statemachine.TRANSITIONS` and an AST walk of `dispatcher.py` —
+  derived, never retyped; `tests/test_diagram.py` fails `make test` on drift.
 - `providers/` — pluggable tracker / VCS / fetcher / implementer (selected in config).
 - `tui/` — Textual TUI package (`maestro tui`, needs the `tui` extra): `app.py` (MaestroTUI +
   entrypoint), `screens.py` (full-screen views), `modals.py` (input dialogs), `render.py`
