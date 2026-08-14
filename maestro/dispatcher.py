@@ -30,7 +30,7 @@ from .config import Config
 from .gates import backend_interlock_reason, needs_approval, parse_spec_overrides, spec_priority, spec_runner, spec_tier  # noqa: F401 (re-export)
 from .idempotency import content_hash
 from .sessions import SessionManager
-from .statemachine import Phase, SLEEPING_PHASES, TERMINAL_PHASES
+from .statemachine import ACTIVE_PHASES, Phase, SLEEPING_PHASES, TERMINAL_PHASES
 
 
 @dataclass
@@ -303,6 +303,15 @@ def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool
     # actually gates a spawn here.
     if needs_approval(home, key, snap):
         return DueResult(False, "needs-approval")
+    # RB-9: this used to be an unconditional `return DueResult(True, "active")` --
+    # anything that fell through terminal/sleeping/needs-approval above was
+    # active by default, so an unclassified phase silently got spawned forever
+    # (2026-07-19, 2026-08-14). PHASE_CLASS is asserted exhaustive at import
+    # time, so this branch should only ever see an ACTIVE_PHASES member -- but
+    # check explicitly and fail closed (never spawn) rather than fall through
+    # to active if that invariant is ever wrong.
+    if phase not in ACTIVE_PHASES:
+        return DueResult(False, "unclassified")
     return DueResult(True, "active")
 
 
