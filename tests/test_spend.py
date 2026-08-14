@@ -35,6 +35,28 @@ def _result_record(cost):
             "usage": {"input_tokens": 100, "output_tokens": 50}}
 
 
+def _write_pi_log(home, key, epoch, turn_costs):
+    """A pi .pi.jsonl (T-58) -- one assistant `message_end` per turn cost in
+    *turn_costs*, then a terminal `agent_end` (pi's own settle marker, unlike
+    Claude's single `result` record)."""
+    session_id = f"reconcile-{key}-{epoch:.6f}"
+    path = home / "agent-logs" / key / f"{session_id}.pi.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"type": "session", "version": 3, "id": session_id,
+              "timestamp": "2026-08-14T00:00:00.000Z", "cwd": str(home)},
+             {"type": "agent_start"}]
+    for cost in turn_costs:
+        lines.append({"type": "turn_start"})
+        lines.append({"type": "message_end",
+                       "message": {"role": "assistant", "stopReason": "stop",
+                                   "provider": "anthropic",
+                                   "usage": {"cost": {"total": cost}}}})
+    lines.append({"type": "agent_end", "messages": [], "willRetry": False})
+    text = "".join(json.dumps(o) + "\n" for o in lines)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def _spawn_and_seed_ledger(home, cfg, key, now):
     """Real first sweep: spawns *key*, populating derived/.spawn_ledger.json --
     the ledger spend.probe reads (mirrors test_ratelimit.py's identical helper)."""
@@ -103,6 +125,43 @@ def test_probe_skips_third_format_log_without_raising(home, cfg):
 
     st = spend.probe(cfg, t0 + 10)  # must not raise
     assert st["total_usd"] == 0.0
+
+
+# --- AC8 (T-58): pi sessions are folded, summed per-turn from usage.cost.total --
+
+def test_probe_folds_pi_session_summed_across_its_own_turns(home, cfg):
+    """AC8: derived/.spend.json matches the hand-summed figure from a pi
+    fixture -- pi has no single `result.total_cost_usd`, so this is the sum
+    of each of its own assistant turns' `message.usage.cost.total`."""
+    t0 = 1_700_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_pi_log(home, "T-1", t0, [0.75, 1.25])  # hand-summed: 2.00
+
+    st = spend.probe(cfg, t0 + 10)
+    assert st["total_usd"] == 2.00
+
+
+def test_probe_pi_session_is_idempotent_on_a_second_probe(home, cfg):
+    t0 = 1_750_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_pi_log(home, "T-1", t0, [3.0])
+
+    st1 = spend.probe(cfg, t0 + 10)
+    assert st1["total_usd"] == 3.0
+    st2 = spend.probe(cfg, t0 + 20)
+    assert st2["total_usd"] == 3.0  # no new bytes -- unchanged
+
+
+def test_probe_accumulates_pi_and_claude_sessions_together(home, cfg):
+    t0 = 1_800_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(2.0)])
+    t1 = t0 + 600
+    _spawn_and_seed_ledger(home, cfg, "T-2", t1)
+    _write_pi_log(home, "T-2", t1, [1.5])
+
+    st = spend.probe(cfg, t1 + 10)
+    assert st["total_usd"] == 3.5
 
 
 def test_probe_folds_older_undrained_log_despite_newer_third_format_log(home, cfg):

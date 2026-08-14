@@ -1,10 +1,11 @@
-"""Step-log folder — reads a session log (Claude ``.stream.jsonl`` or opencode
-``.opencode.jsonl``) and appends IMPL_STEP events.
+"""Step-log folder — reads a session log (Claude ``.stream.jsonl``, opencode
+``.opencode.jsonl``, or pi ``.pi.jsonl``) and appends IMPL_STEP events.
 
 Extracts notable tool_use blocks from a Claude stream log (Edit/Write/Bash/Agent), or
-notable tool-part records from an opencode log (OC-5), and records each as an
-``ImplStepRecorded`` event against the ticket log. Idempotent:
-``step_id = f"step-{key}-{session_id}-{tool_id}"`` prevents re-appending on replay.
+notable tool-part records from an opencode log (OC-5), or notable tool-execution
+records from a pi log (T-58), and records each as an ``ImplStepRecorded`` event
+against the ticket log. Idempotent: ``step_id = f"step-{key}-{session_id}-{tool_id}"``
+prevents re-appending on replay.
 
 Also the one place that classifies a session's terminal outcome (``classify_result``,
 ``session_outcome``) — every render site (``cli.py``, ``tui/events.py``) and
@@ -160,6 +161,155 @@ def _iter_opencode_steps(
         )
 
 
+# ---------------------------------------------------------------------------
+# T-58: the `pi` coding-agent CLI's own log grammar (`pi --mode json`) --
+# verified against a REAL captured stream (not hand-authored -- see spec Notes
+# and tests/fixtures/*.pi.jsonl), matching the documented `AgentSessionEvent`/
+# `AgentEvent` union (`docs/json.md` in `@earendil-works/pi-coding-agent`). One
+# JSON object per line: a "session" header (carries a real per-invocation
+# UUID at "id", the same role Claude's "system" record plays -- unlike
+# opencode's log, which carries no session identity of its own), then
+# "agent_start"/"turn_start"/"message_start"/"message_update"/"message_end"/
+# "turn_end"/"agent_end" lifecycle events. A tool call is a
+# "tool_execution_start" record (`toolCallId`, `toolName`, `args`) -- captured
+# at call time, before its result, the same point Claude's own "assistant"
+# tool_use block and opencode's "tool_use" record are captured at. The
+# session's terminal outcome is NOT a separate record type the way Claude's
+# "result" is: it's read off the last assistant message's `stopReason`
+# ("stop" success, "error" a failure -- carrying `errorMessage`, e.g. the
+# verified "pi returns 0 in json mode even on a 401" trap from spec Notes) once
+# an "agent_end" record has actually been seen (no "agent_end" yet -- crashed
+# mid-turn, or the writer just hasn't flushed it -- means "running", exactly
+# like Claude/opencode's own not-yet-terminal case).
+# ---------------------------------------------------------------------------
+PI_SESSION_TYPE = "session"
+PI_TOOL_START_TYPE = "tool_execution_start"
+PI_TURN_START_TYPE = "turn_start"
+PI_MESSAGE_END_TYPE = "message_end"
+PI_AGENT_END_TYPE = "agent_end"
+
+# Built-in pi tools (`pi --help`: "read, bash, edit, write, grep, find, ls") mapped
+# onto the SAME kind vocabulary Claude's `_kind`/opencode's `_oc_kind` use, plus a
+# defensive allowance for the `pi-subagents` extension's own tool name (not
+# built-in, so its exact spelling is unverified here -- included the same
+# defensive way opencode's `task`/`agent`/`subtask` are).
+_PI_EDIT_TOOLS = frozenset({"edit", "write"})
+_PI_COMMAND_TOOLS = frozenset({"bash"})
+_PI_SUBAGENT_TOOLS = frozenset({"task", "agent", "subagent"})
+_PI_NOTABLE_TOOLS = _PI_EDIT_TOOLS | _PI_COMMAND_TOOLS | _PI_SUBAGENT_TOOLS
+
+
+def _pi_kind(tool_name: str, args: dict) -> str:
+    name = tool_name.lower()
+    if name in _PI_EDIT_TOOLS:
+        return "edit"
+    if name in _PI_SUBAGENT_TOOLS:
+        return "subagent"
+    if name in _PI_COMMAND_TOOLS:
+        cmd = args.get("command", "")
+        if "gh pr" in cmd:
+            return "pr"
+        return "command"
+    return "note"
+
+
+def pi_summary(tool_name: str, args: dict) -> str:
+    """Human-readable one-liner for a pi tool call -- pi's own `edit` tool takes
+    `path` (verified: not Claude's `file_path` or opencode's `filePath`)."""
+    name = tool_name.lower()
+    if name in _PI_COMMAND_TOOLS:
+        text = args.get("command")
+    elif name in _PI_EDIT_TOOLS:
+        text = args.get("path") or args.get("file_path") or args.get("filePath")
+    elif name in _PI_SUBAGENT_TOOLS:
+        text = args.get("description") or args.get("prompt")
+    else:
+        text = None
+    return (text or tool_name)[:120]
+
+
+def _iter_pi_steps(
+    path: Path,
+) -> Iterator[tuple[str, str, int, str, str, str, str]]:
+    """Yield ``(session_id, tool_id, turn, role, kind, tool_name, summary)`` for
+    notable ``tool_execution_start`` records in a pi ``.pi.jsonl`` log. ``turn``
+    increments on each ``turn_start`` record (pi's own turn boundary)."""
+    session_id = ""
+    turn = 0
+    for _offset, obj in iter_records(path):
+        t = obj.get("type")
+        if t == PI_SESSION_TYPE and not session_id:
+            session_id = obj.get("id", "")
+        elif t == PI_TURN_START_TYPE:
+            turn += 1
+        elif t == PI_TOOL_START_TYPE:
+            tool_name = obj.get("toolName", "")
+            if tool_name.lower() not in _PI_NOTABLE_TOOLS:
+                continue
+            tool_id = obj.get("toolCallId", "")
+            if not tool_id:
+                continue
+            args = obj.get("args") or {}
+            yield (
+                session_id,
+                tool_id,
+                turn,
+                "assistant",
+                _pi_kind(tool_name, args),
+                tool_name,
+                pi_summary(tool_name, args),
+            )
+
+
+def _pi_session_outcome(path: Path) -> dict:
+    """Tail-scan a pi ``.pi.jsonl`` log for its terminal outcome (T-58). No
+    "agent_end" record seen yet -> ``running`` (matches the truncated-final-line
+    requirement: an incomplete last line is simply never yielded by
+    :func:`iter_records`, so a process killed mid-write reads as still running,
+    never as an error). Once "agent_end" is seen, the LAST assistant
+    ``message_end``'s ``stopReason`` decides success/error -- verified trap
+    (spec Notes): pi's own process exit code is 0 in json mode even on a 401,
+    so the record stream, never the exit code, is what's classified here.
+    pi's log carries no separate rate-limit signal the way Claude's
+    ``rate_limit_event`` does (spec Notes / AC9) -- ``rate_limit_info`` is
+    always ``None``. ``result`` carries ``num_turns`` (count of ``turn_start``
+    records seen) so ``dispatcher.detect_zero_turn_spawns`` can read it exactly
+    like Claude's ``result.num_turns``. ``provider`` (unlike Claude, always
+    implicitly "anthropic") is pi's own last-seen assistant ``message.provider``
+    -- e.g. "anthropic"/"ollama"/"google" -- read off the SAME real record
+    (never guessed), so ``health.check_provider_availability`` (AC7) can resolve
+    its confirmation-probe host per actual provider instead of assuming
+    Anthropic for a runner that may be talking to any of several."""
+    turns = 0
+    saw_agent_end = False
+    last_assistant_stop: str | None = None
+    last_assistant_error: str | None = None
+    last_assistant_provider: str | None = None
+    for _offset, obj in iter_records(path):
+        t = obj.get("type")
+        if t == PI_TURN_START_TYPE:
+            turns += 1
+        elif t == PI_AGENT_END_TYPE:
+            saw_agent_end = True
+        elif t == PI_MESSAGE_END_TYPE:
+            msg = obj.get("message") or {}
+            if msg.get("role") == "assistant":
+                last_assistant_stop = msg.get("stopReason")
+                last_assistant_error = msg.get("errorMessage")
+                last_assistant_provider = msg.get("provider")
+    if not saw_agent_end:
+        return {"outcome": "running", "result": None, "rate_limit_info": None,
+                "provider": last_assistant_provider}
+    errored = last_assistant_stop == "error"
+    result = {
+        "num_turns": turns,
+        "stopReason": last_assistant_stop,
+        "result": last_assistant_error if errored else "ok",
+    }
+    return {"outcome": "error" if errored else "success", "result": result,
+            "rate_limit_info": None, "provider": last_assistant_provider}
+
+
 def iter_records(path: Path, *, start: int = 0) -> Iterator[tuple[int, dict]]:
     """Yield ``(offset, record)`` for each complete JSON line in *path* from byte
     *start* onward. ``offset`` is the byte position immediately after the line,
@@ -227,9 +377,13 @@ def fold_stream(
     appended. Dispatches on filename suffix: a Claude ``.stream.jsonl`` walks
     ``_iter_steps`` (session id from the log's own ``system`` record); an opencode
     ``.opencode.jsonl`` (OC-5) walks ``_iter_opencode_steps`` (session id from the
-    filename, per ``_opencode_session_key``'s docstring)."""
+    filename, per ``_opencode_session_key``'s docstring); a pi ``.pi.jsonl``
+    (T-58) walks ``_iter_pi_steps`` (session id from the log's own ``session``
+    record, per that function's docstring)."""
     if stream_path.name.endswith(".opencode.jsonl"):
         records = _iter_opencode_steps(stream_path, _opencode_session_key(stream_path))
+    elif stream_path.name.endswith(".pi.jsonl"):
+        records = _iter_pi_steps(stream_path)
     else:
         records = _iter_steps(stream_path)
     appended = 0
@@ -318,15 +472,20 @@ def session_outcome(stream_path: Path) -> dict:
 
     Returns ``{"outcome": ..., "result": <result obj or None>, "rate_limit_info": ...}``.
     ``outcome`` is one of ``success`` / ``error`` / ``rate_limited`` (terminal result seen),
-    ``running`` (no terminal record yet), or ``unknown`` (neither a ``.stream.jsonl`` nor an
-    ``.opencode.jsonl`` log — e.g. a plain-text session). An opencode ``.opencode.jsonl`` log
-    (OC-5) is dispatched to ``_opencode_session_outcome`` instead of the Claude-shaped parse
-    below. A rejected ``rate_limit_event`` only escalates an already-errored result to
-    ``rate_limited``; it never overrides an otherwise-``success`` result — the event is
-    context, not the verdict.
+    ``running`` (no terminal record yet), or ``unknown`` (none of ``.stream.jsonl``,
+    ``.opencode.jsonl``, or ``.pi.jsonl`` — e.g. a plain-text session). An opencode
+    ``.opencode.jsonl`` log (OC-5) is dispatched to ``_opencode_session_outcome``, and a
+    pi ``.pi.jsonl`` log (T-58) to ``_pi_session_outcome``, instead of the Claude-shaped
+    parse below. A rejected ``rate_limit_event`` only escalates an already-errored result
+    to ``rate_limited``; it never overrides an otherwise-``success`` result — the event is
+    context, not the verdict. A pi log's dict also carries ``provider`` (T-58,
+    ``_pi_session_outcome``'s own docstring) -- ``None`` for a Claude/opencode log,
+    where the provider is either implicit (Claude) or not surfaced (opencode).
     """
     if stream_path.name.endswith(".opencode.jsonl"):
         return _opencode_session_outcome(stream_path)
+    if stream_path.name.endswith(".pi.jsonl"):
+        return _pi_session_outcome(stream_path)
     if not stream_path.name.endswith(".stream.jsonl"):
         return {"outcome": "unknown", "result": None, "rate_limit_info": None}
 
@@ -371,6 +530,6 @@ def fold_current_session(home: Path, key: str, *, actor: str = "reconciler") -> 
     if not log_path:
         return 0
     p = Path(log_path)
-    if not p.exists() or not p.name.endswith(".stream.jsonl"):
+    if not p.exists() or not (p.name.endswith(".stream.jsonl") or p.name.endswith(".pi.jsonl")):
         return 0
     return fold_stream(home, key, p, actor=actor)

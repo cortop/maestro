@@ -23,6 +23,8 @@ def _make_log(home: Path, key: str, epoch: float, fmt: str = "log") -> Path:
         path = store.session_stream_path(home, key, session_id)
     elif fmt == "opencode":
         path = store.session_opencode_path(home, key, session_id)
+    elif fmt == "pi":
+        path = store.session_pi_path(home, key, session_id)
     else:
         path = store.session_log_path(home, key, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +169,30 @@ def test_prune_never_removes_live_session_naming_a_third_format_log(home):
     assert live.exists()
     assert not older.exists()
     assert count == 1
+
+
+def test_prune_never_removes_live_session_naming_a_pi_log(home):
+    """AC10 (T-58): same as the opencode case above, but for the fourth
+    ('pi') format slot -- _prune_plan's suffix-stripping must recognize it too."""
+    live = _make_log(home, "T-1", NOW - 10 * 86400, fmt="pi")
+    older = _make_log(home, "T-1", NOW - 20 * 86400, fmt="log")
+    claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1", log_path=str(live))
+    count, nbytes = prune_session_logs(_cfg(home, session_log_retention_days=5), "T-1", now=NOW)
+    assert live.exists()
+    assert not older.exists()
+    assert count == 1
+
+
+def test_prune_removes_stale_pi_log(home):
+    """AC10: `ops.prune_session_logs` prunes `.pi.jsonl` alongside the other
+    three formats, asserted through the real verb."""
+    old = _make_log(home, "T-1", NOW - 10 * 86400, fmt="pi")
+    recent = _make_log(home, "T-1", NOW - 1 * 86400, fmt="pi")
+    count, nbytes = prune_session_logs(_cfg(home, session_log_retention_days=5), "T-1", now=NOW)
+    assert count == 1
+    assert nbytes > 0
+    assert not old.exists()
+    assert recent.exists()
 
 
 def test_prune_removes_session_whose_pid_is_dead(home):

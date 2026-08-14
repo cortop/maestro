@@ -378,3 +378,182 @@ def test_opencode_session_outcome_running_while_no_terminal_record(tmp_path):
         _oc_tool_use("call_1", "bash", command="pytest"),
     ])
     assert session_outcome(log)["outcome"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# T-58: pi log folding and session_outcome -- record shapes below are the
+# REAL, verified `pi --mode json` vocabulary (docs/json.md in
+# @earendil-works/pi-coding-agent), captured live and reproduced here as
+# hand-composed records for the arithmetic/idempotency tests; the two
+# classification tests (AC3/AC9's own error-log requirement) instead read the
+# genuinely committed real captures under tests/fixtures/*.pi.jsonl -- see
+# spec Notes' "do not hand-author" instruction.
+# ---------------------------------------------------------------------------
+
+def _write_pi(tmp_path: Path, key: str, epoch: str, records: list[dict]) -> Path:
+    p = tmp_path / f"reconcile-{key}-{epoch}.pi.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return p
+
+
+def _pi_session(session_id: str) -> dict:
+    return {"type": "session", "version": 3, "id": session_id,
+            "timestamp": "2026-08-14T00:00:00.000Z", "cwd": "/tmp"}
+
+
+def _pi_turn_start() -> dict:
+    return {"type": "turn_start"}
+
+
+def _pi_tool_start(call_id: str, tool: str, **args_kv) -> dict:
+    return {"type": "tool_execution_start", "toolCallId": call_id, "toolName": tool,
+            "args": args_kv}
+
+
+def _pi_message_end(*, role: str = "assistant", stop_reason: str = "stop",
+                     error_message: str | None = None, provider: str = "anthropic") -> dict:
+    msg = {"role": role, "stopReason": stop_reason, "provider": provider, "content": []}
+    if error_message:
+        msg["errorMessage"] = error_message
+    return {"type": "message_end", "message": msg}
+
+
+def _pi_agent_end() -> dict:
+    return {"type": "agent_end", "messages": [], "willRetry": False}
+
+
+def test_fold_pi_stream_appends_impl_step_and_is_idempotent(home, tmp_path):
+    log = _write_pi(tmp_path, "T-1", "1000.000000", [
+        _pi_session("s1"),
+        _pi_turn_start(),
+        _pi_tool_start("call_1", "bash", command="pytest"),
+        _pi_message_end(),
+        _pi_turn_start(),
+        _pi_tool_start("call_2", "edit", path="maestro/ops.py"),
+        _pi_message_end(),
+        _pi_agent_end(),
+    ])
+    n = fold_stream(home, "T-1", log)
+    assert n == 2
+    evs = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs) == 2
+    kinds = {e["payload"]["kind"] for e in evs}
+    assert kinds == {"command", "edit"}
+
+    n2 = fold_stream(home, "T-1", log)
+    assert n2 == 0
+    evs2 = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs2) == 2
+
+
+def test_fold_pi_cross_session_toolcallid_reuse_yields_distinct_steps(home, tmp_path):
+    """Two different pi sessions (distinct real per-invocation ``session.id``s)
+    that happen to reuse a toolCallId must not collapse into one ImplStep."""
+    log1 = _write_pi(tmp_path, "T-1", "1000.000000", [
+        _pi_session("sess-aaa"),
+        _pi_turn_start(),
+        _pi_tool_start("call_1", "bash", command="pytest"),
+        _pi_message_end(),
+        _pi_agent_end(),
+    ])
+    log2 = _write_pi(tmp_path, "T-1", "2000.000000", [
+        _pi_session("sess-bbb"),
+        _pi_turn_start(),
+        _pi_tool_start("call_1", "bash", command="make test"),
+        _pi_message_end(),
+        _pi_agent_end(),
+    ])
+    fold_stream(home, "T-1", log1)
+    fold_stream(home, "T-1", log2)
+    evs = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs) == 2
+    assert len({e["step_id"] for e in evs}) == 2
+
+
+def test_cli_fold_steps_with_pi_log_arg_is_idempotent(home, tmp_path):
+    """AC5: real `maestro fold-steps <KEY>` over a pi log appends one ImplStep
+    per tool call; a second run folds 0."""
+    from maestro.cli import main
+
+    log = _write_pi(tmp_path, "T-1", "1000.000000", [
+        _pi_session("s1"),
+        _pi_turn_start(),
+        _pi_tool_start("call_1", "bash", command="make install"),
+        _pi_message_end(),
+        _pi_agent_end(),
+    ])
+    rc = main(["--home", str(home), "fold-steps", "T-1", "--log", str(log)])
+    assert rc == 0
+    evs = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs) == 1
+
+    rc2 = main(["--home", str(home), "fold-steps", "T-1", "--log", str(log)])
+    assert rc2 == 0
+    evs2 = [e for e in event_log.read(home, "T-1") if e["type"] == E.IMPL_STEP]
+    assert len(evs2) == 1
+
+
+def test_pi_session_outcome_success_from_real_captured_fixture():
+    """AC3: a real captured `pi --mode json` success stream (a clean bash tool
+    call, terminal stopReason "stop") classifies as success."""
+    outcome = session_outcome(FIXTURES / "sample.pi.jsonl")
+    assert outcome["outcome"] == "success"
+    assert outcome["provider"] == "ollama"
+
+
+def test_pi_session_outcome_error_from_real_captured_401_fixture():
+    """AC3: a real captured `pi --mode json` stream against an invalid API key
+    -- the verified exit-code trap (spec Notes): pi exits 0 in json mode even
+    on a 401, so this must classify from the record stream (stopReason
+    "error" + errorMessage), never from a process exit code maestro never
+    reads anyway."""
+    outcome = session_outcome(FIXTURES / "error.pi.jsonl")
+    assert outcome["outcome"] == "error"
+    assert outcome["provider"] == "anthropic"
+    assert "401" in outcome["result"]["result"]
+
+
+def test_pi_session_outcome_running_while_no_terminal_record(tmp_path):
+    log = _write_pi(tmp_path, "T-1", "1000.000000", [
+        _pi_session("s1"),
+        _pi_turn_start(),
+        _pi_tool_start("call_1", "bash", command="pytest"),
+    ])
+    assert session_outcome(log)["outcome"] == "running"
+
+
+def test_pi_session_outcome_truncated_final_line_is_running_not_error(tmp_path):
+    """AC4: a pi log truncated mid-write (process killed before its final
+    line -- the real captured error fixture's own agent_end line -- was fully
+    flushed) classifies as running, not error, and the parser does not raise."""
+    real = (FIXTURES / "error.pi.jsonl").read_text(encoding="utf-8")
+    lines = real.rstrip("\n").split("\n")
+    truncated = "\n".join(lines[:-1]) + "\n" + lines[-1][: len(lines[-1]) // 2]
+    p = tmp_path / "reconcile-T-1-1000.000000.pi.jsonl"
+    p.write_text(truncated, encoding="utf-8")
+
+    outcome = session_outcome(p)  # must not raise
+
+    assert outcome["outcome"] == "running"
+
+
+def test_pi_session_outcome_line_broken_mid_json_is_skipped_not_raised(tmp_path):
+    """AC4 counterpart: a final line that IS newline-terminated but corrupt
+    mid-JSON (a writer flushed a torn buffer) hits the existing
+    ``JSONDecodeError: continue`` path, not a crash -- and still classifies
+    as running since the (unparseable) agent_end record was never seen."""
+    real = (FIXTURES / "error.pi.jsonl").read_text(encoding="utf-8")
+    lines = real.rstrip("\n").split("\n")
+    torn = lines[-1][: len(lines[-1]) // 2] + '"garbage'
+    p = tmp_path / "reconcile-T-1-2000.000000.pi.jsonl"
+    p.write_text("\n".join(lines[:-1]) + "\n" + torn + "\n", encoding="utf-8")
+
+    outcome = session_outcome(p)  # must not raise
+
+    assert outcome["outcome"] == "running"
+
+
+def test_pi_session_outcome_unknown_for_a_grammar_neither_suffix_recognizes(tmp_path):
+    p = tmp_path / "reconcile-T-1-1.weird.jsonl"
+    p.write_text(json.dumps({"type": "agent_end", "messages": []}) + "\n", encoding="utf-8")
+    assert session_outcome(p)["outcome"] == "unknown"

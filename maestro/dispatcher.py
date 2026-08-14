@@ -1371,7 +1371,11 @@ def detect_zero_turn_spawns(cfg: Config, now: float) -> list[str]:
     could possibly have been appended. That is a structural failure the FIRST
     time it happens; left alone, ``active_keys()`` (called right after this,
     to compute ``active``) would silently release the claim as just another
-    dead session and the ticket would simply respawn next sweep, forever.
+    dead session and the ticket would simply respawn next sweep, forever. This
+    is THE runaway net (T-58's spec: "without it there is none") -- it also
+    sees a pi ``.pi.jsonl`` log (``steplog._pi_session_outcome`` synthesizes
+    the same ``result.num_turns`` shape off pi's own ``turn_start`` count), so
+    a board running the ``pi`` runner is not invisible to it.
 
     Must run before ``active = sessions.list_active()`` -- once that call
     releases a stale claim (its normal job), the ``log_path``/``cwd``/
@@ -1391,7 +1395,7 @@ def detect_zero_turn_spawns(cfg: Config, now: float) -> list[str]:
         if not log_path:
             continue
         p = Path(log_path)
-        if not p.exists() or not p.name.endswith(".stream.jsonl"):
+        if not p.exists() or not (p.name.endswith(".stream.jsonl") or p.name.endswith(".pi.jsonl")):
             continue
         result = steplog.session_outcome(p).get("result")
         if not result or result.get("num_turns") != 0:
