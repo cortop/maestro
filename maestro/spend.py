@@ -36,6 +36,20 @@ A ``session_log_format = "text"`` home carries no parseable records (see
 ``ratelimit.py``'s own limitation note) -- its spend is reported as explicitly
 ``unavailable``, never a silent ``$0.00``, which would be a ceiling that can
 never fire.
+
+T-58 (AC8): a pi ``.pi.jsonl`` session log is folded here too -- it carries no
+Claude-shaped ``result.total_cost_usd`` record, so its per-session total is
+summed from every assistant ``message_end``'s ``message.usage.cost.total``
+instead (one such record per turn; pi's own "terminal" marker for settling
+purposes is ``agent_end``, not ``result`` -- see the per-candidate loop below).
+``unavailable`` stays keyed on ``cfg.session_log_format`` ALONE -- a
+Claude-log-capture knob, not a per-runner fact (this ticket's Notes flag this
+explicitly): the default (``"stream-json"``) leaves pi folding fully working
+alongside Claude's, but a board that deliberately sets ``session_log_format =
+"text"`` reports the WHOLE meter unavailable even though pi's own capture is
+unconditional (unlike Claude's) and could in principle still be summed. This is
+a documented, conservative gap -- not a silent one -- left for a future ticket
+that wants per-runner spend availability rather than one board-wide flag.
 """
 from __future__ import annotations
 
@@ -111,8 +125,9 @@ def probe(cfg: Config, now: float) -> dict:
     for key in ledger:
         candidates = sessions_mod.list_sessions(home, key)
         for candidate in candidates:
-            if candidate["format"] != "stream-json":
-                continue  # text-format logs carry no parseable result records
+            fmt = candidate["format"]
+            if fmt not in ("stream-json", "pi"):
+                continue  # text-format (and opencode) logs carry no parseable cost records
             path = Path(candidate["path"])
             if not path.exists():
                 continue
@@ -127,20 +142,31 @@ def probe(cfg: Config, now: float) -> dict:
             pos = start
             for offset, record in steplog.iter_records(path, start=start):
                 pos = offset
-                if record.get("type") == "result":
-                    cost = record.get("total_cost_usd")
-                    if isinstance(cost, (int, float)):
-                        total += float(cost)
-                    settled.add(log_id)
+                if fmt == "stream-json":
+                    if record.get("type") == "result":
+                        cost = record.get("total_cost_usd")
+                        if isinstance(cost, (int, float)):
+                            total += float(cost)
+                        settled.add(log_id)
+                else:  # T-58 (AC8): pi -- see module docstring for the shape
+                    if record.get("type") == "agent_end":
+                        settled.add(log_id)
+                    elif record.get("type") == "message_end":
+                        msg = record.get("message") or {}
+                        if msg.get("role") == "assistant":
+                            cost = ((msg.get("usage") or {}).get("cost") or {}).get("total")
+                            if isinstance(cost, (int, float)):
+                                total += float(cost)
             if pos != start:
                 cursor[log_id] = pos
                 cursor_changed = True
             # Trap: a session SIGTERM'd by run_watchdog mid-stream may never
-            # write a `result` record, so its cost would otherwise silently
-            # count as zero. Once we've drained a log to its current end with
-            # no result ever seen AND its key is no longer live, count it
-            # explicitly instead of dropping it -- and mark it settled so we
-            # don't recount the same dead log every subsequent sweep.
+            # write its terminal marker (`result` for stream-json, `agent_end`
+            # for pi), so its cost would otherwise silently count as zero. Once
+            # we've drained a log to its current end with no terminal marker
+            # ever seen AND its key is no longer live, count it explicitly
+            # instead of dropping it -- and mark it settled so we don't
+            # recount the same dead log every subsequent sweep.
             if pos >= size and log_id not in settled:
                 if live_keys is None:
                     live_keys = claims.active_keys(home)

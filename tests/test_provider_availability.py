@@ -46,7 +46,32 @@ def _write_opencode_session(home, key, epoch, reason):
     return path
 
 
-def _boom_probe():
+def _write_pi_session(home, key, epoch, outcome, *, provider="anthropic"):
+    """A pi-runner session log (T-58's own verified vocabulary) -- unlike
+    opencode, THIS is meant to count toward the streak (AC6), and its own
+    ``provider`` field is what resolves the confirmation probe's host (AC7)."""
+    session_id = f"reconcile-{key}-{epoch:.6f}"
+    path = store.session_pi_path(home, key, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"type": "session", "version": 3, "id": session_id,
+              "timestamp": "2026-08-14T00:00:00.000Z", "cwd": str(home)},
+             {"type": "agent_start"}, {"type": "turn_start"}]
+    if outcome == "success":
+        lines.append({"type": "message_end",
+                       "message": {"role": "assistant", "stopReason": "stop",
+                                   "provider": provider}})
+    elif outcome == "error":
+        lines.append({"type": "message_end",
+                       "message": {"role": "assistant", "stopReason": "error",
+                                   "errorMessage": "401 auth error", "provider": provider}})
+    if outcome in ("success", "error"):
+        lines.append({"type": "agent_end", "messages": [], "willRetry": False})
+    # "running": no agent_end at all.
+    path.write_text("\n".join(json.dumps(o) for o in lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _boom_probe(host=None):
     raise AssertionError("must not call the probe when the primary signal hasn't tripped")
 
 
@@ -85,7 +110,7 @@ def test_erroring_when_streak_trips_and_probe_reaches_the_network(cfg, home):
     seed_ticket(home, "T-1", "x", phase="implementing")
     for i, epoch in enumerate((100.0, 200.0, 300.0)):
         _write_session(home, "T-1", epoch, "error")
-    result = health.check_provider_availability(cfg, 1000, probe=lambda: (True, "reachable"))
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (True, "reachable"))
     assert result["status"] == "warn"
     assert result["state"] == "erroring"
     assert result["error_streak"] == 3
@@ -96,7 +121,7 @@ def test_no_network_when_streak_trips_and_probe_cannot_reach_the_network(cfg, ho
     seed_ticket(home, "T-1", "x", phase="implementing")
     for epoch in (100.0, 200.0, 300.0):
         _write_session(home, "T-1", epoch, "error")
-    result = health.check_provider_availability(cfg, 1000, probe=lambda: (False, "unreachable"))
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (False, "unreachable"))
     assert result["status"] == "fail"
     assert result["state"] == "no_network"
 
@@ -123,7 +148,7 @@ def test_streak_is_computed_fleet_wide_across_tickets(cfg, home):
     _write_session(home, "T-1", 100.0, "error")
     _write_session(home, "T-2", 200.0, "error")
     _write_session(home, "T-1", 300.0, "error")
-    result = health.check_provider_availability(cfg, 1000, probe=lambda: (True, "ok"))
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (True, "ok"))
     assert result["error_streak"] == 3
     assert result["state"] == "erroring"
 
@@ -141,13 +166,60 @@ def test_opencode_runner_errors_never_count_toward_the_anthropic_streak(cfg, hom
     assert result["error_streak"] == 0
 
 
+def test_pi_runner_errors_count_toward_the_streak_and_trip_it(cfg, home):
+    """AC6 (T-58): a board whose three most recent sessions are pi error logs
+    trips the streak through the real check -- unlike opencode, pi IS counted."""
+    seed_ticket(home, "T-1", "x", phase="implementing")
+    for epoch in (100.0, 200.0, 300.0):
+        _write_pi_session(home, "T-1", epoch, "error")
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (True, "reachable"))
+    assert result["status"] == "warn"
+    assert result["state"] == "erroring"
+    assert result["error_streak"] == 3
+
+
+def test_pi_confirmation_probe_host_resolves_from_the_erroring_sessions_own_provider(cfg, home):
+    """AC7: the confirmation probe is asked about the HOST the erroring pi
+    sessions actually recorded talking to (their own ``provider`` field), not
+    the hardcoded Anthropic default -- captured via an injected probe."""
+    seed_ticket(home, "T-1", "x", phase="implementing")
+    for epoch in (100.0, 200.0, 300.0):
+        _write_pi_session(home, "T-1", epoch, "error", provider="google")
+    captured = []
+
+    def _capture_probe(host):
+        captured.append(host)
+        return True, "reachable"
+
+    result = health.check_provider_availability(cfg, 1000, probe=_capture_probe)
+    assert result["status"] == "warn"
+    assert captured == ["generativelanguage.googleapis.com"]
+
+
+def test_claude_streak_still_probes_the_hardcoded_anthropic_host(cfg, home):
+    """AC7 counterpart: a Claude (`stream-json`) streak's confirmation probe
+    is unchanged -- still `_PROVIDER_PROBE_HOST` -- since Claude has no
+    per-session provider field the way pi does."""
+    seed_ticket(home, "T-1", "x", phase="implementing")
+    for epoch in (100.0, 200.0, 300.0):
+        _write_session(home, "T-1", epoch, "error")
+    captured = []
+
+    def _capture_probe(host):
+        captured.append(host)
+        return True, "reachable"
+
+    health.check_provider_availability(cfg, 1000, probe=_capture_probe)
+    assert captured == [health._PROVIDER_PROBE_HOST]
+
+
 def test_a_running_session_in_the_window_is_skipped_not_counted(cfg, home):
     seed_ticket(home, "T-1", "x", phase="implementing")
     _write_session(home, "T-1", 100.0, "error")
     _write_session(home, "T-1", 200.0, "error")
     _write_session(home, "T-1", 300.0, "running")  # newest, no terminal result yet
     _write_session(home, "T-1", 400.0, "error")
-    result = health.check_provider_availability(cfg, 1000, probe=lambda: (True, "ok"))
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (True, "ok"))
     # the "running" entry contributes no verdict -- the three error outcomes
     # (400, 200, 100) are still a fresh streak of 3
     assert result["error_streak"] == 3
@@ -185,7 +257,7 @@ def test_real_doctor_json_reports_no_network(home, monkeypatch):
     seed_ticket(home, "T-1", "x", phase="implementing")
     for epoch in (100.0, 200.0, 300.0):
         _write_session(home, "T-1", epoch, "error")
-    monkeypatch.setattr(health, "_default_provider_probe", lambda: (False, "no route to host"))
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (False, "no route to host"))
     code, out = _sweep(home)
     assert code == 0  # WARN/FAIL-only, never blocks a spawn (report-only, MTO-8)
     check = next(c for c in out["checks"] if c["name"] == "provider_availability")
@@ -201,7 +273,7 @@ def test_alarm_fires_once_on_a_fresh_no_network_episode(home, tmp_path, monkeypa
     seed_ticket(home, "T-1", "x", phase="implementing")
     for epoch in (100.0, 200.0, 300.0):
         _write_session(home, "T-1", epoch, "error")
-    monkeypatch.setattr(health, "_default_provider_probe", lambda: (False, "offline"))
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (False, "offline"))
     cfg = Config(home=home, alarm_cooldown_s=50,
                  notify_command=f'printf "%s|%s\\n" "$KEY" "$PHASE" >> {log_path}')
 

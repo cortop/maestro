@@ -4,6 +4,7 @@ Every test drives the real surface: a real dispatch(cfg, DryRunSessions(), now=.
 sweep over a temp home, or the real `maestro` CLI — never a mocked ratelimit module.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -274,6 +275,23 @@ def test_third_format_newest_log_is_skipped_without_raising(home, cfg):
     path.write_text('{"type": "message"}\n', encoding="utf-8")
 
     report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)  # must not raise
+    assert report.paused_until is None
+    assert not (home / "derived" / ".ratelimit.json").exists()
+
+
+def test_pi_format_newest_log_is_skipped_without_raising(home, cfg):
+    """AC9 (T-58): a real captured pi log -- even the 401 error stream, which
+    DOES carry an error signal (just not Claude's `rate_limit_event` shape) --
+    is left ungated: neither crashes nor mis-parsed as stream-json."""
+    t0 = 9_600_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{t0:.6f}.pi.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    real = (Path(__file__).parent / "fixtures" / "error.pi.jsonl").read_text(encoding="utf-8")
+    path.write_text(real, encoding="utf-8")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)  # must not raise
+
     assert report.paused_until is None
     assert not (home / "derived" / ".ratelimit.json").exists()
 

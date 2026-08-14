@@ -845,52 +845,88 @@ _PROVIDER_PROBE_HOST = "api.anthropic.com"
 _PROVIDER_PROBE_PORT = 443
 _PROVIDER_PROBE_TIMEOUT = 5.0
 
+# T-58 (AC7): the confirmation probe's host resolved per runner/provider,
+# rather than the single hardcoded Anthropic host above -- a Claude session is
+# always Anthropic, but pi is multi-provider by design (its own log records
+# which one it actually talked to, see ``steplog._pi_session_outcome``'s
+# ``provider`` field). Only the providers pi ships built-in support for (see
+# its own ``--provider`` flag) are mapped; anything else (including an
+# ollama-backed pi session, which has no meaningful "provider host" to probe --
+# it's local) falls back to ``_PROVIDER_PROBE_HOST`` -- a KNOWN, documented
+# imprecision (same "if deferred, say so explicitly" call the spec's log-size
+# item makes) rather than inventing a probe target for a local model.
+_PI_PROVIDER_HOSTS = {
+    "anthropic": "api.anthropic.com",
+    "google": "generativelanguage.googleapis.com",
+    "openai": "api.openai.com",
+}
 
-def _recent_fleet_outcomes(home: Path, keys: list[str], scan: int) -> list[str]:
-    """Newest-first terminal outcomes (``success``/``error``/``rate_limited``)
-    across EVERY current ticket's session logs, capped to the *scan*
-    most-recent session files fleet-wide -- sorted by the epoch already
-    embedded in each filename (``sessions.list_sessions`` with
-    ``with_outcome=False``, so this opens NO log file just to rank them), then
-    only the top *scan* get their outcome tail-scanned
-    (``steplog.session_outcome``). This check is Anthropic-provider-specific
-    (see ``_PROVIDER_PROBE_HOST`` below) -- a non-Claude runner's own log
-    grammar (opencode) is filtered out BEFORE the scan window even though
-    ``steplog.session_outcome`` can parse it for its own purposes now (OC-5);
-    it is unrelated evidence about api.anthropic.com and must never occupy a
-    scan slot or be folded into this streak. A ``running`` (still-active
-    claim) entry carries no verdict either and is skipped rather than counted
-    or treated as breaking a streak."""
+
+def _recent_fleet_outcomes(home: Path, keys: list[str], scan: int) -> list[dict]:
+    """Newest-first terminal outcomes across EVERY current ticket's session
+    logs, capped to the *scan* most-recent session files fleet-wide -- sorted
+    by the epoch already embedded in each filename (``sessions.list_sessions``
+    with ``with_outcome=False``, so this opens NO log file just to rank them),
+    then only the top *scan* get their outcome tail-scanned
+    (``steplog.session_outcome``). Returns
+    ``[{"outcome": ..., "format": ..., "provider": ...}, ...]`` -- ``format``
+    and ``provider`` (T-58) let ``check_provider_availability`` resolve its
+    confirmation-probe host per the runner that actually produced the streak,
+    instead of assuming Anthropic. This check's PRIMARY signal is
+    Anthropic-*or*-pi-specific (see ``_PI_PROVIDER_HOSTS`` above) -- a
+    non-Claude, non-pi runner's own log grammar (opencode) is filtered out
+    BEFORE the scan window even though ``steplog.session_outcome`` can parse
+    it for its own purposes now (OC-5); it is unrelated evidence about any
+    resolvable provider host and must never occupy a scan slot or be folded
+    into this streak. A ``running`` (still-active claim) entry carries no
+    verdict either and is skipped rather than counted or treated as breaking
+    a streak."""
     candidates: list[dict] = []
     for key in keys:
         candidates.extend(sessions_mod.list_sessions(home, key))
-    candidates = [c for c in candidates if c["format"] == "stream-json"]
+    candidates = [c for c in candidates if c["format"] in ("stream-json", "pi")]
     candidates.sort(key=lambda d: d["epoch"], reverse=True)
     outcomes = []
     for entry in candidates[:scan]:
-        outcome = steplog.session_outcome(Path(entry["path"]))["outcome"]
+        verdict = steplog.session_outcome(Path(entry["path"]))
+        outcome = verdict["outcome"]
         if outcome in ("running", "unknown"):
             continue
-        outcomes.append(outcome)
+        outcomes.append({"outcome": outcome, "format": entry["format"],
+                          "provider": verdict.get("provider")})
     return outcomes
 
 
-def _default_provider_probe() -> tuple[bool, str]:
-    """Real confirmation probe -- a bare TCP connect to the provider's own
-    host, no TLS handshake, no request, no API key spent. Cheap enough to run
-    as a confirmation step, but ``check_provider_availability`` only ever
-    reaches this once the session-log primary signal has already tripped --
-    never on a bare sweep with nothing wrong, so this can't turn the health
-    check into a traffic generator. A successful connect means "this box has
-    a network path to the provider"; it says nothing about whether the
-    provider itself is erroring -- that distinction is exactly what the
-    already-tripped session-log streak answered."""
+def _provider_probe_host(fmt: str | None, provider: str | None) -> str:
+    """Resolve the confirmation-probe host (AC7) for the runner/provider that
+    produced the tripped error streak. A Claude ``stream-json`` session is
+    always Anthropic; a pi session's own log records which provider it
+    actually talked to (``_PI_PROVIDER_HOSTS``) -- anything unrecognized (no
+    streak yet, or a provider pi supports that this table doesn't) falls back
+    to the historical Anthropic default."""
+    if fmt == "pi" and provider in _PI_PROVIDER_HOSTS:
+        return _PI_PROVIDER_HOSTS[provider]
+    return _PROVIDER_PROBE_HOST
+
+
+def _default_provider_probe(host: str = _PROVIDER_PROBE_HOST) -> tuple[bool, str]:
+    """Real confirmation probe -- a bare TCP connect to *host* (AC7: resolved
+    per runner/provider by ``_provider_probe_host``, defaulting to the
+    historical Anthropic host), no TLS handshake, no request, no API key
+    spent. Cheap enough to run as a confirmation step, but
+    ``check_provider_availability`` only ever reaches this once the
+    session-log primary signal has already tripped -- never on a bare sweep
+    with nothing wrong, so this can't turn the health check into a traffic
+    generator. A successful connect means "this box has a network path to the
+    provider"; it says nothing about whether the provider itself is erroring
+    -- that distinction is exactly what the already-tripped session-log
+    streak answered."""
     import socket
     try:
         with socket.create_connection(
-            (_PROVIDER_PROBE_HOST, _PROVIDER_PROBE_PORT), timeout=_PROVIDER_PROBE_TIMEOUT
+            (host, _PROVIDER_PROBE_PORT), timeout=_PROVIDER_PROBE_TIMEOUT
         ):
-            return True, f"TCP connect to {_PROVIDER_PROBE_HOST}:{_PROVIDER_PROBE_PORT} ok"
+            return True, f"TCP connect to {host}:{_PROVIDER_PROBE_PORT} ok"
     except OSError as e:
         return False, f"{type(e).__name__}: {e}"
 
@@ -916,20 +952,27 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
     ``check_gh_credential_reachability``.
 
     CONFIRMATION probe, reached ONLY once the primary signal has already
-    tripped: a bare TCP connect to the provider's own host
-    (``_default_provider_probe``). Connects -> ``erroring`` (network is up,
-    the provider itself is degraded); fails -> ``no_network`` (this box is
-    offline). Injectable ``probe``, same shape as
-    ``check_gh_credential_reachability``'s ``run``/``check_ollama_models``'s
-    ``transport``, so tests never open a real socket.
+    tripped: a bare TCP connect to a host resolved per runner/provider (AC7:
+    ``_provider_probe_host`` -- Anthropic for a Claude streak, the erroring pi
+    sessions' own recorded provider for a pi streak, see
+    ``_PI_PROVIDER_HOSTS``) via ``_default_provider_probe``. Connects ->
+    ``erroring`` (network is up, the provider itself is degraded); fails ->
+    ``no_network`` (this box is offline). Injectable ``probe`` (now called
+    with that resolved host, same shape as ``check_gh_credential_reachability``'s
+    ``run``/``check_ollama_models``'s ``transport``, so tests never open a
+    real socket).
     """
     home = cfg.home
     keys = dispatcher.list_keys(home)
     outcomes = _recent_fleet_outcomes(home, keys, _PROVIDER_SESSION_SCAN)
     streak = 0
-    for outcome in outcomes:
-        if outcome != "error":
+    streak_fmt: str | None = None
+    streak_provider: str | None = None
+    for entry in outcomes:
+        if entry["outcome"] != "error":
             break
+        if streak == 0:
+            streak_fmt, streak_provider = entry["format"], entry["provider"]
         streak += 1
         if streak >= _PROVIDER_ERROR_STREAK:
             break
@@ -938,7 +981,8 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
                 "detail": "provider reachable, no recent error streak",
                 "error_streak": streak}
 
-    reachable, reason = (probe or _default_provider_probe)()
+    host = _provider_probe_host(streak_fmt, streak_provider)
+    reachable, reason = (probe or _default_provider_probe)(host)
     if reachable:
         return {
             "name": "provider_availability", "status": "warn", "state": "erroring",
