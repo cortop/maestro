@@ -51,8 +51,10 @@ LINEAR_SYNCED = "LinearSynced"          # {linear_updated_ts, status, last_comme
 
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket
-FAILED = "Failed"                       # {error}  increments failure_count
-STALLED = "Stalled"                     # {reason}  -> DEGRADED / dead-letter
+FAILED = "Failed"                       # {error, kind?}  increments failure_count
+STALLED = "Stalled"                     # {reason, kind?}  -> DEGRADED / dead-letter
+                                         # kind="burn" (RB-11): parked by burn.should_park,
+                                         # not a generic failure -- see snapshot.Snapshot.burning
 NOTE = "Note"                           # {text}  free-form audit breadcrumb
 
 # Side-effecting events whose presence (by step_id) means the external action

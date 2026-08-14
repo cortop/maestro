@@ -2098,6 +2098,25 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 spawned = []
                 rotation_changed = False
                 for key, _reason in to_spawn:
+                    # RB-11: the per-key burn cap -- checked before ANY other
+                    # per-key gate below (repo cap, credential, runner
+                    # preflight, the no-progress attempts ledger), so a
+                    # burning key is parked without spending a repo-cap slot
+                    # or an attempts-ledger attempt on a spawn that would
+                    # never have been let through anyway. Dead-letters (not a
+                    # backoff retry) -- waiting out `max_failures` more
+                    # backed-off attempts first would just reproduce the
+                    # burn this exists to stop. Every OTHER due key in this
+                    # sweep is untouched -- `continue` only skips this one.
+                    from . import burn
+                    burn_reason = burn.should_park(cfg, key)
+                    if burn_reason:
+                        from . import ops
+                        ops.fail(cfg, key, burn_reason, actor="dispatcher",
+                                 dead_letter=True, kind="burn")
+                        reaped.append(key)
+                        decisions[key]["outcome"] = "burn_parked"
+                        continue
                     binding = bindings_by_key.get(key)
                     cap = binding.max_spawns_per_sweep if binding is not None else None
                     if cap is not None and per_repo_spawn_count.get(binding.name, 0) >= cap:

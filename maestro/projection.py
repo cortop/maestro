@@ -131,11 +131,19 @@ def render(home: Path) -> dict[str, str]:
     # ---- NEEDS-YOU.md (the single human queue) ------------------------------
     nlines = [_BANNER, f"# Needs you\n\n*Generated: {store.iso_now()}*\n"]
     awaiting = by_phase.get(Phase.AWAITING_HUMAN.value, [])
-    degraded = by_phase.get(Phase.DEGRADED.value, [])
+    # RB-11: a burn-parked key (`should_park`'s dead-letter, tagged kind="burn")
+    # is DEGRADED but is not "quietly waiting on a human" the way a generic
+    # dead-letter or an open question is -- split it into its own section so a
+    # human scanning this file can tell "parked, waiting for you" apart from
+    # "burning" at a glance (spec AC5), instead of both reading identically
+    # under one "Dead-lettered" heading.
+    degraded_all = by_phase.get(Phase.DEGRADED.value, [])
+    burning = [s for s in degraded_all if s.burning]
+    degraded = [s for s in degraded_all if not s.burning]
     # needs-approval is a derived predicate, not a phase (GA-21) -- it can park
     # a ticket that's still `implementing`, so it can't come from `by_phase`.
     gated = [s for s in snaps if needs_approval(home, s.key, s)]
-    if not awaiting and not degraded and not gated:
+    if not awaiting and not degraded and not burning and not gated:
         nlines.append("\nNothing is waiting on you. 🎉\n")
     if awaiting:
         nlines.append("\n## Questions\n")
@@ -143,6 +151,13 @@ def render(home: Path) -> dict[str, str]:
             for qid, text in s.open_questions.items():
                 nlines.append(f"- **{s.key}** — {text}")
                 nlines.append(f"  - answer: `maestro ans {s.key} \"...\"`  (qid: {qid})")
+    if burning:
+        nlines.append("\n## Burning (parked -- no progress, repeated identical failures)\n")
+        for s in sorted(burning, key=lambda x: split_key(x.key)):
+            nlines.append(f"- **{s.key}** — {s.last_error or 'burning'} "
+                          f"(failures: {s.failure_count})")
+            nlines.append(f"  - revive: `maestro cmd {s.key} retry` · "
+                          f"drop: `maestro cmd {s.key} discard`")
     if degraded:
         nlines.append("\n## Dead-lettered (need a decision)\n")
         for s in sorted(degraded, key=lambda x: split_key(x.key)):
