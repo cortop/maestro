@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import claims, credentials, dispatcher, fleet, skills_install, spend as spend_mod, store
+from . import claims, credentials, dispatcher, fleet, runner_permissions, skills_install, spend as spend_mod, store
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
 from .config import Config
@@ -541,6 +541,34 @@ def _missing_maestro_grant(allow: set, deny: set) -> list[str]:
     return [coarse]
 
 
+def _opencode_permission_gap(cfg: Config, repo_path: Path) -> str | None:
+    """T-64: the opencode counterpart of `_missing_maestro_grant` above -- an
+    opencode-runner binding's real permission surface is the generated
+    ``opencode.jsonc`` (``skills_install._opencode_declarative_config``), not
+    Claude Code's settings.json, so this reads THAT file instead: repo-scope
+    first, falling back to user-scope, exactly like
+    ``check_missing_reconcile_skill`` already does for the command-file check.
+    Compared against what the installer would generate RIGHT NOW
+    (``runner_permissions.opencode_permission_block``) byte-for-byte, so a
+    missing file, a stale file (a ``config.toml`` edit since the last
+    ``install-commands`` run), and a foreign hand-edited file are all reported
+    the same way -- 'close but not exactly what would be generated now' must
+    warn, not silently pass (QW-1's rule, same as the Claude-side check).
+    Returns ``None`` when it matches, else a short human-readable reason.
+    """
+    for path in (skills_install.opencode_repo_config_path(repo_path),
+                 skills_install.opencode_user_config_path(cfg)):
+        parsed = skills_install.read_opencode_config(path)
+        if parsed is None:
+            continue
+        if parsed.get("permission") == runner_permissions.opencode_permission_block(cfg.home):
+            return None
+        return f"opencode.jsonc permission block at {path} is missing or stale"
+    return ("no opencode.jsonc found at "
+            f"{skills_install.opencode_repo_config_path(repo_path)} or "
+            f"{skills_install.opencode_user_config_path(cfg)} -- run `maestro install-commands`")
+
+
 def check_reconciler_permissions(cfg: Config, now: float) -> dict:
     """WARN (never blocks a spawn) when a repo bound by a current ticket has no
     Claude Code permission grant for the reconciler's whole Bash surface
@@ -568,16 +596,19 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
     ``dispatcher.referenced_repo_bindings``, skip a binding whose path doesn't
     exist (fails open, same as that check and ``repo_preflight_all``).
 
-    OC-1: runner-aware -- this check only knows how to read Claude Code's own
-    settings.json permission layers. A binding whose referencing ticket(s)
-    resolve to a non-``claude`` runner (`_runners_by_binding`) enforces
-    permissions through a structurally different, runner-owned surface (e.g.
-    opencode's declarative ``permission.bash`` config, see
-    ``runner_permissions.opencode_bash_permissions``) that this check does not
-    read -- reporting ``ok`` for it would claim a verification that never
-    happened (the exact silent-``ok`` class QW-1 exists to prevent). Such a
-    binding is reported ``not_applicable_by_repo`` with a named reason instead
-    of being folded into ``missing_by_repo``/``ok``.
+    OC-1/T-64: runner-aware. A binding whose referencing ticket(s) resolve to
+    ``opencode`` (`_runners_by_binding`) is checked against ITS OWN runner-owned
+    surface instead -- the generated ``opencode.jsonc`` (see
+    ``skills_install._opencode_declarative_config`` /
+    ``runner_permissions.opencode_permission_block``, the write path this
+    check used to have nothing to read), via `_opencode_permission_gap` below.
+    A binding whose runner is neither ``claude`` nor ``opencode`` (no such
+    runner is registered today -- `dispatcher._REGISTERED_RUNNERS` -- but a
+    future one could land before this check is updated for it) is reported
+    ``not_applicable_by_repo`` with a named reason instead of being folded into
+    ``missing_by_repo``/``ok`` -- reporting ``ok`` for a surface nothing here
+    actually reads would claim a verification that never happened (the exact
+    silent-``ok`` class QW-1 exists to prevent).
     """
     if cfg.permission_mode == "bypassPermissions":
         return {"name": "reconciler_permissions", "status": "ok",
@@ -597,12 +628,17 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
         if not binding.path or not Path(binding.path).exists():
             continue
         runner = runners_by_binding.get(name, cfg.runner)
+        repo_path = Path(binding.path)
+        if runner == "opencode":
+            gap = _opencode_permission_gap(cfg, repo_path)
+            if gap:
+                missing_by_repo[name] = [gap]
+            continue
         if runner != "claude":
             not_applicable_by_repo[name] = (
                 f"runner {runner!r} enforces permissions through its own config, "
                 "not Claude Code settings.json -- this check does not inspect it")
             continue
-        repo_path = Path(binding.path)
         allow, deny = _repo_permission_surface(repo_path, cfg)
         missing = _missing_maestro_grant(allow, deny)
         missing += [tool for tool in literal_required if tool not in allow or tool in deny]

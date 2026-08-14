@@ -227,8 +227,15 @@ _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 # dispatcher._RUNNER_DEFAULT_CONCURRENCY for why). `phases` (T-54) is the
 # eligible-phase list (dispatcher.runner_eligible_phases; default
 # ["implementing"] -- see dispatcher._RUNNER_DEFAULT_PHASES) admitting
-# opencode to a phase's spawn beyond just `implementing`.
-_RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases"})
+# opencode to a phase's spawn beyond just `implementing`. OC-6: `models` (list
+# of bare ollama tags, e.g. ["qwen3-coder:30b"]) and `host` (optional
+# `OLLAMA_HOST` override) are what `skills_install`'s generated opencode.jsonc
+# registers its local "ollama" provider from
+# (`skills_install._opencode_provider_block`) -- pinned, explicit config, not
+# code scraping ticket specs for whatever model tag happens to be in use.
+# `models` unset falls back to the board-wide `runner_model` default (see that
+# function's own docstring).
+_RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
 
 
 def config_path(home: Path) -> Path:
@@ -610,6 +617,14 @@ implementer = "claude_skill"
                                      # from before this key existed); admitting a read-mostly
                                      # phase (e.g. "qa", "triaging", "researching") too is a
                                      # deliberate, reviewable edit here, never a code change
+# models = ["qwen3-coder:30b"]      # OC-6: ollama tags to register in the generated
+                                     # opencode.jsonc's local "ollama" provider (each pinned
+                                     # tool_call = true); unset falls back to [maestro]
+                                     # runner_model. `maestro install-commands` is what writes
+                                     # the file this actually feeds.
+# host = "127.0.0.1:11434"          # OC-6: optional OLLAMA_HOST override for that same
+                                     # provider's baseURL; unset resolves the ambient
+                                     # OLLAMA_HOST env var same as `maestro runners` does
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""

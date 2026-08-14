@@ -111,3 +111,58 @@ def opencode_bash_permissions(home: Path) -> dict[str, str]:
         perms.setdefault(verb, "ask")
     perms.setdefault("git clean", "ask")
     return perms
+
+
+# T-64: the three MAESTRO_HOME subtrees every reconcile skill's Read tool calls
+# actually touch (spec.md, the folded context file, snapshots/cursors) -- see
+# opencode_permission_block's docstring for why this can't be a home-wide or
+# empty-string catch-all.
+_EXTERNAL_DIRECTORY_SUBTREES = ("tickets", "inbox", "derived")
+
+
+def opencode_permission_block(home: Path) -> dict:
+    """T-64: the full declarative ``permission`` block ``skills_install`` writes
+    into opencode.jsonc -- the write path both this function and
+    ``opencode_bash_permissions`` (T-34/RF-5) were left waiting on (see that
+    function's own docstring / ``sessions.py:341-347``).
+
+    Two keys:
+
+    ``bash`` -- ``opencode_bash_permissions`` (the destructive-command guard,
+    unchanged) plus an explicit ALLOW for the maestro-verb surface a reconciler
+    actually invokes (``dispatcher.AGENT_TOOL_VERBS`` -- the SAME definition
+    ``cli._reconciler_tool_grants`` renders into Claude's ``--allowedTools``, so
+    this can never drift into a second, hand-typed verb list). Belt-and-suspenders:
+    opencode's own bash default is already allow (nothing here relies on that
+    staying true), and these entries can never collide with the guard's deny
+    patterns (those are all ``rm``/``mv``/``truncate``/``git clean``/redirect
+    patterns, never ``maestro *``).
+
+    ``external_directory`` -- T-64's actual fix for the failure the spec's Notes
+    describe: every reconcile skill Reads ``<MAESTRO_HOME>/tickets/<KEY>/spec.md``
+    and ``.../derived/context/<KEY>.md`` via the Read tool, and MAESTRO_HOME is
+    never inside opencode's own ``--dir`` (the ticket's worktree) -- opencode
+    treats that as an ``external_directory`` permission request, defaults it to
+    ``ask``, and a headless (no-TTY) ``opencode run`` auto-rejects every ``ask``.
+    Verified empirically (T-64 spec Notes' own methodology): a real ``opencode
+    run`` denies with "The user rejected permission..." without this block and
+    succeeds with it, against the SAME three-subtree glob shape below (spiked
+    against a real ``qwen3-coder:30b`` tool call, not just ``opencode debug
+    config`` echo). Scoped to exactly the three subtrees the skills read from
+    (``tickets``/``inbox``/``derived`` -- covers spec.md, inbox logs, and both
+    snapshots and the folded context file under one glob) -- never a home-wide
+    or bare ``"*"`` entry, so this can't be mistaken for the blanket-approve
+    posture the module docstring forbids.
+    """
+    from . import dispatcher  # lazy: avoids a load-time cycle (matches repos.resolve's own note)
+
+    bash = dict(opencode_bash_permissions(home))
+    for verb in dispatcher.AGENT_TOOL_VERBS:
+        bash[f"maestro {verb} *"] = "allow"
+        bash[f"maestro {verb}"] = "allow"
+
+    home = Path(home).expanduser().resolve()
+    external_directory = {
+        f"{home / sub}/**": "allow" for sub in _EXTERNAL_DIRECTORY_SUBTREES
+    }
+    return {"bash": bash, "external_directory": external_directory}

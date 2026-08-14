@@ -1004,12 +1004,34 @@ def test_doctor_cli_missing_reconcile_skill_warn_then_ok_for_opencode_runner_tic
     assert ok_check["status"] == "ok"
 
 
-def test_reconciler_permissions_not_applicable_for_non_claude_runner(home, tmp_path, monkeypatch):
-    """AC3: a repo bound by a non-claude-runner ticket is reported
-    `not_applicable_by_repo` with a reason naming the runner -- this check only
-    knows how to read Claude Code's settings.json layers, so it must never fold
-    a runner it did not inspect into a bare ok/warn."""
+def test_reconciler_permissions_not_applicable_for_an_unregistered_runner(home, tmp_path, monkeypatch):
+    """A repo bound by a ticket naming a runner this check has no dedicated
+    branch for (not ``claude``, not ``opencode``) is reported
+    `not_applicable_by_repo` with a reason naming the runner -- this check must
+    never fold a surface it did not inspect into a bare ok/warn. Uses a made-up
+    runner name (`resolve_runner` reads the spec's `runner:` line verbatim, with
+    no registration check of its own) rather than "opencode", which T-64 gave
+    its own dedicated, actively-checked branch -- see the tests below."""
     monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed_with_runner(home, "T-1", runner="some-future-runner")
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["missing_by_repo"] == {}          # nothing CLAUDE-scoped was found missing
+    assert "default" in check["not_applicable_by_repo"]
+    assert "some-future-runner" in check["not_applicable_by_repo"]["default"]
+
+
+def test_reconciler_permissions_warns_for_opencode_runner_missing_config(home, tmp_path, monkeypatch):
+    """T-64: unlike a genuinely-unregistered runner (above), an opencode-runner
+    binding now gets its OWN real inspection -- the generated opencode.jsonc --
+    instead of being folded into `not_applicable_by_repo` (the exact silent-`ok`
+    class QW-1 exists to prevent: T-64's Notes cite this check reading `ok` for
+    an opencode-runner ticket while checking nothing)."""
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(tmp_path / "no-opencode-user-commands"))
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
     cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
@@ -1017,9 +1039,15 @@ def test_reconciler_permissions_not_applicable_for_non_claude_runner(home, tmp_p
 
     checks = health.run_checks(cfg, 1000)
     check = next(c for c in checks if c["name"] == "reconciler_permissions")
-    assert check["missing_by_repo"] == {}          # nothing CLAUDE-scoped was found missing
-    assert "default" in check["not_applicable_by_repo"]
-    assert "opencode" in check["not_applicable_by_repo"]["default"]
+    assert check["not_applicable_by_repo"] == {}
+    assert "default" in check["missing_by_repo"]
+
+    from maestro import skills_install
+    skills_install.install_repo(cfg, "default")
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["missing_by_repo"] == {}
 
 
 def test_reconciler_permissions_claude_runner_ticket_unaffected_by_opencode_check(home, tmp_path, monkeypatch):
