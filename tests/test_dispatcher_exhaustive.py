@@ -14,13 +14,16 @@ approach for a domain this small.
 from __future__ import annotations
 
 import itertools
+from enum import Enum
 
 import pytest
 
 from maestro import dispatcher as disp
+from maestro import statemachine
 from maestro.snapshot import Snapshot
 from maestro.statemachine import (
     ACTIVE_PHASES,
+    PHASE_CLASS,
     SLEEPING_PHASES,
     TERMINAL_PHASES,
     TRANSITIONS,
@@ -205,8 +208,13 @@ def test_property_terminal_phase_never_due(grid):
 
 def test_property_terminal_phase_never_due_has_teeth(grid_home, monkeypatch):
     """Delete the real terminal-phase guard (dispatcher.py:142-143) and show a
-    DONE ticket would spawn a reconciler forever."""
+    DONE ticket would spawn a reconciler forever. RB-9 added a second, later
+    guard (the fail-closed ACTIVE_PHASES catch-all) that would also catch a
+    DONE ticket once TERMINAL_PHASES is emptied here -- neutralize that one
+    too, so this test still isolates the terminal-phase guard specifically
+    rather than incidentally proving the newer guard's teeth instead."""
     monkeypatch.setattr(disp, "TERMINAL_PHASES", frozenset())
+    monkeypatch.setattr(disp, "ACTIVE_PHASES", ACTIVE_PHASES | {Phase.DONE})
     snap = snapshot_for(Phase.DONE, False, False, "none")
     result = disp.is_due(grid_home, "T-grid", snap, inbox_pending=False,
                          current_spec_hash=_SPEC_HASH, now=_NOW)
@@ -308,16 +316,68 @@ def test_property_reachability_has_teeth_against_an_unreachable_phase():
 
 # ---------------------------------------------------------------------------
 # Property 7: the classification partitions the enum: SLEEPING and TERMINAL
-# are disjoint, and SLEEPING | TERMINAL | ACTIVE == every phase. `ACTIVE_PHASES`
-# is defined by subtraction (statemachine.py:35-37), so a newly added phase
-# lands in ACTIVE by default -- omission fails toward spawning, not away from it.
+# are disjoint, and SLEEPING | TERMINAL | ACTIVE == every phase. RB-9: these
+# three sets are now *derived* from the explicit `PHASE_CLASS` table
+# (statemachine.py), not computed by subtraction -- `_assert_exhaustive` fails
+# the build at import time if any `Phase` member is missing a row, so an
+# omission fails closed (never spawns) instead of silently landing in ACTIVE.
 # ---------------------------------------------------------------------------
 
 def test_property_classification_partitions_the_enum():
     assert SLEEPING_PHASES & TERMINAL_PHASES == set()
     assert SLEEPING_PHASES | TERMINAL_PHASES | ACTIVE_PHASES == set(Phase)
+    # And it comes from the table, not a subtraction -- same partition, derived.
+    assert PHASE_CLASS.keys() == set(Phase)
+    assert SLEEPING_PHASES == {p for p, c in PHASE_CLASS.items() if c == "sleeping"}
+    assert TERMINAL_PHASES == {p for p, c in PHASE_CLASS.items() if c == "terminal"}
+    assert ACTIVE_PHASES == {p for p, c in PHASE_CLASS.items() if c == "active"}
 
 
 def test_property_classification_partition_has_teeth():
     broken_sleeping = SLEEPING_PHASES | TERMINAL_PHASES  # DONE now claimed by both
     assert broken_sleeping & TERMINAL_PHASES != set()
+
+
+def test_new_phase_without_classification_fails_the_build():
+    """RB-9 AC2: adding a `Phase` member without a `PHASE_CLASS` decision must
+    fail loudly, not silently land in ACTIVE_PHASES. Exercises the real
+    `_assert_exhaustive` the module runs at import time -- against a throwaway
+    enum with a temporary extra member left unclassified, so this proves the
+    failure actually happens rather than merely asserting the intent."""
+
+    class _FakePhase(str, Enum):
+        KNOWN = "known"
+        NEWLY_ADDED = "newly-added"  # <-- the temporary, deliberately unclassified member
+
+    incomplete = {_FakePhase.KNOWN: "active"}
+    with pytest.raises(AssertionError, match="newly-added"):
+        statemachine._assert_exhaustive(_FakePhase, incomplete)
+
+
+def test_new_phase_without_classification_has_teeth():
+    """The counterpart: a *complete* classification must NOT raise -- otherwise
+    the test above would pass for the wrong reason (any call raising)."""
+
+    class _FakePhase(str, Enum):
+        KNOWN = "known"
+
+    complete = {_FakePhase.KNOWN: "active"}
+    statemachine._assert_exhaustive(_FakePhase, complete)  # no raise
+
+
+# ---------------------------------------------------------------------------
+# Property 8: `is_due`'s final fallthrough is fail-closed, not active-by-
+# default. RB-9 AC3: a phase that reaches the bottom of `is_due` without being
+# in ACTIVE_PHASES must come back not-due, never fall through to "active".
+# ---------------------------------------------------------------------------
+
+def test_is_due_fallthrough_fails_closed_for_an_unclassified_phase(grid_home, monkeypatch):
+    """Shrink ACTIVE_PHASES to exclude a phase that would otherwise reach the
+    bottom of `is_due` (no inbox/timer/approval gate applies) -- the real
+    catch-all must report not-due, not silently fall through to "active" the
+    way the pre-RB-9 unconditional `return DueResult(True, "active")` did."""
+    monkeypatch.setattr(disp, "ACTIVE_PHASES", ACTIVE_PHASES - {Phase.IMPLEMENTING})
+    snap = snapshot_for(Phase.IMPLEMENTING, False, False, "none")
+    result = disp.is_due(grid_home, "T-grid", snap, inbox_pending=False,
+                         current_spec_hash=_SPEC_HASH, now=_NOW)
+    assert not result.due and result.reason == "unclassified"
