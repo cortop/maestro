@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from maestro import event_log, snapshot as snap_mod, store  # noqa: E402
+from maestro import event_log, skills_install, snapshot as snap_mod, store  # noqa: E402
 from maestro.config import Config  # noqa: E402
 from fault_injection import FaultInjector  # noqa: E402
 
@@ -56,6 +56,52 @@ def faults(monkeypatch):
     `tests/fault_injection.py`) for the test -- patches auto-reverted at
     teardown via the standard `monkeypatch` fixture."""
     return FaultInjector(monkeypatch)
+
+
+def assert_user_scope_confined(tmp_path):
+    """QW-4 fail-closed guard: every resolver in
+    `skills_install.USER_SCOPE_RESOLVERS`, called exactly as production code
+    would call it (no `cfg` override), must resolve under *tmp_path* --
+    raises loudly the instant one doesn't, rather than letting a forgotten
+    redirect quietly write to the developer's real $HOME. Factored out of the
+    autouse fixture below so `test_user_scope_guard.py` can call it directly
+    against a deliberately escaping resolver and assert the raise (AC3) --
+    not just assert intent.
+    """
+    tmp_path = Path(tmp_path).resolve()
+    for resolver in skills_install.USER_SCOPE_RESOLVERS:
+        resolved = Path(resolver()).resolve()
+        try:
+            resolved.relative_to(tmp_path)
+        except ValueError:
+            raise AssertionError(
+                f"skills_install.{resolver.__name__}() resolved to {resolved}, "
+                f"outside this test's tmp_path ({tmp_path}) -- a user-scope "
+                "install would have written to the developer's real home. "
+                "See skills_install.USER_SCOPE_RESOLVERS."
+            ) from None
+
+
+@pytest.fixture(autouse=True)
+def _guard_user_scope_installs(tmp_path, monkeypatch):
+    """QW-4: autouse so no individual test has to remember to redirect every
+    user-scope install target -- points every resolver in
+    `skills_install.USER_SCOPE_RESOLVERS` at this test's own `tmp_path` via
+    their env-var overrides (`MAESTRO_USER_COMMANDS_DIR` /
+    `MAESTRO_OPENCODE_COMMANDS_DIR` -- `opencode_user_agent_dir` and
+    `opencode_user_config_path` both derive from the latter, so redirecting
+    the two env vars covers all four resolvers), then fails closed if any of
+    them didn't actually land there. A test that still does its own
+    `monkeypatch.setenv` of these vars (several already do) just overrides to
+    a *different* tmp_path-scoped location -- env var already wins over this
+    fixture in `skills_install`'s own precedence order, and the assertion
+    below still passes either way.
+    """
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "guard-claude-user-commands"))
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR",
+                       str(tmp_path / "guard-opencode-user-commands"))
+    assert_user_scope_confined(tmp_path)
+    yield
 
 
 def seed_ticket(home, key, title, *, phase=None, questions=None, pr=None, tier=1):
