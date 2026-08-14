@@ -4,7 +4,7 @@
 
 Every `decisions[key]["outcome"]` a sweep can assign, in the source order `maestro/dispatcher.py`'s `dispatch()` sets them. Regenerate with `make diagram` after touching `dispatch()`; `tests/test_diagram.py` fails `make test` otherwise.
 
-17 gates today.
+18 gates today.
 
 | # | outcome | source |
 |---|---------|--------|
@@ -14,14 +14,15 @@ Every `decisions[key]["outcome"]` a sweep can assign, in the source order `maest
 | 4 | `repo_capped` | `maestro/dispatcher.py:2059` |
 | 5 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2062` |
 | 6 | `would_spawn` | `maestro/dispatcher.py:2065` |
-| 7 | `repo_capped` | `maestro/dispatcher.py:2104` |
-| 8 | `backend_interlocked` | `maestro/dispatcher.py:2112` |
-| 9 | `credential_unresolvable` | `maestro/dispatcher.py:2124` |
-| 10 | `runner_unregistered` | `maestro/dispatcher.py:2138` |
-| 11 | `runner_disabled` | `maestro/dispatcher.py:2172` |
-| 12 | `runner_binary_missing` | `maestro/dispatcher.py:2186` |
-| 13 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2190` |
-| 14 | `runner_model_unavailable` | `maestro/dispatcher.py:2201` |
-| 15 | `runner_capped` | `maestro/dispatcher.py:2227` |
-| 16 | `attempts_exhausted` | `maestro/dispatcher.py:2233` |
-| 17 | `spawned` | `maestro/dispatcher.py:2252` |
+| 7 | `burn_parked` | `maestro/dispatcher.py:2118` |
+| 8 | `repo_capped` | `maestro/dispatcher.py:2123` |
+| 9 | `backend_interlocked` | `maestro/dispatcher.py:2131` |
+| 10 | `credential_unresolvable` | `maestro/dispatcher.py:2143` |
+| 11 | `runner_unregistered` | `maestro/dispatcher.py:2157` |
+| 12 | `runner_disabled` | `maestro/dispatcher.py:2191` |
+| 13 | `runner_binary_missing` | `maestro/dispatcher.py:2205` |
+| 14 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2209` |
+| 15 | `runner_model_unavailable` | `maestro/dispatcher.py:2220` |
+| 16 | `runner_capped` | `maestro/dispatcher.py:2246` |
+| 17 | `attempts_exhausted` | `maestro/dispatcher.py:2252` |
+| 18 | `spawned` | `maestro/dispatcher.py:2271` |

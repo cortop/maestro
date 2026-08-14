@@ -1047,7 +1047,7 @@ def record_impl_turn(cfg: Config, key: str, *, role: str = "implementer",
 
 
 def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler",
-         dead_letter: bool = False) -> str:
+         dead_letter: bool = False, kind: str | None = None) -> str:
     """Record a failure; back off, or dead-letter if over the threshold.
 
     ``dead_letter=True`` (T-45) skips the failure-count threshold and
@@ -1055,13 +1055,23 @@ def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler",
     cannot possibly fix (e.g. a resolved reconcile command that doesn't exist
     in the session's cwd) -- waiting out `max_failures` backed-off retries
     first would just reproduce the respawn-forever bug this exists to stop.
+
+    ``kind`` (RB-11) tags the ``Failed``/``Stalled`` payload for a caller that
+    knows THIS failure is a burn-detector park (``burn.should_park``), not a
+    generic error -- folded into ``Snapshot.burning`` so the human-facing
+    surfaces (``maestro status``, ``NEEDS-YOU.md``) can tell "parked, waiting
+    for you" apart from "burning" (spec AC5). Omitted (``None``) for every
+    other caller; never itself changes whether this call dead-letters.
     """
     snap = snap_mod.load(cfg.home, key)
-    _append(cfg, key, E.FAILED, {"error": error}, actor=actor,
+    failed_payload = {"error": error, **({"kind": kind} if kind else {})}
+    _append(cfg, key, E.FAILED, failed_payload, actor=actor,
             sid=step_id(key, snap.phase, snap.observed_seq, "fail"))
     snap = snap_mod.load(cfg.home, key)
     if dead_letter or snap.failure_count >= cfg.max_failures:
-        _append(cfg, key, E.STALLED, {"reason": f"{snap.failure_count} failures: {error}"},
+        stalled_payload = {"reason": f"{snap.failure_count} failures: {error}",
+                            **({"kind": kind} if kind else {})}
+        _append(cfg, key, E.STALLED, stalled_payload,
                 actor=actor, sid=f"deadletter-{key}-{snap.observed_seq}")
         _write_deadletter(cfg, key, error)
         return "dead-letter"

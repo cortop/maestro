@@ -463,7 +463,15 @@ def cmd_status(args) -> int:
     for k in keys:
         s = snap_mod.load(cfg.home, k)
         counts[s.phase] = counts.get(s.phase, 0) + 1
-        if s.phase in {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}:
+        if s.phase == Phase.DEGRADED.value and s.burning:
+            # RB-11: a burn-parked key is NOT "quietly waiting on a human" the
+            # way a generic dead-letter or an open question is -- the Intent
+            # this ticket exists for. Reported under its own reason string
+            # ("burning"), the same synthetic-reason convention `needs-approval`
+            # already uses below, so it's distinguishable from `s.phase` at a
+            # glance without a human first reading `last_error`.
+            waiting.append((k, "burning", [s.last_error or ""]))
+        elif s.phase in {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}:
             waiting.append((k, s.phase, list(s.open_questions.values())))
         elif disp.needs_approval(cfg.home, k, s):
             # Not a phase (still "implementing") -- the second field carries the

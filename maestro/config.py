@@ -65,6 +65,13 @@ class Config:
     # gate. 0 disables the auto-brake while leaving doctor's advisory intact;
     # `runaway_spawns_per_hour = 0` disables both (spawn_budget() returns 0).
     runaway_pause_cooldown: int = 900
+    # RB-11: threshold shared by `maestro doctor`'s per-key burn WARN (byte-identical
+    # `Failed` text, or spawns piling up with `observed_seq` frozen -- see burn.py) AND,
+    # if it trips, `burn.should_park`'s dead-letter park -- a per-key rate cap distinct
+    # from the fleet-wide `runaway_spawns_per_hour`/`daily_spend_ceiling_usd` gates above
+    # (the 2026-08-14 T-55/T-56 incident: $1.40/hr per key, weeks from either ceiling).
+    # 0 disables both the WARN and the park.
+    burn_repeat_threshold: int = 5
     repo_path: str | None = None           # primary repo the reconciler builds in
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
     # GA-20: `prime` fallback for the implicit default binding (repos.implicit_default) --
@@ -292,6 +299,8 @@ def load(home_arg: str | None = None) -> Config:
         cfg.runaway_spawns_per_hour = int(raw_runaway) if raw_runaway is not None else None
         cfg.runaway_pause_cooldown = int(
             m.get("runaway_pause_cooldown", cfg.runaway_pause_cooldown))
+        cfg.burn_repeat_threshold = int(
+            m.get("burn_repeat_threshold", cfg.burn_repeat_threshold))
         cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
@@ -482,6 +491,15 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # runaway_pause_cooldown = 900    # seconds dispatch() auto-arms fleet.pause for on the
                                   # same runaway signal doctor reports (0 disables the
                                   # auto-brake; runaway_spawns_per_hour = 0 disables both)
+# burn_repeat_threshold = 5       # RB-11: a PER-KEY rate cap, distinct from the fleet-wide
+                                  # knobs above -- catches sustained no-progress spend/spawns
+                                  # on ONE ticket long before it could ever trip a fleet-wide
+                                  # ceiling (measured: $1.40/hr per key, weeks from either).
+                                  # `maestro doctor` WARNs once a key repeats byte-identical
+                                  # failure text, or piles up spawns with observed_seq frozen,
+                                  # this many times; the same threshold parks (dead-letters)
+                                  # the key instead of respawning it once its failure text
+                                  # repeats. 0 disables both the WARN and the park.
 # runner_enabled = ["claude"]     # board-wide kill switch: dispatch() only ever spawns a
                                   # runner named here (default: claude only). A scalar
                                   # ("claude") works too. Consulted before OC-2's own

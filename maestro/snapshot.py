@@ -113,6 +113,11 @@ class Snapshot:
     unresolved_reviews: int = 0
     failure_count: int = 0
     last_error: str | None = None
+    # RB-11: True when the CURRENT DEGRADED park was `burn.should_park` parking a
+    # burning key (Stalled payload carries kind="burn"), not a generic dead-letter --
+    # lets human-facing surfaces (status/NEEDS-YOU.md) distinguish "burning" from
+    # "parked, waiting for you". Reset on every PhaseChanged, same as failure_count.
+    burning: bool = False
     next_requeue_at: float | None = None
     open_questions: dict[str, str] = field(default_factory=dict)
     # qid → answer text for questions answered since the last phase change.
@@ -305,6 +310,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 new_phase, warn = _coerce_phase(p, s.phase)
                 s.phase = new_phase
                 s.failure_count = 0
+                s.burning = False
                 s.next_requeue_at = None
                 s.answered_questions = {}
                 s.unresolved_reviews = 0
@@ -374,6 +380,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             else:
                 s.phase = Phase.DEGRADED.value
                 s.last_error = p.get("reason", s.last_error)
+                s.burning = p.get("kind") == "burn"
         elif t == E.FINALIZED:
             s.phase = Phase.DONE.value
             s.next_requeue_at = None

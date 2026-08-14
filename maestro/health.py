@@ -1067,6 +1067,26 @@ def check_depends_on(cfg: Config, now: float) -> dict:
     }
 
 
+def check_burn(cfg: Config, now: float) -> dict:
+    """RB-11: per-key burn visibility. WARN when any key is flagged by either
+    of ``burn.report``'s two signals -- byte-identical ``Failed`` text (the
+    measured T-55/T-56 shape) or spawns piling up with ``observed_seq``
+    frozen (catches a free runner too, spec AC3 -- neither signal depends on
+    spend). Never trips on a key making real progress, however many spawns it
+    has consumed (see ``burn.py``'s module docstring for why). Lazy import:
+    ``burn`` imports this module at its own top level (for ``WINDOW_SECONDS``/
+    ``spawn_rate``), so importing it back here at module load time would be a
+    load-time cycle."""
+    from . import burn
+
+    rpt = burn.report(cfg, now)
+    flagged = rpt["flagged"]
+    status = "warn" if flagged else "ok"
+    detail = (f"{len(flagged)} key(s) burning: {', '.join(flagged)}" if flagged
+              else "no key burning (repeated identical failures, or spawns with no progress)")
+    return {"name": "burn", "status": status, "detail": detail, **rpt}
+
+
 def check_worktree_health(cfg: Config, now: float) -> dict:
     """WARN (detective, never blocks a spawn) on any EXISTING worktree dir
     under ``<home>/worktrees`` that fails `ops.worktree_health` -- no index, or
@@ -1103,8 +1123,9 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
-          check_daily_spend, check_gh_credential_reachability, check_launchctl, check_ollama_models,
-          check_runner_binary, check_worktree_health, check_provider_availability)
+          check_daily_spend, check_burn, check_gh_credential_reachability, check_launchctl,
+          check_ollama_models, check_runner_binary, check_worktree_health,
+          check_provider_availability)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
@@ -1127,6 +1148,7 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
     checks = run_checks(cfg, now, plist=plist)
     threshold = stale_threshold(home, plist=plist)
     spend_status = spend_mod.status(cfg, now)
+    burn_check = next(c for c in checks if c["name"] == "burn")
     return {
         "heartbeat": hb,
         "heartbeat_age_s": age,
@@ -1145,6 +1167,13 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
         "spend_ceiling_usd": spend_status["ceiling_usd"],
         "spend_unavailable": spend_status["unavailable"],
         "spend_unattributed_sessions": spend_status["unattributed_sessions"],
+        # RB-11: per-key spend over the SAME trailing window `spawns_last_hour.by_key`
+        # already covers the spawn side of -- together they're the "spawns and spend
+        # over a recent window, per key" this ticket's Intent asked for, without a new
+        # dashboard. `burning_keys` is the union of burn.py's two flag signals (see
+        # check_burn); never populated for a key genuinely making progress.
+        "spend_usd_by_key": burn_check["spend_usd_by_key"],
+        "burning_keys": burn_check["flagged"],
         "paused": hb.get("paused", False),
         "checks": checks,
     }
