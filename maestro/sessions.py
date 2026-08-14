@@ -20,18 +20,22 @@ from . import claims, store
 
 RECONCILE_PREFIX = "reconcile-"
 
-# Filename pattern: reconcile-<KEY>-<epoch>.{log,stream.jsonl,opencode.jsonl}
+# Filename pattern: reconcile-<KEY>-<epoch>.{log,stream.jsonl,opencode.jsonl,pi.jsonl}
 _SESSION_FILE_RE = re.compile(
-    r"^(reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+))\.(?P<ext>log|stream\.jsonl|opencode\.jsonl)$"
+    r"^(reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+))\.(?P<ext>log|stream\.jsonl|opencode\.jsonl|pi\.jsonl)$"
 )
 
 # Maps a matched filename ``ext`` to the ``format`` value reported to callers. Any
 # ``ext`` not listed here falls back to "text" -- there is currently no such case
 # (the regex's alternation is closed), but the fallback keeps this mapping additive
-# if a future format slot lands.
+# if a future format slot lands. T-58: "pi" is deliberately not "stream-json" --
+# see ``store.session_pi_path``'s docstring; every consumer that gates on the exact
+# "stream-json" literal (``ratelimit.probe``, ``spend.probe``'s per-candidate check)
+# already skips it by construction, same as "opencode".
 _EXT_TO_FORMAT = {
     "stream.jsonl": "stream-json",
     "opencode.jsonl": "opencode",
+    "pi.jsonl": "pi",
 }
 
 
@@ -39,17 +43,19 @@ def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[d
     """Return session log metadata for *key*, newest-first.
 
     Each dict has: ``session_id``, ``path``, ``format`` ('text'|'stream-json'|
-    'opencode'), ``epoch`` (float), ``ts`` (ISO string). ``with_outcome`` is opt-in —
-    it tail-scans each log via :func:`maestro.steplog.session_outcome` to add an
-    ``outcome`` field, so the default (filename-only) call opens no log files, keeping
-    callers like ``ops.prune_session_logs`` and the TUI's log tailer cheap.
+    'opencode'|'pi'), ``epoch`` (float), ``ts`` (ISO string). ``with_outcome`` is
+    opt-in — it tail-scans each log via :func:`maestro.steplog.session_outcome` to
+    add an ``outcome`` field, so the default (filename-only) call opens no log
+    files, keeping callers like ``ops.prune_session_logs`` and the TUI's log
+    tailer cheap.
 
-    'opencode' (RF-3) is a non-Claude runner's own log grammar -- it is deliberately
-    never "stream-json" (``ratelimit.probe`` / ``spend.probe`` gate on that exact
-    string to skip logs they can't parse) and every consumer above
-    :func:`maestro.steplog.iter_records` that isn't format-aware already treats
-    anything other than "stream-json" as opaque text, so it falls straight into the
-    existing plain-text render/prune/outcome fallbacks.
+    'opencode' (RF-3) and 'pi' (T-58) are each a non-Claude runner's own log
+    grammar -- deliberately never "stream-json" (``ratelimit.probe`` /
+    ``spend.probe`` gate on that exact string to skip logs they can't parse) and
+    every consumer above :func:`maestro.steplog.iter_records` that isn't
+    format-aware already treats anything other than "stream-json" as opaque text,
+    so it falls straight into the existing plain-text render/prune/outcome
+    fallbacks.
     """
     store.validate_key(key)
     log_dir = home / "agent-logs" / key
@@ -316,8 +322,8 @@ class OpencodeCliSessions:
     already runner-agnostic -- there is no excuse to invent a second one here).
 
     Verified spawn shape (spec Notes): ``opencode run --command <name> --model
-    ollama/<bare-tag> --format json --dir <cwd> --agent <name>``. opencode's
-    blanket-approve-everything flag (see ``test_runner_permissions.py``'s
+    ollama/<bare-tag> --format json --dir <cwd> --agent <name> <key>``.
+    opencode's blanket-approve-everything flag (see ``test_runner_permissions.py``'s
     whole-package sweep for the literal it forbids) must NEVER appear in this
     argv -- it inverts opencode's permission model (interactive, ask-by-default
     -> silently approve everything). The ``ollama/`` prefix
@@ -329,12 +335,16 @@ class OpencodeCliSessions:
     ``--agent`` -- is *command* (``dispatcher.resolve_reconcile_command``'s
     return value, e.g. ``/maestro-reconcile-implementing``) with its leading
     ``/`` stripped, matching the filename ``skills_install.install_repo``/
-    ``install_user`` install under ``.opencode/command/<name>.md`` (OC-1). The
-    ticket key is never passed as a CLI argument -- unlike Claude's flattened
-    ``f"{command} {key}"`` prompt, opencode resolves it implicitly from *cwd*
-    (a worktree is always ``<MHOME>/worktrees/<KEY>``, so the command body can
-    read its own key back out of ``$(basename "$PWD")``), which is exactly why
-    the verified argv carries no separate key/prompt token.
+    ``install_user`` install under ``.opencode/command/<name>.md`` (OC-1). T-66:
+    the ticket key IS passed as a CLI argument -- a trailing positional after
+    ``--agent <name>``, exactly like Claude's flattened ``f"{command} {key}"``
+    prompt, just split across two argv slots instead of one string. Verified
+    empirically (T-66 spec Notes): ``opencode run --command <name> ...`` DOES
+    substitute that trailing positional for ``$1`` in the command body, so the
+    existing ``$1``/``"$KEY"``-based command files work verbatim under opencode
+    with no rewrite. Nothing here depends on *cwd* -- a ``mode: local`` (AD-6)
+    ticket, whose cwd is not ``<MHOME>/worktrees/<KEY>``, resolves its key
+    exactly the same way.
 
     Keeps ``start_new_session=True`` (matching ``ClaudeCliSessions``) so pid ==
     pgid -- ``dispatcher.run_watchdog`` kills by pgid, and without this a wedged
@@ -402,7 +412,8 @@ class OpencodeCliSessions:
                "--model", f"{self.model_prefix}/{runner_model}",
                "--format", "json",
                "--dir", str(cwd),
-               "--agent", name]
+               "--agent", name,
+               key]
 
         env = dict(os.environ)
         env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker

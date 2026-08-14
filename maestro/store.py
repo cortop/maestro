@@ -121,6 +121,18 @@ def session_opencode_path(home: Path, key: str, session_id: str) -> Path:
     return home / "agent-logs" / validate_key(key) / f"{session_id}.opencode.jsonl"
 
 
+def session_pi_path(home: Path, key: str, session_id: str) -> Path:
+    """T-58: fourth session-log format slot, for the ``pi`` coding-agent CLI's own
+    ``--mode json`` grammar (verified against a real captured stream -- see
+    ``docs/json.md`` in ``@earendil-works/pi-coding-agent`` and
+    ``tests/fixtures/*.pi.jsonl``) -- distinct from ``.stream.jsonl`` (Claude) and
+    ``.opencode.jsonl`` (opencode) so consumers never mistake one grammar for
+    another. Deliberately not named ``.stream-json.jsonl`` or anything else that
+    could collide with the literal ``"stream-json"`` string ``ratelimit.probe`` /
+    ``spend.probe`` gate on to skip logs they cannot parse."""
+    return home / "agent-logs" / validate_key(key) / f"{session_id}.pi.jsonl"
+
+
 def deadletter_path(home: Path, key: str) -> Path:
     return home / "tickets" / "_deadletter" / f"{validate_key(key)}.md"
 

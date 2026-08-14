@@ -4,8 +4,10 @@ from __future__ import annotations
 import json as _json
 
 from ..steplog import (OC_STEP_FINISH_TYPES, OC_STEP_START_TYPES,
-                        OC_TEXT_TYPES, OC_TOOL_USE_TYPES, classify_result,
-                        format_resets_at, oc_part, oc_summary)
+                        OC_TEXT_TYPES, OC_TOOL_USE_TYPES, PI_AGENT_END_TYPE,
+                        PI_MESSAGE_END_TYPE, PI_TOOL_START_TYPE,
+                        classify_result, format_resets_at, oc_part,
+                        oc_summary, pi_summary)
 
 _EM = "—"
 _TAIL_N = 20
@@ -138,3 +140,40 @@ def render_opencode_log_line(obj: dict) -> list[str]:
         return []
     text = obj.get("text")
     return [_esc_log(text)] if isinstance(text, str) and text else []
+
+
+def render_pi_log_line(obj: dict) -> list[str]:
+    """Convert one pi.jsonl record (T-58) to Rich markup lines for the logs
+    pane -- the tool-call/text vocabulary mirrors ``render_log_line`` /
+    ``render_opencode_log_line`` above but keyed on pi's own ``AgentEvent``
+    shape (``docs/json.md`` in ``@earendil-works/pi-coding-agent``, verified
+    against a real captured stream). A tool call renders on
+    ``tool_execution_start`` (call intent, matching the other two renderers'
+    "render at call time" choice); an assistant turn's text (and, on an
+    errored turn, its ``errorMessage``) renders once on that turn's own
+    ``message_end`` -- ``message_update`` deltas are deliberately skipped here,
+    the same way ``render_log_line`` never renders Claude's own streaming
+    deltas, so the pane shows one settled line per turn, not every partial."""
+    type_ = obj.get("type")
+    if type_ == PI_TOOL_START_TYPE:
+        name = obj.get("toolName", "?")
+        args = obj.get("args") or {}
+        summary = _esc_log(pi_summary(name, args))
+        return [f"[dim bold]▶ {name}[/dim bold] [dim]{summary}[/dim]"]
+    if type_ == PI_MESSAGE_END_TYPE:
+        msg = obj.get("message") or {}
+        if msg.get("role") != "assistant":
+            return []
+        lines = []
+        for block in msg.get("content") or []:
+            if block.get("type") == "text":
+                text = (block.get("text") or "").rstrip()
+                if text:
+                    lines.append(_esc_log(text))
+        if msg.get("stopReason") == "error":
+            err = _esc_log((msg.get("errorMessage") or "")[:200])
+            lines.append(f"[red]── error {err}[/red]")
+        return lines
+    if type_ == PI_AGENT_END_TYPE:
+        return ["[green]── done[/green]"]
+    return []

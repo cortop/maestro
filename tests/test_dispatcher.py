@@ -1838,6 +1838,80 @@ def test_zero_turn_spawn_fails_and_dead_letters_on_first_detection(home, cfg):
     assert any(e["type"] == "Stalled" for e in events)
 
 
+def _write_pi_zero_turn(home, key, session_id, *, command="/maestro-reconcile-implementing"):
+    """A pi .pi.jsonl (T-58) holding a real-shaped "session"/"agent_start"/
+    "agent_end" sequence with no "turn_start" at all -- the pi-runner analog of
+    T-45's `_write_zero_turn_result`: whatever caused pi to bail before its
+    first turn (a missing/unresolvable reconcile command in the session's cwd,
+    matching the Claude scenario this guard was built for), no tool could
+    possibly have run."""
+    log = store.session_pi_path(home, key, session_id)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {"type": "session", "version": 3, "id": session_id,
+         "timestamp": "2026-08-14T00:00:00.000Z", "cwd": str(home)},
+        {"type": "agent_start"},
+        {"type": "agent_end", "messages": [], "willRetry": False},
+    ]
+    log.write_text("\n".join(json.dumps(o) for o in lines) + "\n", encoding="utf-8")
+    return log
+
+
+def test_zero_turn_pi_spawn_dead_letters_on_first_detection_same_as_claude(home, cfg):
+    """AC2 (T-58): this is THE runaway net -- a pi log must trip it exactly
+    like a `.stream.jsonl` one, on the very first detection, never a
+    backoff/retry."""
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    session_id = "reconcile-T-1-1000.000000"
+    log = _write_pi_zero_turn(home, "T-1", session_id)
+    dead_pid = 2_000_000_000  # almost certainly not a live pid
+    cwd = str(home / "worktrees" / "T-1")
+    prompt = "/maestro-reconcile-implementing T-1"
+    claims.write_claim(home, "T-1", dead_pid, "reconcile-T-1", log_path=str(log),
+                       cwd=cwd, prompt=prompt)
+
+    failed = disp.detect_zero_turn_spawns(cfg, now=store.now_epoch())
+
+    assert failed == ["T-1"]
+    assert claims.read_claim(home, "T-1") is None  # claim released
+
+    events = event_log.read(home, "T-1")
+    failed_events = [e for e in events if e["type"] == "Failed"]
+    assert len(failed_events) == 1
+    assert prompt in failed_events[0]["payload"]["error"]
+
+    snap = snap_mod.load(home, "T-1")
+    assert snap.failure_count == 1
+    assert snap.phase == Phase.DEGRADED.value  # dead-lettered, not backed off
+
+
+def test_zero_turn_pi_spawn_leaves_real_progress_untouched(home, cfg):
+    """AC2 counterpart: a dead pi session that ran real turns is left alone
+    here too -- the no-progress watchdog's territory, same as the Claude
+    path's own `test_zero_turn_spawn_leaves_real_progress_to_the_no_progress_watchdog`."""
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+    session_id = "reconcile-T-1-1000.000000"
+    log = store.session_pi_path(home, "T-1", session_id)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {"type": "session", "version": 3, "id": session_id,
+         "timestamp": "2026-08-14T00:00:00.000Z", "cwd": str(home)},
+        {"type": "agent_start"},
+        {"type": "turn_start"},
+        {"type": "message_end", "message": {"role": "assistant", "stopReason": "stop",
+                                             "provider": "anthropic"}},
+        {"type": "agent_end", "messages": [], "willRetry": False},
+    ]
+    log.write_text("\n".join(json.dumps(o) for o in lines) + "\n", encoding="utf-8")
+    dead_pid = 2_000_000_000
+    claims.write_claim(home, "T-1", dead_pid, "reconcile-T-1", log_path=str(log),
+                       cwd=str(home), prompt="/maestro-reconcile-implementing T-1")
+
+    assert disp.detect_zero_turn_spawns(cfg, now=store.now_epoch()) == []
+    assert claims.read_claim(home, "T-1") is not None  # left for active_keys() to release normally
+    assert all(e["type"] != "Failed" for e in event_log.read(home, "T-1"))
+
+
 def test_zero_turn_spawn_leaves_live_session_untouched(home, cfg):
     """AC: the existing watchdog is unchanged -- a session still running is
     never touched by this detector, 0 turns so far or not."""

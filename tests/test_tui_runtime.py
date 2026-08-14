@@ -830,6 +830,46 @@ def test_logs_screen_renders_opencode_tool_use_and_text(seeded_home):
     asyncio.run(_inner())
 
 
+def test_logs_screen_renders_a_real_pi_log_without_exception(seeded_home):
+    """AC11 (T-58): a `.pi.jsonl` log -- the real captured fixture, not a
+    hand-authored one -- renders under a real `run_test()` mount without
+    raising, and its tool-call/text content shows up structured in the pane
+    (not just a raw byte dump)."""
+    from pathlib import Path
+    from textual.widgets import RichLog
+
+    log_dir = seeded_home / "agent-logs" / "T-3"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fixture = Path(__file__).parent / "fixtures" / "sample.pi.jsonl"
+    (log_dir / "reconcile-T-3-9999999996.000000.pi.jsonl").write_text(
+        fixture.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("view_logs")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], LogsScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            log_widget = app.screen.query_one("#logs-view", RichLog)
+            rendered = "\n".join(strip.text for strip in log_widget.lines)
+            assert rendered.strip() != ""
+            assert "bash" in rendered
+            assert "hello-pi-fixture" in rendered
+
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_logs_screen_renders_rate_limited_result_not_green(seeded_home):
     """T-18: a session log whose terminal result is is_error/429 must render as an
     error/rate-limit line in the real mounted logs pane, never green success."""
@@ -1044,7 +1084,7 @@ def test_fleet_screen_shows_provider_no_network_distinguishably(seeded_home, mon
                              "is_error": True}) + "\n",
             encoding="utf-8",
         )
-    monkeypatch.setattr(health, "_default_provider_probe", lambda: (False, "offline"))
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (False, "offline"))
 
     async def _inner():
         app = _make_app(seeded_home)
