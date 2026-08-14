@@ -104,6 +104,29 @@ def test_list_sessions_third_format_slot_and_baseline_unchanged(home):
     }
 
 
+def test_list_sessions_fourth_format_slot_all_four_present(home):
+    """AC1 (T-58): a home with all four session-log formats reports all four,
+    each with the correct `format`, and pi's is never the literal "stream-json"."""
+    log_path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.log"
+    stream_path = home / "agent-logs" / "T-1" / "reconcile-T-1-2000.000000.stream.jsonl"
+    oc_path = home / "agent-logs" / "T-1" / "reconcile-T-1-3000.000000.opencode.jsonl"
+    pi_path = home / "agent-logs" / "T-1" / "reconcile-T-1-4000.000000.pi.jsonl"
+    _make_text_log(log_path, "x")
+    _make_text_log(stream_path, "{}")
+    _make_text_log(oc_path, "{}")
+    _make_text_log(pi_path, "{}")
+
+    sessions = list_sessions(home, "T-1")
+    by_fmt = {s["format"]: s for s in sessions}
+    assert set(by_fmt) == {"text", "stream-json", "opencode", "pi"}
+    assert by_fmt["pi"] != "stream-json"
+    assert by_fmt["pi"] == {
+        "session_id": "reconcile-T-1-4000.000000", "path": str(pi_path),
+        "format": "pi", "epoch": 4000.0, "ts": by_fmt["pi"]["ts"],
+    }
+    assert store.session_pi_path(home, "T-1", "reconcile-T-1-4000.000000") == pi_path
+
+
 def test_list_sessions_session_id(home):
     path = home / "agent-logs" / "T-1" / "reconcile-T-1-5000.000000.log"
     _make_text_log(path, "hello")

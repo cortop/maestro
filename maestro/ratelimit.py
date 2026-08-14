@@ -23,6 +23,18 @@ still bounds the rate on its own.
 Limitation: only ``stream-json`` session logs carry parseable records, so a home
 configured with ``session_log_format = "text"`` gets no gate — such keys are
 skipped silently rather than erroring.
+
+T-58 (AC9): a pi ``.pi.jsonl`` session log is deliberately left ungated here
+too, on the SAME per-candidate ``format != "stream-json"`` check below — a
+real captured pi stream (``tests/fixtures/*.pi.jsonl``) carries no analog of
+Claude's ``rate_limit_event``/``rate_limit_info`` record (an auth failure
+surfaces as an assistant message's ``stopReason: "error"`` /``errorMessage``
+instead, which ``steplog.session_outcome`` already classifies for MTO-8's
+purposes — see ``health.py``). This is an explicit, documented decision, not
+an accident of the format string: the gate never crashes on nor
+mis-parses a pi log (it is skipped exactly like a ``.opencode.jsonl`` or
+``text`` one), and a future ticket can add real pi rate-limit extraction if
+pi ever grows its own ``rate_limit_event``-shaped signal.
 """
 from __future__ import annotations
 
@@ -100,7 +112,7 @@ def probe(cfg: Config, now: float) -> dict | None:
         candidates = sessions_mod.list_sessions(home, key)
         for candidate in candidates:
             if candidate["format"] != "stream-json":
-                continue  # text-format logs carry no parseable rate_limit_event
+                continue  # text/opencode/pi logs carry no parseable rate_limit_event (T-58: pi's own signal, if any, is unverified -- see module docstring)
             path = Path(candidate["path"])
             if not path.exists():
                 continue

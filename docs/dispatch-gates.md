@@ -8,20 +8,20 @@ Every `decisions[key]["outcome"]` a sweep can assign, in the source order `maest
 
 | # | outcome | source |
 |---|---------|--------|
-| 1 | `throttled` | `maestro/dispatcher.py:1990` |
-| 2 | `repo_blocked` | `maestro/dispatcher.py:2005` |
-| 3 | `capacity_skipped` | `maestro/dispatcher.py:2029` |
-| 4 | `repo_capped` | `maestro/dispatcher.py:2055` |
-| 5 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2058` |
-| 6 | `would_spawn` | `maestro/dispatcher.py:2061` |
-| 7 | `repo_capped` | `maestro/dispatcher.py:2089` |
-| 8 | `backend_interlocked` | `maestro/dispatcher.py:2097` |
-| 9 | `credential_unresolvable` | `maestro/dispatcher.py:2109` |
-| 10 | `runner_unregistered` | `maestro/dispatcher.py:2123` |
-| 11 | `runner_disabled` | `maestro/dispatcher.py:2157` |
-| 12 | `runner_binary_missing` | `maestro/dispatcher.py:2171` |
-| 13 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2175` |
-| 14 | `runner_model_unavailable` | `maestro/dispatcher.py:2186` |
-| 15 | `runner_capped` | `maestro/dispatcher.py:2210` |
-| 16 | `attempts_exhausted` | `maestro/dispatcher.py:2216` |
-| 17 | `spawned` | `maestro/dispatcher.py:2235` |
+| 1 | `throttled` | `maestro/dispatcher.py:1994` |
+| 2 | `repo_blocked` | `maestro/dispatcher.py:2009` |
+| 3 | `capacity_skipped` | `maestro/dispatcher.py:2033` |
+| 4 | `repo_capped` | `maestro/dispatcher.py:2059` |
+| 5 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2062` |
+| 6 | `would_spawn` | `maestro/dispatcher.py:2065` |
+| 7 | `repo_capped` | `maestro/dispatcher.py:2093` |
+| 8 | `backend_interlocked` | `maestro/dispatcher.py:2101` |
+| 9 | `credential_unresolvable` | `maestro/dispatcher.py:2113` |
+| 10 | `runner_unregistered` | `maestro/dispatcher.py:2127` |
+| 11 | `runner_disabled` | `maestro/dispatcher.py:2161` |
+| 12 | `runner_binary_missing` | `maestro/dispatcher.py:2175` |
+| 13 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2179` |
+| 14 | `runner_model_unavailable` | `maestro/dispatcher.py:2190` |
+| 15 | `runner_capped` | `maestro/dispatcher.py:2214` |
+| 16 | `attempts_exhausted` | `maestro/dispatcher.py:2220` |
+| 17 | `spawned` | `maestro/dispatcher.py:2239` |
