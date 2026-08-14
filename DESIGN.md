@@ -78,13 +78,12 @@ rule is honored because fan-out lives only at two top-level layers (dispatcher�
 
 ## State machine
 
-```
-triaging ──tier0──▶ ready ──slot+deps──▶ implementing ──QA+review PASS──▶ in-review ──merged──▶ done
-   │                  ▲                       │                                              
- tier1/2              │                  stall/maxturns                                      
-   ▼                  │                       ▼                                              
-awaiting-human ─answer┘                   degraded ──human cmd──▶ ready / terminating        
-```
+See [`docs/state-machine.md`](docs/state-machine.md) for the maintained phase diagram
+(mermaid, generated from `maestro/statemachine.py`'s `TRANSITIONS`/`SLEEPING_PHASES`/
+`TERMINAL_PHASES`/`ACTIVE_PHASES` by `make diagram`) and
+[`docs/dispatch-gates.md`](docs/dispatch-gates.md) for the ordered dispatch gate table
+(AST-walked from `dispatcher.py`). Both are derived, never retyped — a drift-guard test
+(`tests/test_diagram.py`) fails `make test` if either goes stale.
 
 `awaiting-human` and `awaiting-ci` are **sleeping** (no held process). The reconciler
 records the gate + a `next_requeue_at`, then exits. The dispatcher re-wakes the ticket

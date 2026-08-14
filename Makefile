@@ -4,11 +4,12 @@ export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
 
 PY := .venv/bin/python
 
-.PHONY: help install test dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs
+.PHONY: help install test diagram dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs
 
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
 	@echo "make test        run the test suite"
+	@echo "make diagram     regenerate docs/state-machine.md + docs/dispatch-gates.md"
 	@echo "make dry         one dispatcher sweep, read-only preview (would_mint + would_spawn)"
 	@echo "make dispatch    one REAL sweep (spawns claude reconcilers for due tickets)"
 	@echo "make loop        foreground dispatch every 5 min (Ctrl-C to stop)"
@@ -33,6 +34,13 @@ install:
 
 test:
 	$(PY) -m pytest -q
+
+# Derived, never retyped (T-50): both files are pure functions of
+# maestro/statemachine.py + an AST walk of maestro/dispatcher.py -- regenerate
+# after touching either. tests/test_diagram.py fails `make test` if these
+# committed files drift from the generator.
+diagram:
+	$(PY) -m maestro.diagram
 
 dry:
 	maestro dispatch --dry-run
