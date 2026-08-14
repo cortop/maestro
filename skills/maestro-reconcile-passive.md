@@ -83,8 +83,9 @@ automated to do:
 ```bash
 maestro release "$KEY"
 ```
-`degraded` is an *active* phase, so an unacked command spins here just as hard as in a sleeping
-one — ack it.
+`degraded` is a *sleeping* phase (OC-7) — `inbox_pending` is what wakes it, checked before the
+sleeping-phase branch and independent of it, same as `awaiting-human`/`awaiting-ci`/`in-review` —
+so an unacked command still spins here just as hard as in any other sleeping phase — ack it.
 
 **Done when:** either the inbox was empty and only `maestro release "$KEY"` ran, or a `retry`
 was folded, `set-phase … ready` appended, `maestro inbox-ack "$KEY"` ran last, and

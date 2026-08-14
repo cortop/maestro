@@ -401,6 +401,51 @@ def test_check_dead_letters_ok_when_none(home, cfg):
     assert result == {"name": "dead_letters", "status": "ok", "detail": "none", "ages_s": {}}
 
 
+# --- watchdog_loops check (AC7, OC-7/T-65) --------------------------------------
+
+
+def test_check_watchdog_loops_warns_on_repeated_identical_failure(home, cfg):
+    """AC7: a key that has tripped `_allow_spawn`'s no-progress watchdog more
+    than once is surfaced by `maestro doctor` -- the exact shape of the
+    2026-08-14 degraded-respawn-forever incident, visible without reading raw
+    session logs."""
+    from maestro import event_log
+
+    _seed(home, "T-1", Phase.DEGRADED)
+    for seq in (3, 8):
+        event_log.append(home, "T-1", "Failed",
+                         {"error": f"watchdog: 2 spawns with no progress at seq {seq}"},
+                         actor="dispatcher")
+    result = health.check_watchdog_loops(cfg, store.now_epoch())
+    assert result["status"] == "warn"
+    assert result["counts"] == {"T-1": 2}
+
+
+def test_check_watchdog_loops_ok_below_threshold(home, cfg):
+    """A single trip is not (yet) a loop -- only repetition is the signal."""
+    from maestro import event_log
+
+    _seed(home, "T-1", Phase.DEGRADED)
+    event_log.append(home, "T-1", "Failed",
+                     {"error": "watchdog: 5 spawns with no progress at seq 0"},
+                     actor="dispatcher")
+    result = health.check_watchdog_loops(cfg, store.now_epoch())
+    assert result == {"name": "watchdog_loops", "status": "ok", "detail": "none", "counts": {}}
+
+
+def test_check_watchdog_loops_ignores_unrelated_failures(home, cfg):
+    """A non-watchdog `Failed` (e.g. a genuine implementation error) never
+    counts toward this check, no matter how many times it recurs."""
+    from maestro import event_log
+
+    _seed(home, "T-1", Phase.DEGRADED)
+    for _ in range(3):
+        event_log.append(home, "T-1", "Failed", {"error": "tests still red"}, actor="reconciler")
+    result = health.check_watchdog_loops(cfg, store.now_epoch())
+    assert result["status"] == "ok"
+    assert result["counts"] == {}
+
+
 # --- spawn_floor check (GA-8) ---------------------------------------------------
 
 
@@ -503,7 +548,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     assert code == 0
     names = {c["name"] for c in out["checks"]}
     assert names == {"heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
-                      "depends_on", "launchctl", "repo_preflight",
+                      "watchdog_loops", "depends_on", "launchctl", "repo_preflight",
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend",
                       "gh_credential_reachability", "ollama_models", "runner_binary",
@@ -559,10 +604,11 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     grew it by one more -- `ollama_models` -- same treatment. T-38 (OC-2) grew
     it by one more still -- `runner_binary` -- same treatment. MTO-1 grew it by one
     more still -- `worktree_health` -- same treatment. MTO-8 grew it by one more
-    still -- `provider_availability` -- same treatment.)"""
+    still -- `provider_availability` -- same treatment. T-65 (OC-7) grew it by
+    one more still -- `watchdog_loops` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
-        "depends_on", "repo_preflight", "unknown_repo_bindings",
+        "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
         "runner_binary", "worktree_health", "provider_availability",
