@@ -64,32 +64,36 @@ provider and advances the phase itself — merged finalizes (+ removes the workt
 CONFLICTING PR routes to `implementing` for auto-resolution, failing CI routes to `implementing`
 with the failing check names in the reason, passing CI moves `awaiting-ci` → `in-review`, and a
 CHANGES_REQUESTED review routes back to `implementing` with the verbatim comment body. So if
-the inbox was empty, you were spawned on a stray signal and there is nothing to do:
+the inbox was empty, you were spawned on a stray signal and there is nothing to do — say so
+before releasing (RB-10: a completed no-op must be distinguishable from a crash, see below):
 ```bash
+maestro checked "$KEY"
 maestro release "$KEY"
 ```
 The one thing that *is* yours here is a human command — the dispatcher polls the PR, not the
 inbox, so nothing else will ever read it. Handle it per the drain section above before
 releasing.
 
-**Done when:** either the inbox was empty and only `maestro release "$KEY"` ran, or every
-pending command was folded, routed (one `set-phase`/`ask`/`append`), `maestro inbox-ack "$KEY"`
-ran last, and `maestro release "$KEY"` ran.
+**Done when:** either the inbox was empty and `maestro checked "$KEY"` then `maestro release
+"$KEY"` ran, or every pending command was folded, routed (one `set-phase`/`ask`/`append`),
+`maestro inbox-ack "$KEY"` ran last, and `maestro release "$KEY"` ran.
 
 ## `degraded`: dead-lettered, waiting on a human
 Repeated failure or non-convergence sent this ticket here. The revival signal is a human
 running `maestro cmd "$KEY" retry` — which lands in the inbox, so **you** are the one who acts
 on it (the drain section above routes it to `ready`). With no pending command there is nothing
-automated to do:
+automated to do — this is the exact shape of the 2026-08-14 T-55 incident (RB-10's Notes): say
+so, so the no-progress watchdog counts this sweep as a healthy check-in, not a crash:
 ```bash
+maestro checked "$KEY"
 maestro release "$KEY"
 ```
 `degraded` is an *active* phase, so an unacked command spins here just as hard as in a sleeping
 one — ack it.
 
-**Done when:** either the inbox was empty and only `maestro release "$KEY"` ran, or a `retry`
-was folded, `set-phase … ready` appended, `maestro inbox-ack "$KEY"` ran last, and
-`maestro release "$KEY"` ran.
+**Done when:** either the inbox was empty and `maestro checked "$KEY"` then `maestro release
+"$KEY"` ran, or a `retry` was folded, `set-phase … ready` appended, `maestro inbox-ack "$KEY"`
+ran last, and `maestro release "$KEY"` ran.
 
 ## `terminating`: finish the teardown
 The ticket was routed here (e.g. `awaiting-human` recorded a `discard`/rejection). Finish it:

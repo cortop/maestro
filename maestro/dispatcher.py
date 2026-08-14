@@ -179,10 +179,10 @@ def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution
 # switch), or any other human-only verb here -- and never collapse this to
 # the bare wildcard "maestro:*", which grants all of those at once.
 AGENT_TOOL_VERBS = (
-    # The 21 "[agent]"-tagged verbs registered in build_parser().
+    # The 22 "[agent]"-tagged verbs registered in build_parser().
     "local-backup", "snapshot", "events", "append", "set-phase", "ask",
     "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-    "verify-ac", "qa-brief", "qa-verdict", "finalize", "release",
+    "verify-ac", "qa-brief", "qa-verdict", "finalize", "checked", "release",
     "check-conflicts", "check-merged", "fold-steps", "worktree",
     # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
     "env",     # every phase preamble's first command, all phase files

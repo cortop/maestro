@@ -54,6 +54,11 @@ REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleep
 FAILED = "Failed"                       # {error}  increments failure_count
 STALLED = "Stalled"                     # {reason}  -> DEGRADED / dead-letter
 NOTE = "Note"                           # {text}  free-form audit breadcrumb
+CHECKED = "Checked"                     # {}  reconciler ran to completion, correctly found
+                                         # nothing due -- advances observed_seq so the
+                                         # no-progress watchdog (`_allow_spawn`) can tell this
+                                         # apart from a crash (RB-10). Cheapest possible payload
+                                         # by design; see ops.checked for the cost accounting.
 
 # Side-effecting events whose presence (by step_id) means the external action
 # already happened — used to make re-spawn after a crash idempotent.
