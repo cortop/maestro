@@ -58,9 +58,15 @@ def test_repeated_genuine_noop_produces_zero_failed_events(home, cfg):
     """N consecutive real dispatch() sweeps, each an honest no-op reconciler
     (calls `maestro checked` before exiting) -- more sweeps than
     max_spawn_attempts would tolerate for a genuine crash, and still zero
-    `Failed`/`Stalled` events. This is the T-55 incident, reproduced and
-    fixed: `degraded` with an empty inbox, swept repeatedly."""
-    _seed(home, "T-1", Phase.DEGRADED)
+    `Failed`/`Stalled` events. Originally reproduced this against a
+    `degraded` ticket (the T-55 incident's exact phase); T-65 (OC-7) later
+    made `degraded` a SLEEPING phase, so a signal-less `degraded` ticket is no
+    longer due at all -- see test_dispatcher.py's
+    test_degraded_ticket_with_no_signal_is_never_spawned /
+    test_degraded_ticket_does_not_accumulate_failed_stalled_pairs for that
+    (stronger) fix. `ready` here proves the underlying Checked-signal
+    mechanism itself, independent of any one phase's due-classification."""
+    _seed(home, "T-1", Phase.READY)
     cfg.max_spawn_attempts = 3
     cfg.min_spawn_interval = 0
     sessions = _HonestNoopSessions(cfg)
@@ -74,7 +80,7 @@ def test_repeated_genuine_noop_produces_zero_failed_events(home, cfg):
     assert all(e["type"] not in ("Failed", "Stalled") for e in events)
     snap = snap_mod.load(home, "T-1")
     assert snap.failure_count == 0
-    assert snap.phase == Phase.DEGRADED.value  # never bounced to degraded-via-failure (already there)
+    assert snap.phase == Phase.READY.value  # never bounced to degraded
 
     # The event log grew by exactly one Checked{} per sweep -- the whole cost.
     checked_events = [e for e in events if e["type"] == "Checked"]
@@ -90,10 +96,11 @@ def test_crash_before_appending_anything_still_fails_at_max_attempts(home, cfg):
     still caught, still at exactly max_spawn_attempts, unchanged from before
     this ticket. Mirrors test_dispatcher.py's
     test_spawn_attempts_fail_after_max_with_no_progress against the same
-    seeded phase this file's happy-path test uses."""
+    seeded phase this file's happy-path test uses (and, since OC-7, that
+    test's own)."""
     from test_dispatcher import _EphemeralSessions
 
-    _seed(home, "T-1", Phase.DEGRADED)
+    _seed(home, "T-1", Phase.READY)
     cfg.max_spawn_attempts = 3
     cfg.min_spawn_interval = 0
     sessions = _EphemeralSessions()  # dies instantly every sweep, appends nothing
@@ -149,7 +156,7 @@ def test_genuine_noop_signal_is_runner_agnostic():
                 (home / d).mkdir(parents=True, exist_ok=True)
             cfg = Config(home=home, max_concurrency=3, backoff_base=10, max_failures=3,
                         max_spawn_attempts=3, min_spawn_interval=0)
-            _seed(home, "T-1", Phase.DEGRADED)
+            _seed(home, "T-1", Phase.READY)  # active phase: degraded is sleeping since OC-7
             sessions = _HonestNoopSessions(cfg, runner=runner)
 
             now = 1_000_000
@@ -166,8 +173,14 @@ def test_genuine_noop_signal_is_runner_agnostic():
 def test_degraded_ticket_with_empty_inbox_does_not_accumulate_failed_stalled_pairs(home, cfg):
     """The measured incident (T-68's Notes, T-65's spec): a `degraded` ticket
     whose reconciler legitimately no-ops (empty inbox, nothing to route) must
-    not accumulate Failed/Stalled pairs across many sweeps -- reproduced here
-    via the real dispatch() loop and the honest-no-op session double above."""
+    not accumulate Failed/Stalled pairs across many sweeps. T-65 (OC-7)
+    closed this at its root -- `degraded` is now a SLEEPING phase, so a
+    signal-less `degraded` ticket is never spawned in the first place, and
+    `_HonestNoopSessions` (which would call `maestro checked` if it ever ran)
+    never gets a chance to. Assert that explicitly rather than let the
+    Failed/Stalled check pass vacuously; see test_dispatcher.py's
+    test_degraded_ticket_does_not_accumulate_failed_stalled_pairs for the
+    same regression proven directly against `is_due`/`dispatch`."""
     _seed(home, "T-1", Phase.DEGRADED)
     cfg.max_spawn_attempts = 5
     cfg.min_spawn_interval = 0
@@ -175,10 +188,12 @@ def test_degraded_ticket_with_empty_inbox_does_not_accumulate_failed_stalled_pai
 
     now = 1_000_000
     for i in range(20):  # far past what 5 consecutive no-progress spawns would have tolerated
-        disp.dispatch(cfg, sessions, now=now + i)
+        report = disp.dispatch(cfg, sessions, now=now + i)
+        assert report.spawned == []  # sleeping, no signal -- never even spawned
 
     events = event_log.read(home, "T-1")
     assert not any(e["type"] in ("Failed", "Stalled") for e in events)
+    assert not any(e["type"] == "Checked" for e in events)  # never ran, so never checked in
 
 
 # --- AC6: cost of the quiet-path append is measured, not just claimed -------
