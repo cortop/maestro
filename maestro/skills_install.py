@@ -124,6 +124,22 @@ def opencode_user_config_path(cfg: Config | None = None) -> Path:
     return opencode_user_commands_dir(cfg).parent / "opencode.jsonc"
 
 
+# QW-4: the complete set of resolvers that can land a write in the
+# developer's real $HOME rather than a repo checkout or a test's tmp_path --
+# the single source of truth tests/conftest.py's autouse guard fixture reads
+# to confine every one of them under `tmp_path`, so a fifth resolver added
+# here without going through this tuple fails the *guard's own* self-check
+# (test_user_scope_guard.py) instead of silently escaping the redirect.
+# Mirrors config.py's `_RUNNER_OPENCODE_KEYS` allow-list-diff posture: an
+# explicit, reviewable list, not an implicit naming convention.
+USER_SCOPE_RESOLVERS = (
+    user_commands_dir,
+    opencode_user_commands_dir,
+    opencode_user_agent_dir,
+    opencode_user_config_path,
+)
+
+
 def opencode_repo_commands_dir(repo_path: Path) -> Path:
     """OC-1: where an opencode copy of the payload lands inside a repo checkout
     -- opencode's own project-scope command directory, mirroring
