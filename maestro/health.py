@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import claims, credentials, dispatcher, fleet, runner_permissions, skills_install, spend as spend_mod, store
+from . import claims, credentials, dispatcher, event_log, fleet, runner_permissions, skills_install, spend as spend_mod, store
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
 from .config import Config
@@ -259,6 +259,37 @@ def check_dead_letters(cfg: Config, now: float) -> dict:
         "detail": f"{len(ages)} dead-lettered ticket(s)" if ages else "none",
         "ages_s": ages,
     }
+
+
+# 2+ already means the exact same automated no-progress path tripped for the
+# same key more than once -- the shape of the 2026-08-14 degraded-respawn-
+# forever incident (OC-7, T-65), where it happened dozens of times per key.
+WATCHDOG_LOOP_THRESHOLD = 2
+
+
+def check_watchdog_loops(cfg: Config, now: float) -> dict:
+    """WARN when a key has repeatedly tripped the no-progress watchdog
+    (`dispatcher._allow_spawn`'s ``"watchdog: N spawns with no progress..."``
+    ``Failed`` events) -- surfaced directly from the event log so the next
+    instance of this shape (a phase wrongly classified as always-active, or
+    any other spawn loop feeding the same watchdog) is visible in `maestro
+    doctor` without a human reading raw session logs to notice the pattern.
+    Counts every matching ``Failed`` a key has ever recorded, not just its
+    most recent streak -- the incident this guards against reproduces the
+    identical error text on every trip, so a lifetime count is exactly what
+    makes the repetition visible."""
+    home = cfg.home
+    counts: dict[str, int] = {}
+    for key in dispatcher.list_keys(home):
+        n = sum(1 for e in event_log.read(home, key)
+                if e.get("type") == "Failed"
+                and str(e.get("payload", {}).get("error", "")).startswith("watchdog:"))
+        if n >= WATCHDOG_LOOP_THRESHOLD:
+            counts[key] = n
+    status = "warn" if counts else "ok"
+    detail = (f"{len(counts)} ticket(s) repeatedly tripping the no-progress watchdog"
+              if counts else "none")
+    return {"name": "watchdog_loops", "status": status, "detail": detail, "counts": counts}
 
 
 def _key_exists_anywhere(home: Path, key: str) -> bool:
@@ -1121,10 +1152,10 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
 # check_heartbeat's plist override is special-cased, by identity, since it's
 # the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
-          check_dead_letters, check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
-          check_missing_reconcile_skill, check_reconciler_permissions, check_spawn_floor,
-          check_daily_spend, check_burn, check_gh_credential_reachability, check_launchctl,
-          check_ollama_models, check_runner_binary, check_worktree_health,
+          check_dead_letters, check_watchdog_loops, check_depends_on, check_repo_preflight,
+          check_unknown_repo_bindings, check_missing_reconcile_skill, check_reconciler_permissions,
+          check_spawn_floor, check_daily_spend, check_burn, check_gh_credential_reachability,
+          check_launchctl, check_ollama_models, check_runner_binary, check_worktree_health,
           check_provider_availability)
 
 

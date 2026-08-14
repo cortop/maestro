@@ -59,14 +59,31 @@ PHASE_CLASS: dict[Phase, PhaseClass] = {
     # itself. This is the phase the 2026-07-19 runaway was fixed by adding --
     # the fix that prompted this table, so it stays here as the case in point.
     Phase.IN_REVIEW: "sleeping",
-    # dead-lettered (repeated failure / non-convergence). Classified "active"
-    # here ONLY to keep today's behavior byte-identical -- this is the known-
-    # wrong default that produced the 2026-08-14 runaway (116 sessions, $8.63).
-    # T-65 is the instance fix that reclassifies this to "sleeping"; RB-9 is
-    # the class fix and deliberately does not change any existing
-    # classification, so this row is a documented carry-over, not an
-    # endorsement. Do not "fix" it here -- let T-65 land it.
-    Phase.DEGRADED: "active",
+    # dead-lettered (repeated failure / non-convergence). DEGRADED means
+    # "parked for a human", not "always has work to advance" -- a ticket
+    # dead-lettered by `ops.fail` has nothing left for any reconciler to do
+    # until a human acts. Before T-65 (OC-7) this row was "active", so
+    # `is_due` kept saying "active" forever: the dispatcher respawned the
+    # passive reconciler every sweep, it correctly found nothing to route and
+    # exited without appending, `_allow_spawn` counted that as no-progress,
+    # and once `max_spawn_attempts` tripped it called `ops.fail` again --
+    # which, already past `max_failures`, re-appended another Failed/Stalled
+    # pair on THIS call and returned without ever setting a backoff timer, so
+    # the ticket came right back due next sweep. Measured on the dogfood board
+    # 2026-08-14: 116 reconciler sessions / $8.63 across two tickets in under
+    # 7 hours, zero progress (see T-65's spec Notes). Sleeping here closes the
+    # loop at its source: a degraded ticket is due again only via the same
+    # signals any other sleeping phase gets -- `inbox_pending` (a human
+    # `maestro cmd <KEY> retry`/`discard` lands in the inbox and wakes it on
+    # the very next sweep, exactly like AWAITING_HUMAN today) or a spec edit
+    # (`current_spec_hash` mismatch, same mechanism). No new revival path
+    # needed -- both already exist in `dispatcher.is_due` above the
+    # SLEEPING_PHASES check and are unaffected by this classification.
+    # `TRANSITIONS[Phase.DEGRADED]` allows READY/TRIAGING/TERMINATING, i.e. it
+    # is reachable again given the right human signal, so it belongs here
+    # (parked, revivable) rather than in TERMINAL_PHASES (permanently swept
+    # out, no way back short of a new ticket).
+    Phase.DEGRADED: "sleeping",
     # runs finalizers (teardown) and must converge to DONE on its own, with no
     # external event to wait on -- unlike DEGRADED above, this one really was
     # audited: it was previously unclassified-by-luck (fell through the old
@@ -101,7 +118,9 @@ _assert_exhaustive(Phase, PHASE_CLASS)
 # and reviews directly and advances the phase itself — no reconciler needed.
 SLEEPING_PHASES = frozenset(p for p, c in PHASE_CLASS.items() if c == "sleeping")
 
-# Terminal phases are swept out of the active scan entirely.
+# Terminal phases are swept out of the active scan entirely -- no reconciler is
+# ever spawned again and no signal (inbox, spec edit, timer) wakes them; the
+# only way out is a fresh ticket.
 TERMINAL_PHASES = frozenset(p for p, c in PHASE_CLASS.items() if c == "terminal")
 
 # Active phases always have work to advance; the dispatcher spawns a worker
