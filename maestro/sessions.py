@@ -192,13 +192,17 @@ class ClaudeCliSessions:
               env_overlay: dict[str, str] | None = None,
               runner: str | None = None,
               runner_model: str | None = None) -> int | None:
-        # RF-2: this backend only ever speaks Claude -- `runner` is accepted (so
-        # callers can pass it uniformly, e.g. via RoutingSessions) but otherwise
-        # unused; the caller (dispatcher.dispatch) has already validated it's
-        # either None or "claude" before routing a spawn to this instance.
+        # RF-2: this backend only ever speaks Claude -- `runner` doesn't affect
+        # the argv built below (the caller, dispatcher.dispatch, has already
+        # validated it's either None or "claude" before routing a spawn to this
+        # instance), but T-54 still threads it into the claim written below so
+        # `_runner_concurrency_cap`'s active count can be read off the claim
+        # instead of re-resolving `resolve_runner` per sweep (see
+        # `claims.write_claim`'s own docstring addition).
         # OC-4: `runner_model` is the opencode-shaped bare tag -- meaningless here,
         # this backend's own `model`/`effort` params are what drive a Claude spawn.
-        del runner, runner_model
+        del runner_model
+        claimed_runner = runner or "claude"
         session_id = f"{session_name(key)}-{self._clock():.6f}"
         effective_model = model or self.model
         # RF-1: compose the flattened prompt here, from the separate command/key
@@ -258,7 +262,8 @@ class ClaudeCliSessions:
         # Rolled back (released) if Popen itself raises, so a failed launch
         # never leaves a phantom claim behind either.
         claims.write_claim(self.home, key, os.getpid(), session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=prompt)
+                           log_path=log_path, cwd=str(cwd), prompt=prompt,
+                           runner=claimed_runner)
         try:
             try:
                 proc = subprocess.Popen(
@@ -276,7 +281,8 @@ class ClaudeCliSessions:
             raise
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=prompt)
+                           log_path=log_path, cwd=str(cwd), prompt=prompt,
+                           runner=claimed_runner)
         return proc.pid
 
 
@@ -393,14 +399,17 @@ class OpencodeCliSessions:
               env_overlay: dict[str, str] | None = None,
               runner: str | None = None,
               runner_model: str | None = None) -> int | None:
-        # This backend only ever speaks opencode; `runner` is accepted (RoutingSessions
-        # passes it uniformly) but unused. opencode has no equivalent of Claude's
-        # --model tier (`model`/`effort`), --disallowedTools, or --allowedTools --
-        # its permission surface is the board-wide, declarative
-        # `runner_permissions.opencode_bash_permissions` block instead, not a
-        # per-spawn flag -- so those four are accepted (for call-site uniformity
-        # through RoutingSessions) and otherwise unused.
-        del runner, model, effort, disallowed_tools, allowed_tools
+        # This backend only ever speaks opencode; `runner` doesn't affect the
+        # argv below (RoutingSessions passes it uniformly). opencode has no
+        # equivalent of Claude's --model tier (`model`/`effort`),
+        # --disallowedTools, or --allowedTools -- its permission surface is the
+        # board-wide, declarative `runner_permissions.opencode_bash_permissions`
+        # block instead, not a per-spawn flag -- so those four are accepted (for
+        # call-site uniformity through RoutingSessions) and otherwise unused.
+        # T-54: `runner` IS still threaded into the claim written below -- see
+        # `ClaudeCliSessions.spawn`'s identical comment.
+        del model, effort, disallowed_tools, allowed_tools
+        claimed_runner = runner or "claude"
         if not runner_model:
             # Must never happen: OC-2's preflight (dispatcher.dispatch) already
             # verified a real, tool-capable runner_model before routing a spawn
@@ -439,7 +448,8 @@ class OpencodeCliSessions:
         # rationale (claims are runner-agnostic, so this backend needs the
         # identical fix).
         claims.write_claim(self.home, key, os.getpid(), session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd))
+                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
+                           runner=claimed_runner)
         try:
             try:
                 proc = subprocess.Popen(
@@ -457,7 +467,8 @@ class OpencodeCliSessions:
             raise
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd))
+                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
+                           runner=claimed_runner)
         return proc.pid
 
 

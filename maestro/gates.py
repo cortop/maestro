@@ -116,43 +116,46 @@ def spec_runner(home: Path, key: str) -> tuple[str | None, str | None]:
     return overrides.get("runner"), overrides.get("runner_model")
 
 
-# UX-1: phases where a ticket's `runner:`/`runner_model:` choice may still be
-# changed -- before a worktree/reconciler for the `implementing` step exists,
-# so an edit can't be silently ignored by a session already spawned.
-_RUNNER_EDITABLE_PHASES = frozenset({Phase.TRIAGING, Phase.AWAITING_HUMAN, Phase.READY})
-
-
 def runner_editable(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
     """True iff *key*'s spec `runner:`/`runner_model:` front-matter may still
     be rewritten through ``ops.set_runner`` (UX-1). THE RULE MUST HAVE EXACTLY
     ONE DEFINITION -- this is it, called by both the CLI ``runner`` verb and
-    (later) the TUI's runner modal.
+    the TUI's runner modal (both funnel through ``ops.set_runner``, so there is
+    only ever one call site of this predicate).
 
-    Three conditions, all required: *key* is still in ``triaging``/
-    ``awaiting-human``/``ready`` (``implementing``, or anything past it, means
-    a reconciler for that step may already exist); no worktree exists on disk
-    yet (``store.worktree_path`` -- never ``ops``, so this stays a cheap,
-    side-effect-free filesystem check); and its claim, if any, is not
-    CONFIRMED-live (``claims.verify_claim`` -- never ``claims.is_claimed``,
-    which *releases* a stale claim as a side effect; a guard/display predicate
-    must never mutate state).
+    Before T-54, a runner choice only ever took effect at the `implementing`
+    spawn, so the editable window was a fixed phase whitelist (``triaging``/
+    ``awaiting-human``/``ready``) plus "no worktree yet" as a defensive second
+    check for the narrow race where `ready`'s own reconciler has already
+    called `worktree ensure` and is about to transition to `implementing`
+    without a fresh spawn in between. Phase-aware routing (T-54) breaks that
+    whitelist: a runner can now be admitted to `qa`/`researching`/`triaging`
+    too (`dispatcher.runner_eligible_phases`), and a ticket can cycle back
+    through `implementing` more than once (a QA fix round), so no fixed set of
+    "pre-implementation" phases is still correct -- a worktree can exist, and
+    `implementing` can have already happened, while a FUTURE runner-bearing
+    spawn (the next fix round, or the next phase admitted for this runner) is
+    still ahead of it.
 
-    A running session's spawn args -- runner included -- were frozen at
-    launch time; a late edit would silently apply only to the *next* session,
-    which is worse than refusing outright, so this is a hard gate, not a
-    warning.
+    The one condition that generalizes correctly, because every runner-bearing
+    spawn (regardless of which phase it turns out to be for) shares it: "a
+    running session's spawn args -- runner included -- were frozen at launch
+    time" is true exactly while a session for *key* is actually in flight, and
+    false otherwise. So: editable unless *key* has a CONFIRMED-live claim right
+    now (``claims.verify_claim`` -- never ``claims.is_claimed``, which
+    *releases* a stale claim as a side effect; a guard/display predicate must
+    never mutate state). No live session -> whatever spawn comes next (any
+    phase) hasn't happened yet -> editable. A live session -> its spawn args
+    are already frozen -> refuse, a hard gate rather than a warning, since a
+    late edit would otherwise silently apply only to the session *after* this
+    one.
+
+    *snap* is accepted (not read) purely for call-site/signature parity with
+    every other gate predicate here (`needs_approval` et al) -- every caller
+    already has a fresh snapshot in hand from its own `snap_mod.load`.
     """
-    try:
-        phase_ok = Phase(snap.phase) in _RUNNER_EDITABLE_PHASES
-    except ValueError:
-        phase_ok = False
-    if not phase_ok:
-        return False
-    if store.worktree_path(home, key).exists():
-        return False
-    if claims.verify_claim(home, key) == "confirmed":
-        return False
-    return True
+    del snap
+    return claims.verify_claim(home, key) != "confirmed"
 
 
 # T-34/RF-5: implementer providers this dispatcher trusts to already carry a

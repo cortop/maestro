@@ -2220,29 +2220,38 @@ def test_runner_modal_round_trip_updates_spec_for_editable_ticket(seeded_home, m
 
 
 def test_runner_modal_noop_for_non_editable_ticket(seeded_home, monkeypatch):
-    """AC2: T-3 is 'implementing' with a PR -- the same flow leaves spec.md
-    bytes unchanged and grows notifications instead of writing."""
+    """AC7 (T-54): a CONFIRMED-live claim on T-3 -- a reconciler session
+    actually in flight, its spawn args (runner included) already frozen at
+    launch -- makes the same flow leave spec.md bytes unchanged and grow
+    notifications instead of writing."""
     _unreachable_ollama(monkeypatch)
     before_bytes = store.spec_path(seeded_home, "T-3").read_bytes()
 
-    async def _inner():
-        app = _make_app(seeded_home)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            app._selected_key = "T-3"
-            await app.run_action("runner")
-            await pilot.pause()
-            modal = app.screen_stack[-1]
-            assert isinstance(modal, _RunnerModal)
-            modal.query_one("#runner-kind", Select).value = "opencode"
-            notifications_before = len(app._notifications)
-            await modal.run_action("submit")
-            await pilot.pause()
-            assert app._exception is None
-            assert len(app._notifications) > notifications_before
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        claims.write_claim(seeded_home, "T-3", proc.pid, "reconcile-T-3")
 
-    asyncio.run(_inner())
-    assert store.spec_path(seeded_home, "T-3").read_bytes() == before_bytes
+        async def _inner():
+            app = _make_app(seeded_home)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                app._selected_key = "T-3"
+                await app.run_action("runner")
+                await pilot.pause()
+                modal = app.screen_stack[-1]
+                assert isinstance(modal, _RunnerModal)
+                modal.query_one("#runner-kind", Select).value = "opencode"
+                notifications_before = len(app._notifications)
+                await modal.run_action("submit")
+                await pilot.pause()
+                assert app._exception is None
+                assert len(app._notifications) > notifications_before
+
+        asyncio.run(_inner())
+        assert store.spec_path(seeded_home, "T-3").read_bytes() == before_bytes
+    finally:
+        proc.terminate()
+        proc.wait()
 
 
 def test_runner_modal_populates_model_select_from_catalogue(seeded_home, monkeypatch):

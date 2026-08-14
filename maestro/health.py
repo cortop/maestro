@@ -23,6 +23,7 @@ from . import claims, credentials, dispatcher, fleet, runner_permissions, skills
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
 from .config import Config
+from .gates import spec_runner
 from .providers import ollama as ollama_mod
 from .statemachine import Phase
 
@@ -351,22 +352,39 @@ def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
             "unknown": unknown}
 
 
-def _implementing_runner(cfg: Config, key: str) -> str:
-    """OC-1: the runner *key* would spawn under for its `implementing` phase,
-    regardless of *key*'s CURRENT phase -- `dispatcher.resolve_runner` only
-    ever returns non-``claude`` for that one phase, and that phase is exactly
-    what the reconcile-skill-location and permission-surface checks below
-    care about (a `researching`/`qa`/etc. ticket always spawns `claude`
-    either way, so its binding's Claude-side surface is what matters even if
-    its spec names a `runner:` override for later)."""
-    runner, _ = dispatcher.resolve_runner(cfg, key, Phase.IMPLEMENTING.value)
+def _runner_for_key(cfg: Config, key: str) -> str:
+    """T-54: "the runner for key K" -- the decision this predicate encodes --
+    for the two doctor checks below.
+
+    Before T-54, a runner only ever meant something for the `implementing`
+    phase (`dispatcher.resolve_runner` hard-forced `claude` everywhere else),
+    so OC-1's original version of this function just resolved against
+    ``Phase.IMPLEMENTING`` unconditionally. Phase-aware routing breaks that:
+    a runner can now be admitted to other phases too
+    (`dispatcher.runner_eligible_phases`), so no single hardcoded phase is
+    still the right one to probe.
+
+    What `check_missing_reconcile_skill`/`check_reconciler_permissions`
+    actually need is simpler than "which phase": whether a spawn into this
+    repo will EVER use a non-``claude`` runner, so its command-file location
+    and permission surface for that runner are ready ahead of time -- not
+    which specific phase triggers it. So "the runner for key K" here means:
+    the runner *key*'s spec resolves to (`gates.spec_runner`, falling back to
+    `cfg.runner`), UNLESS that runner's whole eligible-phase set
+    (`dispatcher.runner_eligible_phases`) is empty -- in which case it can
+    never actually be spawned for *key* regardless of what the spec says, so
+    it's equivalent to `claude` for these checks' purposes."""
+    runner, _ = spec_runner(cfg.home, key)
+    runner = runner or cfg.runner
+    if not dispatcher.runner_eligible_phases(cfg, runner):
+        return "claude"
     return runner
 
 
 def _runners_by_binding(cfg: Config, home: Path, keys) -> dict:
     """{repo binding name: runner} for the two runner-aware checks below -- one
     runner per binding, resolved from whichever key(s) reference it (see
-    `_implementing_runner`). A binding referenced by keys with different
+    `_runner_for_key`). A binding referenced by keys with different
     runners keeps the FIRST seen (mirrors `referenced_repo_bindings`'s own
     first-seen-wins rule) -- a real board binds one runner per repo in
     practice; this doesn't attempt to represent a mixed-runner repo. A binding
@@ -377,7 +395,7 @@ def _runners_by_binding(cfg: Config, home: Path, keys) -> dict:
     out: dict = {}
     for key in keys:
         binding = repos_mod.resolve(cfg, home, key)
-        out.setdefault(binding.name, _implementing_runner(cfg, key))
+        out.setdefault(binding.name, _runner_for_key(cfg, key))
     return out
 
 

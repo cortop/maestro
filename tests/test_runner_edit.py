@@ -42,26 +42,29 @@ def _seed_ticket(home, key, *, phase=Phase.READY, spec=SPEC):
 
 # --- gates.runner_editable -----------------------------------------------------
 
-@pytest.mark.parametrize("phase", [Phase.TRIAGING, Phase.AWAITING_HUMAN, Phase.READY])
-def test_editable_true_in_pre_implementation_phases(home, phase):
+@pytest.mark.parametrize("phase", [Phase.TRIAGING, Phase.AWAITING_HUMAN, Phase.READY,
+                                   Phase.IMPLEMENTING, Phase.QA, Phase.AWAITING_CI,
+                                   Phase.IN_REVIEW, Phase.RESEARCHING])
+def test_editable_true_with_no_live_claim_regardless_of_phase(home, phase):
+    """T-54: phase-aware routing means no fixed phase whitelist is still
+    correct -- a runner can now be admitted to `qa`/`researching`/`triaging`
+    too, and a ticket can cycle back through `implementing` more than once
+    (a QA fix round), so the only thing that still freezes an edit is a
+    session actually in flight RIGHT NOW (see the next two tests)."""
     _seed_ticket(home, "T-1", phase=phase)
     snap = snap_mod.load(home, "T-1")
     assert gates.runner_editable(home, "T-1", snap) is True
 
 
-@pytest.mark.parametrize("phase", [Phase.IMPLEMENTING, Phase.QA, Phase.AWAITING_CI,
-                                   Phase.IN_REVIEW, Phase.RESEARCHING])
-def test_editable_false_once_past_ready(home, phase):
-    _seed_ticket(home, "T-1", phase=phase)
-    snap = snap_mod.load(home, "T-1")
-    assert gates.runner_editable(home, "T-1", snap) is False
-
-
-def test_editable_false_with_worktree_on_disk(home):
+def test_editable_true_even_with_worktree_on_disk_if_no_live_claim(home):
+    """T-54: worktree existence alone no longer blocks an edit -- a worktree
+    persists for the ticket's whole lifetime once created (including across
+    QA fix rounds), so it isn't evidence a runner-bearing spawn is in flight;
+    only a CONFIRMED claim is."""
     _seed_ticket(home, "T-1", phase=Phase.READY)
     store.worktree_path(home, "T-1").mkdir(parents=True)
     snap = snap_mod.load(home, "T-1")
-    assert gates.runner_editable(home, "T-1", snap) is False
+    assert gates.runner_editable(home, "T-1", snap) is True
 
 
 def test_editable_false_with_confirmed_claim_and_claim_file_survives(home, child_process):
@@ -74,6 +77,17 @@ def test_editable_false_with_confirmed_claim_and_claim_file_survives(home, child
 
     assert gates.runner_editable(home, "T-1", snap) is False
     assert claims.claim_path(home, "T-1").exists()
+
+
+def test_editable_false_with_confirmed_claim_even_mid_implementing_fix_round(home, child_process):
+    """AC7: "refuses one for a phase currently mid-spawn" -- a confirmed-live
+    claim refuses the edit regardless of which phase the ticket is in,
+    including a SECOND pass through `implementing` (a QA fix round)."""
+    _seed_ticket(home, "T-1", phase=Phase.IMPLEMENTING)
+    claims.write_claim(home, "T-1", child_process.pid, "reconcile-T-1")
+    snap = snap_mod.load(home, "T-1")
+
+    assert gates.runner_editable(home, "T-1", snap) is False
 
 
 # --- ops.set_runner -------------------------------------------------------------
@@ -152,8 +166,31 @@ def test_set_runner_makes_the_ticket_due_next_sweep_via_spec_hash_mismatch(home,
     assert due.reason == "spec-changed"
 
 
-def test_set_runner_rejects_once_implementing_and_appends_no_event(home, cfg):
+def test_set_runner_allows_once_implementing_with_no_live_claim(home, cfg):
+    """T-54: `implementing` alone no longer blocks an edit -- see
+    `gates.runner_editable`'s generalization."""
     _seed_ticket(home, "T-1", phase=Phase.IMPLEMENTING)
+
+    result = ops.set_runner(cfg, "T-1", runner="opencode")
+
+    assert result["runner"] == "opencode"
+    assert "runner: opencode" in store.spec_path(home, "T-1").read_text()
+
+
+def test_set_runner_allows_with_worktree_present_and_no_live_claim(home, cfg):
+    """T-54: worktree existence alone no longer blocks an edit -- see
+    `gates.runner_editable`'s generalization."""
+    _seed_ticket(home, "T-1", phase=Phase.READY)
+    store.worktree_path(home, "T-1").mkdir(parents=True)
+
+    result = ops.set_runner(cfg, "T-1", runner="opencode")
+
+    assert result["runner"] == "opencode"
+
+
+def test_set_runner_rejects_with_confirmed_live_claim_appends_no_event(home, cfg, child_process):
+    _seed_ticket(home, "T-1", phase=Phase.IMPLEMENTING)
+    claims.write_claim(home, "T-1", child_process.pid, "reconcile-T-1")
     before_events = event_log.read(home, "T-1")
     before_spec = store.spec_path(home, "T-1").read_bytes()
 
@@ -162,14 +199,6 @@ def test_set_runner_rejects_once_implementing_and_appends_no_event(home, cfg):
 
     assert event_log.read(home, "T-1") == before_events
     assert store.spec_path(home, "T-1").read_bytes() == before_spec
-
-
-def test_set_runner_rejects_with_worktree_present(home, cfg):
-    _seed_ticket(home, "T-1", phase=Phase.READY)
-    store.worktree_path(home, "T-1").mkdir(parents=True)
-
-    with pytest.raises(store.MaestroError):
-        ops.set_runner(cfg, "T-1", runner="opencode")
 
 
 def test_set_runner_requires_at_least_one_field(home, cfg):
@@ -238,9 +267,14 @@ def test_cli_runner_rewrites_only_the_new_lines(home):
     assert removed == []
 
 
-def test_cli_runner_on_implementing_ticket_exits_nonzero_appends_no_event(home, capsys):
-    """AC6: refused with the shared message, and no event/spec byte changes."""
+def test_cli_runner_with_confirmed_live_claim_exits_nonzero_appends_no_event(
+        home, capsys, child_process):
+    """AC6/AC7 (T-54): refused with the shared message, and no event/spec byte
+    changes, when a reconciler session for the key is actually in flight
+    (`implementing` alone no longer refuses -- see `gates.runner_editable`'s
+    generalization)."""
     _seed_ticket(home, "T-1", phase=Phase.IMPLEMENTING)
+    claims.write_claim(home, "T-1", child_process.pid, "reconcile-T-1")
     before_events = event_log.read(home, "T-1")
     before_spec = store.spec_path(home, "T-1").read_bytes()
 

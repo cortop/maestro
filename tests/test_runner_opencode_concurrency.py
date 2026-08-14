@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import time
 
-from maestro import dispatcher as disp, event_log, snapshot as snap_mod, store
+from maestro import claims, dispatcher as disp, event_log, snapshot as snap_mod, store
 from maestro.sessions import ClaudeCliSessions, DryRunSessions, OpencodeCliSessions, RoutingSessions
 from maestro.statemachine import Phase
 
@@ -134,3 +134,28 @@ def test_fast_exiting_stub_bounded_by_the_cap_across_a_sequence_of_real_sweeps(
     for key in ("OC-1", "OC-2"):
         assert snap_mod.load(home, key).phase == Phase.IMPLEMENTING.value
         assert not any(e["type"] == "Failed" for e in event_log.read(home, key))
+
+
+# --- AC4: the cap counts from the claim written at spawn time, not from a
+# re-resolved `resolve_runner(cfg, k, CURRENT phase)` ------------------------
+
+def test_cap_counts_a_stale_phase_claim_not_a_reresolved_phase(home, cfg):
+    """T-54's own bug fix: OC-1 was spawned under `implementing` (its claim
+    records `runner: opencode`) and has since folded to `qa`, a phase where
+    opencode is NOT eligible by default -- re-resolving `resolve_runner(cfg,
+    "OC-1", "qa")` would return `claude` and silently stop counting it,
+    leaking the cap slot (the exact bug this ticket exists to fix). Reading
+    the claim's OWN recorded runner instead still counts it, so a due OC-2
+    ticket is refused."""
+    cfg.runner_enabled = ["claude", RUNNER]
+    _cap(cfg, 1)
+    _seed(home, "OC-1", phase=Phase.QA)  # folded past implementing; no runner: override needed
+    claims.write_claim(home, "OC-1", os.getpid(), "reconcile-OC-1", runner=RUNNER)
+    _seed(home, "OC-2", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b")
+    sessions = DryRunSessions(active={"OC-1"})
+
+    report = disp.dispatch(cfg, sessions, now=1000, runner_probe=_TOOL_CAPABLE_PROBE)
+
+    assert "OC-2" not in report.spawned
+    decision = disp.key_decisions(home, "OC-2", tail=1)[0]
+    assert decision["outcome"] == "runner_capped"

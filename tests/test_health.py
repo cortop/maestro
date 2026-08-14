@@ -1066,6 +1066,50 @@ def test_reconciler_permissions_claude_runner_ticket_unaffected_by_opencode_chec
     assert check["not_applicable_by_repo"] == {}
 
 
+# --- T-54 AC8: "the runner for key K" under phase-aware routing ---------------
+
+def test_runner_for_key_treats_a_never_eligible_runner_as_claude(home):
+    """`_runner_for_key` decides: a runner the spec names but whose
+    eligible-phase set is empty (misconfigured -- e.g. `phases = []`) can
+    never actually be spawned for this key, so it's equivalent to `claude`
+    for the doctor checks' purposes."""
+    cfg = Config(home=home, provider_config={"runner": {"opencode": {"phases": []}}})
+    _seed_with_runner(home, "T-1", runner="opencode")
+
+    assert health._runner_for_key(cfg, "T-1") == "claude"
+
+
+def test_runner_for_key_returns_the_spec_runner_when_eligible_anywhere(home):
+    """Admitted to `qa` only (not `implementing`, T-1's current phase) --
+    `_runner_for_key` still names it, since the repo surface it gates on must
+    be ready for WHENEVER that eligible phase's spawn happens, not just the
+    ticket's current one."""
+    cfg = Config(home=home, provider_config={"runner": {"opencode": {"phases": ["qa"]}}})
+    _seed_with_runner(home, "T-1", runner="opencode", phase=Phase.IMPLEMENTING)
+
+    assert health._runner_for_key(cfg, "T-1") == "opencode"
+
+
+def test_real_doctor_over_a_mixed_phase_runner_board_reports_without_exception(
+        home, tmp_path, monkeypatch):
+    """AC8: a board with a claude ticket, an opencode ticket admitted only at
+    `implementing`, and another admitted only at `qa` -- `maestro doctor`
+    completes cleanly over all of them."""
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(tmp_path / "no-opencode-user-commands"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0,
+                provider_config={"runner": {"opencode": {"phases": ["qa"]}}})
+    _seed_with_runner(home, "CL-1", runner=None, phase=Phase.READY)
+    _seed_with_runner(home, "IMPL-1", runner="opencode", phase=Phase.IMPLEMENTING)
+    _seed_with_runner(home, "QA-1", runner="opencode", phase=Phase.QA)
+
+    checks = health.run_checks(cfg, 1000)  # must not raise
+    names = {c["name"] for c in checks}
+    assert "missing_reconcile_skill" in names
+    assert "reconciler_permissions" in names
+
+
 # --- RB-8: an unset daily_spend_ceiling_usd is a visible doctor warning -------
 
 
