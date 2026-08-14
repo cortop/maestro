@@ -76,7 +76,7 @@ def pid_alive(pid) -> bool:
 
 def write_claim(home: Path, key: str, pid: int, name: str,
                 *, log_path: str | None = None, cwd: str | None = None,
-                prompt: str | None = None) -> None:
+                prompt: str | None = None, runner: str | None = None) -> None:
     data: dict = {"pid": pid, "name": name, "ts": store.iso_now(),
                   "epoch": store.now_epoch()}
     if log_path is not None:
@@ -90,6 +90,14 @@ def write_claim(home: Path, key: str, pid: int, name: str,
         data["cwd"] = cwd
     if prompt is not None:
         data["prompt"] = prompt
+    # T-54: the runner this claim's session was actually spawned under (RF-2
+    # name, e.g. "claude"/"opencode") -- the fact `_runner_concurrency_cap`'s
+    # active count is derived from, instead of re-resolving `resolve_runner`
+    # against the key's CURRENT phase every sweep (which silently stops
+    # counting a session the moment its key folds to a phase where that
+    # runner is no longer eligible; see `dispatcher.dispatch`'s cap check).
+    if runner is not None:
+        data["runner"] = runner
     store.write_json(claim_path(home, key), data)
 
 

@@ -984,9 +984,9 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
     snap = snap_mod.load(cfg.home, key)
     if not gates.runner_editable(cfg.home, key, snap):
         raise store.MaestroError(
-            f"runner {key}: no longer editable -- implementation has already begun "
-            "(past ready/awaiting-human/triaging, a worktree exists, or a live claim "
-            "holds it); a running session's spawn args were already frozen at launch")
+            f"runner {key}: no longer editable -- a reconciler session for this "
+            "key is currently in flight, and its spawn args (runner included) "
+            "were already frozen at launch; wait for it to exit and try again")
 
     updates = {f: v for f, v in (("runner", runner), ("runner_model", runner_model))
               if v is not None}

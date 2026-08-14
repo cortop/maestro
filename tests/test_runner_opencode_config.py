@@ -117,3 +117,24 @@ def test_runner_concurrency_cap_none_for_claude(home):
 def test_runner_concurrency_cap_none_for_an_unconfigured_unknown_runner(home):
     cfg = Config(home=home)
     assert disp._runner_concurrency_cap(cfg, "some-future-runner") is None
+
+
+# --- T-54: [runner.opencode]'s `phases` key -----------------------------
+
+def test_config_load_accepts_the_recognized_phases_key(home):
+    (home / "config.toml").write_text(
+        '[runner.opencode]\nphases = ["qa", "triaging"]\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.provider_config["runner"]["opencode"]["phases"] == ["qa", "triaging"]
+
+
+def test_config_load_accepts_both_concurrency_and_phases_together(home):
+    (home / "config.toml").write_text(
+        '[runner.opencode]\nconcurrency = 2\nphases = ["qa"]\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.provider_config["runner"]["opencode"]["concurrency"] == 2
+    assert cfg.provider_config["runner"]["opencode"]["phases"] == ["qa"]
+
+
+def test_default_config_toml_documents_runner_phases():
+    assert "phases" in DEFAULT_CONFIG_TOML

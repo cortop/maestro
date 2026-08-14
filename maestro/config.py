@@ -216,7 +216,7 @@ _REPO_TABLE_KEYS = frozenset({
 # that can livelock a fast-moving base branch.
 _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 
-# OC-4: [runner.opencode]'s whole recognized key set. Unlike every other
+# OC-4/T-54: [runner.opencode]'s whole recognized key set. Unlike every other
 # [runner.<name>] table (free-form, riding cfg.provider_config with zero
 # config.py awareness -- see the `provider_config` field's own docstring),
 # opencode's is explicitly validated here, fail-closed like _REPO_TABLE_KEYS,
@@ -224,8 +224,11 @@ _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 # _REPO_TABLE_KEYS is, so a typo is silent and silently means wrong model / no
 # permission block"). `concurrency` is the per-runner concurrency cap
 # (dispatcher._runner_concurrency_cap; default 1 -- see
-# dispatcher._RUNNER_DEFAULT_CONCURRENCY for why).
-_RUNNER_OPENCODE_KEYS = frozenset({"concurrency"})
+# dispatcher._RUNNER_DEFAULT_CONCURRENCY for why). `phases` (T-54) is the
+# eligible-phase list (dispatcher.runner_eligible_phases; default
+# ["implementing"] -- see dispatcher._RUNNER_DEFAULT_PHASES) admitting
+# opencode to a phase's spawn beyond just `implementing`.
+_RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases"})
 
 
 def config_path(home: Path) -> Path:
@@ -601,6 +604,12 @@ implementer = "claude_skill"
                                      # fleet-wide max_concurrency above -- default 1 until
                                      # measured: opencode wedges intermittently at `init`
                                      # and every process shares one on-disk sqlite db
+# phases = ["implementing"]         # T-54: which phase(s) a ticket's `runner: opencode`
+                                     # (or this board's own `runner` default) may actually
+                                     # spawn under -- default ["implementing"] (unchanged
+                                     # from before this key existed); admitting a read-mostly
+                                     # phase (e.g. "qa", "triaging", "researching") too is a
+                                     # deliberate, reviewable edit here, never a code change
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""
