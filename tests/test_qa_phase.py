@@ -199,14 +199,14 @@ def test_full_sweep_over_seeded_home_unchanged_no_qa_routing(seeded_home):
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
 
-    # T-1 awaiting-human (sleeping) and T-4 awaiting-ci (sleeping) never spawn;
-    # T-2/T-3/T-5 are active and spawn their existing per-phase commands.
-    assert sorted(report.spawned) == ["T-2", "T-3", "T-5"]
+    # T-1 awaiting-human (sleeping), T-2 degraded (sleeping, OC-7), and T-4
+    # awaiting-ci (sleeping) never spawn; T-3/T-5 are active and spawn their
+    # existing per-phase commands.
+    assert sorted(report.spawned) == ["T-3", "T-5"]
     by_key = {k: (p, d) for k, p, _c, _m, _e, d, *_ in sessions.spawned}
-    assert by_key["T-2"][0].startswith("/maestro-reconcile-passive T-2")
     assert by_key["T-3"][0].startswith("/maestro-reconcile-implementing T-3")
     assert by_key["T-5"][0].startswith("/maestro-reconcile-ready T-5")
-    for key in ("T-2", "T-3", "T-5"):
+    for key in ("T-3", "T-5"):
         assert by_key[key][1] == ["Bash(gh pr merge:*)"]  # tier-1 default, unchanged
 
     for key in ("T-1", "T-2", "T-3", "T-4", "T-5"):
