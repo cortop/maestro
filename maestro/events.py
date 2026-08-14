@@ -56,6 +56,11 @@ STALLED = "Stalled"                     # {reason, kind?}  -> DEGRADED / dead-le
                                          # kind="burn" (RB-11): parked by burn.should_park,
                                          # not a generic failure -- see snapshot.Snapshot.burning
 NOTE = "Note"                           # {text}  free-form audit breadcrumb
+CHECKED = "Checked"                     # {}  reconciler ran to completion, correctly found
+                                         # nothing due -- advances observed_seq so the
+                                         # no-progress watchdog (`_allow_spawn`) can tell this
+                                         # apart from a crash (RB-10). Cheapest possible payload
+                                         # by design; see ops.checked for the cost accounting.
 
 # Side-effecting events whose presence (by step_id) means the external action
 # already happened — used to make re-spawn after a crash idempotent.

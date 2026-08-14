@@ -1021,6 +1021,54 @@ def requeue(cfg: Config, key: str, seconds: int, *, actor: str = "reconciler") -
             sid=step_id(key, snap.phase, snap.observed_seq, f"requeue:{int(at)}"))
 
 
+def checked(cfg: Config, key: str, *, actor: str = "reconciler") -> dict | None:
+    """RB-10: record a genuine no-op -- this reconcile step ran to completion
+    and correctly decided nothing was due.
+
+    `_allow_spawn`'s no-progress watchdog (dispatcher.py) infers "crashed
+    before appending a single event" from "observed_seq did not advance". A
+    reconciler that runs to completion and correctly finds nothing to do also
+    appends nothing, so the two opposite outcomes had an identical signature
+    and the watchdog eventually failed the healthy one (the 2026-08-14 T-55
+    incident, RB-10's Notes). Call this immediately before `maestro release`
+    on a genuine no-op exit path so `observed_seq` advances by exactly one and
+    the existing seq-comparison in `_allow_spawn` treats the sweep as
+    progress -- no new watchdog mechanism, just closing the gap in the
+    signal it already reads.
+
+    Step id keyed on (key, phase, observed_seq), the same shape `requeue`/
+    `record_impl_turn`/`fail` use: two attempts that both read the log at the
+    same not-yet-advanced seq (a lost race between concurrent callers, or a
+    retried write whose first attempt actually landed) collapse to one event
+    instead of two -- but a call that runs *after* a prior `checked` already
+    landed reads the advanced seq and legitimately appends a fresh one; that
+    is not a duplicate, it is a second real check-in, exactly like a second
+    `impl-turn` call is a second real turn. A session killed by `run_watchdog`
+    (a wedged process, reaped by pgid) never reaches this call at all, so a
+    kill cannot counterfeit a completed no-op; it still falls through to the
+    unmodified crash path.
+
+    Runner-agnostic by construction, not by branching on `runner`: this is a
+    `maestro` CLI verb the reconcile *skill script* calls, and the identical
+    script runs unmodified under `ClaudeCliSessions` and `OpencodeCliSessions`
+    alike (see claims' pid+start_epoch keying for the same shape of
+    argument). There is exactly one code path to this event, for both.
+
+    Cost (quiet-path log growth, per spec AC): the payload is `{}` -- the
+    envelope (type/actor/step_id/ts/seq) is the whole cost, on the order of
+    150-200 bytes per event on disk. A ticket spawned at the anti-thrash floor
+    (`spawn_floor_s`, 300s default) that no-ops every single spawn appends at
+    most 288 of these a day, ~50KB/day, until a human unblocks it or a
+    sleeping-phase fix (e.g. T-65 for `degraded`) stops it from being
+    respawned at all. `Checked` carries no QA/AC/PR state, so it costs
+    `fold`/`compact`/`archive` nothing beyond that same linear read+write --
+    unlike `Note`, nothing downstream branches on it.
+    """
+    snap = snap_mod.load(cfg.home, key)
+    return _append(cfg, key, E.CHECKED, {}, actor=actor,
+                   sid=step_id(key, snap.phase, snap.observed_seq, "checked"))
+
+
 def record_impl_turn(cfg: Config, key: str, *, role: str = "implementer",
                       actor: str = "reconciler") -> dict:
     """Append one ``ImplTurnRecorded{turn, role}``, folding into ``snapshot.impl_turns``.

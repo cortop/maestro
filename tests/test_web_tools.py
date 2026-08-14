@@ -139,7 +139,7 @@ def test_agent_tool_verbs_named_exactly():
     expected = {
         "local-backup", "snapshot", "events", "append", "set-phase", "ask",
         "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-        "verify-ac", "qa-brief", "qa-verdict", "finalize", "release",
+        "verify-ac", "qa-brief", "qa-verdict", "finalize", "checked", "release",
         "check-conflicts", "check-merged", "fold-steps", "worktree",
         "env", "show", "create",
     }

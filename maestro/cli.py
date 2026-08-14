@@ -869,6 +869,15 @@ def cmd_why(args) -> int:
     return 0
 
 
+def cmd_checked(args) -> int:
+    """[agent] record that this reconcile step ran to completion and correctly
+    found nothing due -- so the no-progress watchdog (`_allow_spawn`) does not
+    mistake a healthy no-op for a crash (RB-10)."""
+    ev = ops.checked(_cfg(args), args.key, actor=args.actor)
+    _print(ev or {"noop": "idempotent (step_id already applied)"})
+    return 0
+
+
 def cmd_release(args) -> int:
     """A reconciler calls this on exit to drop its claim (best-effort)."""
     claims.release(_cfg(args).home, args.key)
@@ -1459,6 +1468,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("compact", cmd_compact, "fold pre-snapshot events into archive"); sp.add_argument("key")
     sp = add("archive-done", cmd_archive_done, "[maintenance] move DONE tickets out of the active scan")
     sp.add_argument("--after", type=float, default=0, help="grace period in seconds since the ticket's last event")
+    sp = add("checked", cmd_checked,
+             "[agent] record a genuine no-op: this step ran to completion and found "
+             "nothing due (RB-10) -- call immediately before `maestro release`")
+    sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
     sp = add("release", cmd_release, "[agent] drop this ticket's claim on exit"); sp.add_argument("key")
 
     sp = add("claims", cmd_claims, "list claim files with verified identity (key/pid/age/verdict)")
