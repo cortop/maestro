@@ -58,6 +58,49 @@ def split_key(key: str) -> tuple:
     return (1, key, 0)
 
 
+def _rotation_cursor_path(home: Path) -> Path:
+    return home / "derived" / ".rotation_cursor.json"
+
+
+def _apply_rotation(home: Path, due: list, bindings_by_key: dict, cursor: dict) -> list:
+    """T-63 (MTO-9 defect 4b): rotate the same-priority tiebreak, scoped per
+    repo, so repeated sweeps under sustained pressure don't always favor the
+    lexically-first `split_key` among equal-priority competitors. `due` must
+    already be sorted (priority, split_key) -- that stays the base/fallback
+    order verbatim; this only reshuffles the STARTING POINT within each
+    (repo, priority) group of size > 1, never the group membership or the
+    across-priority order, so MTO-7's own guarantees (priority never bypasses
+    a brake, total deterministic order) are unaffected. `cursor` is
+    `{repo_name: {str(priority): last_spawned_key}}`, read once by the caller
+    via `store.read_json` (already degrades a missing/corrupt file to `{}`
+    without raising) -- a `last_spawned_key` absent from its group (stale,
+    or never set) leaves that group in its base order, so a cold cursor is
+    provably identical to today's behavior.
+    """
+    groups: dict[tuple[str, int], list] = {}
+    order: list[tuple[str, int]] = []
+    for key, reason in due:
+        binding = bindings_by_key.get(key)
+        repo_name = binding.name if binding is not None else "default"
+        gkey = (repo_name, spec_priority(home, key))
+        if gkey not in groups:
+            groups[gkey] = []
+            order.append(gkey)
+        groups[gkey].append((key, reason))
+
+    rotated: list = []
+    for gkey in order:
+        group = groups[gkey]
+        if len(group) > 1:
+            repo_name, priority = gkey
+            last_key = (cursor.get(repo_name) or {}).get(str(priority))
+            idx = next((i for i, (k, _) in enumerate(group) if k == last_key), None)
+            if idx is not None:
+                group = group[idx + 1:] + group[:idx + 1]
+        rotated.extend(group)
+    return rotated
+
+
 def parse_depends_on(spec_text: str) -> list[str]:
     """Extract the dependsOn list from a spec's loose frontmatter."""
     m = _DEPENDS_ON_RE.search(spec_text)
@@ -1873,6 +1916,20 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # ordering stays deterministic when priorities are equal (including the
         # all-default-3 case, which reduces to today's plain lexical order).
         due.sort(key=lambda kr: (spec_priority(home, kr[0]), split_key(kr[0])))
+        bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in due}
+
+        # T-63 (MTO-9 defect 4b): rotate the same-priority tiebreak, scoped per
+        # repo -- a preference over WHICH same-priority due key comes first,
+        # upstream of every gate below (repo-blocked, max_spawns_per_sweep,
+        # slots), exactly like MTO-7's own priority sort is. Only reorders
+        # within a (repo, priority) group; never changes group membership or
+        # the across-priority order, so it can't punch through any brake
+        # MTO-7's sort couldn't. See `_apply_rotation`'s docstring for the
+        # degrade-safely contract on a missing/corrupt cursor file.
+        rotation_cursor = store.read_json(_rotation_cursor_path(home), {})
+        if not isinstance(rotation_cursor, dict):
+            rotation_cursor = {}
+        due = _apply_rotation(home, due, bindings_by_key, rotation_cursor)
 
         # Per-repo preflight, scoped to the repos this sweep's due tickets (plus the
         # implicit default) actually reference -- a 1-repo board still runs exactly
@@ -1882,7 +1939,6 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         preflight = repo_preflight_all(cfg, home, [k for k, _ in due])
         repo_blockers_by_repo = preflight["blockers_by_repo"]
         repo_blockers = preflight["blockers"]
-        bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in due}
 
         # Fleet-wide rate-limit gate. Above the human-signal bypass below: an inbox
         # answer must not punch through a 429, since that spawn would be rejected too.
@@ -1955,21 +2011,16 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             # blast radius on the sweep's spawn budget without touching the per-key
             # min_spawn_interval floor, the max_spawn_attempts watchdog, or this
             # fleet-wide rate gate -- all three still apply on top. None (default)
-            # is uncapped, i.e. today's behavior by construction.
+            # is uncapped, i.e. today's behavior by construction. T-63 (MTO-9
+            # defect 4a): the cap must count ACTUAL launches, not intent, so
+            # `per_repo_spawn_count` is no longer incremented here -- it lives
+            # beside the real spawn attempt below (dry_run's would_spawn / the
+            # real branch's sessions.spawn), incremented only once a key clears
+            # every downstream gate. A key a later gate rejects (credential,
+            # runner, interlock, attempts-exhausted) never burns its repo's
+            # slot, so it can no longer starve a key behind it that would have
+            # spawned cleanly.
             per_repo_spawn_count: dict[str, int] = {}
-            capped: list[tuple[str, str]] = []
-            for key, reason in eligible:
-                binding = bindings_by_key.get(key)
-                cap = binding.max_spawns_per_sweep if binding is not None else None
-                if cap is not None:
-                    name = binding.name
-                    seen = per_repo_spawn_count.get(name, 0)
-                    if seen >= cap:
-                        decisions[key]["outcome"] = "repo_capped"
-                        continue
-                    per_repo_spawn_count[name] = seen + 1
-                capped.append((key, reason))
-            eligible = capped
 
             slots = max(0, cfg.max_concurrency - len(active))
             to_spawn = eligible[:slots]
@@ -1996,11 +2047,20 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 # REAL sweep decides for itself.
                 spawned = []
                 for key, _reason in to_spawn:
+                    binding = bindings_by_key.get(key)
+                    cap = binding.max_spawns_per_sweep if binding is not None else None
+                    if cap is not None:
+                        name = binding.name
+                        if per_repo_spawn_count.get(name, 0) >= cap:
+                            decisions[key]["outcome"] = "repo_capped"
+                            continue
                     if interlock_reason is not None:
                         decisions[key]["outcome"] = "would_ask_backend_interlocked"
                         continue
                     spawned.append(key)
                     decisions[key]["outcome"] = "would_spawn"
+                    if cap is not None:
+                        per_repo_spawn_count[binding.name] = per_repo_spawn_count.get(binding.name, 0) + 1
             else:
                 attempts_path = _spawn_attempts_path(home)
                 attempts = store.read_json(attempts_path, {}) or {}
@@ -2021,7 +2081,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 runner_active_counts: dict[str, int] = {}
 
                 spawned = []
+                rotation_changed = False
                 for key, _reason in to_spawn:
+                    binding = bindings_by_key.get(key)
+                    cap = binding.max_spawns_per_sweep if binding is not None else None
+                    if cap is not None and per_repo_spawn_count.get(binding.name, 0) >= cap:
+                        decisions[key]["outcome"] = "repo_capped"
+                        continue
                     if interlock_reason is not None:
                         # Ask (not fail): this is a config/backend gap, not a per-key
                         # error, and asking parks the key in awaiting-human -- visibly,
@@ -2033,7 +2099,6 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                         ops.ask(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
                                 actor="dispatcher")
                         continue
-                    binding = bindings_by_key.get(key)
                     cred = resolve_credential(binding, credential_cache)
                     if not cred.ok:
                         # Fail closed (GA-17): never spawn into a repo whose configured
@@ -2168,6 +2233,19 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                                    env_overlay=cred.env, runner=runner, runner_model=runner_model)
                     spawned.append(key)
                     decisions[key]["outcome"] = "spawned"
+                    if cap is not None:
+                        per_repo_spawn_count[binding.name] = per_repo_spawn_count.get(binding.name, 0) + 1
+                    # T-63 (MTO-9 defect 4b): remember this key as the last one
+                    # actually spawned for its (repo, priority) group, so the
+                    # NEXT sweep's `_apply_rotation` starts that group just
+                    # past it -- true round-robin, not favoring the same key
+                    # every sweep. Only an actual launch advances the cursor
+                    # (never a dry-run "would_spawn"), matching 4a's own
+                    # actual-vs-intent rule.
+                    repo_name = binding.name if binding is not None else "default"
+                    priority = spec_priority(home, key)
+                    rotation_cursor.setdefault(repo_name, {})[str(priority)] = key
+                    rotation_changed = True
                     weight = spawn_weight(cfg, phase_by_key.get(key, ""))
                     prev = ledger.get(key)
                     recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
@@ -2186,6 +2264,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                     known = set(list_keys(home))
                     store.write_json(attempts_path,
                                      {k: v for k, v in attempts.items() if k in known})
+                if rotation_changed:
+                    store.write_json(_rotation_cursor_path(home), rotation_cursor)
 
     # Heartbeat/decision-ledger writes are dashboards, not the source of truth --
     # both regenerate from state, so they're written either way. Under dry_run,

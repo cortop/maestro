@@ -326,13 +326,14 @@ def test_two_overlapping_sweeps_dismiss_defect_3_ledger_survives_spawn_lock(home
 # ---------------------------------------------------------------------------
 
 def test_max_spawns_per_sweep_confirms_defect_4a_counts_intent_not_spawns(home):
-    """CONFIRMED. `per_repo_spawn_count[name] = seen + 1` (dispatcher.py, inside
-    the eligible-keys loop) runs BEFORE the credential/runner gates further down
-    can reject a key -- so a key that never actually launches still burns the
-    repo's `max_spawns_per_sweep` slot, starving a key behind it that WOULD have
+    """FIXED (T-63). The repo's `max_spawns_per_sweep` cap only counts a key
+    once it actually clears every downstream gate and launches -- a key
+    rejected by an earlier gate (here, T-1's unregistered runner) never burns
+    the slot, so it can no longer starve a key behind it that would have
     spawned cleanly. T-1 names an unregistered runner (fails cleanly, no
-    process launched, no attempts-ledger spend, per `runner_unregistered`); T-2
-    is an ordinary ticket that would spawn without issue. Cap=1 for both."""
+    process launched, no attempts-ledger spend, per `runner_unregistered`);
+    T-2 is an ordinary ticket that would spawn without issue. Cap=1 for both
+    -- and T-2 still gets the one slot T-1 never actually consumed."""
     cfg = Config(home=home, max_concurrency=10, min_spawn_interval=0,
                  repos={"default": {"path": None, "slug": None, "base_branch": "main",
                                      "branch_prefix": "maestro/", "default": True,
@@ -342,27 +343,26 @@ def test_max_spawns_per_sweep_confirms_defect_4a_counts_intent_not_spawns(home):
 
     report = disp.dispatch(cfg, DryRunSessions(), 1000)
 
-    assert report.spawned == [], "T-1 must never actually launch (unregistered runner)"
+    assert report.spawned == ["T-2"], "T-1 must never actually launch (unregistered runner)"
     decision_1 = disp.key_decisions(home, "T-1", tail=1)[0]
     assert decision_1["outcome"] == "runner_unregistered"
     decision_2 = disp.key_decisions(home, "T-2", tail=1)[0]
-    assert decision_2["outcome"] == "repo_capped", (
-        "defect (4a) DISMISSED: T-2 was not starved by T-1's failed spawn attempt -- "
+    assert decision_2["outcome"] == "spawned", (
+        "defect (4a) REGRESSED: T-2 was starved by T-1's failed spawn attempt -- "
         f"got outcome {decision_2['outcome']!r} instead"
     )
 
 
 def test_same_priority_starvation_confirms_defect_4b(home):
-    """CONFIRMED, reframed per the plan-confirmation answer: MTO-7 already made
-    `split_key` a same-priority TIEBREAKER, not the primary sort, so a
-    difference-in-priority no longer starves anyone -- but among EQUAL-priority
-    competitors under sustained pressure (more due keys than
-    `max_concurrency` slots, every sweep), the sort is still a fixed total order
-    with no rotation state, so the lexically-first key wins every single slot,
-    forever. Three same-priority (default 3) competitors, one slot, six sweeps
-    (two full round-robins of N=3): T-2 and T-3 must get a turn within one
-    round-robin (N=3 sweeps) of re-qualifying -- they never do, in any of the
-    six. ``max_spawn_attempts`` is raised well past 6 -- that watchdog (a
+    """FIXED (T-63): a persisted per-repo rotation cursor
+    (`derived/.rotation_cursor.json`) now breaks the same-priority tie in
+    round-robin order instead of always favoring the lexically-first
+    `split_key`. Three same-priority (default 3) competitors, one slot, six
+    sweeps (two full round-robins of N=3): every competitor now gets a turn
+    within each round-robin, in rotation order (T-1, T-2, T-3, T-1, T-2, T-3)
+    -- the cursor only advances past a key once it actually spawns, so the
+    ring always resumes right where the last real launch left off.
+    ``max_spawn_attempts`` is raised well past 6 -- that watchdog (a
     DIFFERENT circuit breaker, for no-progress-at-one-key) would otherwise
     dead-letter T-1 partway through and mask the fairness question this test
     asks."""
@@ -381,15 +381,15 @@ def test_same_priority_starvation_confirms_defect_4b(home):
             sessions.retire(key)  # every worker crashes -- stays due, never converges
         now += 1
 
-    assert spawned_order == ["T-1"] * 6, spawned_order
-    # The fairness bound (N = 3 competitors -> a turn within 3 sweeps) is violated
-    # for BOTH T-2 and T-3 across both round-robins.
+    assert spawned_order == ["T-1", "T-2", "T-3", "T-1", "T-2", "T-3"], spawned_order
+    # The fairness bound (N = 3 competitors -> a turn within 3 sweeps) now holds
+    # for BOTH T-2 and T-3, in both round-robins.
     for competitor in ("T-2", "T-3"):
         first_round = spawned_order[:3]
         second_round = spawned_order[3:]
-        assert competitor not in first_round, (
-            f"defect (4b) DISMISSED: {competitor} got a turn within the first round-robin"
+        assert competitor in first_round, (
+            f"defect (4b) REGRESSED: {competitor} did not get a turn within the first round-robin"
         )
-        assert competitor not in second_round, (
-            f"defect (4b) DISMISSED: {competitor} got a turn within the second round-robin"
+        assert competitor in second_round, (
+            f"defect (4b) REGRESSED: {competitor} did not get a turn within the second round-robin"
         )
