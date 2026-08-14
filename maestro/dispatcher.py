@@ -2079,6 +2079,17 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 # can't both slip through a cap computed from a snapshot taken before
                 # either spawned.
                 runner_active_counts: dict[str, int] = {}
+                # T-54: the seed sum below counts from the runner recorded ON EACH
+                # ACTIVE KEY'S CLAIM at spawn time (`claims.write_claim`'s own
+                # `runner` field), never from re-resolving `resolve_runner(cfg, k,
+                # phase_by_key.get(k, ""))` -- a session spawned while `k` was
+                # `implementing` still holds its slot after `k` folds to a phase
+                # where its runner is no longer eligible (e.g. `qa`, by default),
+                # and re-resolving would silently stop counting it, leaking a cap
+                # slot (spec Notes: "the claim is the fact; count from the claim,
+                # not from a re-resolution"). Loaded lazily, once for the whole
+                # sweep, only if a cap check is actually reached.
+                claims_by_key: dict[str, dict] | None = None
 
                 spawned = []
                 rotation_changed = False
@@ -2203,9 +2214,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                         cap = _runner_concurrency_cap(cfg, runner)
                         if cap is not None:
                             if runner not in runner_active_counts:
+                                if claims_by_key is None:
+                                    claims_by_key = claims.all_claims(home)
                                 runner_active_counts[runner] = sum(
                                     1 for k in active
-                                    if resolve_runner(cfg, k, phase_by_key.get(k, ""))[0] == runner)
+                                    if (claims_by_key.get(k) or {}).get("runner", "claude") == runner)
                             if runner_active_counts[runner] >= cap:
                                 decisions[key]["outcome"] = "runner_capped"
                                 continue
@@ -2372,6 +2385,44 @@ _REGISTERED_RUNNERS = frozenset({"claude", "opencode"})
 # otherwise -- raise this via config, not by editing the default.
 _RUNNER_DEFAULT_CONCURRENCY = {"opencode": 1}
 
+# T-54: per-runner eligible-phase defaults, consulted by `runner_eligible_phases`
+# below when `[runner.<name>]`'s `phases` key (cfg.provider_config) is unset --
+# "implementing only" for every runner (including one with no default entry at
+# all here), matching what `resolve_runner` hardcoded before this ticket, so an
+# existing home with no `[runner.<name>] phases` line spawns byte-identically
+# to before. A runner is only ever confined to `implementing` BY DEFAULT --
+# admitting it to `triaging`/`researching`/`qa` too is a deliberate, reviewable
+# config change (`[runner.<name>] phases = [...]`), never a code edit.
+_RUNNER_DEFAULT_PHASES = {"opencode": frozenset({Phase.IMPLEMENTING})}
+
+
+def runner_eligible_phases(cfg: Config, runner: str) -> frozenset:
+    """The set of `Phase`s *runner* may actually be spawned for (T-54).
+
+    Sourced from `[runner.<name>].phases` (``cfg.provider_config["runner"]
+    [name]["phases"]``, a list of phase-suffix strings, e.g. ``["implementing",
+    "qa"]``) if set, else `_RUNNER_DEFAULT_PHASES.get(runner)` -- which itself
+    falls back to ``{Phase.IMPLEMENTING}`` when *runner* has no default entry
+    either, so "implementing only" is the universal default. Same fail-soft
+    idiom as `resolve_reconcile_command`'s own `try/except ValueError` around
+    `Phase(phase)`: an unparseable phase name in the config list is skipped,
+    never raised -- a config typo here must never wedge the spawn loop, only
+    narrow the eligible set by one entry. Never raises, never spawns a
+    subprocess -- called from `resolve_runner`, which must stay a pure
+    config + spec read (see its own docstring).
+    """
+    table = (cfg.provider_config.get("runner") or {}).get(runner) or {}
+    raw = table.get("phases")
+    if raw is None:
+        return _RUNNER_DEFAULT_PHASES.get(runner, frozenset({Phase.IMPLEMENTING}))
+    out = set()
+    for name in raw if isinstance(raw, list) else []:
+        try:
+            out.add(Phase(name))
+        except ValueError:
+            continue
+    return frozenset(out)
+
 
 def _runner_concurrency_cap(cfg: Config, runner: str) -> int | None:
     """The per-runner concurrency cap (OC-4) for *runner* -- `[runner.<name>]`'s
@@ -2393,16 +2444,22 @@ def _runner_concurrency_cap(cfg: Config, runner: str) -> int | None:
 
 def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     """Resolve the runner (and its optional model override) for spawning *key*'s
-    reconciler (RF-2).
+    reconciler (RF-2), for *phase* (T-54).
 
     Requirement 1, enforced HERE and only here (``gates.needs_approval``'s "THE
-    RULE MUST HAVE EXACTLY ONE DEFINITION"): every phase other than the
-    implementation spawn always gets ``("claude", None)``, regardless of what the
-    spec says -- a non-Claude runner is only ever meaningful for the `implementing`
-    step, and every other phase's reconciler must keep spawning via the one
-    backend that's actually been proven byte-identical.
+    RULE MUST HAVE EXACTLY ONE DEFINITION"): the spec's `runner:` choice only
+    ever takes effect for a phase admitted into that runner's own eligible-phase
+    set (`runner_eligible_phases`, a `Phase`-keyed table sourced from
+    `[runner.<name>].phases` config, same try/except-``ValueError`` shape as
+    `resolve_reconcile_command`'s `_PHASE_COMMAND_SUFFIX` lookup) -- an
+    unparseable *phase*, or a phase absent from that set, both fall back to
+    ``("claude", None)`` regardless of what the spec says. By default that set
+    is `implementing` only for every runner, so an existing home with no
+    `[runner.<name>] phases` line resolves byte-identically to before this
+    ticket; admitting a runner to `triaging`/`researching`/`qa` too is a
+    deliberate config change, not a code edit.
 
-    Precedence for the `implementing` phase: spec `runner:`/`runner_model:`
+    Precedence when the phase IS eligible: spec `runner:`/`runner_model:`
     front-matter -> board config (``cfg.runner``/``cfg.runner_model``) -- two
     levels only, matching `model`/`effort` (no ``[repos.*].runner`` layer).
 
@@ -2417,10 +2474,8 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     not this function's, so this stays a pure read with no side effects.
     """
     try:
-        is_implementing = Phase(phase) == Phase.IMPLEMENTING
+        phase_enum = Phase(phase)
     except ValueError:
-        is_implementing = False
-    if not is_implementing:
         return "claude", None
 
     spec_file = store.spec_path(cfg.home, key)
@@ -2430,6 +2485,8 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
 
     runner = overrides.get("runner") or cfg.runner
     runner_model = overrides.get("runner_model") or cfg.runner_model
+    if phase_enum not in runner_eligible_phases(cfg, runner):
+        return "claude", None
     return runner, runner_model
 
 
