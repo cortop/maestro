@@ -2013,20 +2013,27 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             # fleet-wide rate gate -- all three still apply on top. None (default)
             # is uncapped, i.e. today's behavior by construction. T-63 (MTO-9
             # defect 4a): the cap must count ACTUAL launches, not intent, so
-            # `per_repo_spawn_count` is no longer incremented here -- it lives
-            # beside the real spawn attempt below (dry_run's would_spawn / the
-            # real branch's sessions.spawn), incremented only once a key clears
-            # every downstream gate. A key a later gate rejects (credential,
-            # runner, interlock, attempts-exhausted) never burns its repo's
-            # slot, so it can no longer starve a key behind it that would have
-            # spawned cleanly.
+            # `per_repo_spawn_count` is only incremented beside the real spawn
+            # attempt below (dry_run's would_spawn / the real branch's
+            # sessions.spawn), once a key clears every downstream gate. A key a
+            # later gate rejects (credential, runner, interlock, attempts-
+            # exhausted) never burns its repo's slot, so it can no longer starve
+            # a key behind it that would have spawned cleanly.
+            #
+            # T-63 (a regression this same fix first introduced, caught in QA):
+            # for the identical reason, `max_concurrency` slots must not be
+            # pre-allocated by slicing `eligible[:slots]` before this cap is
+            # even checked -- that let a repo-capped candidate occupy a slot a
+            # DIFFERENT, uncapped repo's key could have used, starving it into
+            # capacity_skipped. Instead the concurrency-slot check and the
+            # repo-cap check run together, per key, in `eligible` (priority)
+            # order below, and only an ACTUAL spawn (would_spawn under
+            # dry_run, sessions.spawn in the real branch) advances either
+            # counter -- a key rejected by any gate burns neither a repo slot
+            # nor a concurrency slot, so it can never starve a key behind it.
             per_repo_spawn_count: dict[str, int] = {}
-
             slots = max(0, cfg.max_concurrency - len(active))
-            to_spawn = eligible[:slots]
-            capacity_skipped = [k for k, _ in eligible[slots:]]
-            for key in capacity_skipped:
-                decisions[key]["outcome"] = "capacity_skipped"
+            capacity_skipped: list[str] = []
 
             # T-34/RF-5: the interlock -- config-only, computed once per sweep, not
             # per-key, and read here (before the dry_run split) so the read-only
@@ -2042,18 +2049,20 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             if dry_run:
                 # No _allow_spawn (it can call ops.fail -> Failed/RequeueScheduled
                 # events, exactly the bug this ticket exists to stop), no real
-                # sessions.spawn(), no ledger/attempts write. Every to_spawn key is
-                # reported as would-spawn (or would-ask, if interlocked); the next
-                # REAL sweep decides for itself.
+                # sessions.spawn(), no ledger/attempts write. Every considered key
+                # is reported as would-spawn (or would-ask, if interlocked, or
+                # capacity/repo-capped); the next REAL sweep decides for itself.
                 spawned = []
-                for key, _reason in to_spawn:
+                for key, _reason in eligible:
+                    if len(spawned) >= slots:
+                        capacity_skipped.append(key)
+                        decisions[key]["outcome"] = "capacity_skipped"
+                        continue
                     binding = bindings_by_key.get(key)
                     cap = binding.max_spawns_per_sweep if binding is not None else None
-                    if cap is not None:
-                        name = binding.name
-                        if per_repo_spawn_count.get(name, 0) >= cap:
-                            decisions[key]["outcome"] = "repo_capped"
-                            continue
+                    if cap is not None and per_repo_spawn_count.get(binding.name, 0) >= cap:
+                        decisions[key]["outcome"] = "repo_capped"
+                        continue
                     if interlock_reason is not None:
                         decisions[key]["outcome"] = "would_ask_backend_interlocked"
                         continue
@@ -2082,7 +2091,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
 
                 spawned = []
                 rotation_changed = False
-                for key, _reason in to_spawn:
+                for key, _reason in eligible:
+                    if len(spawned) >= slots:
+                        capacity_skipped.append(key)
+                        decisions[key]["outcome"] = "capacity_skipped"
+                        continue
                     binding = bindings_by_key.get(key)
                     cap = binding.max_spawns_per_sweep if binding is not None else None
                     if cap is not None and per_repo_spawn_count.get(binding.name, 0) >= cap:
@@ -2199,14 +2212,17 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                         # attempts and dead-letter the ticket over what is, here, pure
                         # capacity -- not a broken ticket). Group-level skip, modelled on
                         # `repo_capped`/`repo_blocked`: no event, ticket stays due, retried
-                        # next sweep once a slot frees up.
-                        cap = _runner_concurrency_cap(cfg, runner)
-                        if cap is not None:
+                        # next sweep once a slot frees up. Named `runner_cap`, distinct
+                        # from the outer `cap` (repo max_spawns_per_sweep) -- T-63 QA
+                        # caught this reusing `cap` and shadowing the repo cap, so the
+                        # repo-slot increment below silently read the runner cap instead.
+                        runner_cap = _runner_concurrency_cap(cfg, runner)
+                        if runner_cap is not None:
                             if runner not in runner_active_counts:
                                 runner_active_counts[runner] = sum(
                                     1 for k in active
                                     if resolve_runner(cfg, k, phase_by_key.get(k, ""))[0] == runner)
-                            if runner_active_counts[runner] >= cap:
+                            if runner_active_counts[runner] >= runner_cap:
                                 decisions[key]["outcome"] = "runner_capped"
                                 continue
                             runner_active_counts[runner] += 1

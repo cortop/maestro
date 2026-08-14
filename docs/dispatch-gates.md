@@ -4,24 +4,25 @@
 
 Every `decisions[key]["outcome"]` a sweep can assign, in the source order `maestro/dispatcher.py`'s `dispatch()` sets them. Regenerate with `make diagram` after touching `dispatch()`; `tests/test_diagram.py` fails `make test` otherwise.
 
-17 gates today.
+18 gates today.
 
 | # | outcome | source |
 |---|---------|--------|
 | 1 | `throttled` | `maestro/dispatcher.py:1990` |
 | 2 | `repo_blocked` | `maestro/dispatcher.py:2005` |
-| 3 | `capacity_skipped` | `maestro/dispatcher.py:2029` |
-| 4 | `repo_capped` | `maestro/dispatcher.py:2055` |
-| 5 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2058` |
-| 6 | `would_spawn` | `maestro/dispatcher.py:2061` |
-| 7 | `repo_capped` | `maestro/dispatcher.py:2089` |
-| 8 | `backend_interlocked` | `maestro/dispatcher.py:2097` |
-| 9 | `credential_unresolvable` | `maestro/dispatcher.py:2109` |
-| 10 | `runner_unregistered` | `maestro/dispatcher.py:2123` |
-| 11 | `runner_disabled` | `maestro/dispatcher.py:2157` |
-| 12 | `runner_binary_missing` | `maestro/dispatcher.py:2171` |
-| 13 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2175` |
-| 14 | `runner_model_unavailable` | `maestro/dispatcher.py:2186` |
-| 15 | `runner_capped` | `maestro/dispatcher.py:2210` |
-| 16 | `attempts_exhausted` | `maestro/dispatcher.py:2216` |
-| 17 | `spawned` | `maestro/dispatcher.py:2235` |
+| 3 | `capacity_skipped` | `maestro/dispatcher.py:2059` |
+| 4 | `repo_capped` | `maestro/dispatcher.py:2064` |
+| 5 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2067` |
+| 6 | `would_spawn` | `maestro/dispatcher.py:2070` |
+| 7 | `capacity_skipped` | `maestro/dispatcher.py:2097` |
+| 8 | `repo_capped` | `maestro/dispatcher.py:2102` |
+| 9 | `backend_interlocked` | `maestro/dispatcher.py:2110` |
+| 10 | `credential_unresolvable` | `maestro/dispatcher.py:2122` |
+| 11 | `runner_unregistered` | `maestro/dispatcher.py:2136` |
+| 12 | `runner_disabled` | `maestro/dispatcher.py:2170` |
+| 13 | `runner_binary_missing` | `maestro/dispatcher.py:2184` |
+| 14 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2188` |
+| 15 | `runner_model_unavailable` | `maestro/dispatcher.py:2199` |
+| 16 | `runner_capped` | `maestro/dispatcher.py:2226` |
+| 17 | `attempts_exhausted` | `maestro/dispatcher.py:2232` |
+| 18 | `spawned` | `maestro/dispatcher.py:2251` |
