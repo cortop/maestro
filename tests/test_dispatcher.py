@@ -129,6 +129,9 @@ def test_dispatch_does_not_respawn_in_review_ticket_under_its_requeue(home, cfg)
         assert report.spawned == []
     assert sessions.spawned == []
 
+    report = disp.dispatch(cfg, sessions, now=base + 1)
+    assert report.spawned == ["T-1"]
+
 
 # --- OC-7 (T-65): degraded is a sleeping phase, not an active one -----------------
 
