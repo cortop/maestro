@@ -19,12 +19,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import claims, credentials, dispatcher, event_log, fleet, runner_permissions, skills_install, spend as spend_mod, store
+from . import claims, credentials, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, spend as spend_mod, store
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
 from .config import Config
 from .gates import spec_runner
 from .providers import ollama as ollama_mod
+from .providers import pi as pi_mod
 from .statemachine import Phase
 
 WINDOW_SECONDS = 3600
@@ -413,14 +414,24 @@ def _runner_for_key(cfg: Config, key: str) -> str:
 
 
 def _runners_by_binding(cfg: Config, home: Path, keys) -> dict:
-    """{repo binding name: runner} for the two runner-aware checks below -- one
-    runner per binding, resolved from whichever key(s) reference it (see
+    """{repo binding name: runner} for the three runner-aware checks below --
+    one runner per binding, resolved from whichever key(s) reference it (see
     `_runner_for_key`). A binding referenced by keys with different
     runners keeps the FIRST seen (mirrors `referenced_repo_bindings`'s own
     first-seen-wins rule) -- a real board binds one runner per repo in
     practice; this doesn't attempt to represent a mixed-runner repo. A binding
     with no referencing key (e.g. the implicit default on a board with no live
-    tickets yet) is absent here -- callers fall back to `cfg.runner`."""
+    tickets yet) is absent here -- callers fall back to `cfg.runner`.
+
+    T-61: pi's own consumer (`_pi_permission_gap`) doesn't actually read
+    *anything* keyed by binding name -- pi's guard extension is one
+    board-wide install (`store.pi_agent_dir(cfg.home)`), not a per-repo file
+    -- so a binding mixing a pi ticket with a claude/opencode one is not a
+    silent gap for THAT check specifically: whichever runner wins first-seen,
+    the pi-model/pi-binary checks beside it (`check_pi_models`,
+    `check_runner_binary`) still see every ticket's OWN spec directly, never
+    through this per-binding fold. The opencode-side checks keep the
+    pre-existing limitation this docstring already documented."""
     from . import repos as repos_mod  # lazy: repos imports dispatcher at module load time
 
     out: dict = {}
@@ -451,6 +462,12 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     ``.claude/commands/`` -- checking the Claude-side location for an
     opencode-runner ticket would be a check of the wrong file, not a
     meaningful ok/warn.
+
+    T-61: a pi binding is always satisfied, never checked against either
+    location -- PI-8's ``PiCliSessions.spawn`` passes the reconcile prompt
+    via ``--prompt-template`` at the package payload directly (never reads
+    ``.claude/commands/`` or ``.opencode/command/``), so there is no
+    per-repo command-file location for pi that could ever go missing.
     """
     home = cfg.home
     keys = dispatcher.list_keys(home)
@@ -465,6 +482,8 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
         if not binding.path or not Path(binding.path).exists():
             continue
         runner = runners_by_binding.get(name, cfg.runner)
+        if runner == "pi":
+            continue
         if runner == "claude":
             commands_dir = Path(binding.path) / ".claude" / "commands"
             user_has = user_has_skill
@@ -600,6 +619,28 @@ def _opencode_permission_gap(cfg: Config, repo_path: Path) -> str | None:
             f"{skills_install.opencode_user_config_path(cfg)} -- run `maestro install-commands`")
 
 
+def _pi_permission_gap(cfg: Config) -> str | None:
+    """T-61: pi's counterpart of `_opencode_permission_gap` above -- pi ships
+    NO permission gate of its own (auto-approve by design, see
+    `pi_guard`'s module docstring), so maestro's guard extension IS its
+    entire permission surface, materialized once per board under
+    `store.pi_agent_dir(cfg.home)` (never per-repo -- unlike Claude Code's
+    settings.json or opencode's opencode.jsonc, a pi binding has no
+    repo-local permission file of its own to read).
+
+    Read-only existence check -- never calls `pi_guard.install` itself (a
+    doctor check must never write); `PiCliSessions.spawn` is what actually
+    installs it, belt-and-suspenders re-verified there on every real spawn
+    (see its own docstring). Returns ``None`` when the extension is already
+    installed, else a short reason -- an ungated pi board must never report
+    ``ok`` (the Note this check exists for: "a green doctor on an ungated pi
+    board is the worst possible output")."""
+    ext = pi_guard.extension_path(store.pi_agent_dir(cfg.home))
+    if ext.exists():
+        return None
+    return f"pi guard extension not installed at {ext} -- no pi session has spawned yet"
+
+
 def check_reconciler_permissions(cfg: Config, now: float) -> dict:
     """WARN (never blocks a spawn) when a repo bound by a current ticket has no
     Claude Code permission grant for the reconciler's whole Bash surface
@@ -633,13 +674,21 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
     ``skills_install._opencode_declarative_config`` /
     ``runner_permissions.opencode_permission_block``, the write path this
     check used to have nothing to read), via `_opencode_permission_gap` below.
-    A binding whose runner is neither ``claude`` nor ``opencode`` (no such
-    runner is registered today -- `dispatcher._REGISTERED_RUNNERS` -- but a
-    future one could land before this check is updated for it) is reported
-    ``not_applicable_by_repo`` with a named reason instead of being folded into
-    ``missing_by_repo``/``ok`` -- reporting ``ok`` for a surface nothing here
-    actually reads would claim a verification that never happened (the exact
-    silent-``ok`` class QW-1 exists to prevent).
+
+    T-61: a binding whose runner is ``pi`` is checked against ITS OWN
+    surface too -- the guard extension's on-disk presence (`_pi_permission_gap`)
+    -- rather than folded into ``not_applicable_by_repo``. Before this, an
+    ungated pi board (no session ever spawned, so `pi_guard.install` never
+    ran) reported ``ok`` here, which is the worst possible doctor output for
+    a runner that ships with NO permission gate of its own.
+
+    A binding whose runner is neither ``claude``, ``opencode``, nor ``pi``
+    (no such runner is registered today -- `dispatcher._REGISTERED_RUNNERS`
+    -- but a future one could land before this check is updated for it) is
+    reported ``not_applicable_by_repo`` with a named reason instead of being
+    folded into ``missing_by_repo``/``ok`` -- reporting ``ok`` for a surface
+    nothing here actually reads would claim a verification that never
+    happened (the exact silent-``ok`` class QW-1 exists to prevent).
     """
     if cfg.permission_mode == "bypassPermissions":
         return {"name": "reconciler_permissions", "status": "ok",
@@ -662,6 +711,11 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
         repo_path = Path(binding.path)
         if runner == "opencode":
             gap = _opencode_permission_gap(cfg, repo_path)
+            if gap:
+                missing_by_repo[name] = [gap]
+            continue
+        if runner == "pi":
+            gap = _pi_permission_gap(cfg)
             if gap:
                 missing_by_repo[name] = [gap]
             continue
@@ -908,16 +962,24 @@ def check_pi_version(cfg: Config, now: float, *, run=None) -> dict:
 
 
 def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
-    """WARN (never blocks a spawn) when a current ticket's spec names a
-    non-claude ``runner:`` whose ``runner_model:`` is absent from the local
+    """WARN (never blocks a spawn) when a current ticket's spec names
+    ``runner: opencode`` with a ``runner_model:`` absent from the local
     ollama catalogue, or installed but not tool-capable
     (``ollama.verdict_for_model``) -- OC-2's spawn preflight is the only place a
     bad choice is actually refused; this is board-wide visibility only, one
     sweep ahead of a wedge that would otherwise only surface as a spawn
     failure.
 
+    T-61: opencode-only -- ollama is opencode's OWN backend, not a catalogue
+    every non-claude runner shares. A pi ticket names an entirely different
+    catalogue (``check_pi_models`` beside it, ``providers/pi.py``); treating
+    it as an ollama candidate here would falsely warn on every pi ticket (and
+    cost a network call this check's whole "skip when nothing to check"
+    contract promises never to spend). Any future non-{claude,opencode,pi}
+    runner is likewise not a candidate until it's actually ollama-backed.
+
     Skips the network call entirely (``ok``, empty ``tickets``) when no
-    current ticket names a non-claude runner -- discovery must never cost a
+    current ticket names ``runner: opencode`` -- discovery must never cost a
     request on a board with nothing to check. Injectable ``transport``, as
     ``check_gh_credential_reachability``'s ``run`` kwarg already does, so tests
     never hit a real daemon."""
@@ -928,11 +990,11 @@ def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
         if not spec_file.exists():
             continue
         runner, model = _spec_runner_fields(spec_file.read_text(encoding="utf-8"))
-        if runner and runner != "claude" and model:
+        if runner == "opencode" and model:
             candidates.append((key, model))
 
     if not candidates:
-        return {"name": "ollama_models", "status": "ok", "detail": "no ticket uses a non-claude runner",
+        return {"name": "ollama_models", "status": "ok", "detail": "no ticket uses runner: opencode",
                 "tickets": {}}
 
     models, reason = ollama_mod.fetch_models(transport=transport)
@@ -940,7 +1002,7 @@ def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
         return {
             "name": "ollama_models", "status": "warn",
             "detail": f"ollama daemon unreachable ({reason}); "
-                      f"{len(candidates)} ticket(s) use a non-claude runner",
+                      f"{len(candidates)} ticket(s) use runner: opencode",
             "tickets": {key: {"verdict": "unreachable", "model": model, "reason": reason}
                         for key, model in candidates},
         }
@@ -952,8 +1014,56 @@ def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
             tickets[key] = {"verdict": verdict, "model": model, "reason": vreason}
     status = "warn" if tickets else "ok"
     detail = (f"{len(tickets)} ticket(s) name an absent or non-tool-capable ollama model"
-              if tickets else f"{len(candidates)} ticket(s) using a non-claude runner, all resolve ok")
+              if tickets else f"{len(candidates)} ticket(s) using runner: opencode, all resolve ok")
     return {"name": "ollama_models", "status": status, "detail": detail, "tickets": tickets}
+
+
+def check_pi_models(cfg: Config, now: float, *, run=None) -> dict:
+    """WARN (never blocks a spawn) when a current ticket's spec names
+    ``runner: pi`` with a ``runner_model:`` absent from pi's own catalogue
+    (``pi.verdict_for_model``) -- OC-2's spawn preflight is the only place a
+    bad choice is actually refused; this is board-wide visibility only, same
+    shape as ``check_ollama_models`` beside it (T-61: pi's own counterpart,
+    now that ``check_ollama_models`` no longer treats a pi ticket as one of
+    its own candidates).
+
+    Skips the subprocess probe entirely (``ok``, empty ``tickets``) when no
+    current ticket names ``runner: pi`` -- discovery must never cost a
+    ``pi --list-models`` shell-out on a board with nothing to check.
+    Injectable ``run`` (``check_pi_version``'s own pattern for a pi
+    subprocess call) so tests never shell a real ``pi``."""
+    home = cfg.home
+    candidates: list[tuple[str, str]] = []
+    for key in dispatcher.list_keys(home):
+        spec_file = store.spec_path(home, key)
+        if not spec_file.exists():
+            continue
+        runner, model = _spec_runner_fields(spec_file.read_text(encoding="utf-8"))
+        if runner == "pi" and model:
+            candidates.append((key, model))
+
+    if not candidates:
+        return {"name": "pi_models", "status": "ok", "detail": "no ticket uses runner: pi",
+                "tickets": {}}
+
+    models, reason = pi_mod.fetch_models(store.pi_agent_dir(home), run=run)
+    if models is None:
+        return {
+            "name": "pi_models", "status": "warn",
+            "detail": f"pi unreachable ({reason}); {len(candidates)} ticket(s) use runner: pi",
+            "tickets": {key: {"verdict": "unreachable", "model": model, "reason": reason}
+                        for key, model in candidates},
+        }
+
+    tickets = {}
+    for key, model in candidates:
+        verdict, vreason = pi_mod.verdict_for_model(models, reason, model)
+        if verdict != "ok":
+            tickets[key] = {"verdict": verdict, "model": model, "reason": vreason}
+    status = "warn" if tickets else "ok"
+    detail = (f"{len(tickets)} ticket(s) name a pi runner_model absent from pi's catalogue"
+              if tickets else f"{len(candidates)} ticket(s) using runner: pi, all resolve ok")
+    return {"name": "pi_models", "status": status, "detail": detail, "tickets": tickets}
 
 
 # MTO-8: consecutive non-429 error outcomes across the fleet's most recent
@@ -1194,7 +1304,7 @@ CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_out
           check_dead_letters, check_watchdog_loops, check_depends_on, check_repo_preflight,
           check_unknown_repo_bindings, check_missing_reconcile_skill, check_reconciler_permissions,
           check_spawn_floor, check_daily_spend, check_burn, check_gh_credential_reachability,
-          check_launchctl, check_ollama_models, check_runner_binary, check_pi_version,
+          check_launchctl, check_ollama_models, check_pi_models, check_runner_binary, check_pi_version,
           check_worktree_health, check_provider_availability)
 
 

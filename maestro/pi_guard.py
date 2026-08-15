@@ -65,6 +65,15 @@ def _extensions_dir(pi_agent_dir: Path) -> Path:
     return Path(pi_agent_dir) / "extensions"
 
 
+def extension_path(pi_agent_dir: Path) -> Path:
+    """Where `install` materializes the guard extension for *pi_agent_dir* --
+    the same path `spawn_argv`'s `--extension` flag names. T-61:
+    `health.check_reconciler_permissions`'s own read-only existence probe for
+    a pi binding (never calls `install` itself -- a doctor check must never
+    write) uses this to name the exact path it checked."""
+    return _extensions_dir(pi_agent_dir) / _EXTENSION_FILENAME
+
+
 def _write_if_changed(path: Path, content: str) -> bool:
     if path.exists() and path.read_text(encoding="utf-8") == content:
         return False

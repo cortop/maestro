@@ -248,6 +248,51 @@ def test_set_runner_never_warns_for_claude(home, cfg, monkeypatch):
     assert result["warning"] is None
 
 
+# --- T-61 (PI-9): a pi runner_model validates against pi's own catalogue --------
+
+def test_set_runner_pi_warns_from_pis_own_catalogue_never_touches_ollama(home, cfg, monkeypatch):
+    _seed_ticket(home, "T-1")
+    ollama_calls = []
+    monkeypatch.setattr(
+        "maestro.providers.ollama.fetch_models",
+        lambda *a, **kw: ollama_calls.append(1) or ([], None))
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-5.2", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+
+    result = ops.set_runner(cfg, "T-1", runner="pi", runner_model="glm-9.9-does-not-exist")
+
+    assert result["runner_model"] == "glm-9.9-does-not-exist"  # stored verbatim -- never gated
+    assert "glm-5.2" in result["warning"]
+    assert ollama_calls == []
+
+
+def test_set_runner_pi_warns_but_succeeds_when_pi_unreachable(home, cfg, monkeypatch):
+    _seed_ticket(home, "T-1")
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: (None, "pi --list-models timed out after 15.0s"))
+
+    result = ops.set_runner(cfg, "T-1", runner="pi", runner_model="glm-5.2")
+
+    assert result["runner_model"] == "glm-5.2"
+    assert "pi unreachable" in result["warning"]
+    assert "timed out" in result["warning"]
+
+
+def test_set_runner_pi_ok_when_model_present(home, cfg, monkeypatch):
+    _seed_ticket(home, "T-1")
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-5.2", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+
+    result = ops.set_runner(cfg, "T-1", runner="pi", runner_model="glm-5.2")
+
+    assert result["warning"] is None
+
+
 # --- CLI `maestro runner <KEY>` -------------------------------------------------
 
 def test_cli_runner_rewrites_only_the_new_lines(home):
@@ -305,6 +350,26 @@ def test_cli_runner_prints_warning_to_stderr(home, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "warning" in err
     assert "unreachable" in err
+
+
+def test_cli_runner_pi_prints_warning_sourced_from_pi_not_ollama(home, monkeypatch, capsys):
+    """T-61 (PI-9): the real `maestro runner <KEY>` CLI verb, sourced from
+    pi's own catalogue -- ollama is never touched for a pi runner_model."""
+    _seed_ticket(home, "T-1")
+    ollama_calls = []
+    monkeypatch.setattr("maestro.providers.ollama.fetch_models",
+                        lambda *a, **kw: ollama_calls.append(1) or ([], None))
+    monkeypatch.setattr("maestro.providers.pi.fetch_models",
+                        lambda *a, **kw: (None, "no such file: pi"))
+
+    rc = cli_main(["--home", str(home), "runner", "T-1",
+                   "--runner", "pi", "--runner-model", "glm-5.2"])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "warning" in err
+    assert "pi unreachable" in err
+    assert ollama_calls == []
 
 
 # --- AC8: `runner` is a human-only verb, never granted to agents ---------------

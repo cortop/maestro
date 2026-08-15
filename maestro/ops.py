@@ -1099,9 +1099,13 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
     other direct human spec edit already relies on.
 
     Never gates on the model being locally installed/reachable -- WARNs only,
-    the same three-valued verdict `health.check_ollama_models` computes,
-    just run here so the human sees it immediately rather than waiting for
-    the next `maestro doctor`. Returns
+    the same three-valued verdict `health.check_ollama_models`
+    (`health.check_pi_models` for a pi `runner`) computes, just run here so
+    the human sees it immediately rather than waiting for the next `maestro
+    doctor`. T-61: the catalogue is sourced from the runner's OWN provider
+    module -- opencode from `providers/ollama.py`, pi from `providers/pi.py`
+    (needs `cfg.home` to resolve `store.pi_agent_dir`) -- never ollama's for
+    a pi `runner_model`. Returns
     ``{"runner", "runner_model", "warning": str | None}``.
     """
     if runner is None and runner_model is None:
@@ -1124,14 +1128,22 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
 
     warning = None
     if runner and runner != "claude" and runner_model:
-        from .providers import ollama as ollama_mod
-        models, reason = ollama_mod.fetch_models()
-        verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+        if runner == "pi":
+            from .providers import pi as pi_mod
+            models, reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home))
+            verdict, vreason = pi_mod.verdict_for_model(models, reason, runner_model)
+            source = "pi"
+            suggestions = pi_mod.model_names(models) if models else []
+        else:
+            from .providers import ollama as ollama_mod
+            models, reason = ollama_mod.fetch_models()
+            verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+            source = "ollama daemon"
+            suggestions = ollama_mod.model_names(models, tool_capable_only=True) if models else []
         if verdict == "unreachable":
-            warning = f"ollama daemon unreachable ({vreason}) -- runner_model not validated"
+            warning = f"{source} unreachable ({vreason}) -- runner_model not validated"
         elif verdict == "missing":
-            suggestions = ollama_mod.model_names(models, tool_capable_only=True)
-            warning = f"{vreason}; installed tool-capable models: {suggestions or '(none)'}"
+            warning = f"{vreason}; available models: {suggestions or '(none)'}"
     return {"runner": runner, "runner_model": runner_model, "warning": warning}
 
 

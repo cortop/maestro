@@ -204,6 +204,34 @@ def test_mint_new_tickets_never_touches_ollama(home, cfg, monkeypatch):
     disp.mint_new_tickets(cfg)  # no `_new` inbox entries -- proves the path is reachable and untouched
 
 
+# --- T-61 (PI-9): a pi ticket is never an ollama_models candidate ------------
+
+
+def test_pi_runner_never_calls_the_transport(cfg, home):
+    """A `runner: pi` ticket is NOT an ollama_models candidate -- ollama is
+    opencode's own backend, not a catalogue every non-claude runner shares."""
+    _seed_spec(home, "T-1", _runner_spec("T-1", "pi", "glm-5.2"))
+
+    def boom(*a, **k):
+        raise AssertionError("must not call the transport for runner: pi")
+    transport = type("Boom", (), {"get": boom})()
+    result = health.check_ollama_models(cfg, 1000, transport=transport)
+    assert result["status"] == "ok"
+    assert result["tickets"] == {}
+
+
+def test_real_doctor_json_ok_for_pi_only_board_makes_zero_ollama_requests(home, monkeypatch):
+    """AC3: a real `maestro doctor` over a board whose only non-claude ticket
+    names `runner: pi` returns `ok` for `ollama_models` and makes ZERO ollama
+    requests."""
+    _seed_spec(home, "T-1", _runner_spec("T-1", "pi", "glm-5.2"))
+    _boom_transport(monkeypatch)
+    code, out = _sweep(home)
+    assert code == 0
+    check = next(c for c in out["checks"] if c["name"] == "ollama_models")
+    assert check["status"] == "ok"
+
+
 def test_real_doctor_json_warns_once_when_daemon_unreachable(home, monkeypatch):
     _seed_spec(home, "T-1", _runner_spec("T-1", "opencode", "a:1b"))
     monkeypatch.setattr(ollama_mod, "HttpOllamaTransport",

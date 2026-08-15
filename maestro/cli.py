@@ -18,6 +18,7 @@ from . import backup, claims, credentials, event_log, events, fleet, health, inb
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .providers import ollama as ollama_mod
+from .providers import pi as pi_mod
 from .sessions import (ClaudeCliSessions, DryRunSessions, OpencodeCliSessions,
                        PiCliSessions, RoutingSessions, list_sessions)
 from .statemachine import Phase
@@ -233,26 +234,37 @@ def _stdin_intent() -> str | None:
     return "\n".join(lines).strip() or None
 
 
-def _warn_runner_model(runner, runner_model) -> None:
+def _warn_runner_model(home, runner, runner_model) -> None:
     """UX-1: WARN-only, never gates creation -- prints when a non-claude
-    `runner_model` is absent locally / not tool-capable, or the ollama daemon
-    itself is unreachable. Mirrors the exact verdict
-    `health.check_ollama_models` computes board-wide, just run here so the
-    human sees it immediately at `create`/`runner` time instead of waiting
-    for the next `maestro doctor`. A model released after this code was
-    written must still be accepted with no code change -- this only ever
-    prints to stderr, it never changes the caller's exit code."""
+    `runner_model` is absent from its runner's catalogue / not tool-capable,
+    or that runner's own daemon/binary is unreachable. Mirrors the exact
+    verdict `health.check_ollama_models`/`health.check_pi_models` computes
+    board-wide, just run here so the human sees it immediately at
+    `create`/`runner` time instead of waiting for the next `maestro doctor`.
+    A model released after this code was written must still be accepted with
+    no code change -- this only ever prints to stderr, it never changes the
+    caller's exit code.
+
+    T-61: sourced from the runner's OWN provider module -- opencode from
+    `providers/ollama.py`, pi from `providers/pi.py` (needs *home* to resolve
+    `store.pi_agent_dir`) -- never ollama's for a pi `runner_model`."""
     if not runner or runner == "claude" or not runner_model:
         return
-    from .providers import ollama as ollama_mod
-    models, reason = ollama_mod.fetch_models()
-    verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+    if runner == "pi":
+        models, reason = pi_mod.fetch_models(store.pi_agent_dir(home))
+        verdict, vreason = pi_mod.verdict_for_model(models, reason, runner_model)
+        source = "pi"
+        suggestions = pi_mod.model_names(models) if models else []
+    else:
+        models, reason = ollama_mod.fetch_models()
+        verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+        source = "ollama daemon"
+        suggestions = ollama_mod.model_names(models, tool_capable_only=True) if models else []
     if verdict == "unreachable":
-        print(f"warning: ollama daemon unreachable ({vreason}) -- "
+        print(f"warning: {source} unreachable ({vreason}) -- "
               "runner_model not validated", file=sys.stderr)
     elif verdict == "missing":
-        suggestions = ollama_mod.model_names(models, tool_capable_only=True)
-        print(f"warning: {vreason}; installed tool-capable models: {suggestions or '(none)'}",
+        print(f"warning: {vreason}; available models: {suggestions or '(none)'}",
               file=sys.stderr)
 
 
@@ -365,7 +377,7 @@ def cmd_create(args) -> int:
         _print({"key": key})
         # UX-1 AC4: never gates creation on a model being locally installed/reachable
         # -- WARN only, after the ticket is already minted.
-        _warn_runner_model(runner, runner_model)
+        _warn_runner_model(cfg.home, runner, runner_model)
         if not args.no_nudge and cfg.nudge_on_human_input:
             _nudge(cfg)
         return 0
@@ -375,7 +387,7 @@ def cmd_create(args) -> int:
     _print(f"queued create: {args.key or '(auto-key)'} — {title}")
     # UX-1 AC4: never gates creation on a model being locally installed/reachable
     # -- WARN only, after the ticket is already queued.
-    _warn_runner_model(runner, runner_model)
+    _warn_runner_model(cfg.home, runner, runner_model)
     if not args.no_nudge and cfg.nudge_on_human_input:
         _nudge(cfg)
     return 0
@@ -512,15 +524,23 @@ def cmd_doctor(args) -> int:
 def cmd_runners(args) -> int:
     """Which local models can actually drive an agent (RF-4) -- claude is
     always available; opencode's are whatever the local ollama daemon reports
-    as tool-capable, discovered as a convenience only (never validated here --
-    OC-2's spawn preflight is where a bad choice is actually refused)."""
+    as tool-capable; pi's (T-61) are whatever this board's own pi install
+    (`store.pi_agent_dir(cfg.home)`) resolves via `providers/pi.py`. Every
+    probe here is discovery only, never validated -- OC-2's spawn preflight
+    is where a bad choice is actually refused."""
+    cfg = _cfg(args)
     models, reason = ollama_mod.fetch_models()
     if models is None:
         opencode = {"status": "unreachable", "models": None, "reason": reason}
     else:
         opencode = {"status": "ok", "models": ollama_mod.model_names(models, tool_capable_only=True),
                     "reason": None}
-    _print({"claude": {"status": "ok"}, "opencode": opencode})
+    pi_models, pi_reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home))
+    if pi_models is None:
+        pi = {"status": "unreachable", "models": None, "reason": pi_reason}
+    else:
+        pi = {"status": "ok", "models": pi_mod.model_names(pi_models), "reason": None}
+    _print({"claude": {"status": "ok"}, "opencode": opencode, "pi": pi})
     return 0
 
 
@@ -1304,7 +1324,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--session", help="select a specific session_id")
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
-    add("runners", cmd_runners, "which local models can drive an agent (claude + tool-capable ollama)")
+    add("runners", cmd_runners, "which local models can drive an agent (claude + tool-capable ollama + pi)")
     sp = add("runner", cmd_runner,
              "[human] change a ticket's runner/runner-model before implementation begins")
     sp.add_argument("key")

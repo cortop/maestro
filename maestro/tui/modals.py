@@ -8,8 +8,9 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, Select, Static, TextArea
 
-from .. import schedule
+from .. import schedule, store
 from ..providers import ollama as ollama_mod
+from ..providers import pi as pi_mod
 from ..statemachine import Phase
 
 
@@ -547,7 +548,16 @@ class _RunnerModal(ModalScreen):
     `_CreateModal.on_select_changed`'s kind -> field reshape. All state
     mutation happens in the caller's `_on_dismiss` (via `ops.set_runner`) --
     this modal only collects the two values, it never touches the spec file
-    itself."""
+    itself.
+
+    T-61 (PI-9): three runner kinds now, each with its own model catalogue --
+    claude has none of its own (the field stays sourced from ollama's for a
+    claude-runner ticket too, a pre-existing quirk this ticket doesn't
+    change: the label already says "only meaningful for a non-claude
+    runner"), opencode's is `providers.ollama`, pi's is `providers.pi`.
+    Selecting a runner-kind reshapes `#runner-model` to that kind's own
+    catalogue (`_reshape_model_field`) -- a `Select` when the catalogue is
+    reachable, an `Input` fallback otherwise, same shape either kind uses."""
 
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
@@ -556,21 +566,57 @@ class _RunnerModal(ModalScreen):
 
     # UX-1's known runner names (`maestro runners`) -- "claude" is always
     # available; anything else is opt-in via the board's `runner_enabled`.
-    _RUNNER_OPTIONS = [("claude", "claude"), ("opencode", "opencode")]
+    _RUNNER_OPTIONS = [("claude", "claude"), ("opencode", "opencode"), ("pi", "pi")]
 
-    def __init__(self, key: str, runner: str | None, runner_model: str | None) -> None:
+    def __init__(self, key: str, runner: str | None, runner_model: str | None,
+                home: Path | None = None) -> None:
         super().__init__()
         self._key = key
         self._runner = runner or "claude"
         self._runner_model = runner_model or ""
+        # `home` resolves pi's own agent dir (`store.pi_agent_dir`) for its
+        # catalogue probe -- optional so a caller that never shows a pi
+        # ticket (or a test exercising claude/opencode only) doesn't need one.
+        self._home = home
         # UX-1's model catalogue (`ollama_mod.fetch_models`) -- fetched once,
         # up front, so both `compose` and `on_select_changed` decide the model
         # field's shape off the same result. Never raises (see ollama.py); a
         # down/unreachable daemon just means an empty catalogue, handled below.
         self._models, self._daemon_reason = ollama_mod.fetch_models()
+        # pi's own catalogue is fetched lazily (`_fetch_pi_models`) -- a
+        # subprocess probe, unlike ollama's cheap 2s-timeout HTTP call, so it
+        # must never run for a modal that never shows a pi-kind selection.
+        self._pi_models: list[dict] | None = None
+        self._pi_reason: str | None = None
+        self._pi_fetched = False
 
-    def _model_names(self) -> list[str]:
-        return ollama_mod.model_names(self._models, tool_capable_only=True) if self._models else []
+    def _fetch_pi_models(self) -> None:
+        if self._pi_fetched:
+            return
+        pi_agent_dir = store.pi_agent_dir(self._home) if self._home is not None else None
+        self._pi_models, self._pi_reason = pi_mod.fetch_models(pi_agent_dir)
+        self._pi_fetched = True
+
+    def _catalogue(self, runner: str) -> tuple[list[dict] | None, str | None, list[str]]:
+        """``(models, reason, names)`` for *runner*'s own model field -- pi's
+        catalogue for a pi selection, ollama's for anything else."""
+        if runner == "pi":
+            self._fetch_pi_models()
+            models, reason = self._pi_models, self._pi_reason
+            names = pi_mod.model_names(models) if models else []
+        else:
+            models, reason = self._models, self._daemon_reason
+            names = ollama_mod.model_names(models, tool_capable_only=True) if models else []
+        return models, reason, names
+
+    def _model_field_widget(self, runner: str, current: str | None) -> Input | Select:
+        models, _reason, names = self._catalogue(runner)
+        if models is not None:
+            model_options = [(m, m) for m in names]
+            default = current if current in dict(model_options) else Select.NULL
+            return Select(options=model_options, id="runner-model", allow_blank=True, value=default)
+        return Input(value=current or "",
+                    placeholder="model name (daemon unreachable)", id="runner-model")
 
     def compose(self) -> ComposeResult:
         with Vertical(id="runner-dialog"):
@@ -579,36 +625,68 @@ class _RunnerModal(ModalScreen):
             yield Select(options=self._RUNNER_OPTIONS, id="runner-kind",
                         allow_blank=False, value=self._runner)
             yield Label("Model (optional; only meaningful for a non-claude runner)")
-            if self._models is not None:
-                model_options = [(m, m) for m in self._model_names()]
-                default = self._runner_model if self._runner_model in dict(model_options) else Select.NULL
-                yield Select(options=model_options, id="runner-model", allow_blank=True, value=default)
-            else:
-                yield Input(value=self._runner_model,
-                           placeholder="model name (daemon unreachable)", id="runner-model")
-            yield Label("[dim]Tab/Enter → next · Ctrl+Enter → submit · Esc → cancel[/dim]")
+            yield self._model_field_widget(self._runner, self._runner_model or None)
+            yield Label("[dim]Tab/Enter → next · Ctrl+Enter → submit · Esc → cancel[/dim]", id="runner-hint")
 
     def on_mount(self) -> None:
-        if self._models is None:
+        models, reason, _names = self._catalogue(self._runner)
+        if models is None:
+            source = "pi" if self._runner == "pi" else "ollama daemon"
             self.notify(
-                f"ollama daemon unreachable ({self._daemon_reason}) -- "
+                f"{source} unreachable ({reason}) -- "
                 "type a model name manually", severity="warning",
             )
         self.query_one("#runner-kind", Select).focus()
 
-    def on_select_changed(self, event: Select.Changed) -> None:
+    async def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "runner-kind":
             return
-        # Mirrors _CreateModal.on_select_changed's kind -> field reshape: a
-        # runner_model override is only ever meaningful for a non-claude
-        # runner (ops.set_runner only validates/warns on it then), so clear
-        # whatever the model field holds the moment the kind flips to claude.
-        if event.value == "claude":
-            model_widget = self.query_one("#runner-model")
-            if isinstance(model_widget, Select):
-                model_widget.value = Select.NULL
+        await self._reshape_model_field(str(event.value))
+
+    async def _reshape_model_field(self, runner: str) -> None:
+        """Rebuild `#runner-model` for *runner*'s own catalogue. A
+        runner_model override is only ever meaningful for a non-claude
+        runner (`ops.set_runner` only validates/warns on it then), so
+        `claude` just clears whatever the field holds -- same as before T-61.
+        `opencode`/`pi` reshape the field to that kind's own catalogue
+        (`_catalogue`), carrying over the current value where it's still a
+        valid choice under the new one.
+
+        Async (Textual awaits a coroutine message handler same as a plain
+        one): swapping the field's WIDGET TYPE (`Select` <-> `Input`, needed
+        whenever reachability differs between the two kinds) must `remove()`
+        the old widget and `await` that completion before `mount()`-ing the
+        new one under the same id -- `mount()` registers the new widget's id
+        synchronously, while `remove()` only schedules the old one's
+        deregistration, so an un-awaited remove immediately followed by a
+        mount raises `DuplicateIds`."""
+        old = self.query_one("#runner-model")
+        if isinstance(old, Select):
+            current = None if old.value is Select.NULL else str(old.value)
+        else:
+            current = old.value.strip() or None
+        if runner == "claude":
+            if isinstance(old, Select):
+                old.value = Select.NULL
             else:
-                model_widget.value = ""
+                old.value = ""
+            return
+        models, reason, names = self._catalogue(runner)
+        if models is None:
+            source = "pi" if runner == "pi" else "ollama daemon"
+            self.notify(f"{source} unreachable ({reason}) -- type a model name manually",
+                       severity="warning")
+        if isinstance(old, Select) and models is not None:
+            model_options = [(m, m) for m in names]
+            old.set_options(model_options)
+            old.value = current if current in dict(model_options) else Select.NULL
+            return
+        if isinstance(old, Input) and models is None:
+            return  # already the right shape -- keep whatever's typed
+        new_widget = self._model_field_widget(runner, current)
+        hint = self.query_one("#runner-hint")
+        await old.remove()
+        await self.query_one("#runner-dialog").mount(new_widget, before=hint)
 
     def action_submit(self) -> None:
         self._submit()
