@@ -133,6 +133,73 @@ def test_dispatch_does_not_respawn_in_review_ticket_under_its_requeue(home, cfg)
     assert report.spawned == ["T-1"]
 
 
+# --- OC-7 (T-65): degraded is a sleeping phase, not an active one -----------------
+
+
+def test_degraded_ticket_with_no_signal_is_never_spawned(home, cfg):
+    """AC1: a real dispatch() sweep over a `degraded` ticket with an empty
+    inbox and no pending requeue timer spawns nothing for it -- and a second
+    sweep still spawns nothing, proving it actually sleeps (statemachine.
+    SLEEPING_PHASES) rather than merely skipping one cycle."""
+    _seed(home, "T-1", Phase.DEGRADED)
+    snap = snap_mod.load(home, "T-1")
+    assert not disp.is_due(home, "T-1", snap, inbox_pending=False,
+                           current_spec_hash=snap.spec_hash, now=1000).due
+
+    r1 = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert r1.spawned == []
+    r2 = disp.dispatch(cfg, DryRunSessions(), now=2000)
+    assert r2.spawned == []
+
+
+def test_degraded_ticket_revived_by_real_inbox_command(home, cfg):
+    """AC2: appending to a degraded ticket's inbox through the real CLI makes
+    it due on the very next real sweep -- a degraded ticket can still be
+    revived, proven end-to-end against the real `maestro` verb and a real
+    dispatch() sweep, not asserted against a mock."""
+    from maestro import cli
+
+    _seed(home, "T-1", Phase.DEGRADED)
+    assert disp.dispatch(cfg, DryRunSessions(), now=1000).spawned == []
+
+    # --no-nudge: this test proves revival via its own explicit dispatch()
+    # call below, not via cmd_ans's post-write nudge sweep -- an un-suppressed
+    # nudge would build a real ClaudeCliSessions and try to Popen("claude", ...)
+    # the instant T-1 goes due, which fails in CI where no `claude` binary is
+    # on PATH (it happens to succeed as a pointless real spawn locally, where
+    # one is).
+    assert cli.main(["--home", str(home), "ans", "T-1", "retry", "--no-nudge"]) == 0
+
+    r2 = disp.dispatch(cfg, DryRunSessions(), now=1001)
+    assert r2.spawned == ["T-1"]
+
+
+def test_degraded_ticket_does_not_accumulate_failed_stalled_pairs(home, cfg):
+    """Regression test for the measured 2026-08-14 loop (OC-7): before this
+    fix, `degraded` sat in ACTIVE_PHASES, so the dispatcher respawned the
+    passive reconciler on it every sweep; a reconciler that (correctly) finds
+    nothing to route exits without appending, `_allow_spawn`'s no-progress
+    watchdog counts that as a stall, and once `max_spawn_attempts` trips it
+    calls `ops.fail` again -- which, already past `max_failures`, re-appends
+    another Failed/Stalled pair on every single call with no backoff, forever.
+    Reproduced here with the exact `_EphemeralSessions` no-op worker (appends
+    nothing, dies before the next sweep looks) across many sweeps: the real
+    event log must be byte-for-byte unchanged after them."""
+    cfg.max_spawn_attempts = 2
+    cfg.min_spawn_interval = 0
+    _seed(home, "T-1", Phase.DEGRADED)
+    before = event_log.read(home, "T-1")
+
+    sessions = _EphemeralSessions()
+    for i in range(30):
+        report = disp.dispatch(cfg, sessions, now=1000 + i)
+        assert report.spawned == []
+
+    after = event_log.read(home, "T-1")
+    assert after == before
+    assert snap_mod.load(home, "T-1").phase == Phase.DEGRADED.value
+
+
 def test_spawn_floor_bounds_a_runaway_dispatcher(home, cfg):
     """The incident in miniature. A dispatcher fired every 11s at four tickets that
     never advance and whose workers die instantly used to spawn 4 sessions per

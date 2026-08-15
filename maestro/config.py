@@ -28,7 +28,25 @@ class Config:
     min_spawn_interval: int | None = None
     backoff_base: int = 30                 # seconds; exp backoff on transient failure
     backoff_cap: int = 3600
-    max_failures: int = 4                  # -> dead-letter (DEGRADED)
+    # Cumulative-failure threshold before `ops.fail` dead-letters a ticket into
+    # DEGRADED (STALLED + phase change). `failure_count` is a lifetime counter
+    # that never resets -- not even when a human revives a DEGRADED ticket
+    # (`maestro cmd <KEY> retry` -> READY) -- so this is a ONE-SHOT trip, not a
+    # per-attempt retry budget: once a ticket has failed `max_failures` times
+    # ever, its very next failure re-dead-letters immediately, with no backoff
+    # in between. What it does NOT bound on its own: how many times `ops.fail`
+    # itself gets CALLED for an already-degraded ticket -- that was the actual
+    # 2026-08-14 runaway (OC-7, T-65's spec Notes: 116 sessions / $8.63 for zero
+    # progress). DEGRADED sitting in `statemachine.ACTIVE_PHASES` kept it being
+    # respawned every sweep, and each no-progress spawn tripped
+    # `max_spawn_attempts`'s watchdog into calling `ops.fail` again -- which,
+    # already past this threshold, re-appended another Failed/Stalled pair on
+    # every single call, forever, since dead-lettering never sets a backoff
+    # timer the way the non-dead-letter branch does. `max_failures` was doing
+    # exactly what it says (parking the ticket); the respawn loop feeding it
+    # was `statemachine.SLEEPING_PHASES` missing DEGRADED, not this knob -- see
+    # the comment there.
+    max_failures: int = 4
     max_impl_turns: int = 20               # ralph-loop circuit breaker
     # Watchdog: reap a claim whose session has run past this many seconds (0 disables).
     # Generous by default -- real implementation sessions legitimately run 30-60+ min.
@@ -458,7 +476,9 @@ reconcile_steady_interval = 300
                                   # when the effective value is 0). Negative is rejected
                                   # at load (exit 2), not silently clamped to 0.
 backoff_base = 30
-max_failures = 4
+max_failures = 4                 # lifetime (never-reset) failure count -> dead-letter
+                                  # (DEGRADED); a one-shot trip, not a per-attempt retry
+                                  # budget -- see the field's docstring in this module.
 max_impl_turns = 20
 # max_session_seconds = 7200      # kill+fail a claim whose session ran longer than this
                                   # (0 disables). Generous default -- real implementation

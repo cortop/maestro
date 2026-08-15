@@ -68,7 +68,7 @@ stateDiagram-v2
     classDef sleeping fill:#fff3cd,stroke:#997404
     classDef terminal fill:#d1e7dd,stroke:#0f5132
     classDef active fill:#cfe2ff,stroke:#084298
-    class awaiting_ci awaiting_human in_review sleeping
+    class awaiting_ci awaiting_human degraded in_review sleeping
     class done terminal
-    class degraded implementing qa ready researching terminating triaging active
+    class implementing qa ready researching terminating triaging active
 ```
