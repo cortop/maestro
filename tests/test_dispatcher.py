@@ -162,7 +162,13 @@ def test_degraded_ticket_revived_by_real_inbox_command(home, cfg):
     _seed(home, "T-1", Phase.DEGRADED)
     assert disp.dispatch(cfg, DryRunSessions(), now=1000).spawned == []
 
-    assert cli.main(["--home", str(home), "ans", "T-1", "retry"]) == 0
+    # --no-nudge: this test proves revival via its own explicit dispatch()
+    # call below, not via cmd_ans's post-write nudge sweep -- an un-suppressed
+    # nudge would build a real ClaudeCliSessions and try to Popen("claude", ...)
+    # the instant T-1 goes due, which fails in CI where no `claude` binary is
+    # on PATH (it happens to succeed as a pointless real spawn locally, where
+    # one is).
+    assert cli.main(["--home", str(home), "ans", "T-1", "retry", "--no-nudge"]) == 0
 
     r2 = disp.dispatch(cfg, DryRunSessions(), now=1001)
     assert r2.spawned == ["T-1"]
