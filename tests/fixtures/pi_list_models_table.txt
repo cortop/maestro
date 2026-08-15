@@ -1,0 +1,8 @@
+provider  model         context  max-out  thinking  images
+zai       glm-4.5-air   131.1K   98.3K    yes       no    
+zai       glm-4.7       204.8K   131.1K   yes       no    
+zai       glm-5-turbo   200K     131.1K   yes       no    
+zai       glm-5.1       200K     131.1K   yes       no    
+zai       glm-5.2       1.0M     128K     yes       no    
+zai       glm-5.2-air   1.0M     128K     no        no    
+zai       glm-5v-turbo  200K     131.1K   yes       yes   

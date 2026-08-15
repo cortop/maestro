@@ -2572,16 +2572,31 @@ def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
             models, daemon_reason = ollama_mod.fetch_models()
             return {"binary_ok": shutil.which("ollama") is not None,
                     "models": models, "daemon_reason": daemon_reason}
-            
+
+        def _pi_probe() -> dict:
+            # T-57 (PI-5): run under maestro's own PI_CODING_AGENT_DIR (PI-4)
+            # so this never depends on -- or pollutes -- a developer's real
+            # `~/.pi`; `providers.pi.fetch_models` itself sets pi's offline
+            # flag. `models is None` (fetch_models' failure AND zero-models
+            # shape, see its own docstring) is exactly the generic
+            # `probed.get("models") is None` branch below, so a credential-
+            # less/unreachable pi is TRANSIENT with no special-casing here.
+            from . import store as store_mod
+            from .providers import pi as pi_mod
+            models, reason = pi_mod.fetch_models(store_mod.pi_agent_dir(cfg.home))
+            return {"binary_ok": shutil.which("pi") is not None,
+                    "models": models, "daemon_reason": reason}
+
         def _generic_probe() -> dict:
             # For runners like opencode that don't have special support yet
             # we use the existing ollama probe for compatibility, but this would
             # be the place to add true runner-specific probing in future
             return _default_runner_probe(runner)
-        
+
         # Dispatch table for different runner types
         probe_dispatch = {
             "ollama": _ollama_probe,
+            "pi": _pi_probe,
             # Other runners can have their own specific probes later
         }
         
@@ -2612,10 +2627,15 @@ def _make_default_runner_verdict(cfg: Config) -> Callable[[str], Callable]:
             from .providers import ollama as ollama_mod
             return ollama_mod.verdict_for_model
 
+        def _pi_verdict() -> Callable:
+            from .providers import pi as pi_mod
+            return pi_mod.verdict_for_model
+
         # Dispatch table for different runner types -- other runners can get
         # their own dedicated verdict function here as they gain real support.
         verdict_dispatch = {
             "ollama": _ollama_verdict,
+            "pi": _pi_verdict,
         }
         verdict_fn_getter = verdict_dispatch.get(runner, _ollama_verdict)
         return verdict_fn_getter()
