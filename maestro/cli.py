@@ -19,7 +19,7 @@ from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
 from .providers import ollama as ollama_mod
 from .sessions import (ClaudeCliSessions, DryRunSessions, OpencodeCliSessions,
-                       RoutingSessions, list_sessions)
+                       PiCliSessions, RoutingSessions, list_sessions)
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
@@ -111,10 +111,10 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     other.
     """
     # RF-2: route through RoutingSessions -- the ClaudeCliSessions construction
-    # is unchanged in every kwarg. OC-4: also wires the opencode delegate
-    # (dispatcher._REGISTERED_RUNNERS admits both names now) -- every
-    # RoutingSessions construction site wires every registered non-claude
-    # backend, so adding a THIRD means touching this dict too (see
+    # is unchanged in every kwarg. OC-4/PI-8: also wires the opencode and pi
+    # delegates (dispatcher._REGISTERED_RUNNERS admits all three names now) --
+    # every RoutingSessions construction site wires every registered
+    # non-claude backend, so adding a FOURTH means touching this dict too (see
     # dispatcher._REGISTERED_RUNNERS's own docstring).
     sessions = RoutingSessions({
         "claude": ClaudeCliSessions(
@@ -126,6 +126,11 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
             unverified_claim_max_age=cfg.unverified_claim_max_age,
         ),
         "opencode": OpencodeCliSessions(
+            cfg.home,
+            capture_session_logs=cfg.capture_session_logs,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+        "pi": PiCliSessions(
             cfg.home,
             capture_session_logs=cfg.capture_session_logs,
             unverified_claim_max_age=cfg.unverified_claim_max_age,
@@ -557,7 +562,7 @@ def cmd_dispatch(args) -> int:
     if args.dry_run:
         sessions = DryRunSessions()
     else:
-        # RF-2/OC-4: same wrap as _nudge above -- both registered backends wired.
+        # RF-2/OC-4/PI-8: same wrap as _nudge above -- every registered backend wired.
         sessions = RoutingSessions({
             "claude": ClaudeCliSessions(
                 cfg.home, model=args.model or cfg.reconcile_model,
@@ -567,6 +572,10 @@ def cmd_dispatch(args) -> int:
                 session_log_format=cfg.session_log_format,
                 unverified_claim_max_age=cfg.unverified_claim_max_age),
             "opencode": OpencodeCliSessions(
+                cfg.home,
+                capture_session_logs=cfg.capture_session_logs,
+                unverified_claim_max_age=cfg.unverified_claim_max_age),
+            "pi": PiCliSessions(
                 cfg.home,
                 capture_session_logs=cfg.capture_session_logs,
                 unverified_claim_max_age=cfg.unverified_claim_max_age),

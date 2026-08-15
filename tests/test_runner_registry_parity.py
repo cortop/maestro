@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from maestro import cli, dispatcher as disp, event_log, snapshot as snap_mod, store
-from maestro.sessions import ClaudeCliSessions, OpencodeCliSessions, RoutingSessions
+from maestro.sessions import ClaudeCliSessions, OpencodeCliSessions, PiCliSessions, RoutingSessions
 from maestro.statemachine import Phase
 
 
@@ -72,7 +72,8 @@ def _build_delegates_at_both_sites(home, monkeypatch):
     monkeypatch.setattr(RoutingSessions, "__init__", spy_init)
 
     with patch("maestro.cli.ClaudeCliSessions", side_effect=_FakeDelegate), \
-         patch("maestro.cli.OpencodeCliSessions", side_effect=_FakeDelegate):
+         patch("maestro.cli.OpencodeCliSessions", side_effect=_FakeDelegate), \
+         patch("maestro.cli.PiCliSessions", side_effect=_FakeDelegate):
         rc = cli.main(["--home", str(home), "ans", "T-1", "yes"])
         assert rc == 0
         rc = cli.main(["--home", str(home), "dispatch"])
@@ -104,7 +105,8 @@ def test_routing_sessions_delegates_match_registered_runners_at_both_sites(home,
 # --- AC3: every registered delegate satisfies the SessionManager protocol surface --
 
 def test_registered_delegate_classes_satisfy_session_manager_protocol():
-    delegate_classes = {"claude": ClaudeCliSessions, "opencode": OpencodeCliSessions}
+    delegate_classes = {"claude": ClaudeCliSessions, "opencode": OpencodeCliSessions,
+                        "pi": PiCliSessions}
     # Sanity: this mapping itself must track the registry, or the sweep below
     # would silently skip a registered runner it never heard of.
     assert set(delegate_classes) == disp._REGISTERED_RUNNERS

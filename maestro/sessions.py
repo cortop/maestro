@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import claims, config, store
+from . import claims, config, pi_guard, store
 from .store import generate_pi_models_json
 
 RECONCILE_PREFIX = "reconcile-"
@@ -474,6 +474,208 @@ class OpencodeCliSessions:
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
                             log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
+                            runner=claimed_runner)
+        return proc.pid
+
+
+class PiCliSessions:
+    """PI-8: the third real ``SessionManager`` backend -- speaks the ``pi``
+    coding-agent CLI (``@earendil-works/pi-coding-agent``) instead of the
+    Claude CLI. Reuses ``claims`` unchanged, same rationale as
+    ``OpencodeCliSessions``'s own docstring (``claims._verdict`` keys only on
+    pid + ``start_epoch``, never the spawned command string).
+
+    **The failure mode this backend exists to make impossible is a silent
+    no-op** (PI-8 spec Notes): pi's project-local prompt/skill discovery is
+    trust-gated, and headless mode shows no trust prompt, so an undiscovered
+    ``/maestro-reconcile-implementing <KEY>`` would otherwise be sent to the
+    model as literal, unexpanded text -- exit 0, no error, no reconcile step
+    taken. The argv built below avoids discovery entirely rather than trying
+    to earn trust: ``--no-skills``/``--no-prompt-templates``/``--no-extensions``
+    disable every discovered source, and ``--prompt-template <payload dir>``
+    (``skills_install.payload_dir()`` -- the SAME installed copy of the
+    ``.claude/commands`` payload every other backend reuses, lazy-imported to
+    avoid the load-time cycle ``sessions -> skills_install -> sessions``)
+    loads the command set explicitly, which is trust-independent (verified
+    against the installed pi's compiled resource-loader: the no-discovery
+    flags drop only *discovered* prompts, never CLI-supplied paths -- and
+    empirically, live, against a real symlinked payload dir in an untrusted
+    cwd, see ``tests/test_pi_real_smoke.py``, AC12). pi's own ``$1``
+    substitution matches Claude Code's in the existing payload bodies, so the
+    same ``/maestro-reconcile-<phase> <KEY>`` flattened prompt every other
+    backend sends works verbatim here too, with no payload rewrite.
+
+    **No project-trust flag ever appears** -- ``--approve``/``-a`` would trust
+    project-local files for the run, defeating the point of disabling
+    discovery above; ``--no-approve`` (pi's own explicit opt-out) is included
+    instead, belt-and-suspenders next to non-interactive mode's own default.
+
+    **The guard extension is non-negotiable** (T-59/PI-7): pi is auto-approve
+    by design (no sandbox, no permission prompts), so ``pi_guard.spawn_argv``
+    -- called here, the same production call site ``providers.pi.fetch_models``
+    uses for its own probe subprocess -- installs the destructive-command guard
+    extension under this home's maestro-owned pi agent dir
+    (``store.pi_agent_dir``) and returns the argv fragment that loads it
+    explicitly while disabling all other extension discovery, plus the frozen
+    ``--tools`` allowlist (``pi_guard.PI_GUARD_TOOLS``). This method verifies
+    the returned extension path actually exists on disk before spawning --
+    ``pi_guard.install`` is expected to have just written it, but this method
+    never trusts that blindly (an install failure -- a read-only package dir,
+    a broken symlink chain -- must fail the spawn loudly, never launch pi
+    ungated). Belt-and-suspenders next to ``gates.BYPASS_RESISTANT_IMPLEMENTERS``,
+    which refuses this backend a spawn at all until every check pi_guard wires
+    in was proven live in production.
+
+    The ``<provider>/`` prefix is composed HERE and nowhere else (matching the
+    ``ollama/`` precedent, ``OpencodeCliSessions.spawn`` above) -- against
+    ``store.pi_model_provider``, read fresh from this home's ``[runner.pi]``
+    config on every spawn (never cached at construction: the same config
+    ``RoutingSessions._prep_pi_env`` already reloads per-spawn to regenerate
+    ``models.json``, so a provider edit takes effect the very next spawn, not
+    just the next process restart). ``--provider`` alone is never emitted --
+    the model flag always pairs provider and model in one ``--model
+    provider/id`` token, matching ``providers.pi.model_names``'s own
+    bare-tag contract for what a spec's ``runner_model:`` line stores.
+
+    T-59 Note 22 (pi auto-loads ``CLAUDE.md``/``AGENTS.md`` from cwd and every
+    ancestor regardless of trust): kept ON by default -- a pi reconciler in a
+    maestro worktree DOES ingest this very file, written for Claude Code and
+    naming tools pi doesn't have. Left on deliberately: pi is confined by
+    ``pi_guard``'s own tool-call interception regardless of what a stray
+    instruction in ``CLAUDE.md`` asks for (the guard is the actual boundary --
+    see that module's docstring), so a misdirected instruction can at worst
+    waste a turn, not escape containment; disabling it would also drop the
+    repo-specific conventions/write-ownership rules a pi reconciler otherwise
+    has no other way to learn. ``disable_context_files=True`` is the opt-out
+    knob for a board that judges the ingestion risk differently.
+
+    Keeps ``start_new_session=True`` so pid == pgid -- ``run_watchdog`` kills
+    by pgid, and without this a wedged pi session survives as an orphan while
+    ``ops.fail`` records it as killed.
+    """
+
+    def __init__(self, home: Path, capture_session_logs: bool = True,
+                 disable_context_files: bool = False,
+                 clock: Callable[[], float] | None = None,
+                 unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
+                 claims_run=subprocess.run):
+        self.home = Path(home)
+        self.capture_session_logs = capture_session_logs
+        self.disable_context_files = disable_context_files
+        self._clock: Callable[[], float] = clock or store.now_epoch
+        self._unverified_claim_max_age = unverified_claim_max_age
+        self._claims_run = claims_run
+
+    def list_active(self) -> set[str]:
+        # Same claim files, same verified-pid liveness check every backend
+        # uses -- claims are runner-agnostic (see class docstring above).
+        return claims.active_keys(self.home, run=self._claims_run,
+                                  max_age=self._unverified_claim_max_age)
+
+    def spawn(self, key: str, command: str, cwd: Path,
+              model: str | None = None, effort: str | None = None,
+              disallowed_tools: list[str] | None = None,
+              allowed_tools: list[str] | None = None,
+              env_overlay: dict[str, str] | None = None,
+              runner: str | None = None,
+              runner_model: str | None = None) -> int | None:
+        # This backend only ever speaks pi; `model`/`effort` are Claude's own
+        # tier vocabulary and `disallowed_tools`/`allowed_tools` are Claude's
+        # own flag shapes -- none apply here (pi's tool surface is the frozen
+        # `pi_guard.PI_GUARD_TOOLS` allowlist instead, not a per-spawn grant).
+        # Accepted anyway for call-site uniformity through RoutingSessions,
+        # same posture as `OpencodeCliSessions.spawn`.
+        del model, effort, disallowed_tools, allowed_tools
+        claimed_runner = runner or "claude"
+        if not runner_model:
+            # Must never happen: OC-2/PI-3's preflight (dispatcher.dispatch)
+            # already verified a real, tool-capable runner_model before
+            # routing a spawn here. Fail loud rather than silently composing
+            # "<provider>/None".
+            raise store.MaestroError(
+                f"PiCliSessions.spawn({key!r}): no runner_model resolved -- "
+                "the preflight must run before a spawn reaches this backend")
+
+        pi_dir = store.pi_agent_dir(self.home)
+        pi_config = (config.load(self.home).provider_config.get("runner") or {}).get("pi") or {}
+        provider = store.pi_model_provider(pi_config)
+
+        guard_argv = pi_guard.spawn_argv(pi_dir)
+        extension_path = Path(guard_argv[guard_argv.index("--extension") + 1])
+        if not extension_path.exists():
+            # T-59's guard is non-negotiable -- `pi_guard.install` (called by
+            # `spawn_argv` above) is expected to have just written this file;
+            # never trust that blindly and launch pi ungated if it didn't.
+            raise store.MaestroError(
+                f"PiCliSessions.spawn({key!r}): guard extension missing at "
+                f"{extension_path} -- refusing to spawn pi ungated")
+
+        session_id = f"{session_name(key)}-{self._clock():.6f}"
+        # RF-1-equivalent: the flattened prompt, byte-identical in shape to
+        # ClaudeCliSessions.spawn's own -- pi's `$1` substitution matches
+        # Claude Code's in the existing payload bodies (spec Notes), so this
+        # works verbatim with no payload rewrite.
+        prompt = f"{command} {key}"
+
+        from . import skills_install  # lazy: avoids the load-time cycle
+                                       # sessions -> skills_install -> sessions
+                                       # (skills_install imports OPENCODE_MODEL_PROVIDER
+                                       # from this module at load time)
+        payload_dir = skills_install.payload_dir()
+
+        cmd = ["pi", "-p", prompt,
+               "--model", f"{provider}/{runner_model}",
+               "--mode", "json",
+               "--no-skills",
+               "--prompt-template", str(payload_dir),
+               "--no-prompt-templates"]
+        if self.disable_context_files:
+            cmd += ["--no-context-files"]
+        cmd += guard_argv
+
+        env = dict(os.environ)
+        env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
+        # T-56: PI_CODING_AGENT_DIR (if RoutingSessions prepared it) rides in
+        # via env_overlay -- see RoutingSessions._prep_pi_env's docstring.
+        if env_overlay:
+            env.update(env_overlay)
+
+        log_path: str | None = None
+        if self.capture_session_logs:
+            # T-58: pi's own log-identity slot -- never "stream-json" (see
+            # store.session_pi_path's docstring).
+            log_file = store.session_pi_path(self.home, key, session_id)
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = log_file.open("w", encoding="utf-8")
+            log_path = str(log_file)
+        else:
+            log_handle = None
+
+        # T-52: reserve before Popen, commit the real pid after, roll back on
+        # a failed launch -- see ClaudeCliSessions.spawn's comment for the
+        # full rationale (claims are runner-agnostic, so this backend needs
+        # the identical fix).
+        claims.write_claim(self.home, key, os.getpid(), session_name(key),
+                            log_path=log_path, cwd=str(cwd), prompt=prompt,
+                            runner=claimed_runner)
+        try:
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=str(cwd), env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
+                    stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            finally:
+                if log_handle is not None:
+                    log_handle.close()
+        except Exception:
+            claims.release(self.home, key)
+            raise
+
+        claims.write_claim(self.home, key, proc.pid, session_name(key),
+                            log_path=log_path, cwd=str(cwd), prompt=prompt,
                             runner=claimed_runner)
         return proc.pid
 
