@@ -125,8 +125,9 @@ class SessionManager(Protocol):
         prompt.
 
         *model* and *effort* override instance defaults when provided.
-        *disallowed_tools* is the per-tier tool-surface denylist (see
-        ``dispatcher.tier_denylist``) rendered as a ``--disallowedTools`` flag.
+        *disallowed_tools* is the merge-denial + per-phase tool-surface denylist
+        (see ``dispatcher.MERGE_DENYLIST``/``phase_denylist``) rendered as a
+        ``--disallowedTools`` flag.
         *allowed_tools* (GA-10) is the per-key --allowedTools additions
         (``dispatcher.resolved_allowed_tools`` -- the board-wide
         ``reconcile_allowed_tools`` list unioned with the resolved repo binding's

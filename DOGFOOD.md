@@ -59,8 +59,8 @@ maestro fleet status        # loaded? heartbeat age? interval?
 ## Add your own work
 
 ```bash
-maestro create              # interactive: title → tier → priority → $EDITOR opens spec template
-maestro create "Short title" --tier 1 --intent "What done looks like + AC."  # non-interactive
+maestro create              # interactive: title → priority → $EDITOR opens spec template
+maestro create "Short title" --intent "What done looks like + AC."  # non-interactive
 # edit the richer spec by hand any time — it's yours, append-only-safe:
 $EDITOR ~/.maestro/maestro-dev/tickets/<KEY>/spec.md
 ```

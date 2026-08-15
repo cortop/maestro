@@ -27,7 +27,7 @@ from typing import Callable, Iterable
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
 from .config import Config
-from .gates import backend_interlock_reason, needs_approval, parse_spec_overrides, spec_priority, spec_runner, spec_tier  # noqa: F401 (re-export)
+from .gates import backend_interlock_reason, parse_spec_overrides, spec_priority, spec_runner  # noqa: F401 (re-export)
 from .idempotency import content_hash
 from .sessions import SessionManager
 from .statemachine import ACTIVE_PHASES, Phase, SLEEPING_PHASES, TERMINAL_PHASES
@@ -110,19 +110,18 @@ def parse_depends_on(spec_text: str) -> list[str]:
     return [k.strip() for k in raw.split(",") if k.strip()]
 
 
-def tier_denylist(tier: int) -> list[str]:
-    """Tool-surface denylist for a spawned reconciler, keyed by approval tier.
-
-    Tier 0 (auto-approved) gets none. Tier >=1 is denied ``gh pr merge`` --
-    such a ticket can still open a PR, but merging it is a human decision.
-    """
-    return ["Bash(gh pr merge:*)"] if tier >= 1 else []
+# AD-7: merging is always a human decision, unconditionally -- every spawned
+# reconciler is denied `gh pr merge` regardless of ticket or phase. Formerly
+# gated by approval tier (`tier_denylist`, tier>=1 only); tier is gone, so this
+# is now a flat constant, unioned with `phase_denylist` at the same spawn site
+# as before (see the `sessions.spawn` call in `dispatch()` below).
+MERGE_DENYLIST = ["Bash(gh pr merge:*)"]
 
 
 def phase_denylist(phase: str) -> list[str]:
     """Tool-surface denylist for a spawned reconciler, keyed by phase (RF-6).
 
-    Unioned with ``tier_denylist`` at spawn time. Empty for every phase except
+    Unioned with ``MERGE_DENYLIST`` at spawn time. Empty for every phase except
     ``qa``: a QA reconciler judges a diff independently of the agent that wrote
     it, so it must not be able to Edit or Write the code it's reviewing.
     """
@@ -137,7 +136,7 @@ def resolved_allowed_tools(cfg: Config, binding) -> list[str]:
     ``reconcile_allowed_tools`` list unioned with *binding*'s own
     ``reconcile_allowed_tools`` -- an unset/empty repo list simply contributes
     nothing extra, so it inherits the board-wide list rather than replacing it.
-    Threaded through ``sessions.spawn`` per key, beside ``tier_denylist``, and
+    Threaded through ``sessions.spawn`` per key, beside ``MERGE_DENYLIST``, and
     merged by the session backend with the process-wide base grant (maestro CLI
     verbs + ``reconcile_web_tools``) into exactly ONE ``--allowedTools`` flag
     (see ``sessions.ClaudeCliSessions.spawn``).
@@ -295,14 +294,6 @@ def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool
     # floor in dispatch() is what bounds it.
     if phase in SLEEPING_PHASES:
         return DueResult(False, "sleeping")
-    # Tier-2 implementing gate: a high-tier ticket sits in `implementing` (the
-    # worktree is set up, phase already transitioned) but is not due for the
-    # actual coding step until a human runs `maestro approve`. `needs_approval`
-    # (gates.py) is the ONE definition of this rule -- every human-facing
-    # surface calls the same function, so none of them can drift from what
-    # actually gates a spawn here.
-    if needs_approval(home, key, snap):
-        return DueResult(False, "needs-approval")
     # RB-9: this used to be an unconditional `return DueResult(True, "active")` --
     # anything that fell through terminal/sleeping/needs-approval above was
     # active by default, so an unclassified phase silently got spawned forever
@@ -592,7 +583,6 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
     # with a default is not enough — coerce None to the fallback for every field that
     # is rendered into the spec, or a null intent/title/deps would crash the sweep.
     title = title or key
-    tier = args.get("approval_tier") or 1
     priority = args.get("priority") or 3
     depends_on = args.get("depends_on") or []
     deps_str = ", ".join(depends_on) if depends_on else ""
@@ -601,7 +591,6 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
         "",
         "<!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->",
         "",
-        f"approval_tier: {tier}",
         f"priority: {priority}",
     ]
     if args.get("kind"):
@@ -720,7 +709,6 @@ def run_scheduled_tasks(cfg: Config, now: float) -> dict:
         args = {
             "intent": task["prompt"],
             "kind": task.get("kind", "implementation"),
-            "approval_tier": task.get("approval_tier", 1),
             "priority": task.get("priority", 3),
             "scheduled_by": name,
             "dedup": f"{name}:{schedule.dedup_bucket(task, now)}",
@@ -763,7 +751,6 @@ def schedule_status(cfg: Config, now: float) -> list[dict]:
             "cron": task.get("cron"),
             "tz": task.get("tz") or "UTC",
             "kind": task.get("kind", "implementation"),
-            "approval_tier": task.get("approval_tier", 1),
             "priority": task.get("priority", 3),
             "prefix": task.get("prefix"),
             "enabled": enabled,
@@ -1885,7 +1872,6 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         due: list[tuple[str, str]] = []
         claimed: list[str] = []
         observed_seq_by_key: dict[str, int] = {}
-        tier_by_key: dict[str, int] = {}
         phase_by_key: dict[str, str] = {}
         decisions: dict[str, dict] = {}
 
@@ -1907,8 +1893,6 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             observed_seq_by_key[key] = snap.observed_seq
             phase_by_key[key] = snap.phase
             blocked_dep = _has_unmet_deps(home, key)
-            tier = spec_tier(home, key)
-            tier_by_key[key] = tier
             res = is_due(
                 home, key, snap,
                 inbox_pending=inbox.has_pending(home, key),
@@ -1933,9 +1917,9 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # whether a key is due, throttled, or spawnable -- only their relative order
         # through those unchanged filters, so a throttled/capped/blocked high-priority
         # ticket still can't starve the rest of the board. `spec_priority` reads fresh
-        # from disk per sweep (never the folded snapshot) with the same total-and-
-        # never-raises contract as `spec_tier`; `split_key` is the tiebreaker so
-        # ordering stays deterministic when priorities are equal (including the
+        # from disk per sweep (never the folded snapshot), total and never-raises;
+        # `split_key` is the tiebreaker so ordering stays deterministic when
+        # priorities are equal (including the
         # all-default-3 case, which reduces to today's plain lexical order).
         due.sort(key=lambda kr: (spec_priority(home, kr[0]), split_key(kr[0])))
         bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in due}
@@ -2274,8 +2258,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                     cwd = _worker_cwd(cfg, key)
                     command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
                     model, effort = _resolve_model_effort(cfg, key)
-                    disallowed_tools = tier_denylist(tier_by_key.get(key, 1)) + phase_denylist(
-                        phase_by_key.get(key, ""))
+                    disallowed_tools = MERGE_DENYLIST + phase_denylist(phase_by_key.get(key, ""))
                     allowed_tools = resolved_allowed_tools(cfg, binding)
                     # RF-1: hand the resolved command and key to spawn() as separate
                     # arguments -- each backend composes its own invocation (the Claude
@@ -2372,7 +2355,7 @@ _PHASE_COMMAND_SUFFIX = {
 
 def resolve_reconcile_command(cfg: Config, phase: str) -> str:
     """The ``claude -p`` command to spawn for *phase* (T-22): resolved once,
-    here, beside ``_resolve_model_effort``/``tier_denylist`` -- the dispatcher
+    here, beside ``_resolve_model_effort``/``MERGE_DENYLIST`` -- the dispatcher
     already resolves per-key spawn state at this point, so per-phase command
     routing is the same shape, not a new mechanism. ``maestro env --key`` also
     surfaces this (see ``cli.cmd_env``) so ``make reconcile`` routes identically
@@ -2499,8 +2482,9 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     """Resolve the runner (and its optional model override) for spawning *key*'s
     reconciler (RF-2), for *phase* (T-54).
 
-    Requirement 1, enforced HERE and only here (``gates.needs_approval``'s "THE
-    RULE MUST HAVE EXACTLY ONE DEFINITION"): the spec's `runner:` choice only
+    Requirement 1, enforced HERE and only here ("THE RULE MUST HAVE EXACTLY ONE
+    DEFINITION", the same posture ``gates.runner_editable`` documents): the
+    spec's `runner:` choice only
     ever takes effect for a phase admitted into that runner's own eligible-phase
     set (`runner_eligible_phases`, a `Phase`-keyed table sourced from
     `[runner.<name>].phases` config, same try/except-``ValueError`` shape as

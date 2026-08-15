@@ -90,10 +90,10 @@ def evaluate(home, is_due_fn, point):
 
 @pytest.fixture(scope="module")
 def grid_home(tmp_path_factory):
-    # `is_due` only touches the filesystem via `needs_approval` -> `spec_tier`,
-    # which reads a spec file that doesn't exist here and falls back to tier 1
-    # (never gates) -- one shared, empty home is enough for all 1056 points, no
-    # per-point construction (that's the trap the ticket's Notes call out).
+    # `is_due` never touches the filesystem at all (AD-7 removed the only spec
+    # read it used to do, via `needs_approval` -> `spec_tier`) -- one shared,
+    # empty home is enough for all 1056 points, no per-point construction
+    # (that's the trap the ticket's Notes call out).
     return tmp_path_factory.mktemp("rb9-exhaustive-home")
 
 
@@ -133,8 +133,6 @@ def _pre_fix_is_due(home, key, snap, *, inbox_pending, current_spec_hash, now, b
     handler does) was ignored -- the ticket came back due on the very next
     sweep. Test-only; never imported by production code, and NOT a substitute
     for enumerating the real `is_due` above (see the ticket's Notes/TRAPS)."""
-    from maestro.gates import needs_approval
-
     phase = Phase(snap.phase)
     if phase in TERMINAL_PHASES:
         return disp.DueResult(False, "terminal")
@@ -154,8 +152,6 @@ def _pre_fix_is_due(home, key, snap, *, inbox_pending, current_spec_hash, now, b
                 return disp.DueResult(False, "backoff")
             return disp.DueResult(True, "timer")
         return disp.DueResult(False, "sleeping")
-    if needs_approval(home, key, snap):
-        return disp.DueResult(False, "needs-approval")
     return disp.DueResult(True, "active")
 
 
@@ -373,7 +369,7 @@ def test_new_phase_without_classification_has_teeth():
 
 def test_is_due_fallthrough_fails_closed_for_an_unclassified_phase(grid_home, monkeypatch):
     """Shrink ACTIVE_PHASES to exclude a phase that would otherwise reach the
-    bottom of `is_due` (no inbox/timer/approval gate applies) -- the real
+    bottom of `is_due` (no inbox/timer gate applies) -- the real
     catch-all must report not-due, not silently fall through to "active" the
     way the pre-RB-9 unconditional `return DueResult(True, "active")` did."""
     monkeypatch.setattr(disp, "ACTIVE_PHASES", ACTIVE_PHASES - {Phase.IMPLEMENTING})

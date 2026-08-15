@@ -13,18 +13,11 @@ def _esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace("[", "\\[")
 
 
-def render(snap: snap_mod.Snapshot, tier: int | None = None,
-           title: str | None = None, runner: str | None = None,
-           runner_model: str | None = None) -> str:
+def render(snap: snap_mod.Snapshot, title: str | None = None,
+           runner: str | None = None, runner_model: str | None = None) -> str:
     """Build Rich markup string for the snapshot detail pane.
 
-    `tier` comes from the caller (`dispatcher.spec_tier`) -- the snapshot itself
-    carries no tier field, so display and the approval gate read the same source
-    by construction. `tier` is total once read from disk and never None in
-    practice, but 0 is a real (auto-approved) tier, so it's rendered via
-    `str(tier)` unconditionally rather than the `v()` falsy-check helper below.
-
-    `title` arrives the same way (`projection.display_title`) and for the same
+    `title` arrives from the caller (`projection.display_title`) for the same
     reason: a ticket whose log carries no `TicketCreated` folds to `title = None`
     but still has its title in its spec's H1, and this module stays filesystem-
     free so it remains importable in tests. Omitted, it falls back to the folded
@@ -66,7 +59,6 @@ def render(snap: snap_mod.Snapshot, tier: int | None = None,
         f"[bold]{v(title if title is not None else snap.title)}[/bold]\n\n"
         f"[dim]Key[/dim]           {v(snap.key)}\n"
         f"[dim]Phase[/dim]         {v(snap.phase)}\n"
-        f"[dim]Tier[/dim]          {str(tier) if tier is not None else _EM}\n"
         f"[dim]Runner[/dim]        {runner_info}\n"
         f"[dim]Source[/dim]        {v(snap.source)}\n"
         f"[dim]PR[/dim]            {pr_info}\n"

@@ -1036,13 +1036,6 @@ def check_merged(cfg: Config, key: str, pr_state: str, *, actor: str = "reconcil
     return True
 
 
-def approve(cfg: Config, key: str, *, actor: str = "human") -> None:
-    """Clear the tier-2 implementing gate (idempotent -- a fixed step-id means
-    repeat calls are a no-op). Once appended, `dispatcher.is_due` finds
-    `snap.approved` and the ticket is due on the very next sweep."""
-    _append(cfg, key, E.APPROVED, {}, actor=actor, sid=f"approve-{key}")
-
-
 # UX-1: same loose-frontmatter grammar `gates.parse_spec_overrides` scans
 # (stop at the first `##` header) -- kept as its own copy here, matching
 # `health._spec_runner_fields`'s precedent, rather than importing a private

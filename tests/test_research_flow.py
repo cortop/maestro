@@ -114,7 +114,7 @@ def _sim_awaiting_human_approve(cfg, key: str, answer: str, proposal_path: Path)
     impl_title = f"Implement: caching strategies ({key})"
     rc = cli_main([
         "--home", str(cfg.home), "create", impl_title,
-        "--tier", "0", "--kind", "implementation",
+        "--kind", "implementation",
         "--intent", section,
         "--notes", f"Seeded from {key} proposal. See tickets/{key}/proposal.md for full context.",
         "--depends-on", key, "--key", impl_key, "--no-nudge",

@@ -39,7 +39,7 @@ def _populate(home, capsys):
     dispatch() call the CLI itself makes, just without the launchd process
     wrapper, and DryRunSessions still means no real session launches)."""
     _run(home, "init")
-    _run(home, "create", "First ticket", "--tier", "1", "--no-nudge", capsys=capsys)
+    _run(home, "create", "First ticket", "--no-nudge", capsys=capsys)
     cfg = load(str(home))
     disp.dispatch(cfg, DryRunSessions(), now=store.now_epoch())  # mints T-1
     assert (home / "events" / "T-1.jsonl").exists()

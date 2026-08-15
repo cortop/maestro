@@ -27,6 +27,20 @@ def test_fold_ignores_legacy_ticket_triaged_event(home):
     assert not hasattr(snap, "tier")
 
 
+def test_fold_parses_historical_approved_event_without_warning(home):
+    """AD-7: `maestro approve`/the tier-2 implementing gate it cleared are gone,
+    but 30 existing event logs carry a real Approved event and the log is
+    append-only -- the fold must keep parsing it forever, with no warning or
+    error, even though nothing emits it anymore."""
+    event_log.append(home, "T-1", "TicketCreated", {"title": "x", "spec_hash": "abc"}, actor="d")
+    event_log.append(home, "T-1", "PhaseChanged", {"phase": "implementing"}, actor="r")
+    event_log.append(home, "T-1", "Approved", {}, actor="human")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert snap.approved is True
+    assert snap.fold_warnings == []
+    assert snap.phase == Phase.IMPLEMENTING.value  # unaffected -- no gate reads this anymore
+
+
 def test_question_open_then_answered(home):
     event_log.append(home, "T-1", "QuestionAsked", {"qid": "q1", "text": "ok?"}, actor="r")
     assert snap_mod.rebuild(home, "T-1").question_open is True

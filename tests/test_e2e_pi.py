@@ -54,7 +54,7 @@ def test_end_to_end_create_runner_pi_through_sweeps_to_awaiting_ci(
     # --json mints synchronously (bypasses the _new inbox) -- the spec exists
     # the moment this call returns, no separate mint_new_tickets step needed.
     rc = cli.main(["--home", str(home), "create", "PI-8 e2e", "--key", "T-1",
-                   "--tier", "0", "--runner", "pi", "--runner-model", "glm-5.2",
+                   "--runner", "pi", "--runner-model", "glm-5.2",
                    "--json", "--no-nudge"])
     assert rc == 0
     spec_text = store.spec_path(home, "T-1").read_text()
@@ -161,7 +161,7 @@ def test_e2e_create_pi_then_change_runner_then_env_reports_pi(home, monkeypatch,
         encoding="utf-8")
 
     rc = cli.main(["--home", str(home), "create", "PI-9 e2e", "--key", "T-1",
-                   "--tier", "0", "--runner", "pi", "--runner-model", "glm-5.2",
+                   "--runner", "pi", "--runner-model", "glm-5.2",
                    "--json", "--no-nudge"])
     assert rc == 0
     capsys.readouterr()  # discard the {"key": "T-1"} + any create-time warning

@@ -1,5 +1,5 @@
 ---
-description: Reconcile a `triaging` maestro ticket — classify tier, route to approval or ready. (maestro self-dev)
+description: Reconcile a `triaging` maestro ticket — resolve what's discoverable, then ask for approval. (maestro self-dev)
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent
 argument-hint: <TICKET-KEY>
 ---
@@ -62,18 +62,21 @@ without a judgment call? If so, dispatch an `Agent`-tool sub-agent to find it �
 human round-trip on it. Only put a question in the round if a sub-agent genuinely cannot resolve
 it: a product/scope decision, an ambiguous intent, or an explicit approval gate.
 
-## `triaging`: classify tier, then route
-Read `approval_tier` from the spec's frontmatter:
-- **tier 0** → auto-approve: `maestro set-phase "$KEY" ready --reason "tier-0 auto-approved"`
-- **tier ≥1** → resolve anything discoverable yourself first (rule (b) above — dispatch a
-  sub-agent rather than asking), then ask the whole settled frontier in one round (rule (a)):
-  the pickup/plan approval question, plus any other genuinely open design questions, each
-  numbered with your recommended answer:
-  ```bash
-  maestro ask "$KEY" \
-    --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?" "<your recommendation>" "" \
-    --question "<other settled question, if any>" "<your recommendation>" ""
-  ```
+## `triaging`: route to approval
+Every ticket gets an explicit human hop before work starts — AD-7 replaced the old hidden
+tier-2 implementing-phase due-gate with this real, visible phase instead of a second, redundant
+mechanism for the same job. Resolve anything discoverable yourself first (rule (b) above —
+dispatch a sub-agent rather than asking), then ask the whole settled frontier in one round
+(rule (a)): the pickup/plan approval question, plus any other genuinely open design questions,
+each numbered with your recommended answer:
+```bash
+maestro ask "$KEY" \
+  --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?" "<your recommendation>" "" \
+  --question "<other settled question, if any>" "<your recommendation>" ""
+```
+This appends `QuestionAsked` and moves the ticket to `awaiting-human`, where
+`maestro-reconcile-awaiting-human.md` applies the answer and routes it onward (`ready` on
+approval, `terminating` on rejection).
 
-**Done when:** exactly one of the two `maestro` calls above has appended its event, and
+**Done when:** the `maestro ask` call above has appended its event, and
 `maestro release "$KEY"` has run — that is the whole step, nothing else to check.

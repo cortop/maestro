@@ -59,7 +59,7 @@ Read the proposal at `$MHOME/tickets/$KEY/proposal.md`. Inspect the answer:
 Then mint the implementation ticket using the chosen approach as intent, synchronously so its key
 comes straight back instead of being derived by scraping internal inbox state:
 ```bash
-maestro create "Implement: <research-title-without-Research-prefix>" --tier 0 --kind implementation \
+maestro create "Implement: <research-title-without-Research-prefix>" --kind implementation \
   --intent "<chosen approach text>" \
   --notes "Seeded from $KEY proposal. See tickets/$KEY/proposal.md for full context." \
   --depends-on "$KEY" --json --no-nudge

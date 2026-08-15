@@ -47,8 +47,8 @@ _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _EVERY_RE = re.compile(r"^(\d+)([smhd])?$")
 
 # Optional per-task fields that pass through into a scheduled task's minted ticket,
-# beyond the six structural mint-args (intent/kind/approval_tier/priority/
-# scheduled_by/dedup) that ``dispatcher.run_scheduled_tasks`` always sets. Shared
+# beyond the five structural mint-args (intent/kind/priority/scheduled_by/dedup)
+# that ``dispatcher.run_scheduled_tasks`` always sets. Shared
 # with ``config._SCHEDULED_FIELDS`` so the mint-args allowlist and the config.toml
 # round-trip allowlist can't drift apart. ``cron``/``tz`` are NOT here -- they
 # configure the cadence itself, they never flow into the minted ticket.

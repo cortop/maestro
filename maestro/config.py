@@ -170,7 +170,7 @@ class Config:
     # --allowedTools flag. Default [] -- today's behavior for every existing home.
     reconcile_allowed_tools: list = field(default_factory=list)
     # Declarative recurring triggers: [[scheduled]] array-of-tables, each a dict with
-    # name/prompt/every (+ optional approval_tier/kind/priority/prefix/enabled).
+    # name/prompt/every (+ optional kind/priority/prefix/enabled).
     scheduled: list = field(default_factory=list)
     # Ceiling on how long an "unknown" (unverifiable identity) claim may still be
     # honored via raw pid liveness before it is released with no kill/no event.
@@ -815,7 +815,6 @@ implementer = "claude_skill"
                                     # Spring-forward (a local instant that doesn't exist)
                                     # fires at the next valid instant; fall-back (a local
                                     # instant that occurs twice) fires exactly once.
-# approval_tier = 1
 # kind = "implementation"          # or "research"
 # priority = 3
 # prefix = "S"                     # minted keys become S-1, S-2, ...
@@ -835,7 +834,7 @@ implementer = "claude_skill"
 # allowlist here can never drift from the mint-args allowlist in dispatcher.py.
 # `cron`/`tz` (GA-19) round-trip too but are NOT mint fields -- they configure the
 # cadence itself, so they live in the base tuple, not OPTIONAL_MINT_FIELDS.
-_SCHEDULED_FIELDS = ("name", "prompt", "every", "cron", "tz", "approval_tier", "kind",
+_SCHEDULED_FIELDS = ("name", "prompt", "every", "cron", "tz", "kind",
                      "priority", "prefix", "enabled", "title") + schedule.OPTIONAL_MINT_FIELDS
 # Matches a `[[scheduled]]` header plus ONLY its immediately-following contiguous
 # `key = value` lines -- never blank lines, comments, or another table header.

@@ -71,8 +71,8 @@ Quickstart below).
 ```bash
 pip install -e .
 maestro init                       # scaffold ~/.maestro + config.toml
-maestro create                     # guided interactive flow (title → tier → priority → $EDITOR)
-maestro create "Add retry to X" --tier 0  # flag-based (scripts / CI)
+maestro create                     # guided interactive flow (title → priority → $EDITOR)
+maestro create "Add retry to X"    # flag-based (scripts / CI)
 maestro dispatch --dry-run         # read-only preview: would_mint/would_spawn, no writes
                                     # except regenerated dashboards (nothing minted, no
                                     # sessions launched, ledger/attempts untouched)

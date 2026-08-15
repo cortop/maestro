@@ -7,15 +7,15 @@ from unittest.mock import MagicMock, patch
 from maestro import cli, event_log, inbox, snapshot as snap_mod, store
 from maestro.cli import _AGENT_TOOL_VERBS
 from maestro.config import load
-from maestro.dispatcher import tier_denylist
+from maestro.dispatcher import MERGE_DENYLIST
 from maestro.statemachine import Phase
 
-_HUMAN_ONLY_VERBS = ("approve", "ans", "answer", "restore", "fleet", "init",
+_HUMAN_ONLY_VERBS = ("ans", "answer", "restore", "fleet", "init",
                      "dispatch", "prune-logs", "cmd", "tui", "compact", "archive-done")
 
 
-def _seed_ready(home, key="T-1", tier=0):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: {tier}\n")
+def _seed_ready(home, key="T-1"):
+    store.atomic_write(store.spec_path(home, key), f"# {key}\n")
     event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": "x"}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": Phase.READY.value}, actor="r")
     snap_mod.rebuild(home, key)
@@ -177,10 +177,11 @@ def test_agent_grant_matches_cli_agent_tags():
     assert non_agent_tagged_extras <= set(_AGENT_TOOL_VERBS)
 
 
-def test_dispatch_allowed_tools_composes_with_tier_denylist(home):
-    """A tier-1 key's spawn argv must carry both --disallowedTools (deny) and
-    --allowedTools (the maestro grant), with no overlap between them."""
-    _seed_ready(home, tier=1)
+def test_dispatch_allowed_tools_composes_with_merge_denylist(home):
+    """AD-7: every key's spawn argv must carry both --disallowedTools (the
+    unconditional gh-pr-merge deny) and --allowedTools (the maestro grant),
+    with no overlap between them."""
+    _seed_ready(home)
     captured, capture_popen = _capture_popen_cmds()
     with patch("subprocess.Popen", side_effect=capture_popen):
         rc = cli.main(["--home", str(home), "dispatch"])
@@ -189,7 +190,7 @@ def test_dispatch_allowed_tools_composes_with_tier_denylist(home):
     cmd = captured[0]
     assert "--disallowedTools" in cmd
     deny_value = cmd[cmd.index("--disallowedTools") + 1]
-    assert deny_value == ",".join(tier_denylist(1))
+    assert deny_value == ",".join(MERGE_DENYLIST)
     allow_value = cmd[cmd.index("--allowedTools") + 1]
     assert not (set(deny_value.split(",")) & set(allow_value.split(",")))
 
@@ -207,9 +208,9 @@ reconcile_allowed_tools = ["Bash(npm test:*)"]
 """
 
 
-def _seed_ready_bound(home, key, repo_name, tier=0):
+def _seed_ready_bound(home, key, repo_name):
     store.atomic_write(store.spec_path(home, key),
-                       f"# {key}\napproval_tier: {tier}\nrepo: {repo_name}\n")
+                       f"# {key}\nrepo: {repo_name}\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": "x", "repo": repo_name}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": Phase.READY.value}, actor="r")

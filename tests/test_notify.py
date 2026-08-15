@@ -8,8 +8,8 @@ from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 
-def _create(cfg, key, tier=1):
-    store.atomic_write(store.spec_path(cfg.home, key), f"# {key}\napproval_tier: {tier}\n")
+def _create(cfg, key):
+    store.atomic_write(store.spec_path(cfg.home, key), f"# {key}\n")
     event_log.append(cfg.home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(cfg.home, key)}, actor="d")
     snap_mod.rebuild(cfg.home, key)
@@ -27,7 +27,7 @@ def test_notify_fires_once_then_again_on_a_fresh_entry(cfg, tmp_path):
     assert len(lines) == 1
     assert lines[0] == "T-1 awaiting-human Can I pick this up?"
 
-    # Same phase, no new entry -> gated, no second line.
+    # Same phase, no new entry -> no second line.
     disp.dispatch(cfg, DryRunSessions(), now=1_100)
     assert log_path.read_text().splitlines() == lines
 
@@ -62,35 +62,6 @@ def test_notify_fires_on_degraded_and_done(cfg, tmp_path):
     disp.dispatch(cfg, DryRunSessions(), now=1_000)
     lines = sorted(log_path.read_text().splitlines())
     assert lines == ["T-1 degraded", "T-2 done"]
-
-
-def test_notify_fires_once_on_needs_approval_entry_then_quiets(cfg, tmp_path):
-    """The tier-2 approval gate (GA-21, `gates.needs_approval`) is not a phase --
-    `snap.phase` stays "implementing" the whole time -- so entering it is
-    tracked via the composite (phase, gated) cursor state instead of a bare
-    phase diff. Fires exactly once on entry; a second sweep with no state
-    change fires nothing, matching every other watched-phase entry."""
-    log_path = tmp_path / "notify.log"
-    cfg.notify_command = f'printf "%s %s %s\\n" "$KEY" "$PHASE" "$QUESTION" >> {log_path}'
-
-    _create(cfg, "T-1", tier=2)
-    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING)
-    assert snap_mod.load(cfg.home, "T-1").phase == Phase.IMPLEMENTING.value
-
-    disp.dispatch(cfg, DryRunSessions(), now=1_000)
-    lines = log_path.read_text().splitlines()
-    assert len(lines) == 1
-    assert lines[0].startswith("T-1 implementing")
-
-    # No state change -> still gated, no second line.
-    disp.dispatch(cfg, DryRunSessions(), now=1_100)
-    assert log_path.read_text().splitlines() == lines
-
-    # Approve clears the gate. Not a watched phase itself, so leaving it fires
-    # no new notification -- but the cursor still advances to reflect it.
-    ops.approve(cfg, "T-1")
-    disp.dispatch(cfg, DryRunSessions(), now=1_200)
-    assert log_path.read_text().splitlines() == lines
 
 
 def test_no_op_when_unconfigured(cfg):
@@ -131,8 +102,8 @@ def test_broken_command_and_unreachable_webhook_never_abort_the_sweep(cfg):
     _create(cfg, "T-1")
     ops.ask(cfg, "T-1", "ok?", qid="q1")
 
-    # A second, independently-due ticket (tier 0, freshly triaging) must still spawn.
-    _create(cfg, "T-2", tier=0)
+    # A second, independently-due ticket (freshly triaging) must still spawn.
+    _create(cfg, "T-2")
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1_000)
     assert snap_mod.load(cfg.home, "T-1").phase == Phase.AWAITING_HUMAN.value

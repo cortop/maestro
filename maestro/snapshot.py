@@ -73,13 +73,12 @@ def parse_title(spec_text: str, key: str | None = None) -> str | None:
 def display_title(home: Path, s: "Snapshot") -> str:
     """The title to show a human: the folded one, else the spec's own H1.
 
-    Read from disk on demand, exactly like `gates.spec_tier` -- so a ticket with
-    no `TicketCreated` still renders with a title, and a human's edit to the
-    spec's heading takes effect on the next render rather than never. Lives here,
-    below `projection`/`notify`/`tui`, so all three human-facing surfaces share
-    ONE definition instead of each re-deriving the fallback (the drift that
-    `gates.needs_approval` exists to prevent). Total: a missing or unreadable
-    spec falls back to the empty string.
+    Read from disk on demand, exactly like `gates.spec_priority` -- so a ticket
+    with no `TicketCreated` still renders with a title, and a human's edit to
+    the spec's heading takes effect on the next render rather than never. Lives
+    here, below `projection`/`notify`/`tui`, so all three human-facing surfaces
+    share ONE definition instead of each re-deriving the fallback. Total: a
+    missing or unreadable spec falls back to the empty string.
     """
     if s.title:
         return s.title
@@ -134,9 +133,11 @@ class Snapshot:
     # changes an AC's text invalidates an entry (its hash simply stops matching
     # any current AC — see acs_unverified()).
     ac_verified: dict[str, dict] = field(default_factory=dict)
-    # Set once by an Approved event (`maestro approve`) and never reset by a
-    # phase change -- the tier-2 implementing gate is a one-time human sign-off
-    # for the ticket's lifetime, not a per-visit checkpoint.
+    # AD-7: historical-only -- set once by an Approved event, from back when
+    # `maestro approve` cleared a tier-2 implementing gate. Nothing emits
+    # Approved anymore and nothing reads this field for gating, but it's kept
+    # (never reset by a phase change, exactly as before) so a snapshot rebuilt
+    # from an old log with a real Approved event still round-trips faithfully.
     approved: bool = False
     # ac_hash -> {"verdict": "pass"|"fail", "evidence": str}, from AcQaVerdict
     # events with axis "spec" (or no axis, for pre-T-23 events) — an independent
@@ -391,7 +392,7 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.APPROVED:
-            s.approved = True
+            s.approved = True  # AD-7: historical-only, see events.APPROVED/Snapshot.approved
         elif t == E.REQUEUE_SCHEDULED:
             s.next_requeue_at = p.get("at")
         elif t == E.FAILED:

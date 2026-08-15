@@ -270,7 +270,7 @@ def test_write_scheduled_creates_block_and_round_trips(home):
     store.atomic_write(path, "[maestro]\nmax_concurrency = 5\n")
     tasks = [{
         "name": "digest", "prompt": "Summarize PRs\nacross repos", "every": "24h",
-        "approval_tier": 1, "kind": "implementation", "priority": 3,
+        "kind": "implementation", "priority": 3,
         "prefix": "S", "enabled": True,
         # GA-9: repo/title plus the mint-allowlist fields must round-trip too.
         "repo": "alpha", "title": "Morning digest", "model": "sonnet",
@@ -348,7 +348,7 @@ def test_write_scheduled_cron_and_tz_round_trip(home):
     cron task carries no `every` key at all."""
     tasks = [{
         "name": "digest", "prompt": "Summarize things", "cron": "0 9 * * 1",
-        "tz": "America/New_York", "approval_tier": 1, "kind": "implementation",
+        "tz": "America/New_York", "kind": "implementation",
         "priority": 3, "enabled": True,
     }]
     config_mod.write_scheduled(home, tasks)

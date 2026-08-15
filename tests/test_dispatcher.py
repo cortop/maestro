@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from maestro import claims, dispatcher as disp
+from maestro import cli, claims, dispatcher as disp
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.config import Config
 from maestro.sessions import ClaudeCliSessions, DryRunSessions
@@ -44,6 +44,41 @@ def test_sleeping_phase_not_due_until_signal(home):
     assert not disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000).due
     # inbox arrival wakes it
     assert disp.is_due(home, "T-1", snap, inbox_pending=True, current_spec_hash=snap.spec_hash, now=1000).due
+
+
+# --- AD-7: triaging -> awaiting-human -> ans -> onward, the real replacement for
+# the deleted tier-2 gate. `maestro ask` (`ops.ask`/`ask_round`) already
+# transitions triaging -> awaiting-human on its own -- this is what the
+# triaging skill now relies on unconditionally instead of branching on a
+# spec's tier -- proven here over the real CLI + a real dispatch sweep, not
+# just `ops` calls in isolation.
+
+def test_triaging_asks_and_routes_to_awaiting_human_then_ans_moves_it_onward(home, cfg):
+    key = "T-1"
+    rc = cli.main(["--home", str(home), "create", "risky change", "--key", key,
+                   "--json", "--no-nudge"])
+    assert rc == 0
+    disp.dispatch(cfg, DryRunSessions(), now=1000)  # mints the spec + TicketCreated
+    assert snap_mod.load(home, key).phase == Phase.TRIAGING.value
+
+    rc = cli.main(["--home", str(home), "ask", key,
+                   "Pick up T-1 -- <plan>. AC: <bulleted>. OK?"])
+    assert rc == 0
+    snap = snap_mod.load(home, key)
+    assert snap.phase == Phase.AWAITING_HUMAN.value
+    assert snap.open_questions
+
+    qid = next(iter(snap.open_questions))
+    rc = cli.main(["--home", str(home), "ans", key, "ok", "--qid", qid, "--no-nudge"])
+    assert rc == 0
+    rc = cli.main(["--home", str(home), "fold-inbox", key])
+    assert rc == 0
+    rc = cli.main(["--home", str(home), "set-phase", key, "ready", "--reason", "approved"])
+    assert rc == 0
+    assert snap_mod.load(home, key).phase == Phase.READY.value
+
+    events = [e["type"] for e in event_log.read(home, key)]
+    assert "QuestionAsked" in events and "QuestionAnswered" in events
 
 
 def test_spec_edit_wakes_sleeping_ticket(home):
@@ -673,37 +708,54 @@ def test_mint_ticket_prefix_skips_existing(home, cfg):
 
 # --- RT-1: parse_spec_overrides ---
 
-def test_parse_spec_overrides_tier_only():
-    assert disp.parse_spec_overrides("approval_tier: 1\n") == {"approval_tier": 1}
-
-
-def test_parse_spec_overrides_tier_and_priority():
-    # MTO-7: priority is now a recognized override, parsed to int like approval_tier.
-    assert disp.parse_spec_overrides("approval_tier: 1\npriority: 3\n") == {
-        "approval_tier": 1, "priority": 3,
-    }
+def test_parse_spec_overrides_priority_only():
+    assert disp.parse_spec_overrides("priority: 3\n") == {"priority": 3}
 
 
 def test_parse_spec_overrides_model_only():
-    spec = "approval_tier: 1\nmodel: opus\ndependsOn: []\n"
-    assert disp.parse_spec_overrides(spec) == {"approval_tier": 1, "model": "opus"}
+    spec = "priority: 1\nmodel: opus\ndependsOn: []\n"
+    assert disp.parse_spec_overrides(spec) == {"priority": 1, "model": "opus"}
 
 
 def test_parse_spec_overrides_all_three():
-    spec = "approval_tier: 1\nkind: research\nmodel: opus\neffort: high\ndependsOn: []\n"
+    spec = "priority: 1\nkind: research\nmodel: opus\neffort: high\ndependsOn: []\n"
     result = disp.parse_spec_overrides(spec)
-    assert result == {"approval_tier": 1, "kind": "research", "model": "opus", "effort": "high"}
+    assert result == {"priority": 1, "kind": "research", "model": "opus", "effort": "high"}
 
 
 def test_parse_spec_overrides_stops_at_section_header():
-    spec = "approval_tier: 1\n## Intent\nmodel: opus\n"
-    assert disp.parse_spec_overrides(spec) == {"approval_tier": 1}
+    spec = "priority: 1\n## Intent\nmodel: opus\n"
+    assert disp.parse_spec_overrides(spec) == {"priority": 1}
 
 
-def test_parse_spec_overrides_malformed_tier_omitted():
-    """A non-integer approval_tier is dropped, not raised -- `spec_tier` is what
-    supplies the safe (more-restrictive) fallback."""
-    assert disp.parse_spec_overrides("approval_tier: soon\n") == {}
+def test_parse_spec_overrides_malformed_priority_omitted():
+    """A non-integer priority is dropped, not raised -- `spec_priority` is what
+    supplies the safe fallback."""
+    assert disp.parse_spec_overrides("priority: soon\n") == {}
+
+
+def test_parse_spec_overrides_ignores_legacy_approval_tier():
+    """AD-7: the 130 existing specs' now-inert `approval_tier:` line is an
+    unrecognized front-matter key -- tolerated, not parsed, not raised."""
+    assert disp.parse_spec_overrides("approval_tier: 2\npriority: 1\n") == {"priority": 1}
+
+
+def test_spec_with_legacy_approval_tier_line_folds_and_dispatches_clean(home, cfg):
+    """AD-7 AC: a spec still carrying an `approval_tier:` line (like the 130
+    existing ones on the real board) folds and dispatches with no error and no
+    fold warning -- no bulk rewrite of existing specs is required."""
+    key = "T-1"
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: 2\npriority: 1\ndependsOn: []\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": Phase.READY.value}, actor="r")
+    snap = snap_mod.rebuild(home, key)
+    assert snap.fold_warnings == []
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+    assert report.spawned == [key]
 
 
 # --- RT-1: _resolve_model_effort ---
@@ -809,7 +861,7 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
     same spawn tuple RF-1 found before the split -- dispatcher no longer pre-flattens
     "<command> <key>" itself, but DryRunSessions.spawn still composes and records it,
     so every existing reader of sessions.spawned sees byte-identical values."""
-    _seed_with_overrides(home, "T-1")  # approval_tier: 0 -> tier_denylist([]) below
+    _seed_with_overrides(home, "T-1")
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert report.spawned == ["T-1"]
@@ -823,7 +875,7 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
         str(home),
         "sonnet",
         None,
-        [],
+        ["Bash(gh pr merge:*)"],  # AD-7: unconditional merge denylist
         [],
         {},
         "claude",  # RF-2: READY forces "claude" regardless of any spec runner: override
@@ -835,7 +887,7 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
 
 def test_seed_spec_includes_kind_model_effort(home, cfg):
     inbox.append_new(home, "Research task", key="R-1", args={
-        "approval_tier": 1, "priority": 2,
+        "priority": 2,
         "kind": "research", "model": "opus", "effort": "high",
         "notes": "Use web search", "depends_on": ["T-1"],
     })
@@ -865,7 +917,7 @@ def test_seed_spec_no_extra_fields_by_default(home, cfg):
 
 def test_seed_spec_includes_runner_and_runner_model(home, cfg):
     inbox.append_new(home, "Non-claude task", key="R-2", args={
-        "approval_tier": 1, "priority": 2,
+        "priority": 2,
         "runner": "opencode", "runner_model": "qwen3-coder:30b",
     })
     disp.dispatch(cfg, DryRunSessions(), now=1000)
@@ -882,13 +934,12 @@ def test_seed_spec_includes_runner_and_runner_model(home, cfg):
 def test_seed_spec_with_neither_runner_field_matches_golden_fixture():
     """AC2: `_seed_spec` with neither field set returns a string byte-identical
     to the pre-runner-field baseline -- the same shape it always rendered."""
-    text = disp._seed_spec("T-91", "Plain ticket", {"approval_tier": 1, "priority": 3})
+    text = disp._seed_spec("T-91", "Plain ticket", {"priority": 3})
     assert text == (
         "# T-91: Plain ticket\n"
         "\n"
         "<!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->\n"
         "\n"
-        "approval_tier: 1\n"
         "priority: 3\n"
         "dependsOn: []\n"
         "\n"
@@ -904,7 +955,7 @@ def test_mint_tolerates_explicit_null_fields(home, cfg):
     """A create-request carrying explicit JSON ``null`` for intent/args must not
     crash the whole sweep (regression: null intent made ``_seed_spec`` join a None)."""
     inbox.append_new(home, "Nullable ticket", prefix="M",
-                     args={"approval_tier": 1, "priority": 3,
+                     args={"priority": 3,
                            "intent": None, "kind": "implementation"})
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert report.minted == ["M-1"]
@@ -926,7 +977,7 @@ def test_mint_tolerates_null_title(home, cfg):
 def _sched_cfg(cfg, **overrides):
     task = {
         "name": "digest", "prompt": "Summarize things", "every": "1h",
-        "approval_tier": 0, "kind": "implementation", "priority": 3, "prefix": "S",
+        "kind": "implementation", "priority": 3, "prefix": "S",
         "enabled": True,
     }
     task.update(overrides)
@@ -1089,7 +1140,7 @@ def test_schedule_status_reports_cadence_and_cursor(home, cfg):
     assert rows == [{
         "name": "digest", "prompt": "Summarize things", "every": "1h",
         "cron": None, "tz": "UTC",
-        "kind": "implementation", "approval_tier": 0, "priority": 3,
+        "kind": "implementation", "priority": 3,
         "prefix": "S", "enabled": True, "repo": None, "title": None,
         "last_fired": now, "next_due": now + 3600,
     }]
@@ -1107,7 +1158,7 @@ def test_schedule_status_never_fired_has_no_last_fired(home, cfg):
 def _cron_sched_cfg(cfg, **overrides):
     task = {
         "name": "digest", "prompt": "Summarize things", "cron": "0 2 * * *",
-        "tz": "UTC", "approval_tier": 0, "kind": "implementation", "priority": 3,
+        "tz": "UTC", "kind": "implementation", "priority": 3,
         "prefix": "S", "enabled": True,
     }
     task.update(overrides)

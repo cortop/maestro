@@ -81,7 +81,7 @@ def test_end_to_end_create_runner_opencode_through_sweeps_to_awaiting_ci(
     # --json mints synchronously (bypasses the _new inbox) -- the spec exists
     # the moment this call returns, no separate mint_new_tickets step needed.
     rc = cli.main(["--home", str(home), "create", "OC-4 e2e", "--key", "T-1",
-                   "--tier", "0", "--runner", "opencode", "--runner-model", "a:1b",
+                   "--runner", "opencode", "--runner-model", "a:1b",
                    "--json", "--no-nudge"])
     assert rc == 0
     spec_text = store.spec_path(home, "T-1").read_text()

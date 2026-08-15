@@ -61,7 +61,6 @@ _maestro() {
           _arguments \
             '(-h --help)'{-h,--help}'[show help]' \
             '--key=[ticket key]:key:_maestro_keys' \
-            '--tier=[approval tier (0=auto-approve)]:tier:(0 1 2)' \
             '--priority=[priority (1=highest)]:priority:(1 2 3 4 5)' \
             '--intent=[intent text]:intent:' \
             '--no-nudge[skip in-process dispatch nudge after queuing]' \

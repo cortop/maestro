@@ -138,11 +138,13 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   (`.claude/commands/maestro-reconcile-<phase>.md`, mirrored in `skills/`; tracked so every
   worktree inherits them) — progressive disclosure, so a reconciler only loads the branch its
   current phase needs. The dispatcher resolves which one to spawn per-key at spawn time
-  (`dispatcher.resolve_reconcile_command`, beside `_resolve_model_effort`/`tier_denylist`).
+  (`dispatcher.resolve_reconcile_command`, beside `_resolve_model_effort`/`MERGE_DENYLIST`).
   Agents drive state exclusively via `maestro` verbs.
-- Ticket specs follow a fixed format (front-matter `approval_tier` / `priority` / optional
-  `dependsOn`, then `## Intent`, `## Notes`, `## Acceptance criteria` as `- [ ]` checkboxes) —
-  match existing tickets, don't invent fields.
+- Ticket specs follow a fixed format (front-matter `priority` / optional `dependsOn`, then
+  `## Intent`, `## Notes`, `## Acceptance criteria` as `- [ ]` checkboxes) — match existing
+  tickets, don't invent fields. Some existing specs still carry a now-inert `approval_tier:`
+  line (AD-7 removed the tier gate it drove) — tolerated as an unrecognized front-matter key,
+  never rewritten in bulk.
 
 ## Git
 
