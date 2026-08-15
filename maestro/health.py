@@ -868,6 +868,45 @@ def check_runner_binary(cfg: Config, now: float, *, which=None) -> dict:
     return {"name": "runner_binary", "status": status, "detail": detail, "tickets": tickets}
 
 
+def check_pi_version(cfg: Config, now: float, *, run=None) -> dict:
+    """WARN (never blocks a spawn) when the installed ``pi --version`` drifts
+    from the pinned ``[runner.pi].version`` (T-56) -- pi has no equivalent of
+    OC-2's spawn-time binary probe today (it isn't a registered runner yet,
+    ``dispatcher._REGISTERED_RUNNERS``), so this is the only place a version
+    drift ever surfaces; same "board-wide visibility, WARN-only" shape as
+    ``check_runner_binary``/``check_ollama_models`` beside it.
+
+    Skips entirely (``ok``, ``installed=None``) when ``[runner.pi]`` isn't
+    configured or sets no ``version`` -- nothing pinned to drift from.
+    Injectable ``run`` (``check_gh_credential_reachability``'s own pattern) so
+    tests never shell a real ``pi``.
+    """
+    run = run or subprocess.run
+    pi_table = (cfg.provider_config.get("runner") or {}).get("pi")
+    pinned = pi_table.get("version") if isinstance(pi_table, dict) else None
+    if not pinned:
+        return {"name": "pi_version", "status": "ok",
+                "detail": "no [runner.pi].version pinned", "pinned": None, "installed": None}
+    try:
+        p = run(["pi", "--version"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"name": "pi_version", "status": "warn",
+                "detail": f"pi --version failed: {type(e).__name__}: {e}",
+                "pinned": pinned, "installed": None}
+    installed = (p.stdout or "").strip()
+    if p.returncode != 0 or not installed:
+        return {"name": "pi_version", "status": "warn",
+                "detail": (p.stderr or "pi --version failed").strip(),
+                "pinned": pinned, "installed": None}
+    if installed != pinned:
+        return {"name": "pi_version", "status": "warn",
+                "detail": f"installed pi {installed} != pinned {pinned}",
+                "pinned": pinned, "installed": installed}
+    return {"name": "pi_version", "status": "ok",
+            "detail": f"installed pi {installed} matches pinned version",
+            "pinned": pinned, "installed": installed}
+
+
 def check_ollama_models(cfg: Config, now: float, *, transport=None) -> dict:
     """WARN (never blocks a spawn) when a current ticket's spec names a
     non-claude ``runner:`` whose ``runner_model:`` is absent from the local
@@ -1155,8 +1194,8 @@ CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_out
           check_dead_letters, check_watchdog_loops, check_depends_on, check_repo_preflight,
           check_unknown_repo_bindings, check_missing_reconcile_skill, check_reconciler_permissions,
           check_spawn_floor, check_daily_spend, check_burn, check_gh_credential_reachability,
-          check_launchctl, check_ollama_models, check_runner_binary, check_worktree_health,
-          check_provider_availability)
+          check_launchctl, check_ollama_models, check_runner_binary, check_pi_version,
+          check_worktree_health, check_provider_availability)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:

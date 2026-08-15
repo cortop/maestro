@@ -5,8 +5,11 @@ Only the non-derived, can-never-be-regenerated state is captured: the event logs
 (``events/``), the human-owned specs (``tickets/``), the human inbox (``inbox/``)
 and ``config.toml``. ``derived/``, ``agent-logs/`` and ``worktrees/`` are all
 disposable or reconstructable, so they are deliberately excluded to keep snapshots
-small. Backups default to a *sibling* of the home (never inside it), so a
-``rm -rf <home>`` leaves them intact.
+small -- ``.pi-agent`` (``store.pi_agent_dir``, T-56) is the same story: it's
+regenerated from ``[runner.pi]`` config on the next spawn
+(``sessions.RoutingSessions.spawn``), so a restore into a home without it just
+means the next spawn recreates it, never a restore failure. Backups default to a
+*sibling* of the home (never inside it), so a ``rm -rf <home>`` leaves them intact.
 """
 from __future__ import annotations
 

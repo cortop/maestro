@@ -263,6 +263,21 @@ _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 _RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
 
 
+# T-56: [runner.pi]'s whole recognized key set. Same validation posture as
+# _RUNNER_OPENCODE_KEYS (fail-closed at config.load -- see the unknown-key check
+# below). `provider` is the name `store.generate_pi_models_json` registers the
+# `providers.<name>` block under in the generated models.json (default "zai");
+# `base_url`/`api`/`api_key`/`compat` are that provider's own fields (`api_key`
+# a resolver expression -- `$ENV_VAR` or `!command ...` -- never a literal, see
+# that function's docstring); `models` is a table of `<model id>` ->
+# `{context_window, max_tokens, cost: {input, output, cache_read, cache_write}}`;
+# `version` is the pinned `pi --version` string `health.check_pi_version` warns
+# on drift from.
+_RUNNER_PI_KEYS = frozenset({
+    "provider", "base_url", "api", "compat", "models", "api_key", "version"
+})
+
+
 def config_path(home: Path) -> Path:
     return home / "config.toml"
 
@@ -444,6 +459,13 @@ def load(home_arg: str | None = None) -> Config:
                 if unknown:
                     raise store.MaestroError(
                         f"config.toml: [runner.opencode] has unrecognized key(s): "
+                        f"{', '.join(sorted(unknown))}")
+            raw_pi_table = raw_runner_table.get("pi")
+            if isinstance(raw_pi_table, dict):
+                unknown = set(raw_pi_table) - _RUNNER_PI_KEYS
+                if unknown:
+                    raise store.MaestroError(
+                        f"config.toml: [runner.pi] has unrecognized key(s): "
                         f"{', '.join(sorted(unknown))}")
         cfg.provider_config = {
             k: v for k, v in data.items()
@@ -663,6 +685,65 @@ implementer = "claude_skill"
 # host = "127.0.0.1:11434"          # OC-6: optional OLLAMA_HOST override for that same
                                      # provider's baseURL; unset resolves the ambient
                                      # OLLAMA_HOST env var same as `maestro runners` does
+
+# [runner.pi]                       # T-56 (PI-4): pi's own maestro-owned agent home --
+                                     # unknown keys here fail config.load (fail-closed, see
+                                     # config._RUNNER_PI_KEYS). `store.generate_pi_models_json`
+                                     # regenerates $PI_CODING_AGENT_DIR/models.json from this
+                                     # table before every spawn (sessions.RoutingSessions.spawn,
+                                     # its one call site), so no developer's real ~/.pi config
+                                     # can ever shadow what a reconciler resolves.
+# provider = "zai"                  # the `providers.<name>` key models.json registers under
+                                     # (default "zai" -- the vendor whose bundled catalogue this
+                                     # ticket's models table extends)
+# base_url = "https://api.z.ai/api/coding/paas/v4"
+                                     # the Coding-Plan SUBSCRIPTION endpoint -- NOT
+                                     # "https://api.z.ai/api/paas/v4" (metered pay-as-you-go);
+                                     # the vendor warns the wrong one silently fails to consume
+                                     # subscription quota. A config value, never hardcoded.
+# api = "openai-completions"        # pi's own wire-protocol name for this provider
+# api_key = "$ZAI_API_KEY"          # a RESOLVER EXPRESSION only -- "$ENV_VAR" (interpolated)
+                                     # or "!command" (executed, stdout used) -- written through
+                                     # verbatim. maestro never reads or holds the secret value.
+# version = "0.79.2"                # pinned installed `pi --version`; health.check_pi_version
+                                     # WARNs when the real binary drifts from this
+#
+# [runner.pi.compat]                # the provider-level compat block (pi's own schema);
+                                     # mirrors the bundled "zai" entries' own compat so the
+                                     # newer model behaves identically to its bundled siblings
+# supportsDeveloperRole = false
+# thinkingFormat = "zai"
+# zaiToolStream = true
+#
+# [runner.pi.models."glm-5.2"]      # one table per model id this provider registers; context
+                                     # window and pricing are the vendor's OWN published figures
+                                     # (docs.z.ai/guides/llm/glm-5.2 and
+                                     # docs.z.ai/guides/overview/pricing, read 2026-08-15) --
+                                     # never copied from this file's comments elsewhere.
+                                     # cache_write is NOT pinned to 0 here even though the
+                                     # vendor currently lists cache-write/storage as
+                                     # "limited-time free": on the measured board, cache writes
+                                     # were ~40% of the real bill, and a 0 here would zero the
+                                     # spend meter the moment that promo ends. Absent an explicit
+                                     # vendor cache-write price, this pins it equal to the input
+                                     # rate (the standard assumption when a vendor doesn't
+                                     # special-price cache writes) -- revisit if the vendor
+                                     # publishes a distinct figure.
+# context_window = 1048576          # 1M tokens (docs.z.ai/guides/llm/glm-5.2)
+# max_tokens = 128000                # docs.z.ai/guides/llm/glm-5.2's own max-output figure
+# reasoning = true                   # GLM-5.2 reasons by default (docs.z.ai/guides/llm/glm-5.2)
+                                     # -- omitting this silently drops thinking support, unlike
+                                     # every bundled sibling zai model (verified: real
+                                     # `pi --list-models` shows "thinking" go from "no" to "yes")
+# [runner.pi.models."glm-5.2".cost] # USD per MILLION tokens -- pi's own unit (it divides by
+                                     # 1e6 itself, models.js:calculateCost), matching the
+                                     # bundled built-in zai entries' units; write the vendor's
+                                     # per-million figures here verbatim, no conversion needed
+# input = 1.4                       # $1.40 / 1M input tokens (docs.z.ai/guides/overview/pricing)
+# output = 4.4                      # $4.40 / 1M output tokens
+# cache_read = 0.26                 # $0.26 / 1M cached-input (read) tokens
+# cache_write = 1.4                 # not separately published -- pinned to the input rate,
+                                     # see the table's own comment above
 
 # [notify]                          # outbound push on awaiting-human/degraded/done (optional)
 # notify_command = "terminal-notifier -title maestro -message \"$KEY $PHASE: $QUESTION\""

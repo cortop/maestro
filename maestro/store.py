@@ -152,6 +152,93 @@ def scratch_path(home: Path, key: str) -> Path:
     return home / "scratch" / validate_key(key)
 
 
+def pi_agent_dir(home: Path) -> Path:
+    """The maestro-owned pi agent home for *home* -- ``$PI_CODING_AGENT_DIR``
+    points here (``sessions.RoutingSessions.spawn``, the one call site), which
+    the installed pi CLI (``@earendil-works/pi-coding-agent``) treats as its
+    ENTIRE agent dir (not a parent of one -- see ``getAgentDir()`` in its own
+    ``config.js``: an env override is returned as-is, never joined with
+    anything). That isolates every scrap of pi state -- extensions, sessions,
+    the generated ``models.json`` below -- from a developer's real ``~/.pi``,
+    which on a real machine carries extensions that reproducibly hang a run
+    (T-56 spec). Regenerable, so it is excluded from ``maestro backup`` (see
+    ``backup.py``) and never needs to pre-exist: ``generate_pi_models_json``
+    creates it lazily via ``atomic_write``.
+    """
+    return home / ".pi-agent"
+
+
+# T-56: the `providers.<name>` key `generate_pi_models_json` registers the
+# `[runner.pi]` table under when the config doesn't set `provider` itself --
+# "zai" because that is the one vendor this ticket's own config comments and
+# spec are about; a board wiring a different vendor sets `provider` to name it.
+_PI_DEFAULT_PROVIDER = "zai"
+
+
+def generate_pi_models_json(home: Path, pi_config: dict) -> bool:
+    """Regenerate ``<pi_agent_dir(home)>/models.json`` from ``[runner.pi]``
+    config (``config.load(home).provider_config["runner"]["pi"]``) --
+    write-if-changed via ``atomic_write``, so calling this twice with the same
+    config produces a byte-identical file and a no-op second write. Returns
+    whether it actually wrote (``False`` on the no-op case). The ONE
+    production call site is ``sessions.RoutingSessions.spawn`` (see its
+    docstring), run before every spawn.
+
+    Schema verified against the installed pi 0.79.2's own
+    ``core/model-registry.js`` (there is no public schema doc for this file):
+    ``{"providers": {<name>: {baseUrl, api, apiKey, compat, models: [{id,
+    contextWindow, maxTokens, reasoning, cost: {input, output, cacheRead,
+    cacheWrite}}, ...]}}}``. ``pi_config``'s own keys are this codebase's usual
+    TOML ``snake_case`` (matching every other ``[runner.<name>]`` table);
+    ``base_url``/``api``/``api_key``/``compat`` map onto that provider block
+    1:1 (``api_key`` -> ``apiKey`` is a resolver expression -- ``$ENV_VAR`` or
+    ``!command ...`` -- written through VERBATIM; nothing in this function
+    reads or resolves a secret value), and ``models`` (a table of ``<model
+    id>`` -> ``{context_window, max_tokens, reasoning, cost: {input, output,
+    cache_read, cache_write}}``) becomes that provider's own ``models`` array,
+    one entry per configured id. ``reasoning`` (bool) is a straight
+    pass-through -- omitted pi defaults it to ``false``, which silently drops
+    thinking support pi's OWN bundled sibling models of the same family carry
+    (verified against a real ``pi --list-models``); set it explicitly for a
+    reasoning model.
+    """
+    provider = pi_config.get("provider") or _PI_DEFAULT_PROVIDER
+    provider_block: dict = {}
+    for src, dst in (("base_url", "baseUrl"), ("api", "api"), ("api_key", "apiKey")):
+        if pi_config.get(src):
+            provider_block[dst] = pi_config[src]
+    if pi_config.get("compat"):
+        provider_block["compat"] = pi_config["compat"]
+
+    models = []
+    for model_id, model_cfg in (pi_config.get("models") or {}).items():
+        entry: dict = {"id": model_id}
+        if "context_window" in model_cfg:
+            entry["contextWindow"] = model_cfg["context_window"]
+        if "max_tokens" in model_cfg:
+            entry["maxTokens"] = model_cfg["max_tokens"]
+        if "reasoning" in model_cfg:
+            entry["reasoning"] = model_cfg["reasoning"]
+        cost = model_cfg.get("cost")
+        if isinstance(cost, dict):
+            entry["cost"] = {
+                "input": cost.get("input", 0),
+                "output": cost.get("output", 0),
+                "cacheRead": cost.get("cache_read", 0),
+                "cacheWrite": cost.get("cache_write", 0),
+            }
+        models.append(entry)
+    if models:
+        provider_block["models"] = models
+
+    content = json.dumps({"providers": {provider: provider_block}}, indent=2, sort_keys=True) + "\n"
+    path = pi_agent_dir(home) / "models.json"
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return False
+    atomic_write(path, content)
+    return True
+
+
 def _lock_file(target: Path) -> Path:
     return target.parent / f".{target.name}.lock"
 

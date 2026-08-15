@@ -130,7 +130,7 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
             capture_session_logs=cfg.capture_session_logs,
             unverified_claim_max_age=cfg.unverified_claim_max_age,
         ),
-    })
+    }, home=cfg.home)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     if report.repo_blockers:
         if cfg.repos:
@@ -570,7 +570,7 @@ def cmd_dispatch(args) -> int:
                 cfg.home,
                 capture_session_logs=cfg.capture_session_logs,
                 unverified_claim_max_age=cfg.unverified_claim_max_age),
-        })
+        }, home=cfg.home)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run,
                             key_filter=key_filter)
     projection.write(cfg.home)

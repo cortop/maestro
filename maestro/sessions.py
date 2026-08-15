@@ -16,7 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import claims, store
+from . import claims, config, store
+from .store import generate_pi_models_json
 
 RECONCILE_PREFIX = "reconcile-"
 
@@ -172,7 +173,7 @@ class ClaudeCliSessions:
         self.extra_args = extra_args or []
         # GA-10: the process-wide "always-on" --allowedTools rules (maestro CLI verbs +
         # reconcile_web_tools, see cli._reconciler_tool_grants) -- bare rules, not a
-        # pre-built "--allowedTools <value>" pair, so spawn() can merge in the per-key
+        # pre-built "--allowedTools" pair, so spawn() can merge in the per-key
         # allowed_tools argument and still emit exactly ONE --allowedTools flag.
         self.base_allowed_tools = base_allowed_tools or []
         self.capture_session_logs = capture_session_logs
@@ -234,6 +235,9 @@ class ClaudeCliSessions:
         env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
         # GA-17: this key's resolved gh credential wins over whatever's ambient --
         # it's an explicit, already-fail-closed-checked resolution, not a guess.
+        # T-56: also where PI_CODING_AGENT_DIR (if RoutingSessions prepared it)
+        # rides in -- see that class's spawn() docstring for why it belongs there
+        # and not duplicated in each backend.
         if env_overlay:
             env.update(env_overlay)
 
@@ -262,8 +266,8 @@ class ClaudeCliSessions:
         # Rolled back (released) if Popen itself raises, so a failed launch
         # never leaves a phantom claim behind either.
         claims.write_claim(self.home, key, os.getpid(), session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=prompt,
-                           runner=claimed_runner)
+                            log_path=log_path, cwd=str(cwd), prompt=prompt,
+                            runner=claimed_runner)
         try:
             try:
                 proc = subprocess.Popen(
@@ -281,8 +285,8 @@ class ClaudeCliSessions:
             raise
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=prompt,
-                           runner=claimed_runner)
+                            log_path=log_path, cwd=str(cwd), prompt=prompt,
+                            runner=claimed_runner)
         return proc.pid
 
 
@@ -429,6 +433,8 @@ class OpencodeCliSessions:
 
         env = dict(os.environ)
         env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
+        # T-56: PI_CODING_AGENT_DIR (if RoutingSessions prepared it) rides in via
+        # env_overlay -- see that class's spawn() docstring.
         if env_overlay:
             env.update(env_overlay)
 
@@ -448,8 +454,8 @@ class OpencodeCliSessions:
         # rationale (claims are runner-agnostic, so this backend needs the
         # identical fix).
         claims.write_claim(self.home, key, os.getpid(), session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
-                           runner=claimed_runner)
+                            log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
+                            runner=claimed_runner)
         try:
             try:
                 proc = subprocess.Popen(
@@ -467,8 +473,8 @@ class OpencodeCliSessions:
             raise
 
         claims.write_claim(self.home, key, proc.pid, session_name(key),
-                           log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
-                           runner=claimed_runner)
+                            log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
+                            runner=claimed_runner)
         return proc.pid
 
 
@@ -489,12 +495,28 @@ class RoutingSessions:
     ``claims._verdict``), so every delegate sharing the same home would compute
     the identical set; asking N of them would just re-read (and, for
     ``ClaudeCliSessions``, re-verify via ``ps``) the same claim files N times.
+
+    T-56: also the ONE production call site that keeps the maestro-owned pi
+    agent home (``store.pi_agent_dir``/``store.generate_pi_models_json``) in
+    sync with ``[runner.pi]`` config and threads ``PI_CODING_AGENT_DIR`` into
+    every spawned reconciler's env -- regardless of which backend actually
+    runs it, since a reconciler's own tools can shell out to ``pi`` (a future
+    pi runner backend, or an ad hoc call) and must never see a developer's
+    real ``~/.pi`` state. Lives here rather than in each backend's own
+    ``spawn`` (the pre-T-56 shape) precisely because this is the one place
+    every spawn already funnels through, regardless of backend -- duplicating
+    it per-backend is what let it drift out of sync with ``provider_config``'s
+    real shape the first time. Requires ``home`` to do anything; both real
+    construction sites (``cli.py``'s ``_nudge`` and ``cmd_dispatch``) pass
+    ``cfg.home``, so this is live in production. Tests that don't exercise pi
+    behavior can omit ``home`` and get the pre-T-56 no-op.
     """
 
-    def __init__(self, delegates: dict[str, SessionManager]):
+    def __init__(self, delegates: dict[str, SessionManager], home: Path | None = None):
         if not delegates:
             raise store.MaestroError("RoutingSessions needs at least one delegate")
         self.delegates = dict(delegates)
+        self.home = Path(home) if home is not None else None
 
     def list_active(self) -> set[str]:
         return next(iter(self.delegates.values())).list_active()
@@ -514,6 +536,21 @@ class RoutingSessions:
                 f"RoutingSessions: no delegate registered for runner {name!r} "
                 f"(registered: {sorted(self.delegates)}) -- the caller must "
                 "validate the runner before calling spawn") from None
+        env_overlay = self._prep_pi_env(env_overlay)
         return delegate.spawn(key, command, cwd, model=model, effort=effort,
                               disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
                               env_overlay=env_overlay, runner=name, runner_model=runner_model)
+
+    def _prep_pi_env(self, env_overlay: dict[str, str] | None) -> dict[str, str] | None:
+        """T-56: regenerate models.json and add ``PI_CODING_AGENT_DIR`` to
+        *env_overlay* when ``[runner.pi]`` is configured; a no-op passthrough
+        otherwise (no ``home``, or nothing configured under ``[runner.pi]``)."""
+        if self.home is None:
+            return env_overlay
+        pi_config = (config.load(self.home).provider_config.get("runner") or {}).get("pi")
+        if not isinstance(pi_config, dict):
+            return env_overlay
+        generate_pi_models_json(self.home, pi_config)
+        merged = dict(env_overlay) if env_overlay else {}
+        merged.setdefault("PI_CODING_AGENT_DIR", str(store.pi_agent_dir(self.home)))
+        return merged

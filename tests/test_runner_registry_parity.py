@@ -65,9 +65,9 @@ def _build_delegates_at_both_sites(home, monkeypatch):
     captured: list[set[str]] = []
     orig_init = RoutingSessions.__init__
 
-    def spy_init(self, delegates):
+    def spy_init(self, delegates, home=None):
         captured.append(set(delegates))
-        orig_init(self, delegates)
+        orig_init(self, delegates, home=home)
 
     monkeypatch.setattr(RoutingSessions, "__init__", spy_init)
 
