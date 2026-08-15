@@ -2409,33 +2409,44 @@ def _resolve_model_effort(cfg: Config, key: str) -> tuple[str, str | None]:
     return model, effort
 
 
-# RF-2/OC-4: the registered runners -- the seam RF-2 landed (spec
+# RF-2/OC-4/PI-8: the registered runners -- the seam RF-2 landed (spec
 # `runner:`/`runner_model:` -> resolve_runner -> RoutingSessions) was proved
 # byte-identical-by-default before a second backend was added, per RF-2's ticket
-# Intent. OC-4 is that second backend (``sessions.OpencodeCliSessions``); adding a
-# THIRD means adding it here AND wiring a delegate into every RoutingSessions
-# construction site (cli.py) -- one is meaningless without the other.
-_REGISTERED_RUNNERS = frozenset({"claude", "opencode"})
+# Intent. OC-4 added the second backend (``sessions.OpencodeCliSessions``);
+# PI-8 the third (``sessions.PiCliSessions``). Adding a FOURTH means adding it
+# here AND wiring a delegate into every RoutingSessions construction site
+# (cli.py) -- one is meaningless without the other (T-53's parity test,
+# tests/test_runner_registry_parity.py, fails loudly if either is missed).
+_REGISTERED_RUNNERS = frozenset({"claude", "opencode", "pi"})
 
-# OC-4: per-runner concurrency cap defaults, consulted by `_runner_concurrency_cap`
-# below when `[runner.<name>]`'s `concurrency` key (cfg.provider_config) is unset.
-# "claude" is never looked up here -- the fleet-wide `max_concurrency` already
-# bounds it, and it never reaches the non-claude branch this cap gates. opencode
-# defaults to 1 (spec Notes, QW-3): it wedges intermittently at `init` and every
-# process shares one on-disk sqlite db (`~/.local/share/opencode/opencode.db` +
-# WAL), so two concurrent opencode reconcilers is a measured risk until proven
-# otherwise -- raise this via config, not by editing the default.
-_RUNNER_DEFAULT_CONCURRENCY = {"opencode": 1}
+# OC-4/PI-8: per-runner concurrency cap defaults, consulted by
+# `_runner_concurrency_cap` below when `[runner.<name>]`'s `concurrency` key
+# (cfg.provider_config) is unset. "claude" is never looked up here -- the
+# fleet-wide `max_concurrency` already bounds it, and it never reaches the
+# non-claude branch this cap gates. opencode defaults to 1 (spec Notes, QW-3):
+# it wedges intermittently at `init` and every process shares one on-disk
+# sqlite db (`~/.local/share/opencode/opencode.db` + WAL), so two concurrent
+# opencode reconcilers is a measured risk until proven otherwise. pi ALSO
+# defaults to 1 (PI-8 spec Notes) -- not a performance default, an account
+# fair-use one: the likely provider's subscription is documented as scoped to
+# 1-2 concurrent projects, with enforcement against exactly maestro's fan-out
+# pattern -- raise either via config, never by editing the default.
+_RUNNER_DEFAULT_CONCURRENCY = {"opencode": 1, "pi": 1}
 
-# T-54: per-runner eligible-phase defaults, consulted by `runner_eligible_phases`
-# below when `[runner.<name>]`'s `phases` key (cfg.provider_config) is unset --
-# "implementing only" for every runner (including one with no default entry at
-# all here), matching what `resolve_runner` hardcoded before this ticket, so an
-# existing home with no `[runner.<name>] phases` line spawns byte-identically
-# to before. A runner is only ever confined to `implementing` BY DEFAULT --
-# admitting it to `triaging`/`researching`/`qa` too is a deliberate, reviewable
-# config change (`[runner.<name>] phases = [...]`), never a code edit.
-_RUNNER_DEFAULT_PHASES = {"opencode": frozenset({Phase.IMPLEMENTING})}
+# T-54/PI-8: per-runner eligible-phase defaults, consulted by
+# `runner_eligible_phases` below when `[runner.<name>]`'s `phases` key
+# (cfg.provider_config) is unset -- "implementing only" for a runner with NO
+# entry here at all (see `runner_eligible_phases`'s own fallback), matching
+# what `resolve_runner` hardcoded before T-54, so an existing home with no
+# `[runner.<name>] phases` line spawns byte-identically to before. pi gets an
+# EXPLICIT empty entry here -- deliberately narrower than that universal
+# fallback: PI-8's spec Notes are explicit that admitting pi to `implementing`
+# is a separate, reviewable config change made only after the guard has been
+# proven in production, not something this ticket's own registration should
+# grant for free via the generic default. Admitting any runner to a phase
+# beyond its default is always a deliberate config edit
+# (`[runner.<name>] phases = [...]`), never a code change.
+_RUNNER_DEFAULT_PHASES = {"opencode": frozenset({Phase.IMPLEMENTING}), "pi": frozenset()}
 
 
 def runner_eligible_phases(cfg: Config, runner: str) -> frozenset:

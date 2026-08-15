@@ -175,6 +175,17 @@ def pi_agent_dir(home: Path) -> Path:
 _PI_DEFAULT_PROVIDER = "zai"
 
 
+def pi_model_provider(pi_config: dict | None) -> str:
+    """The provider name pi's ``--model`` flag's ``<provider>/`` prefix (T-60,
+    ``sessions.PiCliSessions.spawn``) composes against -- ``pi_config.get
+    ("provider")`` if set, else the same default ``generate_pi_models_json``
+    bakes into ``models.json`` (``_PI_DEFAULT_PROVIDER``). ONE definition, so a
+    spawn's ``--model`` flag and the generated ``models.json``'s own provider
+    key can never disagree about which provider a bare ``runner_model`` tag
+    resolves under."""
+    return (pi_config or {}).get("provider") or _PI_DEFAULT_PROVIDER
+
+
 def generate_pi_models_json(home: Path, pi_config: dict) -> bool:
     """Regenerate ``<pi_agent_dir(home)>/models.json`` from ``[runner.pi]``
     config (``config.load(home).provider_config["runner"]["pi"]``) --
@@ -202,7 +213,7 @@ def generate_pi_models_json(home: Path, pi_config: dict) -> bool:
     (verified against a real ``pi --list-models``); set it explicitly for a
     reasoning model.
     """
-    provider = pi_config.get("provider") or _PI_DEFAULT_PROVIDER
+    provider = pi_model_provider(pi_config)
     provider_block: dict = {}
     for src, dst in (("base_url", "baseUrl"), ("api", "api"), ("api_key", "apiKey")):
         if pi_config.get(src):
