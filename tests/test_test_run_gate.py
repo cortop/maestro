@@ -21,7 +21,8 @@ import sys
 
 import pytest
 
-from maestro import cli, config as config_mod, event_log, ops, snapshot as snap_mod, store
+from maestro import cli, config as config_mod, dispatcher as disp, event_log, ops, snapshot as snap_mod, store
+from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from conftest import git, make_origin_and_repo
@@ -75,6 +76,18 @@ def test_unset_test_command_leaves_implementing_to_qa_unaffected(tmp_path, home)
     ev = ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")
 
     assert ev is not None
+    assert snap_mod.load(home, "G-1").phase == Phase.QA.value
+
+    # Proven byte-identical over a REAL dispatcher sweep, this repo's own
+    # established pattern for exactly this claim (test_drift_policy.py's
+    # `disp.dispatch(cfg, DryRunSessions(), now=...)`) -- not just the direct
+    # `ops.set_phase` call above. With `test_command` unset, `_tests_stale_reason`
+    # short-circuits to None before ever touching `snap.test_runs`/the worktree,
+    # so a full sweep over this now-due `qa` ticket must spawn/report it exactly
+    # as it would have before RB-12 existed -- the unconfigured gate never
+    # intrudes on dispatch()'s own due-checking/spawn decision.
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert "G-1" in report.spawned
     assert snap_mod.load(home, "G-1").phase == Phase.QA.value
 
 
@@ -236,6 +249,7 @@ def test_force_overrides_the_test_gate_and_records_forced_by_and_a_note(tmp_path
     assert len(notes) == 1
     assert "valentin" in notes[0]["payload"]["text"]
     assert "failed" in notes[0]["payload"]["text"]
+    assert _FAIL_CMD in notes[0]["payload"]["text"]  # names the failing command, not just an exit code
 
 
 # ---------------------------------------------------------------------------

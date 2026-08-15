@@ -114,7 +114,8 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
                 actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "force-ac-override"))
     if forced_tests:
         _append(cfg, key, E.NOTE,
-                {"text": f"forced past failing test-run gate ({tests_reason}) by {actor}"},
+                {"text": f"forced past failing test-run gate for `{cfg.test_command}` "
+                         f"({tests_reason}) by {actor}"},
                 actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "force-tests-override"))
     if not forced and phase == Phase.AWAITING_CI:
         _warn_unverified_acs(cfg, key, actor=actor)
