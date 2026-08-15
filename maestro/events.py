@@ -31,7 +31,11 @@ IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  evidence: {what, where, result}; content-hash keyed
 
 # Approval
-APPROVED = "Approved"                   # {}  human clears the tier-2 implementing gate (`maestro approve`)
+# AD-7: historical-only -- `maestro approve` and the tier-2 implementing gate it
+# cleared are gone (30 existing event logs carry a real Approved event, and the
+# log is append-only, so `snapshot.fold` must keep parsing this forever even
+# though nothing emits it anymore).
+APPROVED = "Approved"                   # {}
 
 # Independent QA (a separate agent that did not write the code re-checks the diff)
 AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, evidence, axis}

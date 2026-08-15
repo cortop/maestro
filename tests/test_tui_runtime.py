@@ -347,13 +347,14 @@ def test_cmd_modal_shows_phase_commands(seeded_home):
         _check(phase, cmds)
 
 
-def test_needs_you_filter_and_command_modal_offer_approve_for_gated_ticket(home):
-    """GA-21 mounted-app QA: a tier-2 unapproved ticket parked in `implementing`
-    surfaces on the real needs-you filter -- cycled to with real `f` presses,
-    not just relying on it being the default -- and its command modal offers
-    `approve`. An ordinary tier-1 implementing ticket does neither."""
-    seed_ticket(home, "G-1", "gated change", phase="implementing", tier=2)
-    seed_ticket(home, "G-2", "ordinary change", phase="implementing", tier=1)
+def test_needs_you_filter_shows_only_sleeping_and_stuck_phases(home):
+    """AD-7 mounted-app QA: the needs-you filter -- cycled to with real `f`
+    presses, not just relying on it being the default -- shows only the two
+    sleeping-and-stuck phases (awaiting-human/degraded); an ordinary
+    implementing ticket never appears there (the tier-2 gate this filter used
+    to also fold in is gone -- there is no way to be "gated" anymore)."""
+    seed_ticket(home, "G-1", "waiting on a human", phase="awaiting-human")
+    seed_ticket(home, "G-2", "ordinary change", phase="implementing")
 
     async def _inner():
         app = _make_app(home)
@@ -370,29 +371,8 @@ def test_needs_you_filter_and_command_modal_offer_approve_for_gated_ticket(home)
 
             table = app.query_one("#tickets", DataTable)
             keys = [str(table.get_row_at(r)[0]) for r in range(table.row_count)]
-            assert "G-1" in keys, f"gated ticket missing from needs-you filter: {keys}"
-            assert "G-2" not in keys, f"ungated ticket wrongly in needs-you filter: {keys}"
-
-            # Open the command modal on the gated ticket -- `approve` must be offered.
-            app._selected_key = "G-1"
-            await app.run_action("cmd")
-            await pilot.pause()
-            assert app._exception is None
-            rows = [str(lbl.content) for lbl in app.screen.query("Label.cmd-row")]
-            assert any("approve" in t for t in rows), f"approve not offered: {rows}"
-            await pilot.press("escape")
-            await pilot.pause()
-
-            # Same modal on the ungated ticket must NOT offer it.
-            app._selected_key = "G-2"
-            await app.run_action("cmd")
-            await pilot.pause()
-            rows2 = [str(lbl.content) for lbl in app.screen.query("Label.cmd-row")]
-            assert not any("approve" in t for t in rows2), f"approve wrongly offered: {rows2}"
-            await pilot.press("escape")
-            await pilot.pause()
-
-            assert app._exception is None
+            assert "G-1" in keys, f"awaiting-human ticket missing from needs-you filter: {keys}"
+            assert "G-2" not in keys, f"implementing ticket wrongly in needs-you filter: {keys}"
 
     asyncio.run(_inner())
 
@@ -669,16 +649,12 @@ def test_detail_screen_shows_detail_and_events(seeded_home):
     asyncio.run(_inner())
 
 
-def test_detail_pane_and_screen_render_tier_from_spec(home):
-    """GA-18: the Tier shown in both the compact #detail pane and the full
-    DetailScreen (#ds-detail) comes from `dispatcher.spec_tier` -- including
-    the tier-0 case (the falsy-0 bug: 0 must render '0', never '—') -- not
-    from any snapshot field."""
-    seed_ticket(home, "T-1", "auto-approved change", phase="ready", tier=0)
-    seed_ticket(home, "T-2", "risky change", phase="ready", tier=2)
-
-    def _tier_line(static: Static) -> str:
-        return next(l for l in static.render().plain.splitlines() if "Tier" in l)
+def test_detail_pane_and_screen_render_title_from_spec_at_row_zero(home):
+    """AD-7 replaces GA-18's tier-rendering test (the Tier line is gone --
+    there is no more tier to render): proves both the compact #detail pane and
+    the full DetailScreen (#ds-detail) still mount clean and show the ticket's
+    title for the selected row."""
+    seed_ticket(home, "T-1", "auto-approved change", phase="ready")
 
     async def _inner():
         app = _make_app(home)
@@ -692,27 +668,15 @@ def test_detail_pane_and_screen_render_tier_from_spec(home):
             table.move_cursor(row=0)
             await pilot.pause()
             assert app._selected_key == "T-1"
-            line = _tier_line(app.query_one("#detail", Static))
-            assert "0" in line and "—" not in line
+            assert "auto-approved change" in app.query_one("#detail", Static).render().plain
 
             await pilot.press("enter")
             await pilot.pause()
             assert isinstance(app.screen_stack[-1], DetailScreen)
-            line = _tier_line(app.screen_stack[-1].query_one("#ds-detail", Static))
-            assert "0" in line and "—" not in line
+            ds_text = app.screen_stack[-1].query_one("#ds-detail", Static).render().plain
+            assert "auto-approved change" in ds_text
             await pilot.press("escape")
             await pilot.pause()
-
-            table.move_cursor(row=1)
-            await pilot.pause()
-            assert app._selected_key == "T-2"
-            line = _tier_line(app.query_one("#detail", Static))
-            assert "2" in line
-
-            await pilot.press("enter")
-            await pilot.pause()
-            line = _tier_line(app.screen_stack[-1].query_one("#ds-detail", Static))
-            assert "2" in line
 
             assert app._exception is None
 
@@ -1304,40 +1268,6 @@ def test_notification_fires_on_phase_transition(seeded_home):
     asyncio.run(_inner())
 
 
-def test_notification_fires_once_on_needs_approval_transition(seeded_home):
-    """A ticket entering the tier-2 approval gate (GA-21) toasts exactly once,
-    matching the once-per-transition behavior above -- even though `phase`
-    itself never changes (stays "implementing"), since the gated bit rides
-    along in `_prev_phases` as a second signal per key."""
-    async def _inner():
-        app = _make_app(seeded_home)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()  # first populate; sets baseline
-            assert app._prev_phases is not None
-
-            # T-3 is already "implementing" (tier 1 by default) in seeded_home;
-            # bumping it to tier 2 on disk gates it without any new event, matching
-            # `gates.spec_tier`'s "a spec edit takes effect next sweep" contract.
-            store.atomic_write(store.spec_path(seeded_home, "T-3"),
-                               "# T-3\napproval_tier: 2\n\n## Intent\nx\n")
-
-            notifications_before = len(app._notifications)
-            app._populate()
-            await pilot.pause()
-            assert len(app._notifications) > notifications_before, (
-                "Expected a warning notification after T-3 entered needs-approval"
-            )
-
-            # A second populate with no further change fires nothing new.
-            count_after_first = len(app._notifications)
-            app._populate()
-            await pilot.pause()
-            assert len(app._notifications) == count_after_first
-            assert app._exception is None
-
-    asyncio.run(_inner())
-
-
 # --------------------------------------------------------------------------- #
 # (e) TUI-18: inbox-compose action works at any phase                          #
 # --------------------------------------------------------------------------- #
@@ -1566,7 +1496,7 @@ def test_proposal_screen_opens_with_proposal(seeded_home):
 def _write_scheduled_config(home, **overrides):
     task = {
         "name": "digest", "prompt": "Summarize things", "every": "1h",
-        "approval_tier": 1, "kind": "implementation", "priority": 3,
+        "kind": "implementation", "priority": 3,
         "prefix": "S", "enabled": True,
     }
     task.update(overrides)

@@ -138,16 +138,9 @@ _DEFAULT_COMMANDS: list[tuple[str, str]] = [
 ]
 
 
-def _commands_for(phase: str, gated: bool) -> list[tuple[str, str]]:
-    """The reference list `_CmdModal` shows for *phase*, with `approve`
-    prepended when the ticket is parked at the tier-2 approval gate (GA-21) --
-    phase alone can't tell a gated `implementing` ticket from an ungated one
-    (both are phase=="implementing"), so the caller passes the already-computed
-    `gates.needs_approval` verdict in."""
-    commands = _PHASE_COMMANDS.get(phase, _DEFAULT_COMMANDS)
-    if gated:
-        commands = [("approve", "clear the tier-2 approval gate")] + commands
-    return commands
+def _commands_for(phase: str) -> list[tuple[str, str]]:
+    """The reference list `_CmdModal` shows for *phase*."""
+    return _PHASE_COMMANDS.get(phase, _DEFAULT_COMMANDS)
 
 
 class _CmdModal(ModalScreen):
@@ -167,15 +160,14 @@ class _CmdModal(ModalScreen):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, key: str, phase: str, *, gated: bool = False) -> None:
+    def __init__(self, key: str, phase: str) -> None:
         super().__init__()
         self._key = key
         self._phase = phase
-        self._gated = gated
 
     def compose(self) -> ComposeResult:
         header = f"[bold]{self._key}[/bold] — {self._phase}"
-        commands = _commands_for(self._phase, self._gated)
+        commands = _commands_for(self._phase)
         with Vertical(id="cmd-dialog"):
             yield Label(header)
             yield Label("[dim]── Commands ──[/dim]")
@@ -270,8 +262,6 @@ class _CreateModal(ModalScreen):
             yield Input(placeholder="e.g. opus, sonnet (empty = config default)", id="create-model")
             yield Label("Effort")
             yield Input(placeholder="e.g. high, medium, low (empty = config default)", id="create-effort")
-            yield Label("Tier")
-            yield Input(value="1", id="create-tier")
             yield Label("Priority")
             yield Input(value="3", id="create-priority")
             yield Label("Intent")
@@ -335,14 +325,12 @@ class _CreateModal(ModalScreen):
                 return
         else:
             prefix = str(selected)
-        tier_str = self.query_one("#create-tier", Input).value.strip() or "1"
         priority_str = self.query_one("#create-priority", Input).value.strip() or "3"
         intent_val = self.query_one("#create-intent", TextArea).text.strip() or None
         try:
-            tier = int(tier_str)
             priority = int(priority_str)
         except ValueError:
-            self.notify("Tier and priority must be integers", severity="warning")
+            self.notify("Priority must be an integer", severity="warning")
             return
         kind_sel = self.query_one("#create-kind", Select)
         kind_val = str(kind_sel.value) if kind_sel.value is not Select.BLANK else "implementation"
@@ -351,7 +339,6 @@ class _CreateModal(ModalScreen):
         self.dismiss({
             "title": title,
             "prefix": prefix,
-            "tier": tier,
             "priority": priority,
             "intent": intent_val,
             "kind": kind_val,
@@ -464,8 +451,6 @@ class _ScheduleModal(ModalScreen):
             yield Label("Kind")
             yield Select(options=[("implementation", "implementation"), ("research", "research")],
                         id="sched-kind", allow_blank=False, value=t.get("kind", "implementation"))
-            yield Label("Approval tier")
-            yield Input(value=str(t.get("approval_tier", 1)), id="sched-tier")
             yield Label("Priority")
             yield Input(value=str(t.get("priority", 3)), id="sched-priority")
             yield Label("Prefix (minted keys become PREFIX-1, PREFIX-2, …)")
@@ -520,10 +505,9 @@ class _ScheduleModal(ModalScreen):
                 self.notify(str(e), severity="warning")
                 return
         try:
-            tier = int(self.query_one("#sched-tier", Input).value.strip() or "1")
             priority = int(self.query_one("#sched-priority", Input).value.strip() or "3")
         except ValueError:
-            self.notify("Tier and priority must be integers", severity="warning")
+            self.notify("Priority must be an integer", severity="warning")
             return
         kind_sel = self.query_one("#sched-kind", Select)
         kind = str(kind_sel.value) if kind_sel.value is not Select.BLANK else "implementation"
@@ -535,7 +519,7 @@ class _ScheduleModal(ModalScreen):
         self.dismiss({
             "name": name, "prompt": prompt, "every": every or None, "cron": cron or None,
             "tz": tz, "kind": kind,
-            "approval_tier": tier, "priority": priority, "prefix": prefix,
+            "priority": priority, "prefix": prefix,
             "enabled": enabled, "title": title, "repo": repo,
         })
 

@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Callable
 
 from . import fleet, snapshot as snap_mod, store
-from .dispatcher import list_keys, needs_approval, spec_tier, split_key
+from .dispatcher import list_keys, split_key
 from .statemachine import Phase
 
-# A row predicate: (home, snapshot) -> bool. Wider than the historic phase-set
-# filter below -- needs-approval (GA-21) is a derived predicate, not a phase,
-# so it can't be expressed as a `frozenset[Phase]`.
+# A row predicate: (home, snapshot) -> bool. Wider than a bare phase-set
+# filter, so a caller can express a derived predicate too, not only phase
+# membership.
 RowPredicate = Callable[[Path, snap_mod.Snapshot], bool]
 
 _BANNER = (
@@ -66,20 +66,19 @@ def phase_predicate(phases: frozenset) -> RowPredicate:
 
 def load_snapshots(home: Path) -> list[snap_mod.Snapshot]:
     """Every ticket's snapshot, freshly loaded. The shared read behind
-    `ticket_rows` and any caller needing a snapshot-level predicate (e.g. the
-    TUI's needs-you filter, which needs `.approved` -- something the row
-    tuples below don't carry)."""
+    `ticket_rows` and any caller needing a snapshot-level predicate rather
+    than just the row tuples below."""
     return [snap_mod.load(home, k) for k in list_keys(home)]
 
 
 def _row(home: Path, s: snap_mod.Snapshot) -> tuple[str, ...]:
     return (s.key, s.phase, snap_mod.display_title(home, s)[:64], _pr_cell(s),
-            s.ci_state or "—", str(spec_tier(home, s.key)), str(s.failure_count), s.key)
+            s.ci_state or "—", str(s.failure_count), s.key)
 
 
 def rows_from_snapshots(home: Path, snaps) -> list[tuple[str, ...]]:
     """Sort *snaps* into table order and render each to a row tuple:
-    (key, phase, title, pr, ci, tier, fails, row_key), row_key == key (for
+    (key, phase, title, pr, ci, fails, row_key), row_key == key (for
     DataTable keying)."""
     ordered = sorted(snaps, key=lambda s: (_PHASE_RANK.get(s.phase, 99), _sort_secondary(s)))
     return [_row(home, s) for s in ordered]
@@ -118,13 +117,13 @@ def render(home: Path) -> dict[str, str]:
     lines.append(f"\n**{len(snaps)} tickets** — "
                  + ", ".join(f"{p.value}:{len(by_phase.get(p.value, []))}"
                              for p in order if by_phase.get(p.value)) + "\n")
-    lines.append("\n| Key | Phase | Title | PR | CI | Tier | Fails |")
-    lines.append("|-----|-------|-------|----|----|------|-------|")
+    lines.append("\n| Key | Phase | Title | PR | CI | Fails |")
+    lines.append("|-----|-------|-------|----|----|-------|")
     for p in order:
         for s in sorted(by_phase.get(p.value, []), key=lambda x: split_key(x.key)):
             lines.append(
                 f"| {s.key} | {s.phase} | {snap_mod.display_title(home, s)[:64]} | {_link(s)} "
-                f"| {s.ci_state or '—'} | {spec_tier(home, s.key)} | {s.failure_count} |"
+                f"| {s.ci_state or '—'} | {s.failure_count} |"
             )
     workstate = "\n".join(lines) + "\n"
 
@@ -140,10 +139,7 @@ def render(home: Path) -> dict[str, str]:
     degraded_all = by_phase.get(Phase.DEGRADED.value, [])
     burning = [s for s in degraded_all if s.burning]
     degraded = [s for s in degraded_all if not s.burning]
-    # needs-approval is a derived predicate, not a phase (GA-21) -- it can park
-    # a ticket that's still `implementing`, so it can't come from `by_phase`.
-    gated = [s for s in snaps if needs_approval(home, s.key, s)]
-    if not awaiting and not degraded and not burning and not gated:
+    if not awaiting and not degraded and not burning:
         nlines.append("\nNothing is waiting on you. 🎉\n")
     if awaiting:
         nlines.append("\n## Questions\n")
@@ -165,12 +161,6 @@ def render(home: Path) -> dict[str, str]:
                           f"(failures: {s.failure_count})")
             nlines.append(f"  - revive: `maestro cmd {s.key} retry` · "
                           f"drop: `maestro cmd {s.key} discard`")
-    if gated:
-        nlines.append("\n## Needs approval\n")
-        for s in sorted(gated, key=lambda x: split_key(x.key)):
-            nlines.append(f"- **{s.key}** — tier-{spec_tier(home, s.key)} change parked "
-                          f"at the implementing gate")
-            nlines.append(f"  - unblock: `maestro approve {s.key}`")
     needs_you = "\n".join(nlines) + "\n"
     return {"WORKSTATE.md": workstate, "NEEDS-YOU.md": needs_you}
 

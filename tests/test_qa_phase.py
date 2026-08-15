@@ -25,8 +25,8 @@ from conftest import seed_ticket
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _seed(home, key, phase=Phase.READY, tier=1):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: {tier}\n")
+def _seed(home, key, phase=Phase.READY):
+    store.atomic_write(store.spec_path(home, key), f"# {key}\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
@@ -83,7 +83,7 @@ def test_qa_is_active_not_sleeping():
 # ---------------------------------------------------------------------------
 
 def test_dryrun_sweep_over_qa_ticket_spawns_qa_command(home, cfg):
-    _seed(home, "T-1", Phase.QA, tier=0)
+    _seed(home, "T-1", Phase.QA)
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert report.spawned == ["T-1"]
@@ -94,7 +94,7 @@ def test_dryrun_sweep_over_qa_ticket_spawns_qa_command(home, cfg):
 
 
 def test_env_key_prints_the_same_qa_command_as_the_real_spawn(home, capsys):
-    _seed(home, "T-1", Phase.QA, tier=0)
+    _seed(home, "T-1", Phase.QA)
     rc = cli.main(["--home", str(home), "env", "--key", "T-1"])
     assert rc == 0
     printed = json.loads(capsys.readouterr().out)
@@ -103,12 +103,12 @@ def test_env_key_prints_the_same_qa_command_as_the_real_spawn(home, capsys):
 
 # ---------------------------------------------------------------------------
 # AC4: the qa spawn's disallowed_tools include Edit and Write; every other
-# phase's denylist is byte-identical to the pre-change baseline (tier-keyed
-# only).
+# phase's denylist is byte-identical to the pre-change baseline (the
+# unconditional merge-denylist only).
 # ---------------------------------------------------------------------------
 
 def test_qa_spawn_denies_edit_and_write(home, cfg):
-    _seed(home, "T-1", Phase.QA, tier=0)
+    _seed(home, "T-1", Phase.QA)
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
     _key, _prompt, _cwd, _model, _effort, disallowed, _allowed, *_ = sessions.spawned[0]
@@ -125,13 +125,11 @@ def test_phase_denylist_empty_for_every_phase_except_qa():
 
 
 def test_other_phase_spawn_denylist_unchanged_baseline(home, cfg):
-    _seed(home, "T-1", Phase.READY, tier=0)
-    _seed(home, "T-2", Phase.READY, tier=1)
+    _seed(home, "T-1", Phase.READY)
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
     by_key = {k: d for k, _p, _c, _m, _e, d, *_ in sessions.spawned}
-    assert by_key["T-1"] == []  # tier 0, unaffected by RF-6
-    assert by_key["T-2"] == ["Bash(gh pr merge:*)"]  # tier 1, unaffected by RF-6
+    assert by_key["T-1"] == ["Bash(gh pr merge:*)"]  # AD-7: unconditional, unaffected by RF-6
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +205,7 @@ def test_full_sweep_over_seeded_home_unchanged_no_qa_routing(seeded_home):
     assert by_key["T-3"][0].startswith("/maestro-reconcile-implementing T-3")
     assert by_key["T-5"][0].startswith("/maestro-reconcile-ready T-5")
     for key in ("T-3", "T-5"):
-        assert by_key[key][1] == ["Bash(gh pr merge:*)"]  # tier-1 default, unchanged
+        assert by_key[key][1] == ["Bash(gh pr merge:*)"]  # AD-7: unconditional, unchanged
 
     for key in ("T-1", "T-2", "T-3", "T-4", "T-5"):
         assert snap_mod.load(seeded_home, key).phase != "qa"

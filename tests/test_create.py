@@ -10,12 +10,11 @@ from maestro.cli import cmd_create
 
 
 class _Args:
-    def __init__(self, title=None, key=None, tier=1, priority=3, intent=None,
+    def __init__(self, title=None, key=None, priority=3, intent=None,
                  home=None, no_nudge=True, kind=None, model=None, effort=None,
                  notes=None, depends_on=None, prefix=None, runner=None, runner_model=None):
         self.title = title
         self.key = key
-        self.tier = tier
         self.priority = priority
         self.intent = intent
         self.home = home
@@ -30,10 +29,10 @@ class _Args:
         self.no_nudge = no_nudge
 
 
-def _run_create(cfg, title=None, key=None, tier=1, priority=3, intent=None,
+def _run_create(cfg, title=None, key=None, priority=3, intent=None,
                 stdin_text="", fake_editor=None):
     """Helper that runs cmd_create with faked stdin and optionally a fake editor."""
-    args = _Args(title=title, key=key, tier=tier, priority=priority, intent=intent, home=cfg.home)
+    args = _Args(title=title, key=key, priority=priority, intent=intent, home=cfg.home)
     old_stdin = sys.stdin
     sys.stdin = io.StringIO(stdin_text)
     sys.stdin.isatty = lambda: True  # simulate TTY
@@ -75,23 +74,23 @@ def test_flag_form_with_key(cfg):
     assert entry["key"] == "T-42"
 
 
-def test_flag_form_tier_priority(cfg):
-    rc = _run_create(cfg, title="Fix bug", tier=0, priority=1)
+def test_flag_form_priority(cfg):
+    rc = _run_create(cfg, title="Fix bug", priority=1)
     assert rc == 0
     _, entry = inbox.pending_new(cfg.home)[0]
-    assert entry["args"]["approval_tier"] == 0
     assert entry["args"]["priority"] == 1
+    assert "approval_tier" not in entry["args"]
 
 
 # --- interactive form --------------------------------------------------------
 
 def test_interactive_guided_flow(cfg):
-    """Guided flow: provide title/tier/priority/key via stdin, fake editor returns intent."""
-    def fake_editor(title, tier, priority):
+    """Guided flow: provide title/priority/key via stdin, fake editor returns intent."""
+    def fake_editor(title, priority):
         return "My rich intent from editor"
 
-    # stdin: title, tier (accept default), priority (accept default), key (blank)
-    rc = _run_create(cfg, stdin_text="My new ticket\n\n\n\n",
+    # stdin: title, priority (accept default), key (blank)
+    rc = _run_create(cfg, stdin_text="My new ticket\n\n\n",
                      fake_editor=fake_editor)
     assert rc == 0
     pending = inbox.pending_new(cfg.home)
@@ -99,18 +98,17 @@ def test_interactive_guided_flow(cfg):
     _, entry = pending[0]
     assert entry["title"] == "My new ticket"
     assert entry["args"]["intent"] == "My rich intent from editor"
-    assert entry["args"]["approval_tier"] == 1
     assert entry["args"]["priority"] == 3
+    assert "approval_tier" not in entry["args"]
 
 
-def test_interactive_custom_tier_priority(cfg):
-    def fake_editor(title, tier, priority):
+def test_interactive_custom_priority(cfg):
+    def fake_editor(title, priority):
         return "Intent"
 
-    rc = _run_create(cfg, stdin_text="My ticket\n2\n5\n\n", fake_editor=fake_editor)
+    rc = _run_create(cfg, stdin_text="My ticket\n5\n\n", fake_editor=fake_editor)
     assert rc == 0
     _, entry = inbox.pending_new(cfg.home)[0]
-    assert entry["args"]["approval_tier"] == 2
     assert entry["args"]["priority"] == 5
 
 
@@ -119,13 +117,13 @@ def test_interactive_stdin_intent_fallback(cfg):
     import maestro.cli as cli_mod
     old_editor_fn = cli_mod._editor_intent
 
-    def fake_no_editor(title, tier, priority):
+    def fake_no_editor(title, priority):
         return None  # simulate no editor
 
     cli_mod._editor_intent = fake_no_editor
     old_stdin = sys.stdin
-    # stdin: title, tier default, priority default, key blank, then intent lines + blank
-    sys.stdin = io.StringIO("Ticket title\n\n\n\nLine one of intent\nLine two\n\n")
+    # stdin: title, priority default, key blank, then intent lines + blank
+    sys.stdin = io.StringIO("Ticket title\n\n\nLine one of intent\nLine two\n\n")
     sys.stdin.isatty = lambda: True
     try:
         args = _Args(home=cfg.home)
@@ -341,11 +339,11 @@ def test_interactive_flow_does_not_prompt_for_or_set_runner(cfg):
     """AC3: the guided interactive flow deliberately stays minimal and never
     collects a runner choice -- documented in cmd_create's interactive
     branch. Same stdin script as test_interactive_guided_flow proves no extra
-    prompt was inserted (it still consumes exactly 4 lines)."""
-    def fake_editor(title, tier, priority):
+    prompt was inserted (it still consumes exactly 3 lines)."""
+    def fake_editor(title, priority):
         return "Intent text"
 
-    rc = _run_create(cfg, stdin_text="My new ticket\n\n\n\n", fake_editor=fake_editor)
+    rc = _run_create(cfg, stdin_text="My new ticket\n\n\n", fake_editor=fake_editor)
     assert rc == 0
     _, entry = inbox.pending_new(cfg.home)[0]
     assert "runner" not in entry["args"]

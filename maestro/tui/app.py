@@ -12,7 +12,7 @@ from textual.worker import Worker, WorkerState
 
 from .. import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
-from ..dispatcher import existing_prefixes, needs_approval, spec_runner, spec_tier
+from ..dispatcher import existing_prefixes, spec_runner
 from ..projection import phase_predicate, ticket_rows
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
@@ -36,15 +36,14 @@ _NEEDS_YOU_PHASE_VALUES = {p.value for p in _NEEDS_YOU_PHASES}
 
 
 def _needs_you_predicate(home: Path, s: snap_mod.Snapshot) -> bool:
-    """The needs-you filter: the two sleeping-and-stuck phases, plus the
-    tier-2 approval gate (GA-21) -- a ticket that's still "implementing" but
-    not due until `maestro approve`, so it can't be expressed as a phase."""
-    return s.phase in _NEEDS_YOU_PHASE_VALUES or needs_approval(home, s.key, s)
+    """The needs-you filter: the two sleeping-and-stuck phases."""
+    del home
+    return s.phase in _NEEDS_YOU_PHASE_VALUES
 
 
 # Named filters: (display_name, row_predicate) — None predicate means no
 # filtering (show all). A predicate takes (home, Snapshot) -> bool; wider than
-# a bare phase set since needs-you (above) can't be expressed as one.
+# a bare phase set for callers that need one.
 _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
     ("needs-you", _needs_you_predicate),
     ("active", phase_predicate(ACTIVE_PHASES)),
@@ -104,8 +103,8 @@ class MaestroTUI(App):
         self._home = Path(home)
         self._selected_key: str | None = None
         self._filter_idx: int = 0
-        # key -> (phase, gated); None = first poll (no notifications)
-        self._prev_phases: dict[str, tuple[str, bool]] | None = None
+        # key -> phase; None = first poll (no notifications)
+        self._prev_phases: dict[str, str] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -126,7 +125,6 @@ class MaestroTUI(App):
         table.add_column("Title", width=40)
         table.add_column("PR")
         table.add_column("CI")
-        table.add_column("Tier")
         table.add_column("Fails")
         self._populate()
         self.set_interval(3.0, self._populate)
@@ -164,8 +162,7 @@ class MaestroTUI(App):
             return
         snap = snap_mod.load(self._home, key)
         runner, runner_model = spec_runner(self._home, key)
-        detail.update(_render_detail(snap, spec_tier(self._home, key),
-                                     snap_mod.display_title(self._home, snap),
+        detail.update(_render_detail(snap, snap_mod.display_title(self._home, snap),
                                      runner, runner_model))
         self._refresh_events()
 
@@ -190,26 +187,16 @@ class MaestroTUI(App):
             self.notify("Select a ticket first", severity="warning")
             return
         snap = snap_mod.load(self._home, key)
-        gated = needs_approval(self._home, key, snap)
 
         def _on_dismiss(result: tuple[str, str] | None) -> None:
             if result is None:
                 return
             command, args_text = result
-            if command == "approve" and gated:
-                # The tier-2 gate clears via its own dedicated event (`ops.approve`
-                # / `maestro approve`), not the inbox-command path below -- a
-                # queued "approve" command would just no-op here (this ticket has
-                # no open_questions for ANSWER_COMMANDS to attach an answer to).
-                cfg = Config(home=self._home)
-                ops_mod.approve(cfg, key)
-                self.notify(f"approved {key}")
-                return
             args = {"text": args_text} if args_text else {}
             inbox.append_command(self._home, key, command, args)
             self.notify(f"'{command}' queued for {key}")
 
-        self.push_screen(_CmdModal(key, snap.phase, gated=gated), _on_dismiss)
+        self.push_screen(_CmdModal(key, snap.phase), _on_dismiss)
 
     def action_retry(self) -> None:
         self._send_degraded_cmd("retry")
@@ -279,7 +266,6 @@ class MaestroTUI(App):
             if result is None:
                 return
             create_args: dict = {
-                "approval_tier": result["tier"],
                 "priority": result["priority"],
             }
             if result.get("intent"):
@@ -330,8 +316,7 @@ class MaestroTUI(App):
                 snap = snap_mod.load(self._home, key)
                 runner, runner_model = spec_runner(self._home, key)
                 self.query_one("#detail", Static).update(
-                    _render_detail(snap, spec_tier(self._home, key),
-                                   snap_mod.display_title(self._home, snap),
+                    _render_detail(snap, snap_mod.display_title(self._home, snap),
                                    runner, runner_model))
             return
         qid, text = questions[idx]
@@ -449,24 +434,17 @@ class MaestroTUI(App):
         # Load all rows once for counting and filtering
         all_rows = ticket_rows(home)
 
-        # Snapshot-level state for filtering/toasting: the row tuples above
-        # don't carry `.approved`, which the needs-you predicate needs.
+        # Snapshot-level state for filtering/toasting.
         snaps_by_key = {row[-1]: snap_mod.load(home, row[-1]) for row in all_rows}
 
-        # Detect tickets newly entering awaiting-human/degraded, OR newly
-        # gated by the tier-2 approval gate (GA-21) -- the latter leaves
-        # `phase` unchanged ("implementing"), so it's tracked as a second
-        # signal per key rather than folded into the phase comparison.
-        new_state = {key: (s.phase, needs_approval(home, key, s))
-                     for key, s in snaps_by_key.items()}
+        # Detect tickets newly entering awaiting-human/degraded.
+        new_phases = {key: s.phase for key, s in snaps_by_key.items()}
         if self._prev_phases is not None:
-            for key, (phase, gated) in new_state.items():
-                prev_phase, prev_gated = self._prev_phases.get(key, (None, False))
+            for key, phase in new_phases.items():
+                prev_phase = self._prev_phases.get(key)
                 if phase in _NEEDS_YOU_PHASE_VALUES and prev_phase != phase:
                     self.notify(f"{key}: {phase}", severity="warning", timeout=6)
-                elif gated and not prev_gated:
-                    self.notify(f"{key}: needs-approval", severity="warning", timeout=6)
-        self._prev_phases = new_state
+        self._prev_phases = new_phases
 
         # Build filter bar: show counts per filter, bold the active one
         parts = []

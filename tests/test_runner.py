@@ -90,7 +90,8 @@ def test_no_runner_override_sweep_is_byte_identical_baseline(home, cfg):
     key, prompt, cwd, model, effort, disallowed, allowed, overlay, runner, runner_model = (
         sessions.spawned[0])
     assert (key, prompt, cwd, model, effort, disallowed, allowed, overlay) == (
-        "T-1", "/maestro-reconcile-ready T-1", str(home), "sonnet", None, [], [], {})
+        "T-1", "/maestro-reconcile-ready T-1", str(home), "sonnet", None,
+        ["Bash(gh pr merge:*)"], [], {})
     assert runner == "claude"
     assert runner_model is None
 

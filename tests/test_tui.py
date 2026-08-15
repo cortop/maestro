@@ -120,39 +120,13 @@ def test_ticket_rows_lists_ticket_columns(home):
 
     rows = ticket_rows(home)
     assert len(rows) == 1
-    key, phase, title, pr, ci, tier, fails, row_key = rows[0]
+    key, phase, title, pr, ci, fails, row_key = rows[0]
     assert key == "T-1"
     assert phase == Phase.TRIAGING.value
     assert title == "My feature"
     assert pr == "—"
     assert ci == "—"
-    assert tier == "1"  # no spec.md on disk -> spec_tier's documented fallback
     assert row_key == "T-1"
-
-
-def test_ticket_rows_tier_sourced_from_spec_not_snapshot(home):
-    """The Tier column is rendered from `dispatcher.spec_tier` (the spec on disk),
-    not any snapshot field -- 0/2/malformed all render per spec_tier's contract,
-    with the falsy-0 bug fixed (0 must render as "0", not "—")."""
-    store.atomic_write(store.spec_path(home, "Z-0"), "# Z-0\napproval_tier: 0\n")
-    store.atomic_write(store.spec_path(home, "Z-2"), "# Z-2\napproval_tier: 2\n")
-    store.atomic_write(store.spec_path(home, "Z-3"), "# Z-3\napproval_tier: nope\n")
-    for key in ("Z-0", "Z-2", "Z-3"):
-        event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
-        snap_mod.rebuild(home, key)
-
-    rows = {r[0]: r[5] for r in ticket_rows(home)}
-    assert rows["Z-0"] == "0"       # falsy-0 bug: must not render "—"
-    assert rows["Z-2"] == "2"
-    assert rows["Z-3"] == "1"       # malformed -> spec_tier's safe fallback
-
-    # Editing the spec on disk (no new event) changes the rendered tier on the
-    # very next projection read -- the fold never saw a tier-carrying event.
-    events_before = len(event_log.read(home, "Z-0"))
-    store.atomic_write(store.spec_path(home, "Z-0"), "# Z-0\napproval_tier: 2\n")
-    rows = {r[0]: r[5] for r in ticket_rows(home)}
-    assert rows["Z-0"] == "2"
-    assert len(event_log.read(home, "Z-0")) == events_before  # no new event appended
 
 
 def test_ticket_rows_pr_label(home):
@@ -277,8 +251,7 @@ from maestro.tui.detail import render as _render_detail  # noqa: E402
 
 
 def test_render_detail_all_fields_present():
-    """All snapshot fields appear in the detail output; tier is passed in by the
-    caller (dispatcher.spec_tier), not read off the snapshot."""
+    """All snapshot fields appear in the detail output."""
     snap = snap_mod.Snapshot(
         key="T-1",
         phase="implementing",
@@ -294,10 +267,9 @@ def test_render_detail_all_fields_present():
         open_questions={"q1": "Is this OK?"},
         updated_ts="2026-06-25T00:00:00+00:00",
     )
-    out = _render_detail(snap, tier=1)
+    out = _render_detail(snap)
     assert "My feature" in out
     assert "implementing" in out
-    assert "1" in out          # tier
     assert "inbox/_new" in out
     assert "#7" in out
     assert "open" in out
@@ -308,22 +280,12 @@ def test_render_detail_all_fields_present():
     assert "2026-06-25" in out
 
 
-def test_render_detail_tier_zero_renders_as_zero_not_emdash():
-    """The falsy-0 bug: tier 0 (auto-approved) must render '0', never '—'."""
-    snap = snap_mod.Snapshot(key="T-1", phase="ready")
-    out = _render_detail(snap, tier=0)
-    lines = [l for l in out.splitlines() if "Tier" in l]
-    assert lines
-    assert "0" in lines[0]
-    assert "—" not in lines[0]
-
-
 def test_render_detail_missing_values_show_emdash():
     """None / empty fields render as em-dash."""
     snap = snap_mod.Snapshot(key="T-99")
     out = _render_detail(snap)
-    # At least tier, source, PR, CI, last_error should all show —
-    assert out.count("—") >= 5
+    # At least source, PR, CI, last_error should all show —
+    assert out.count("—") >= 4
 
 
 def test_render_detail_no_pr_shows_emdash():
@@ -409,7 +371,7 @@ def test_render_detail_valid_markup_with_pr_every_phase(phase):
         open_questions={"q1": "Is this OK?"},
         updated_ts="2026-06-25T00:00:00+00:00",
     )
-    _assert_valid_markup(_render_detail(snap, tier=1))
+    _assert_valid_markup(_render_detail(snap))
 
 
 @pytest.mark.parametrize("phase", [p.value for p in Phase])
@@ -1172,9 +1134,9 @@ def test_populate_clamps_cursor_when_ticket_removed(home):
     # Remove B-3 from the store by patching ticket_rows
     remaining = ["B-1", "B-2"]
     with mock.patch("maestro.tui.app.ticket_rows") as mock_rows:
-        # ticket_rows returns (key, phase, title, pr, ci, tier, fails, row_key)
+        # ticket_rows returns (key, phase, title, pr, ci, fails, row_key)
         mock_rows.return_value = [
-            (k, "triaging", k, "—", "—", "—", 0, k) for k in remaining
+            (k, "triaging", k, "—", "—", 0, k) for k in remaining
         ]
         app._populate()
 
@@ -1213,7 +1175,6 @@ def test_create_appends_new_entry(home):
     callback({
         "title": "My new ticket",
         "prefix": "FEAT",
-        "tier": 2,
         "priority": 1,
         "intent": "Do the thing",
     })
@@ -1224,7 +1185,7 @@ def test_create_appends_new_entry(home):
     assert entry["title"] == "My new ticket"
     assert entry["prefix"] == "FEAT"
     assert entry["key"] is None
-    assert entry["args"]["approval_tier"] == 2
+    assert "approval_tier" not in entry["args"]
     assert entry["args"]["priority"] == 1
     assert entry["args"]["intent"] == "Do the thing"
 
@@ -1240,18 +1201,18 @@ def test_create_cancel_appends_nothing(home):
     assert inbox.pending_new(home) == []
 
 
-def test_create_defaults_tier_and_priority(home):
-    """Submitting with tier=1 and priority=3 records the correct defaults."""
+def test_create_defaults_priority(home):
+    """Submitting with priority=3 records the correct default."""
     app, push_calls = _make_app_with_mocked_screen(home)
     app.action_create()
 
     _, callback = push_calls[0]
-    callback({"title": "Minimal ticket", "key": None, "tier": 1, "priority": 3, "intent": None})
+    callback({"title": "Minimal ticket", "key": None, "priority": 3, "intent": None})
 
     pending = inbox.pending_new(home)
     assert len(pending) == 1
     _, entry = pending[0]
-    assert entry["args"]["approval_tier"] == 1
+    assert "approval_tier" not in entry["args"]
     assert entry["args"]["priority"] == 3
     assert entry["key"] is None
     assert "intent" not in entry["args"]
@@ -1263,7 +1224,7 @@ def test_create_shows_queued_toast(home):
     app.action_create()
 
     _, callback = push_calls[0]
-    callback({"title": "Test ticket", "key": None, "tier": 1, "priority": 3, "intent": None})
+    callback({"title": "Test ticket", "key": None, "priority": 3, "intent": None})
 
     app.notify.assert_called_once()
     msg = app.notify.call_args[0][0]

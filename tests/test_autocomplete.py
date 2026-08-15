@@ -55,7 +55,7 @@ def test_completion_script_dynamic_keys_uses_maestro_home():
 
 def test_completion_script_create_flags():
     text = COMPLETION_SCRIPT.read_text()
-    for flag in ("--key", "--tier", "--priority", "--intent", "--no-nudge"):
+    for flag in ("--key", "--priority", "--intent", "--no-nudge"):
         assert flag in text, f"create completion must include flag '{flag}'"
 
 

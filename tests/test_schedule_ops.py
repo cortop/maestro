@@ -13,7 +13,7 @@ from maestro.sessions import DryRunSessions
 def test_cli_schedule_add_roundtrips_all_fields(home):
     rc = cli_main(["--home", str(home), "schedule", "add", "digest",
                    "--prompt", "Summarize PRs", "--every", "24h",
-                   "--kind", "research", "--approval-tier", "2", "--priority", "5",
+                   "--kind", "research", "--priority", "5",
                    "--prefix", "S", "--title", "Morning digest", "--repo", "alpha",
                    "--model", "sonnet", "--effort", "high", "--notes", "Skip weekends.",
                    "--depends-on", "T-1", "T-2",
@@ -22,7 +22,7 @@ def test_cli_schedule_add_roundtrips_all_fields(home):
     cfg = config_mod.load(str(home))
     assert cfg.scheduled == [{
         "name": "digest", "prompt": "Summarize PRs", "every": "24h",
-        "kind": "research", "approval_tier": 2, "priority": 5, "prefix": "S",
+        "kind": "research", "priority": 5, "prefix": "S",
         "enabled": True, "title": "Morning digest", "repo": "alpha",
         "model": "sonnet", "effort": "high", "notes": "Skip weekends.",
         "depends_on": ["T-1", "T-2"],
@@ -338,7 +338,7 @@ def test_cli_schedule_add_cron_roundtrips_cron_and_tz(home):
     cfg = config_mod.load(str(home))
     assert cfg.scheduled == [{
         "name": "digest", "prompt": "Summarize PRs", "cron": "0 9 * * 1",
-        "tz": "America/New_York", "kind": "implementation", "approval_tier": 1,
+        "tz": "America/New_York", "kind": "implementation",
         "priority": 3, "enabled": True,
     }]
 

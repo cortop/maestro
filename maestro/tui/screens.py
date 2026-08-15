@@ -13,7 +13,7 @@ from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
 from textual.worker import Worker, WorkerState
 
 from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
-from ..dispatcher import schedule_status, spec_runner, spec_tier
+from ..dispatcher import schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import render_log, render_log_line, render_opencode_log_line, render_pi_log_line
@@ -399,8 +399,7 @@ class DetailScreen(Screen):
         snap = snap_mod.load(self._home, self._key)
         runner, runner_model = spec_runner(self._home, self._key)
         self.query_one("#ds-detail", Static).update(
-            _render_detail(snap, spec_tier(self._home, self._key),
-                           snap_mod.display_title(self._home, snap),
+            _render_detail(snap, snap_mod.display_title(self._home, snap),
                            runner, runner_model))
         events = event_log.read(self._home, self._key)
         log = self.query_one("#ds-events", RichLog)
@@ -463,7 +462,6 @@ class ScheduleScreen(Screen):
         table.add_column("Repo")
         table.add_column("Cadence")
         table.add_column("Kind")
-        table.add_column("Tier")
         table.add_column("Enabled")
         table.add_column("Last fired")
         table.add_column("Next due")
@@ -481,7 +479,7 @@ class ScheduleScreen(Screen):
             cadence = f"{row['cron']} ({row['tz']})" if row.get("cron") else str(row["every"])
             table.add_row(
                 row["name"], row.get("title") or "", row.get("repo") or "",
-                cadence, row["kind"], str(row["approval_tier"]),
+                cadence, row["kind"],
                 "yes" if row["enabled"] else "no",
                 _fmt_epoch(row["last_fired"]), _fmt_epoch(row["next_due"]),
                 key=row["name"],

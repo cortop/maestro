@@ -1,16 +1,23 @@
-"""The tier-2 approval gate: one predicate, read from the spec + the snapshot.
+"""Spec front-matter reads shared by the dispatcher and every human-facing surface.
 
-Split out of ``dispatcher.py`` (GA-21) so every human-facing surface — not just
-the dispatcher's own ``is_due`` — can call the exact same ``needs_approval``
-function instead of re-deriving the rule (which is how NEEDS-YOU.md, ``maestro
-status``, the TUI, and outbound notifications all went blind to a gated ticket
-in the first place). This module sits BELOW ``dispatcher`` in the import graph
-on purpose: ``dispatcher.py`` imports ``notify`` at module load time, so
-``notify.py`` can never import ``dispatcher`` back without a cycle -- but it can
-import this module directly, since ``gates`` imports neither ``dispatcher`` nor
-``notify``. ``dispatcher`` re-exports ``spec_tier``/``parse_spec_overrides`` from
-here so existing ``from .dispatcher import spec_tier`` callers (``repos.py``,
-``projection.py``, ``tui/app.py``, ``tui/screens.py``) keep working unchanged.
+Split out of ``dispatcher.py`` (GA-21) so every human-facing surface can read
+the same spec overrides instead of re-deriving them. This module sits BELOW
+``dispatcher`` in the import graph on purpose: ``dispatcher.py`` imports
+``notify`` at module load time, so ``notify.py`` can never import ``dispatcher``
+back without a cycle -- but it can import this module directly, since ``gates``
+imports neither ``dispatcher`` nor ``notify``. ``dispatcher`` re-exports
+``parse_spec_overrides`` from here so existing ``from .dispatcher import ...``
+callers keep working unchanged.
+
+AD-7 removed the tier-2 approval gate this module used to own
+(``needs_approval``/``spec_tier``) -- a hidden hold inside the `implementing`
+phase, superseded by routing through the real ``awaiting-human`` phase instead
+(see ``.claude/commands/maestro-reconcile-triaging.md``). ``approval_tier:`` is
+still tolerated as an unrecognized front-matter key on the 130 existing specs
+that carry it (``parse_spec_overrides`` below simply doesn't special-case it
+anymore), and ``events.APPROVED`` stays in the vocabulary as a historical-only
+event type (``snapshot.fold`` still parses it) -- see those modules' own
+comments.
 """
 from __future__ import annotations
 
@@ -21,22 +28,23 @@ from . import claims
 from . import snapshot as snap_mod
 from . import store
 from .config import Config
-from .statemachine import Phase
 
 _FRONTMATTER_FIELD_RE = re.compile(r"^([a-zA-Z_]\w*)\s*:\s*(.+)$")
 
 
 def parse_spec_overrides(spec_text: str) -> dict:
-    """Extract optional kind/model/effort/repo/runner/runner_model/approval_tier/
-    priority from a spec's loose frontmatter. Stops at the first ## section
-    header. Returns only keys that are present. ``approval_tier``/``priority``
-    are parsed to int; a malformed value (not an int) is simply omitted --
-    callers fall back to the safe default (see ``spec_tier``/``spec_priority``)
-    rather than this function ever raising. RF-2: ``runner``/``runner_model``
-    follow ``model``/``effort``'s precedent exactly -- returned verbatim, no
-    normalisation, no validation (that's ``dispatcher.resolve_runner``'s job,
-    and the fail-closed-on-unregistered-name check is the dispatcher's, not
-    this function's).
+    """Extract optional kind/model/effort/repo/runner/runner_model/priority
+    from a spec's loose frontmatter. Stops at the first ## section header.
+    Returns only keys that are present. ``priority`` is parsed to int; a
+    malformed value (not an int) is simply omitted -- callers fall back to the
+    safe default (see ``spec_priority``) rather than this function ever
+    raising. Any OTHER field (including the 130 existing specs' now-inert
+    ``approval_tier:`` line, AD-7) is silently ignored, not rejected -- an
+    unknown front-matter key must never fold-warn or error. RF-2:
+    ``runner``/``runner_model`` follow ``model``/``effort``'s precedent
+    exactly -- returned verbatim, no normalisation, no validation (that's
+    ``dispatcher.resolve_runner``'s job, and the fail-closed-on-unregistered-
+    name check is the dispatcher's, not this function's).
     """
     result: dict = {}
     for line in spec_text.splitlines():
@@ -48,7 +56,7 @@ def parse_spec_overrides(spec_text: str) -> dict:
         field, val = m.group(1), m.group(2).strip()
         if field in ("kind", "model", "effort", "repo", "runner", "runner_model"):
             result[field] = val
-        elif field in ("approval_tier", "priority"):
+        elif field == "priority":
             try:
                 result[field] = int(val)
             except ValueError:
@@ -56,24 +64,10 @@ def parse_spec_overrides(spec_text: str) -> dict:
     return result
 
 
-def spec_tier(home: Path, key: str) -> int:
-    """*key*'s approval tier, read straight from the spec file on disk (not the
-    snapshot, so a human edit takes effect the very next sweep). Missing file,
-    missing field, or a malformed value all fall back to 1 -- the same
-    more-restrictive default used at mint (``args.get("approval_tier") or 1``)
-    -- so ``is_due``/spawn-arg construction can stay total and never wedge on a
-    bad spec."""
-    spec_file = store.spec_path(home, key)
-    if not spec_file.exists():
-        return 1
-    overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
-    return overrides.get("approval_tier", 1)
-
-
 def spec_priority(home: Path, key: str) -> int:
     """*key*'s dispatch-ordering preference, read straight from the spec file on
     disk (not the snapshot, so a human edit takes effect the very next sweep) --
-    mirrors ``spec_tier`` exactly. Missing file, missing field, or a malformed
+    mirrors ``spec_runner`` exactly. Missing file, missing field, or a malformed
     value all fall back to the default (3), the same default ``_seed_spec``
     already coerces to, so a sweep can never raise on a bad/absent value
     (MTO-7). Lower sorts first -- see ``dispatcher.dispatch``'s ordering of the
@@ -86,29 +80,15 @@ def spec_priority(home: Path, key: str) -> int:
     return overrides.get("priority", 3)
 
 
-def needs_approval(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
-    """True iff *key* is parked at the tier-2 ``implementing`` approval gate
-    (AD-1): ``phase == implementing and spec_tier(home, key) >= 2 and not
-    snap.approved``. THE RULE MUST HAVE EXACTLY ONE DEFINITION -- this is it.
-    ``dispatcher.is_due`` calls this directly (so ``not_due``'s "needs-approval"
-    reason and this function can never drift apart), and every human-facing
-    surface (NEEDS-YOU.md, ``maestro status``, the TUI filter/toast/command
-    modal, outbound notify) calls it too, instead of re-deriving the tier/
-    approved check inline."""
-    return (Phase(snap.phase) == Phase.IMPLEMENTING
-            and spec_tier(home, key) >= 2
-            and not snap.approved)
-
-
 def spec_runner(home: Path, key: str) -> tuple[str | None, str | None]:
     """*key*'s `runner:`/`runner_model:` spec front-matter overrides, read
-    straight from the spec file on disk -- mirrors `spec_tier`/`spec_priority`
-    exactly, so a human's `maestro runner` edit (or the TUI's runner modal,
-    UX-2) is visible to display surfaces the very next render, without waiting
-    for a fold. Missing file or missing field both come back `None` -- there is
-    no numeric-style safe default for a runner name, so unlike `spec_tier` this
-    does not default to `"claude"`; a display caller treats `None` as "board
-    default" (`cfg.runner`), not as an error."""
+    straight from the spec file on disk -- mirrors `spec_priority` exactly, so
+    a human's `maestro runner` edit (or the TUI's runner modal, UX-2) is
+    visible to display surfaces the very next render, without waiting for a
+    fold. Missing file or missing field both come back `None` -- there is no
+    numeric-style safe default for a runner name, so unlike `spec_priority`
+    this does not default to a number; a display caller treats `None` as
+    "board default" (`cfg.runner`), not as an error."""
     spec_file = store.spec_path(home, key)
     if not spec_file.exists():
         return None, None
@@ -151,8 +131,8 @@ def runner_editable(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
     one.
 
     *snap* is accepted (not read) purely for call-site/signature parity with
-    every other gate predicate here (`needs_approval` et al) -- every caller
-    already has a fresh snapshot in hand from its own `snap_mod.load`.
+    every other gate predicate here -- every caller already has a fresh
+    snapshot in hand from its own `snap_mod.load`.
     """
     del snap
     return claims.verify_claim(home, key) != "confirmed"

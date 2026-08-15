@@ -10,7 +10,7 @@ from typing import Literal
 
 
 class Phase(str, Enum):
-    TRIAGING = "triaging"            # newly seen; classify tier + scope
+    TRIAGING = "triaging"            # newly seen; classify + scope
     AWAITING_HUMAN = "awaiting-human"  # blocked on an answer/approval (SLEEPING)
     READY = "ready"                  # approved + unblocked; waiting for a worker slot
     IMPLEMENTING = "implementing"    # ralph-loop running in a worktree
@@ -26,8 +26,8 @@ class Phase(str, Enum):
 PhaseClass = Literal["active", "sleeping", "terminal"]
 
 # RB-9: one exhaustive, hand-decided row per `Phase` -- the same house pattern
-# as `_PHASE_COMMAND_SUFFIX`/`resolve_reconcile_command` (dispatcher.py:2321),
-# `phase_denylist` (dispatcher.py:122) and `tier_denylist` (dispatcher.py:113).
+# as `_PHASE_COMMAND_SUFFIX`/`resolve_reconcile_command` (dispatcher.py:2321)
+# and `phase_denylist` (dispatcher.py:122).
 # `SLEEPING_PHASES`/`TERMINAL_PHASES`/`ACTIVE_PHASES` below are *derived* from
 # this table, never computed by subtraction -- subtraction is exactly what
 # made a newly-added phase land in ACTIVE_PHASES by default with nobody having
