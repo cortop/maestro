@@ -1746,10 +1746,10 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     ``DryRunSessions`` to record-without-launch). Always idempotent and safe to
     run on a timer — minting and folding are no-ops when nothing changed.
 
-    ``runner_probe`` (OC-2) overrides ``_default_runner_probe`` for the
-    non-claude runner preflight below -- tests inject a fake to assert every
-    transient/permanent branch without a real binary or ollama daemon; real
-    callers never pass it.
+    ``runner_probe`` (OC-2) overrides the default probe (built by
+    ``_make_default_runner_probe``) for the non-claude runner preflight below --
+    tests inject a fake to assert every transient/permanent branch without a real
+    binary or ollama daemon; real callers never pass it.
 
     ``key_filter`` (MTO-4) restricts the candidate set to exactly these keys,
     resolved before due-checking so everything downstream -- due-checking,
@@ -2085,6 +2085,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 # to the same non-claude runner probe its binary/daemon once, not once
                 # each ("Probe once per sweep, cached — never per key").
                 runner_probe_cache: dict = {}
+                default_probe = _make_default_runner_probe(cfg)
                 # OC-4: {runner name: count}, seeded lazily (once per runner name, on
                 # first key that reaches the cap check below) from keys already in
                 # `active` this sweep, then incremented in-place as this sweep spawns
@@ -2206,7 +2207,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                                     "`runner:` line",
                                     qid=f"runner-disabled-{key}-{runner}", actor="dispatcher")
                             continue
-                        probe_fn = runner_probe or _default_runner_probe
+                        probe_fn = runner_probe or default_probe
                         if runner not in runner_probe_cache:
                             runner_probe_cache[runner] = probe_fn(runner)
                         probed = runner_probe_cache[runner]
@@ -2216,14 +2217,14 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                             continue
                         if probed.get("models") is None:
                             decisions[key]["outcome"] = "runner_daemon_unreachable"
-                            runner_blockers[runner] = (f"ollama daemon unreachable: "
+                            runner_blockers[runner] = (f"{runner} daemon unreachable: "
                                                         f"{probed.get('daemon_reason')}")
                             continue
                         if not runner_model:
                             verdict, vreason = "missing", "no runner_model configured"
                         else:
-                            from .providers import ollama as ollama_mod
-                            verdict, vreason = ollama_mod.verdict_for_model(
+                            verdict_fn = _resolve_runner_verdict(cfg, runner)
+                            verdict, vreason = verdict_fn(
                                 probed["models"], probed.get("daemon_reason"), runner_model)
                         if verdict != "ok":
                             decisions[key]["outcome"] = "runner_model_unavailable"
@@ -2522,24 +2523,54 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     return runner, runner_model
 
 
-def _default_runner_probe(runner: str) -> dict:
-    """OC-2's real preflight probe for a non-``claude`` *runner*: is its own CLI
-    binary on ``PATH`` (``shutil.which`` -- covers "missing" and "unexecutable"
-    in one check, since ``which`` already applies ``os.X_OK``), and, separately,
-    is the local ollama daemon reachable with its model catalogue
-    (``providers.ollama.fetch_models``, used below to verify a specific
-    ``runner_model`` is installed and tool-capable). Never raises -- like
-    ``fetch_models`` itself and ``resolve_credential`` beside it, a down binary
-    or daemon must never wedge the spawn loop, only gate the one key that needs
-    it. Never called for ``runner == "claude"`` (see the spawn loop below), and
-    the caller -- never this function -- is what caches one call per sweep per
-    runner name instead of once per key.
+def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
+    """Build the default probe function for a non-``claude`` runner.
+
+    Returns a one-arg closure that dispatches through a ``{runner name: probe fn}``
+    table and falls back to the ollama probe for an unrecognized name. The closure
+    closes over *cfg* to access runner-specific config (e.g. ``[runner.<name>]``
+    settings).
+
+    The probe cache is managed by the caller (see ``dispatch()'s runner_probe_cache``),
+    not here -- this function only builds the dispatch table.
     """
     from .providers import ollama as ollama_mod
 
-    models, daemon_reason = ollama_mod.fetch_models()
-    return {"binary_ok": shutil.which(runner) is not None,
-            "models": models, "daemon_reason": daemon_reason}
+    def _ollama_probe(runner: str) -> dict:
+        """The ollama probe: checks binary presence and ollama daemon reachability."""
+        models, daemon_reason = ollama_mod.fetch_models()
+        return {"binary_ok": shutil.which(runner) is not None,
+                "models": models, "daemon_reason": daemon_reason}
+
+    # Build the per-runner probe dispatch table. Unrecognized runners fall back
+    # to the ollama probe (opencode uses ollama for its models).
+    probe_dispatch: dict[str, Callable[[str], dict]] = {
+        "opencode": _ollama_probe,
+    }
+
+    def probe_fn(runner: str) -> dict:
+        """Dispatch to the appropriate probe for *runner*, or fall back to ollama."""
+        specific = probe_dispatch.get(runner)
+        if specific is not None:
+            return specific(runner)
+        return _ollama_probe(runner)
+
+    return probe_fn
+
+
+def _resolve_runner_verdict(cfg: Config, runner_name: str):
+    """Resolve the verdict function for a runner.
+
+    Returns a callable that takes (models, daemon_reason, runner_model) and
+    returns (verdict, reason) -- one per runner. By default, uses the ollama
+    verdict function; subclasses can override via provider-specific adapters.
+
+    For now, all non-claude runners use the ollama verdict (opencode's models
+    are fetched from ollama). The dispatch table mirrors the probe table in
+    `_make_default_runner_probe`.
+    """
+    from .providers import ollama as ollama_mod
+    return ollama_mod.verdict_for_model
 
 
 def _worker_cwd(cfg: Config, key: str) -> Path:
