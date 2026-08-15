@@ -152,6 +152,69 @@ def scratch_path(home: Path, key: str) -> Path:
     return home / "scratch" / validate_key(key)
 
 
+def pi_agent_dir(home: Path) -> Path:
+    """Return the maestro-owned pi agent directory for a given home.
+    
+    This is where the pinned, idempotent models.json will be generated from [runner.pi] config.
+    """
+    return home / ".pi-agent"
+
+
+def generate_pi_models_json(home: Path, pi_config: dict) -> None:
+    """Generate models.json in the maestro-owned pi agent directory from [runner.pi] config.
+    
+    The file is written atomically with store.atomic_write and only if it changes.
+    
+    Args:
+        home: The maestro home directory
+        pi_config: The [runner.pi] configuration as dict
+    """
+    agent_dir = pi_agent_dir(home)
+    models_json_path = agent_dir / "models.json"
+    
+    # Build the models.json content from config
+    models_data = {
+        "baseUrl": pi_config.get("base_url"),
+        "api": pi_config.get("api"),
+        "compat": pi_config.get("compat", {}),
+        "models": {},
+    }
+    
+    # Process each model in pi_config and add contextWindow/maxTokens/cost
+    if "models" in pi_config:
+        for model_name, model_config in pi_config["models"].items():
+            # The models.json requires contextWindow, maxTokens, and cost for each model entry
+            processed_model = {
+                "contextWindow": model_config.get("context_window", 0),
+                "maxTokens": model_config.get("max_tokens", 0),
+                "cost": model_config.get("cost", {"input": 0, "output": 0}) if isinstance(model_config.get("cost"), dict) else {"input": 0, "output": 0}
+            }
+            
+            # Include additional fields from the source config
+            for key, value in model_config.items():
+                if key not in ["context_window", "max_tokens", "cost"]:
+                    processed_model[key] = value
+                    
+            models_data["models"][model_name] = processed_model
+    
+    # Only include api_key if it exists in the config (it's optional for validation but required for generation)
+    if "api_key" in pi_config:
+        models_data["apiKey"] = pi_config["api_key"]
+    
+    # Include version if present in pi_config (for T-56)
+    if "version" in pi_config:
+        models_data["version"] = pi_config["version"]
+    
+    # Convert to JSON string and write
+    content = json.dumps(models_data, indent=2, sort_keys=True)
+    
+    # Use atomic_write to ensure idempotent writes
+    atomic_write(models_json_path, content)
+    
+    # T-56: This function should be called during spawn path for the named call site,
+    # as required by AC #31 - it's invoked from the session managers' spawn logic.
+
+
 def _lock_file(target: Path) -> Path:
     return target.parent / f".{target.name}.lock"
 

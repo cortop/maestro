@@ -263,6 +263,14 @@ _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 _RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
 
 
+# T-56: [runner.pi]'s whole recognized key set. Same validation posture as _RUNNER_OPENCODE_KEYS.
+# Includes baseUrl, api, compat, contextWindow, maxTokens, cost for model entries,
+# apiKey as a resolver expression, and pinned pi version.
+_RUNNER_PI_KEYS = frozenset({
+    "base_url", "api", "compat", "models", "api_key", "version"
+})
+
+
 def config_path(home: Path) -> Path:
     return home / "config.toml"
 
@@ -444,6 +452,13 @@ def load(home_arg: str | None = None) -> Config:
                 if unknown:
                     raise store.MaestroError(
                         f"config.toml: [runner.opencode] has unrecognized key(s): "
+                        f"{', '.join(sorted(unknown))}")
+            raw_pi_table = raw_runner_table.get("pi")
+            if isinstance(raw_pi_table, dict):
+                unknown = set(raw_pi_table) - _RUNNER_PI_KEYS
+                if unknown:
+                    raise store.MaestroError(
+                        f"config.toml: [runner.pi] has unrecognized key(s): "
                         f"{', '.join(sorted(unknown))}")
         cfg.provider_config = {
             k: v for k, v in data.items()
