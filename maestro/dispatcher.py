@@ -2568,16 +2568,28 @@ def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
     """
     # Build a dispatch table for different runners
     def _probe(runner: str) -> dict:
-        # For unrecognized runners, fall back to ollama probe (backward compatibility)
-        if runner == "ollama":
+        # Create probe functions for different runner types
+        def _ollama_probe() -> dict:
             from .providers import ollama as ollama_mod
             models, daemon_reason = ollama_mod.fetch_models()
-            return {"binary_ok": shutil.which(runner) is not None,
+            return {"binary_ok": shutil.which("ollama") is not None,
                     "models": models, "daemon_reason": daemon_reason}
-        else:
-            # For other runners (including opencode), fall back to ollama for now
-            # This maintains backward compatibility but allows future expansion
+            
+        def _generic_probe() -> dict:
+            # For runners like opencode that don't have special support yet
+            # we use the existing ollama probe for compatibility, but this would
+            # be the place to add true runner-specific probing in future
             return _default_runner_probe(runner)
+        
+        # Dispatch table for different runner types
+        probe_dispatch = {
+            "ollama": _ollama_probe,
+            # Other runners can have their own specific probes later
+        }
+        
+        # Get the appropriate probe function, fallback to generic
+        probe_fn = probe_dispatch.get(runner, _generic_probe)
+        return probe_fn()
     
     return _probe
 
