@@ -98,6 +98,13 @@ class Config:
     # [repos.<name>] shape. A [repos.<name>] table's own `prime` always wins over this.
     # See RepoBinding.prime (maestro/repos.py) for what runs it, when, and how.
     prime: str | None = None
+    # RB-12: the real command maestro itself runs (subprocess, its OWN exit code
+    # captured -- never an agent's word) to prove the suite passes before it will
+    # let `implementing -> qa` through (see ops.capture_tests / ops._refuse_if_tests_stale).
+    # None (default) disables the gate entirely -- every existing home behaves
+    # exactly as it does today until it opts in; this ships dark. A `mode: local`
+    # binding (AD-6, no repo/suite) always no-ops regardless of this setting.
+    test_command: str | None = None
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -338,6 +345,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.repo_path = m.get("repo_path", cfg.repo_path)
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
         cfg.prime = m.get("prime", cfg.prime) or None
+        cfg.test_command = m.get("test_command", cfg.test_command) or None
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.opencode_user_commands_dir = m.get(
             "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
@@ -575,6 +583,18 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # for the multi-repo equivalent). Run ONCE per fresh worktree by
                                   # `maestro worktree ensure`, cwd=worktree, with $WT/$REPO/$KEY
                                   # in its environment -- never by the dispatcher.
+# test_command = ".venv/bin/python -m pytest -q"   # RB-12: unset (default) disables the gate --
+                                  # every existing home behaves exactly as today. Set this and
+                                  # `implementing -> qa` refuses (`maestro set-phase ... qa`,
+                                  # non-zero exit, no event) unless `maestro capture-tests <key>`
+                                  # has a passing record captured by MAESTRO ITSELF (a real
+                                  # subprocess, its own exit code) at the CURRENT tree state
+                                  # (commit sha + a hash of the dirty tree) -- a self-reported
+                                  # "tests pass" note never satisfies this. A matching record is
+                                  # reused, never re-run, so a 60s sweep never re-runs a 115s
+                                  # suite for nothing. `--force` on `set-phase` overrides, same
+                                  # as the unverified-ACs gate. No-ops for a `mode = "local"`
+                                  # binding (no suite to run).
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend

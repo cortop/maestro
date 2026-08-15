@@ -715,6 +715,7 @@ _APPEND_DENYLIST = {
     events.APPROVED: "approve",
     events.AC_VERIFIED: "verify-ac",
     events.AC_QA_VERDICT: "qa-verdict",
+    events.TEST_RUN_CAPTURED: "capture-tests",
     events.FAILED: "fail",
     events.STALLED: "fail",
 }
@@ -810,6 +811,15 @@ def cmd_verify_ac(args) -> int:
     evidence = {"what": args.what, "where": args.where, "result": args.result}
     h = ops.verify_ac(_cfg(args), args.key, args.ac, evidence, actor=args.actor)
     _print({"verified_ac_hash": h})
+    return 0
+
+
+def cmd_capture_tests(args) -> int:
+    """[agent] run the configured test_command for real (a subprocess, its own exit
+    code) at the current tree state and record it -- the RB-12 gate `set-phase qa`
+    checks. Reused, not re-run, when a record already matches the tree; no-ops
+    when test_command is unset or the ticket is a mode=local binding."""
+    _print(ops.capture_tests(_cfg(args), args.key, actor=args.actor))
     return 0
 
 
@@ -1450,6 +1460,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--where", required=True, help="where it ran (file:line or test name)")
     sp.add_argument("--result", required=True, help="the observed result (e.g. PASSED, output excerpt)")
     sp.add_argument("--actor", default="reconciler")
+
+    sp = add("capture-tests", cmd_capture_tests,
+             "[agent] run test_command for real and record the result (RB-12 implementing->qa gate)")
+    sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
 
     sp = add("qa-brief", cmd_qa_brief,
              "[agent] mint the QA hand-off packet (AC list + diff) for one ticket")

@@ -162,6 +162,13 @@ class Snapshot:
     # [repos.<name>] this ticket is bound to, from TicketCreated.repo. None = no
     # explicit binding -- repos.resolve() falls back to the implicit default.
     repo: str | None = None
+    # tree_key -> {"command", "exit_code", "passed"}, from TestRunCaptured events
+    # (RB-12) -- maestro's own captured proof, never an agent's self-attestation.
+    # tree_key is "<HEAD sha>:<hash of the dirty tree>", so a record only ever
+    # matches the exact tree state it was captured at; latest capture per
+    # tree_key wins. Never reset by a phase change -- a passing capture stays
+    # valid across a fix-round bounce as long as the tree itself hasn't moved.
+    test_runs: dict[str, dict] = field(default_factory=dict)
     # Human-readable notes of malformed events `fold` coerced instead of
     # raising on (RB-2, law (b)) -- "seq <n> <Type>: <what was wrong>". Never
     # reset by a phase change; a corrupt log stays visible for as long as the
@@ -195,6 +202,16 @@ class Snapshot:
             if v and v.get("verdict") == "fail":
                 out.append(t)
         return out
+
+    def tests_passing(self, tree_key: str) -> bool:
+        """True iff a TestRunCaptured record exists for *tree_key* (the exact
+        current tree state) and it passed -- the whole gate, in one predicate
+        (RB-12). A record from a different tree state (one more edit since it
+        was captured) simply isn't in this dict at all, so it can never
+        satisfy a later, different tree_key -- see the T-71 spec's "bind the
+        record to the tree" note."""
+        rec = self.test_runs.get(tree_key)
+        return bool(rec and rec.get("passed"))
 
     def standards_failing_acs(self, spec_text: str) -> list[str]:
         """AC texts (in spec order) whose latest independent standards-axis QA
@@ -363,6 +380,14 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                     s.qa_verdicts_standards[h] = entry
                 else:
                     s.qa_verdicts[h] = entry  # axis "spec", or absent (pre-T-23 events)
+        elif t == E.TEST_RUN_CAPTURED:
+            tk = p.get("tree_key")
+            if tk:
+                s.test_runs[tk] = {
+                    "command": p.get("command"),
+                    "exit_code": p.get("exit_code"),
+                    "passed": bool(p.get("passed")),
+                }
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.APPROVED:
