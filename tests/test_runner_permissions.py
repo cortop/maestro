@@ -64,3 +64,35 @@ def test_no_argv_maestro_constructs_ever_carries_the_literal_dangerous_auto_flag
         if "--auto" in text:
             hits.append(str(path.relative_to(_MAESTRO_SRC.parent)))
     assert not hits, f"literal '--auto' found in: {hits}"
+
+
+def test_no_pi_argv_maestro_constructs_ever_carries_approve_or_bare_dash_a():
+    """T-59 (PI-7): pi's `--approve`/`-a` ("trust project-local files for this
+    run") is pi's own analogue of opencode's `--auto` -- it would let a hostile
+    repo's `.pi/settings.json`/`.pi/extensions` load and run automatically,
+    inverting the whole point of the guard extension this ticket builds.
+
+    Unlike the `--auto` sweep above (a safe bare-substring search -- that
+    literal is rare and opencode-specific), a bare `-a` is a common,
+    perfectly legitimate short flag for OTHER tools already invoked elsewhere
+    in this package (`rsync -a` in `ops.py`) -- a package-wide substring sweep
+    for `-a` would false-positive on those. So this walks the AST instead and
+    only inspects list/tuple literals that actually build a `pi` executable's
+    argv (first element the exact string `"pi"`, matching every real call
+    site in this codebase), the same scoping the `pi_guard.spawn_argv` unit
+    test already applies to its own returned fragment."""
+    import ast
+
+    hits = []
+    for path in _MAESTRO_SRC.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, (ast.List, ast.Tuple)) and node.elts):
+                continue
+            first = node.elts[0]
+            if not (isinstance(first, ast.Constant) and first.value == "pi"):
+                continue
+            for elt in node.elts:
+                if isinstance(elt, ast.Constant) and elt.value in ("-a", "--approve"):
+                    hits.append(f"{path.relative_to(_MAESTRO_SRC.parent)}:{node.lineno}")
+    assert not hits, f"forbidden pi trust-override literal found in a pi argv at: {hits}"

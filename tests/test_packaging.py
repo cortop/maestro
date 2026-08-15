@@ -31,6 +31,23 @@ def test_wheel_contains_packaged_assets(built_wheel):
     assert "maestro/_assets/completions/_maestro" in names
 
 
+def test_wheel_contains_the_pi_guard_extension_assets(built_wheel):
+    """T-59 (PI-7): the pi guard extension + its checker + the destructive-
+    command predicate it reuses (a symlink into `.claude/hooks/`, dereferenced
+    into real file content by hatchling) must all ship as package data --
+    `maestro.pi_guard.install` resolves them via `importlib.resources` against
+    the INSTALLED package, so a real `pip install` (no repo checkout) must
+    carry real files here, not a dangling symlink target."""
+    z = zipfile.ZipFile(built_wheel)
+    names = z.namelist()
+    assert "maestro/_assets/pi/pi_guard_extension.ts" in names
+    assert "maestro/_assets/pi/pi_guard_check.py" in names
+    assert "maestro/_assets/pi/destructive_command_guard.py" in names
+    # Real, non-empty predicate content -- not an unresolved symlink entry.
+    content = z.read("maestro/_assets/pi/destructive_command_guard.py")
+    assert b"PROTECTED_RELATIVE" in content
+
+
 def test_wheel_declares_no_unconditional_runtime_dependencies(built_wheel):
     """RB-10: Hypothesis (and pytest, textual) must land in the built wheel's metadata ONLY as
     extra-gated `Requires-Dist` lines -- never as a bare, unconditional one -- so a fresh `pip

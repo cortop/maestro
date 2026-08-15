@@ -94,3 +94,30 @@ def test_claude_skill_backend_is_unaffected_by_the_interlock(home):
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert "X-2" in report.spawned
+
+
+def test_backend_interlock_reason_is_none_for_pi(home):
+    """T-59 (PI-7): the last commit of that ticket -- `pi` finally has a
+    bypass-resistant destructive-command guard wired in (`maestro.pi_guard`,
+    proven live in `tests/test_pi_guard.py` including a real pi run), so the
+    interlock no longer refuses it."""
+    cfg = Config(home=home, providers={"tracker": "none", "vcs": "none",
+                                        "fetcher": "none", "implementer": "pi"})
+    assert gates.backend_interlock_reason(cfg) is None
+
+
+def test_real_sweep_with_a_pi_implementer_spawns_normally(home):
+    """The AC's own bar, mirrored from
+    `test_real_sweep_refuses_to_spawn_into_a_non_claude_backend`: a real
+    dispatch() sweep with `providers.implementer == "pi"` spawns exactly like
+    the claude_skill default -- no interlock refusal, no open question."""
+    cfg = Config(home=home, providers={"tracker": "none", "vcs": "none",
+                                        "fetcher": "none", "implementer": "pi"})
+    _seed_ready_ticket(home, "X-4")
+
+    sessions = DryRunSessions()
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    assert "X-4" in report.spawned
+    snap = snap_mod.load(home, "X-4")
+    assert not snap.open_questions

@@ -165,7 +165,17 @@ def runner_editable(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
 # today. Adding a provider name here IS the "wiring" step for a future backend
 # (e.g. opencode) -- it must not happen by accident just because a provider
 # name was typed into config.toml.
-BYPASS_RESISTANT_IMPLEMENTERS = {"claude_skill"}
+#
+# T-59/PI-7: "pi" joins the set as the LAST commit of that ticket, once (and
+# only once) every other AC was green -- `maestro.pi_guard` wires a
+# bypass-resistant guard extension (sourced from the SAME
+# `destructive_command_guard.check_command` predicate, plus pi-only widening
+# for the reconciler's own worktree and the guard's own install directory,
+# the human-only maestro-verb denylist, and force-push), proven with a REAL
+# `pi` run in `tests/test_pi_guard.py` (not just a unit test of the
+# predicate) -- see that ticket's spec for the full bar this had to clear
+# before landing here.
+BYPASS_RESISTANT_IMPLEMENTERS = {"claude_skill", "pi"}
 
 
 def backend_interlock_reason(cfg: Config) -> str | None:

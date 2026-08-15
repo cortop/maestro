@@ -77,6 +77,15 @@ def fetch_models(
     own established pattern for a pi subprocess call in this codebase) --
     defaults to ``subprocess.run``; tests substitute a fake to assert argv/env
     or simulate each failure mode without shelling a real ``pi``.
+
+    T-59: this is currently the ONLY argv maestro constructs for the `pi`
+    executable that could plausibly run past startup (``health.check_pi_version``'s
+    own ``pi --version`` probe exits before extensions or tools ever load, so
+    it's out of scope -- see that function's docstring) -- so it carries
+    ``pi_guard.spawn_argv``'s guard flags whenever *pi_agent_dir* is given,
+    same as any future real spawn backend would. Installing the guard is
+    best-effort: a failure there must never break this function's own
+    never-raises contract, so it degrades to the plain probe argv instead.
     """
     run = run or subprocess.run
     argv = ["pi", "--list-models", "--offline"]
@@ -85,6 +94,11 @@ def fetch_models(
         import os
         env = dict(os.environ)
         env["PI_CODING_AGENT_DIR"] = str(pi_agent_dir)
+        try:
+            from .. import pi_guard
+            argv += pi_guard.spawn_argv(Path(pi_agent_dir))
+        except OSError:
+            pass
     try:
         proc = run(argv, capture_output=True, text=True, timeout=TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired:
