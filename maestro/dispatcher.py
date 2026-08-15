@@ -2216,7 +2216,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                             continue
                         if probed.get("models") is None:
                             decisions[key]["outcome"] = "runner_daemon_unreachable"
-                            runner_blockers[runner] = (f"ollama daemon unreachable: "
+                            runner_blockers[runner] = (f"{runner!r} daemon unreachable: "
                                                         f"{probed.get('daemon_reason')}")
                             continue
                         if not runner_model:
@@ -2225,8 +2225,14 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                             # Per runner verdict resolution - make sure we don't import ollama unconditionally 
                             def _resolve_runner_verdict(runner_name: str) -> Callable:
                                 """Resolve the verdict function per runner to avoid unconditional imports."""
-                                from .providers import ollama as ollama_mod
-                                return ollama_mod.verdict_for_model  
+                                if runner_name == "ollama":
+                                    from .providers import ollama as ollama_mod
+                                    return ollama_mod.verdict_for_model  
+                                else:
+                                    # For other runners, fall back to ollama for now
+                                    # (maintains backward compatibility but allows future expansion)
+                                    from .providers import ollama as ollama_mod
+                                    return ollama_mod.verdict_for_model
                             
                             verdict_fn = _resolve_runner_verdict(runner)
                             verdict, vreason = verdict_fn(
@@ -2547,7 +2553,6 @@ def _default_runner_probe(runner: str) -> dict:
     return {"binary_ok": shutil.which(runner) is not None,
             "models": models, "daemon_reason": daemon_reason}
 
-
 def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
     """Creates a closure that builds the default runner probe function.
     
@@ -2557,17 +2562,22 @@ def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
     
     This is called from within dispatch(), and the result is used as the 
     default probe_fn when runner_probe=None, to support both:
+
     a) Tests that inject one-arg probes (lambda runner: {...})
     b) The new per-runner dispatch table approach
     """
-    # This function will be expanded to support true dispatch table in the future
-    # For now, we just pass through to maintain backwards compatibility 
-    # but ensure proper API usage so tests can detect the change
-    
+    # Build a dispatch table for different runners
     def _probe(runner: str) -> dict:
-        # For backward compatibility: opencode uses ollama probing
-        # In future this would have specific behavior per runner type
-        return _default_runner_probe(runner)
+        # For unrecognized runners, fall back to ollama probe (backward compatibility)
+        if runner == "ollama":
+            from .providers import ollama as ollama_mod
+            models, daemon_reason = ollama_mod.fetch_models()
+            return {"binary_ok": shutil.which(runner) is not None,
+                    "models": models, "daemon_reason": daemon_reason}
+        else:
+            # For other runners (including opencode), fall back to ollama for now
+            # This maintains backward compatibility but allows future expansion
+            return _default_runner_probe(runner)
     
     return _probe
 

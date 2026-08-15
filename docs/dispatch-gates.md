@@ -22,7 +22,7 @@ Every `decisions[key]["outcome"]` a sweep can assign, in the source order `maest
 | 12 | `runner_disabled` | `maestro/dispatcher.py:2200` |
 | 13 | `runner_binary_missing` | `maestro/dispatcher.py:2214` |
 | 14 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2218` |
-| 15 | `runner_model_unavailable` | `maestro/dispatcher.py:2229` |
-| 16 | `runner_capped` | `maestro/dispatcher.py:2255` |
-| 17 | `attempts_exhausted` | `maestro/dispatcher.py:2261` |
-| 18 | `spawned` | `maestro/dispatcher.py:2280` |
+| 15 | `runner_model_unavailable` | `maestro/dispatcher.py:2241` |
+| 16 | `runner_capped` | `maestro/dispatcher.py:2267` |
+| 17 | `attempts_exhausted` | `maestro/dispatcher.py:2273` |
+| 18 | `spawned` | `maestro/dispatcher.py:2292` |
