@@ -1223,15 +1223,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--title", dest="title_flag", default=None,
                     help="ticket title, as a flag (alias for the positional title)")
     sp.add_argument("--key")
-    # AD-7: approval_tier is gone -- accepted and silently discarded, never
-    # read by cmd_create below. Kept ONLY because a couple of `.claude/commands/`
-    # skill invocations (maestro-reconcile-awaiting-human.md, maestro-task.md)
-    # still pass `--tier <n>` and this checkout's sandbox refuses writes under
-    # `.claude/` for this session (every attempt -- Edit, Write, and a plain
-    # Bash `echo >>` -- was refused as "a sensitive file"), so those two files
-    # could not be updated in the same change. Remove this flag once a human
-    # (or a session with `.claude/` write access) drops `--tier` from both.
-    sp.add_argument("--tier", type=int, default=None, help=argparse.SUPPRESS)
     sp.add_argument("--priority", type=int, default=3); sp.add_argument("--intent")
     sp.add_argument("--kind", default=None, help="ticket kind (e.g. research, implementation)")
     sp.add_argument("--model", default=None, help="model override for this ticket's reconciler")

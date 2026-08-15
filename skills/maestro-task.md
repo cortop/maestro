@@ -50,7 +50,6 @@ Synthesise what you know into a structured spec:
 - **intent**: 2–5 sentences — what problem this solves and what "done" looks like
 - **notes** (optional): relevant context, surface areas, constraints
 - **acceptance criteria**: each one starts with `- [ ]` and is observable/verifiable
-- **approval_tier**: default `1` unless the user said it's pre-approved (tier 0)
 - **priority**: default `2` unless the user said otherwise
 - **dependsOn**: omit unless the user named a dependency
 
@@ -91,7 +90,6 @@ with this exact format:
 
 <!-- HUMAN-OWNED. Edit freely, anytime. Agents read this; they never rewrite it. -->
 
-approval_tier: <tier>
 priority: <priority>
 <dependsOn line only if there are deps: dependsOn: [X-1, X-2]>
 
@@ -111,7 +109,7 @@ Then queue the ticket so the dispatcher sees it:
 
 ```bash
 export MAESTRO_HOME=~/.maestro/maestro-dev
-maestro create --key "$KEY" --tier <tier> --priority <priority> --no-nudge "<title>"
+maestro create --key "$KEY" --priority <priority> --no-nudge "<title>"
 ```
 
 Finally, report success:
@@ -128,7 +126,7 @@ The dispatcher will pick it up on the next sweep.
 - Never create a ticket whose spec fails the rubric. Loop on questions until it passes
   or the user cancels.
 - Never invent acceptance criteria — derive them from what the user said.
-- Never add front-matter fields beyond `approval_tier`, `priority`, `dependsOn`.
+- Never add front-matter fields beyond `priority`, `dependsOn`.
 - The `dependsOn` line must be omitted (not left as `dependsOn: []`) unless there are
   real dependencies.
 - Target the dogfood home (`~/.maestro/maestro-dev`), not the default `~/.maestro`.
