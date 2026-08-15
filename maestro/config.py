@@ -263,7 +263,7 @@ _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 _RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
 
 
-# T-56: [runner.pi]'s whole recognized key set. Same validation posture as
+# T-56/T-60: [runner.pi]'s whole recognized key set. Same validation posture as
 # _RUNNER_OPENCODE_KEYS (fail-closed at config.load -- see the unknown-key check
 # below). `provider` is the name `store.generate_pi_models_json` registers the
 # `providers.<name>` block under in the generated models.json (default "zai");
@@ -272,9 +272,15 @@ _RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
 # that function's docstring); `models` is a table of `<model id>` ->
 # `{context_window, max_tokens, cost: {input, output, cache_read, cache_write}}`;
 # `version` is the pinned `pi --version` string `health.check_pi_version` warns
-# on drift from.
+# on drift from. PI-8: `concurrency` (dispatcher._runner_concurrency_cap;
+# default 1 -- see dispatcher._RUNNER_DEFAULT_CONCURRENCY) and `phases`
+# (dispatcher.runner_eligible_phases; default NONE -- see
+# dispatcher._RUNNER_DEFAULT_PHASES's own PI-8 comment on why pi's default is
+# deliberately narrower than opencode's) are the same two keys
+# _RUNNER_OPENCODE_KEYS already carries.
 _RUNNER_PI_KEYS = frozenset({
-    "provider", "base_url", "api", "compat", "models", "api_key", "version"
+    "provider", "base_url", "api", "compat", "models", "api_key", "version",
+    "concurrency", "phases",
 })
 
 
@@ -707,6 +713,15 @@ implementer = "claude_skill"
                                      # verbatim. maestro never reads or holds the secret value.
 # version = "0.79.2"                # pinned installed `pi --version`; health.check_pi_version
                                      # WARNs when the real binary drifts from this
+# concurrency = 1                   # PI-8: cap on concurrently-running pi reconcilers -- default
+                                     # 1: the likely provider's usage policy scopes a subscription
+                                     # to 1-2 concurrent projects, with documented account-level
+                                     # fair-use enforcement against exactly maestro's fan-out
+# phases = ["qa"]                   # PI-8: which phase(s) a ticket's `runner: pi` (or this
+                                     # board's own `runner` default) may actually spawn under --
+                                     # default is NONE (unlike opencode's ["implementing"]):
+                                     # admitting pi to `implementing` is a separate, reviewable
+                                     # edit here, made only once the guard has been proven live
 #
 # [runner.pi.compat]                # the provider-level compat block (pi's own schema);
                                      # mirrors the bundled "zai" entries' own compat so the

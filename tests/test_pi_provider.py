@@ -175,6 +175,14 @@ def _register(monkeypatch, *names):
 
 def _enable(cfg, *names):
     cfg.runner_enabled = ["claude", *names]
+    if "pi" in names:
+        # PI-8: pi's own default eligible-phase set is now empty
+        # (dispatcher._RUNNER_DEFAULT_PHASES) -- admitting pi to `implementing`
+        # is a deliberate config edit, not a free default. These preflight
+        # tests exercise the verdict codepath for an `implementing`-phase
+        # ticket, so they must opt pi into that phase explicitly, exactly the
+        # way a real board configuring pi would.
+        cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
 
 
 def _seed(home, key, *, runner, runner_model):
