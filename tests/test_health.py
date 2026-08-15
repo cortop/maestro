@@ -551,7 +551,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "watchdog_loops", "depends_on", "launchctl", "repo_preflight",
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
-                      "gh_credential_reachability", "ollama_models", "runner_binary",
+                      "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
                       "pi_version", "worktree_health", "provider_availability"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
@@ -607,13 +607,15 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     still -- `provider_availability` -- same treatment. RB-11 grew it by one more
     still -- `burn` -- same treatment. T-65 (OC-7) grew it by one more still --
     `watchdog_loops` -- same treatment. T-56 (PI-4) grew it by one more still --
-    `pi_version` -- same treatment.)"""
+    `pi_version` -- same treatment. T-61 (PI-9) grew it by one more still --
+    `pi_models` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
-        "runner_binary", "pi_version", "worktree_health", "provider_availability", "burn",
+        "pi_models", "runner_binary", "pi_version", "worktree_health",
+        "provider_availability", "burn",
     }
     code, out = _sweep(home)
     assert code == 0
@@ -1052,6 +1054,27 @@ def test_doctor_cli_missing_reconcile_skill_warn_then_ok_for_opencode_runner_tic
     assert ok_check["status"] == "ok"
 
 
+# --- T-61 (PI-9): missing_reconcile_skill treats a pi binding as always satisfied ---
+
+def test_missing_reconcile_skill_pi_binding_always_ok_with_neither_location_present(
+        home, tmp_path, monkeypatch):
+    """AC5: a real doctor run over a board with a pi ticket and NEITHER
+    `.claude/commands/` nor `.opencode/command/` present still reports `ok`
+    -- PI-8 passes `--prompt-template` at the package payload directly, so
+    there is no per-repo command-file location for pi to be missing from."""
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "no-user-commands"))
+    monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(tmp_path / "no-opencode-user-commands"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
+    _seed_with_runner(home, "T-1", runner="pi")
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "ok"
+    assert check["missing"] == []
+
+
 def test_reconciler_permissions_not_applicable_for_an_unregistered_runner(home, tmp_path, monkeypatch):
     """A repo bound by a ticket naming a runner this check has no dedicated
     branch for (not ``claude``, not ``opencode``) is reported
@@ -1112,6 +1135,66 @@ def test_reconciler_permissions_claude_runner_ticket_unaffected_by_opencode_chec
     assert check["status"] == "warn"
     assert "default" in check["missing_by_repo"]
     assert check["not_applicable_by_repo"] == {}
+
+
+# --- T-61 (PI-9) AC6: a pi binding never reports `ok` with no guard extension --
+
+def test_reconciler_permissions_warns_for_pi_binding_with_no_guard_extension_installed(
+        home, tmp_path):
+    """Before T-61, a pi binding fell into `not_applicable_by_repo` and
+    `status` stayed `ok` even though pi ships NO permission gate of its own
+    -- an ungated pi board reading a green doctor is the worst possible
+    output this check exists to prevent."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
+    _seed_with_runner(home, "T-1", runner="pi")
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "default" in check["missing_by_repo"]
+    assert check["not_applicable_by_repo"] == {}
+    assert "not installed" in check["missing_by_repo"]["default"][0]
+
+
+def test_reconciler_permissions_ok_for_pi_binding_once_guard_extension_is_installed(
+        home, tmp_path):
+    """Once `pi_guard.install` has actually materialized the extension (a
+    real prior pi spawn's own belt-and-suspenders call, PI-7) -- the SAME
+    board-wide `store.pi_agent_dir(cfg.home)` this check reads -- the check
+    reports `ok`."""
+    from maestro import pi_guard
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
+    _seed_with_runner(home, "T-1", runner="pi")
+    pi_guard.install(store.pi_agent_dir(home))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+    assert check["missing_by_repo"] == {}
+
+
+def test_reconciler_permissions_pi_never_reads_claude_code_settings(home, tmp_path):
+    """A pi binding's Claude Code settings.json (allow/deny) is irrelevant --
+    the guard-extension probe never even looks at it, unlike a claude
+    binding."""
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)  # deliberately no .claude/settings*.json at all
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
+    _seed_with_runner(home, "T-1", runner="pi")
+    from maestro import pi_guard
+    pi_guard.install(store.pi_agent_dir(home))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
 
 
 # --- T-54 AC8: "the runner for key K" under phase-aware routing ---------------

@@ -399,3 +399,44 @@ def test_create_flag_runner_claude_never_warns(cfg, monkeypatch, capsys):
     assert rc == 0
     assert calls == []
     assert capsys.readouterr().err == ""
+
+
+# --- T-61 (PI-9): --runner pi validates against pi's own catalogue, never ollama's --
+
+def test_create_flag_runner_pi_missing_model_warns_from_pis_own_catalogue(cfg, monkeypatch, capsys):
+    """AC2: a pi `runner_model` unknown to pi's own catalogue never gates
+    creation -- exits 0, stores the value verbatim, warns with pi's own
+    suggestions -- and never touches ollama at all."""
+    ollama_calls = []
+    monkeypatch.setattr(
+        "maestro.providers.ollama.fetch_models",
+        lambda *a, **kw: ollama_calls.append(1) or ([], None))
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-5.2", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+
+    rc, entry = _run_create_with_flags(
+        cfg, title="Pi task", runner="pi", runner_model="glm-9.9-does-not-exist")
+
+    assert rc == 0
+    assert entry["args"]["runner_model"] == "glm-9.9-does-not-exist"  # stored verbatim
+    assert ollama_calls == []  # never the wrong catalogue
+    err = capsys.readouterr().err
+    assert "warning" in err
+    assert "glm-5.2" in err
+
+
+def test_create_flag_runner_pi_unreachable_exits_zero_with_warning(cfg, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: (None, "pi --list-models exited 1: no such file"))
+
+    rc, entry = _run_create_with_flags(
+        cfg, title="Pi task", runner="pi", runner_model="glm-5.2")
+
+    assert rc == 0
+    assert entry["args"]["runner_model"] == "glm-5.2"
+    err = capsys.readouterr().err
+    assert "pi unreachable" in err
+    assert "not validated" in err

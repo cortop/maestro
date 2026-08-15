@@ -277,6 +277,24 @@ def test_check_runner_binary_ok_when_no_ticket_uses_a_non_claude_runner(home, cf
     assert result["tickets"] == {}
 
 
+# --- T-61 (PI-9) AC7: check_runner_binary works unchanged for pi ---------------
+
+
+def test_check_runner_binary_ok_when_pi_binary_present(home, cfg):
+    _seed(home, "PI-1", phase=Phase.IMPLEMENTING, runner="pi", runner_model="glm-5.2")
+    result = health.check_runner_binary(cfg, 1000, which=lambda name: f"/usr/local/bin/{name}")
+    assert result["status"] == "ok"
+    assert result["tickets"] == {}
+
+
+def test_check_runner_binary_warns_when_pi_binary_absent(home, cfg):
+    _seed(home, "PI-1", phase=Phase.IMPLEMENTING, runner="pi", runner_model="glm-5.2")
+    result = health.check_runner_binary(cfg, 1000, which=lambda name: None)
+    assert result["status"] == "warn"
+    assert result["tickets"]["PI-1"]["runner"] == "pi"
+    assert "not found on PATH" in result["tickets"]["PI-1"]["reason"]
+
+
 # --- AC7: a home with no `runner:` fields calls the probe zero times --------
 
 def test_no_runner_fields_board_calls_probe_zero_times(home, cfg):

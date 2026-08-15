@@ -46,11 +46,20 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     refuses (raises `MaestroError`, non-zero exit, NO event appended) unless
     `force=True`, and one with a failing independent QA verdict on a current AC
     refuses unconditionally (`force` does not override QA — that gate is fixed
-    by re-running `maestro qa-verdict`, not by a human override). The `--force`
-    escape hatch is for a human overriding the unverified-ACs gate; the event
-    log still has to show that they did, so a forced transition records
-    `forced_by=<actor>` on the PhaseChanged event plus a Note spelling out the
-    count.
+    by re-running `maestro qa-verdict`, not by a human override). Entering `qa`
+    from `implementing` is gated a third way (RB-12): if `cfg.test_command` is
+    set and this ticket isn't a `mode: local` binding, the transition refuses
+    unless `maestro capture-tests` has already recorded a PASSING run — a real
+    subprocess maestro itself ran, never an agent's word — at the exact current
+    tree state (see `_tests_stale_reason`/`ops.capture_tests`). Each of these is
+    a separate escape hatch: the `--force` below overrides the unattested-ACs
+    gate AND the test-run gate, but never the QA-verdict gate (fixed only by
+    re-running `maestro qa-verdict`).
+
+    The `--force` escape hatch is for a human overriding the unverified-ACs
+    and/or test-run gates; the event log still has to show that they did, so a
+    forced transition records `forced_by=<actor>` on the PhaseChanged event
+    plus a Note per gate overridden, spelling out what was skipped.
 
     `expect` (RB-7) is the fencing CAS, scoped to this one call site — the
     state-machine gate — and to nowhere else in `ops`: a caller that already
@@ -72,7 +81,17 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
         raise store.MaestroError(
             f"{key}: refusing awaiting-ci — {unverified} acceptance criteria unverified; "
             f"run `maestro verify-ac` for each, or pass --force to override")
-    forced = unverified > 0 and force
+    forced_acs = unverified > 0 and force
+
+    tests_reason = None
+    if phase == Phase.QA and Phase(snap.phase) == Phase.IMPLEMENTING:
+        tests_reason = _tests_stale_reason(cfg, key, snap)
+        if tests_reason and not force:
+            raise store.MaestroError(
+                f"{key}: refusing qa — {tests_reason}; run `maestro capture-tests {key}`, "
+                f"or pass --force to override")
+    forced_tests = tests_reason is not None and force
+
     if phase == Phase.AWAITING_CI:
         _refuse_if_qa_failing(cfg, key, snap)
 
@@ -83,16 +102,22 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
                 actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, f"note-transition-{phase.value}"))
         snap = snap_mod.load(cfg.home, key)
 
+    forced = forced_acs or forced_tests
     payload = {"phase": phase.value, "reason": reason}
     if forced:
         payload["forced_by"] = actor
     sid = step_id(key, snap.phase, snap.observed_seq, f"phase:{phase.value}")
     ev = _append(cfg, key, E.PHASE_CHANGED, payload, actor=actor, sid=sid, expect=expect)
-    if forced:
+    if forced_acs:
         _append(cfg, key, E.NOTE,
                 {"text": f"forced past {unverified} unverified acceptance criteria by {actor}"},
                 actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "force-ac-override"))
-    elif phase == Phase.AWAITING_CI:
+    if forced_tests:
+        _append(cfg, key, E.NOTE,
+                {"text": f"forced past failing test-run gate for `{cfg.test_command}` "
+                         f"({tests_reason}) by {actor}"},
+                actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "force-tests-override"))
+    if not forced and phase == Phase.AWAITING_CI:
         _warn_unverified_acs(cfg, key, actor=actor)
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
@@ -126,6 +151,34 @@ def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
         raise store.MaestroError(
             f"{key}: refusing awaiting-ci — QA verdict is fail on {len(failing)} "
             f"acceptance criteria: {'; '.join(failing)} — fix and re-run `maestro qa-verdict`")
+
+
+def _tests_stale_reason(cfg: Config, key: str, snap) -> str | None:
+    """None if the RB-12 test-run gate is satisfied for *key* right now;
+    otherwise the human-facing reason `set_phase` refuses `implementing -> qa`
+    with. Satisfied means any of: the gate is unconfigured (`test_command`
+    unset — ships dark, see `Config.test_command`), *key* is bound `mode:
+    local` (AD-6, no repo/suite to run), or the CURRENT tree state (HEAD sha +
+    a hash of the dirty tree, see `_tree_state_key`) already has a captured
+    PASSING record in `snap.test_runs` — one `maestro capture-tests` actually
+    ran a subprocess and recorded, never a free-text claim (that's the whole
+    point: see `Snapshot.tests_passing`). A record from a stale tree state (one
+    more edit since it was captured) is invisible here — it simply isn't keyed
+    under the current tree_key — so it can never satisfy this check."""
+    if not cfg.test_command:
+        return None
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode == "local":
+        return None
+    from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
+
+    tree_key = _tree_state_key(_worker_cwd(cfg, key))
+    if snap.tests_passing(tree_key):
+        return None
+    rec = snap.test_runs.get(tree_key)
+    if rec is None:
+        return "no captured test run matches the current tree state"
+    return f"captured test run at this tree state failed (exit {rec.get('exit_code')})"
 
 
 def _warn_unverified_acs(cfg: Config, key: str, *, actor: str) -> None:
@@ -720,6 +773,82 @@ def _untracked_diff(_git) -> str:
     return "".join(out)
 
 
+# RB-12: how long a real `cfg.test_command` subprocess may run before
+# `capture_tests` gives up and records it as a failure -- generous, same
+# posture as `worktree_timeout` (MTO-1): a killed-mid-run suite must read as
+# "failed", never wedge the reconciler that's waiting on it.
+_TEST_RUN_TIMEOUT = 1800  # seconds
+
+
+def _tree_state_key(cwd: Path) -> str:
+    """"<HEAD sha>:<hash of the dirty tree>" at *cwd* -- the RB-12 gate's
+    binding key, chosen so it changes exactly when the code does (the spec's
+    "bind the record to the tree, not the ticket" note): a passing capture
+    from before one more edit never matches after it. The dirty half covers
+    both tracked changes (`git diff HEAD`) and untracked new files (the same
+    `_untracked_diff` helper `_qa_diff` briefs QA with), so a brand-new,
+    not-yet-`git add`-ed file still moves the key. A non-git *cwd* (rev-parse
+    fails) degrades to an all-empty key rather than raising -- `capture_tests`
+    is never called for a `mode: local` binding, so this is a defensive
+    fallback, not an expected path.
+    """
+    def _git(*args):
+        return subprocess.run(["git", "-C", str(cwd), *args],
+                              capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+    head = _git("rev-parse", "HEAD")
+    sha = head.stdout.strip() if head.returncode == 0 else ""
+    dirty = _git("diff", "HEAD", "--")
+    dirty_text = (dirty.stdout if dirty.returncode == 0 else "") + _untracked_diff(_git)
+    return f"{sha}:{content_hash(dirty_text)}"
+
+
+def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
+    """Run `cfg.test_command` for real -- a subprocess, ITS OWN exit code --
+    at *key*'s current tree state, and record the result as a TestRunCaptured
+    event. This is the only thing `_tests_stale_reason` (the `implementing ->
+    qa` gate in `set_phase`) ever trusts; a Note, a `verify-ac`, or any other
+    free-text claim of "tests pass" satisfies nothing (RB-12: "the evidence
+    must be captured, never claimed").
+
+    Caching -- the chosen rule for "do not run the suite on every sweep": if a
+    record already exists for this exact tree_key (HEAD sha + a hash of the
+    dirty tree, see `_tree_state_key`), the command is NOT re-run at all; the
+    existing record is returned as-is. Only a tree state maestro has never
+    captured before triggers a real subprocess call, so a matching tree state
+    across repeated calls (e.g. two dispatcher sweeps back to back) costs
+    exactly one suite run, not one per call.
+
+    No-ops (`{"skipped": "..."}`, no event appended) when `test_command` is
+    unset (the gate is disabled board-wide) or *key*'s repo binding is `mode:
+    local` (AD-6 -- a plain, non-git target with no suite to run).
+    """
+    if not cfg.test_command:
+        return {"skipped": "unconfigured"}
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode == "local":
+        return {"skipped": "local"}
+    from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
+
+    cwd = _worker_cwd(cfg, key)
+    tree_key = _tree_state_key(cwd)
+    snap = snap_mod.load(cfg.home, key)
+    cached = snap.test_runs.get(tree_key)
+    if cached is not None:
+        return {**cached, "tree_key": tree_key, "cached": True}
+    try:
+        proc = subprocess.run(cfg.test_command, shell=True, cwd=cwd,
+                              capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT)
+        exit_code = proc.returncode
+    except subprocess.TimeoutExpired:
+        exit_code = -1
+    payload = {"tree_key": tree_key, "command": cfg.test_command,
+               "exit_code": exit_code, "passed": exit_code == 0}
+    _append(cfg, key, E.TEST_RUN_CAPTURED, payload, actor=actor,
+            sid=f"testrun-{key}-{tree_key}")
+    return {**payload, "cached": False}
+
+
 def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, evidence: str, *,
                        axis: str = "spec", actor: str = "reconciler-qa") -> str:
     """Record an *independent* QA re-check of AC #ac_index (1-based, in spec
@@ -963,9 +1092,13 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
     other direct human spec edit already relies on.
 
     Never gates on the model being locally installed/reachable -- WARNs only,
-    the same three-valued verdict `health.check_ollama_models` computes,
-    just run here so the human sees it immediately rather than waiting for
-    the next `maestro doctor`. Returns
+    the same three-valued verdict `health.check_ollama_models`
+    (`health.check_pi_models` for a pi `runner`) computes, just run here so
+    the human sees it immediately rather than waiting for the next `maestro
+    doctor`. T-61: the catalogue is sourced from the runner's OWN provider
+    module -- opencode from `providers/ollama.py`, pi from `providers/pi.py`
+    (needs `cfg.home` to resolve `store.pi_agent_dir`) -- never ollama's for
+    a pi `runner_model`. Returns
     ``{"runner", "runner_model", "warning": str | None}``.
     """
     if runner is None and runner_model is None:
@@ -988,14 +1121,22 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
 
     warning = None
     if runner and runner != "claude" and runner_model:
-        from .providers import ollama as ollama_mod
-        models, reason = ollama_mod.fetch_models()
-        verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+        if runner == "pi":
+            from .providers import pi as pi_mod
+            models, reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home))
+            verdict, vreason = pi_mod.verdict_for_model(models, reason, runner_model)
+            source = "pi"
+            suggestions = pi_mod.model_names(models) if models else []
+        else:
+            from .providers import ollama as ollama_mod
+            models, reason = ollama_mod.fetch_models()
+            verdict, vreason = ollama_mod.verdict_for_model(models, reason, runner_model)
+            source = "ollama daemon"
+            suggestions = ollama_mod.model_names(models, tool_capable_only=True) if models else []
         if verdict == "unreachable":
-            warning = f"ollama daemon unreachable ({vreason}) -- runner_model not validated"
+            warning = f"{source} unreachable ({vreason}) -- runner_model not validated"
         elif verdict == "missing":
-            suggestions = ollama_mod.model_names(models, tool_capable_only=True)
-            warning = f"{vreason}; installed tool-capable models: {suggestions or '(none)'}"
+            warning = f"{vreason}; available models: {suggestions or '(none)'}"
     return {"runner": runner, "runner_model": runner_model, "warning": warning}
 
 

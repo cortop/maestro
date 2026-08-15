@@ -30,6 +30,13 @@ IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one
 # Self-review
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  evidence: {what, where, result}; content-hash keyed
 
+# Test-run gate (RB-12): maestro's OWN captured proof the suite passes at a given
+# tree state -- produced only by ops.capture_tests's own subprocess call, never
+# an agent's self-attestation. See ops._refuse_if_tests_stale (the gate on
+# implementing -> qa) and snapshot.Snapshot.test_runs (keyed by tree_key: HEAD
+# sha + a hash of the dirty tree, so a stale pass never satisfies a changed tree).
+TEST_RUN_CAPTURED = "TestRunCaptured"   # {tree_key, command, exit_code, passed}
+
 # Approval
 # AD-7: historical-only -- `maestro approve` and the tier-2 implementing gate it
 # cleared are gone (30 existing event logs carry a real Approved event, and the

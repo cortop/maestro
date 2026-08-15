@@ -2250,12 +2250,198 @@ def test_runner_kind_switch_to_claude_clears_model_field(seeded_home, monkeypatc
             kind_sel = modal.query_one("#runner-kind", Select)
             # setting .value alone does not emit Select.Changed in Textual 8 --
             # drive on_select_changed directly, same as test_create_modal_new_prefix_reveals_input.
-            modal.on_select_changed(Select.Changed(select=kind_sel, value="claude"))
+            # _RunnerModal.on_select_changed is async (T-61: it may remove/mount
+            # the model field's widget across a runner-kind swap).
+            await modal.on_select_changed(Select.Changed(select=kind_sel, value="claude"))
             await pilot.pause()
             assert model_inp.value == ""
             assert app._exception is None
 
     asyncio.run(_inner())
+
+
+# --- T-61 (PI-9): pi joins the runner-kind Select, reshapes #runner-model -----
+
+def _unreachable_pi(monkeypatch):
+    """Deterministic "pi unreachable" verdict -- never depend on whether the
+    box running these tests happens to have a real `pi` on PATH."""
+    monkeypatch.setattr("maestro.providers.pi.fetch_models",
+                        lambda *a, **kw: (None, "no such file: pi"))
+
+
+def test_runner_options_include_pi(seeded_home, monkeypatch):
+    _unreachable_ollama(monkeypatch)
+    _unreachable_pi(monkeypatch)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("runner")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            kind_sel = modal.query_one("#runner-kind", Select)
+            names = {str(value) for _prompt, value in kind_sel._options}
+            assert names == {"claude", "opencode", "pi"}
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_selecting_pi_reshapes_model_field_to_pis_catalogue(seeded_home, monkeypatch):
+    """AC8: selecting `pi` reshapes `#runner-model` to pi's own catalogue --
+    never ollama's -- proven by MOUNTING the real app and driving a real
+    `on_select_changed`."""
+    _unreachable_ollama(monkeypatch)
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-5.2", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"},
+                           {"provider": "zai", "model": "glm-9.9", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("runner")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            # T-5 opens claude-default -- ollama unreachable -> Input fallback.
+            assert isinstance(modal.query_one("#runner-model"), Input)
+
+            kind_sel = modal.query_one("#runner-kind", Select)
+            await modal.on_select_changed(Select.Changed(select=kind_sel, value="pi"))
+            await pilot.pause()
+
+            model_sel = modal.query_one("#runner-model", Select)
+            names = {str(value) for _prompt, value in model_sel._options} - {"Select.NULL"}
+            assert names == {"glm-5.2", "glm-9.9"}
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_selecting_pi_with_pi_unreachable_falls_back_to_input_and_warns(seeded_home, monkeypatch):
+    _unreachable_ollama(monkeypatch)
+    _unreachable_pi(monkeypatch)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("runner")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            kind_sel = modal.query_one("#runner-kind", Select)
+            notifications_before = len(app._notifications)
+            await modal.on_select_changed(Select.Changed(select=kind_sel, value="pi"))
+            await pilot.pause()
+
+            assert isinstance(modal.query_one("#runner-model"), Input)
+            assert len(app._notifications) > notifications_before
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_switching_from_pi_back_to_opencode_restores_ollamas_catalogue(seeded_home, monkeypatch):
+    monkeypatch.setattr(
+        "maestro.providers.ollama.fetch_models",
+        lambda *a, **kw: ([{"name": "qwen3-coder:30b", "capabilities": ["tools"]}], None))
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-5.2", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("runner")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            kind_sel = modal.query_one("#runner-kind", Select)
+
+            await modal.on_select_changed(Select.Changed(select=kind_sel, value="pi"))
+            await pilot.pause()
+            names = {str(v) for _p, v in modal.query_one("#runner-model", Select)._options} - {"Select.NULL"}
+            assert names == {"glm-5.2"}
+
+            await modal.on_select_changed(Select.Changed(select=kind_sel, value="opencode"))
+            await pilot.pause()
+            names = {str(v) for _p, v in modal.query_one("#runner-model", Select)._options} - {"Select.NULL"}
+            assert names == {"qwen3-coder:30b"}
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_runner_modal_opens_directly_on_pi_reshapes_from_compose(seeded_home, monkeypatch):
+    """A ticket whose spec already names `runner: pi` opens the modal with the
+    model field ALREADY shaped to pi's catalogue -- not ollama's -- at
+    `compose()` time, not just after a later kind switch."""
+    _unreachable_ollama(monkeypatch)
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-5.2", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+    store.atomic_write(store.spec_path(seeded_home, "T-5"),
+                       "# T-5\napproval_tier: 1\nrunner: pi\nrunner_model: glm-5.2\n\n"
+                       "## Intent\nready ticket\n")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("runner")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            kind_sel = modal.query_one("#runner-kind", Select)
+            assert kind_sel.value == "pi"
+            model_sel = modal.query_one("#runner-model", Select)
+            assert model_sel.value == "glm-5.2"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_runner_modal_round_trip_updates_spec_for_pi(seeded_home, monkeypatch):
+    """The full submit path stores `runner: pi`/`runner_model:` verbatim,
+    same as the existing opencode round-trip."""
+    _unreachable_ollama(monkeypatch)
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-5.2", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("runner")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            kind_sel = modal.query_one("#runner-kind", Select)
+            await modal.on_select_changed(Select.Changed(select=kind_sel, value="pi"))
+            await pilot.pause()
+            modal.query_one("#runner-kind", Select).value = "pi"
+            modal.query_one("#runner-model", Select).value = "glm-5.2"
+            await modal.run_action("submit")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1
+
+    asyncio.run(_inner())
+    text = store.spec_path(seeded_home, "T-5").read_text()
+    assert "runner: pi" in text
+    assert "runner_model: glm-5.2" in text
 
 
 def test_detail_screen_shows_runner_row(seeded_home, monkeypatch):

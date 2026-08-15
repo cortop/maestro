@@ -143,3 +143,54 @@ def test_no_pi_ticket_byte_identical_whether_backend_registered(tmp_path, monkey
         a = (home_registered / "derived" / fname).read_bytes()
         b = (home_unregistered / "derived" / fname).read_bytes()
         assert a == b, f"{fname} differs with pi registered vs unregistered"
+
+
+# --- T-61 (PI-9) AC9: create --runner pi -> runner <KEY> -> env --key --------
+
+def test_e2e_create_pi_then_change_runner_then_env_reports_pi(home, monkeypatch, capsys):
+    """A real human path over a temp home: `maestro create --runner pi`, then
+    `maestro runner <KEY>` to change the model, then `maestro env --key
+    <KEY>` reports the pi runner -- with `gates.runner_editable` still
+    refusing the edit once a runner-bearing spawn (a CONFIRMED live claim)
+    has happened."""
+    from maestro import claims
+
+    (home / "config.toml").write_text(
+        "[maestro]\nmin_spawn_interval = 0\n\n"
+        "[runner.pi]\nphases = [\"triaging\"]\n",
+        encoding="utf-8")
+
+    rc = cli.main(["--home", str(home), "create", "PI-9 e2e", "--key", "T-1",
+                   "--runner", "pi", "--runner-model", "glm-5.2",
+                   "--json", "--no-nudge"])
+    assert rc == 0
+    capsys.readouterr()  # discard the {"key": "T-1"} + any create-time warning
+
+    monkeypatch.setattr(
+        "maestro.providers.pi.fetch_models",
+        lambda *a, **kw: ([{"provider": "zai", "model": "glm-9.9", "context": "1.0M",
+                            "max-out": "128K", "thinking": "yes", "images": "no"}], None))
+    rc = cli.main(["--home", str(home), "runner", "T-1",
+                   "--runner", "pi", "--runner-model", "glm-9.9"])
+    assert rc == 0
+    assert "warning" not in capsys.readouterr().err  # glm-9.9 IS in the injected catalogue
+
+    rc = cli.main(["--home", str(home), "env", "--key", "T-1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"runner": "pi"' in out
+    assert '"runner_model": "glm-9.9"' in out
+
+    # A runner-bearing spawn is now in flight (a CONFIRMED live claim) --
+    # gates.runner_editable must refuse a further edit.
+    proc_path = ["python3", "-c", "import time; time.sleep(30)"]
+    import subprocess
+    proc = subprocess.Popen(proc_path)
+    try:
+        claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
+        rc = cli.main(["--home", str(home), "runner", "T-1", "--runner-model", "glm-5.2"])
+        assert rc != 0
+        assert "no longer editable" in capsys.readouterr().err
+    finally:
+        proc.terminate()
+        proc.wait()

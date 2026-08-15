@@ -251,7 +251,7 @@ class MaestroTUI(App):
             else:
                 self.notify(f"runner updated for {key}")
 
-        self.push_screen(_RunnerModal(key, runner, runner_model), _on_dismiss)
+        self.push_screen(_RunnerModal(key, runner, runner_model, home=self._home), _on_dismiss)
 
     def action_env_panel(self) -> None:
         self.push_screen(EnvScreen(self._home))

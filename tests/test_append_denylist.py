@@ -1,10 +1,11 @@
 """GA-2: `maestro append --type <T>` accepted any T and wrote it straight to the log,
 so every invariant `ops` enforces (max_impl_turns ceiling, unverified-AC gate,
-independent QA gate, backoff/dead-letter routing) was one raw append away from
-irrelevant. `cmd_append` now refuses the six ops-owned types with an error naming
-the verb to use instead -- a denylist, not an allowlist, so the legitimate raw
-appends (`events.SIDE_EFFECTING`, plus ad-hoc types like Note and ResearchProposed,
-and AD-7's now-historical-only `Approved`) keep working unchanged.
+independent QA gate, backoff/dead-letter routing, RB-12's captured-test-run gate)
+was one raw append away from irrelevant. `cmd_append` now refuses the seven
+ops-owned types with an error naming the verb to use instead -- a denylist, not
+an allowlist, so the legitimate raw appends (`events.SIDE_EFFECTING`, plus ad-hoc
+types like Note and ResearchProposed, and AD-7's now-historical-only `Approved`)
+keep working unchanged.
 """
 import pytest
 
@@ -22,11 +23,12 @@ DENIED = [
     (E.AC_QA_VERDICT, "qa-verdict"),
     (E.FAILED, "fail"),
     (E.STALLED, "fail"),
+    (E.TEST_RUN_CAPTURED, "capture-tests"),
 ]
 
 
 # ---------------------------------------------------------------------------
-# The six ops-owned types refuse, name the owning verb, and append nothing.
+# The seven ops-owned types refuse, name the owning verb, and append nothing.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("denied_type, verb", DENIED)
