@@ -129,7 +129,12 @@ def test_other_phase_spawn_denylist_unchanged_baseline(home, cfg):
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)
     by_key = {k: d for k, _p, _c, _m, _e, d, *_ in sessions.spawned}
-    assert by_key["T-1"] == ["Bash(gh pr merge:*)"]  # AD-7: unconditional, unaffected by RF-6
+    # AD-7's merge deny is still unconditional; RF-6's own Edit/Write block is
+    # still qa-only (empty here, a `ready` spawn). RB-16 adds a THIRD, phase-
+    # varying component -- the deny half of the narrowed verb grant.
+    assert by_key["T-1"] == (["Bash(gh pr merge:*)"]
+                              + disp.phase_denylist(Phase.READY.value)
+                              + disp.phase_verb_denylist(Phase.READY.value))
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +209,12 @@ def test_full_sweep_over_seeded_home_unchanged_no_qa_routing(seeded_home):
     by_key = {k: (p, d) for k, p, _c, _m, _e, d, *_ in sessions.spawned}
     assert by_key["T-3"][0].startswith("/maestro-reconcile-implementing T-3")
     assert by_key["T-5"][0].startswith("/maestro-reconcile-ready T-5")
+    phase_by_key = {"T-3": Phase.IMPLEMENTING.value, "T-5": Phase.READY.value}
     for key in ("T-3", "T-5"):
-        assert by_key[key][1] == ["Bash(gh pr merge:*)"]  # AD-7: unconditional, unchanged
+        phase = phase_by_key[key]
+        assert by_key[key][1] == (["Bash(gh pr merge:*)"]
+                                   + disp.phase_denylist(phase)
+                                   + disp.phase_verb_denylist(phase))
 
     for key in ("T-1", "T-2", "T-3", "T-4", "T-5"):
         assert snap_mod.load(seeded_home, key).phase != "qa"

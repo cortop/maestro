@@ -210,6 +210,11 @@ def test_qa_brief_via_real_cli(tmp_path, home, capsys):
 
 
 def test_qa_brief_is_granted_to_reconcilers(home):
-    """It is useless if a spawned reconciler is not allowed to run it."""
-    grants = cli._reconciler_tool_grants(Config(home=home))
+    """It is useless if a `qa`-spawned reconciler is not allowed to run it.
+    RB-16: the maestro-verb grant is phase-scoped now, resolved per key by
+    `dispatcher.phase_verb_grant` rather than baked into the process-wide
+    `cli._reconciler_tool_grants` -- assert against the `qa` phase's own
+    grant, the one a qa-brief call would actually run under."""
+    from maestro import dispatcher as disp
+    grants = disp.phase_verb_grant("qa")
     assert any("qa-brief" in g for g in grants)

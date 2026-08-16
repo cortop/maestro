@@ -128,12 +128,15 @@ class SessionManager(Protocol):
         *disallowed_tools* is the merge-denial + per-phase tool-surface denylist
         (see ``dispatcher.MERGE_DENYLIST``/``phase_denylist``) rendered as a
         ``--disallowedTools`` flag.
-        *allowed_tools* (GA-10) is the per-key --allowedTools additions
+        *allowed_tools* (GA-10; RB-16 adds ``dispatcher.phase_verb_grant`` to
+        what the caller packs in here -- see ``dispatcher.dispatch``'s own
+        spawn site) is the per-key --allowedTools additions
         (``dispatcher.resolved_allowed_tools`` -- the board-wide
         ``reconcile_allowed_tools`` list unioned with the resolved repo binding's
         own list); the implementation merges this with its own process-wide base
-        grant (maestro CLI verbs + reconcile_web_tools) into exactly ONE
-        ``--allowedTools`` flag, never two.
+        grant (``reconcile_web_tools`` only -- RB-16 moved the maestro CLI verb
+        grant out of the process-wide base and into this per-key argument,
+        phase-scoped) into exactly ONE ``--allowedTools`` flag, never two.
         *env_overlay* (GA-17) is this key's resolved gh credential (see
         ``maestro.credentials`` / ``dispatcher.resolve_credential``) -- merged
         into the spawned session's env beside the ``MAESTRO_HOME`` pin. None
@@ -172,10 +175,13 @@ class ClaudeCliSessions:
         self.model = model
         self.permission_mode = permission_mode
         self.extra_args = extra_args or []
-        # GA-10: the process-wide "always-on" --allowedTools rules (maestro CLI verbs +
-        # reconcile_web_tools, see cli._reconciler_tool_grants) -- bare rules, not a
-        # pre-built "--allowedTools" pair, so spawn() can merge in the per-key
-        # allowed_tools argument and still emit exactly ONE --allowedTools flag.
+        # GA-10: the process-wide "always-on" --allowedTools rules (RB-16:
+        # reconcile_web_tools only now -- see cli._reconciler_tool_grants; the
+        # maestro CLI verb grant moved to the per-key allowed_tools argument
+        # below, phase-scoped via dispatcher.phase_verb_grant) -- bare rules,
+        # not a pre-built "--allowedTools" pair, so spawn() can merge in the
+        # per-key allowed_tools argument and still emit exactly ONE
+        # --allowedTools flag.
         self.base_allowed_tools = base_allowed_tools or []
         self.capture_session_logs = capture_session_logs
         self.session_log_format = session_log_format
