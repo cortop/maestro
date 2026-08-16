@@ -1,11 +1,13 @@
 """GA-2: `maestro append --type <T>` accepted any T and wrote it straight to the log,
 so every invariant `ops` enforces (max_impl_turns ceiling, unverified-AC gate,
-independent QA gate, backoff/dead-letter routing, RB-12's captured-test-run gate)
-was one raw append away from irrelevant. `cmd_append` now refuses the seven
-ops-owned types with an error naming the verb to use instead -- a denylist, not
-an allowlist, so the legitimate raw appends (`events.SIDE_EFFECTING`, plus ad-hoc
-types like Note and ResearchProposed, and AD-7's now-historical-only `Approved`)
-keep working unchanged.
+independent QA gate, backoff/dead-letter routing, RB-12's captured-test-run gate,
+T-79's per-AC captured-check gate) was one raw append away from irrelevant.
+`cmd_append` now refuses the ops-owned types -- most with an error naming the verb
+to use instead, and T-79's `AcCheckCaptured` (dispatcher-owned, no manual verb at
+all) with its own message -- a denylist, not an allowlist, so the legitimate raw
+appends (`events.SIDE_EFFECTING`, plus ad-hoc types like Note and
+ResearchProposed, and AD-7's now-historical-only `Approved`) keep working
+unchanged.
 """
 import pytest
 
@@ -28,7 +30,7 @@ DENIED = [
 
 
 # ---------------------------------------------------------------------------
-# The seven ops-owned types refuse, name the owning verb, and append nothing.
+# The ops-owned types with a real verb refuse, name it, and append nothing.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("denied_type, verb", DENIED)
@@ -50,9 +52,25 @@ def test_denied_type_refuses_and_appends_nothing(home, cfg, capsys, denied_type,
     assert after_snap == before_snap
 
 
-def test_denylist_covers_exactly_the_six_documented_types():
+def test_ac_check_captured_refuses_with_dispatcher_owned_message(home, cfg, capsys):
+    """T-79: AcCheckCaptured has no manual verb at all -- only
+    `ops.run_ac_checks` (the dispatcher's own verifying stage) ever appends
+    it -- so its refusal message is its own, not `use maestro <verb>`."""
+    seed_ticket(home, "T-1", "do the thing", phase="implementing")
+    before_events = event_log.read(home, "T-1")
+
+    rc = cli.main(["--home", str(home), "append", "T-1", "--type", "AcCheckCaptured",
+                   "--payload", "{}"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "dispatcher-owned" in err
+    assert event_log.read(home, "T-1") == before_events
+
+
+def test_denylist_covers_exactly_the_documented_types():
     from maestro.cli import _APPEND_DENYLIST
-    assert set(_APPEND_DENYLIST.keys()) == {t for t, _ in DENIED}
+    assert set(_APPEND_DENYLIST.keys()) == {t for t, _ in DENIED} | {E.AC_CHECK_CAPTURED}
     for t in E.SIDE_EFFECTING:
         assert t not in _APPEND_DENYLIST
 

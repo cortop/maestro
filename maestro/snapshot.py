@@ -44,9 +44,60 @@ _AC_RE = re.compile(r"^- \[[ xX]\]\s*(.+)$", re.MULTILINE)
 # A spec's title is its first level-1 heading, conventionally "# <KEY>: <title>".
 _TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 
+# T-79: an opt-in, machine-checkable annotation trailing an AC line --
+# `(test: <path>)`, `(test: <path>::<id>)`, or `(check: <shell command>)`.
+# Anchored at end-of-line and disallows embedded parens in the body (so a
+# SECOND trailing parenthetical, e.g. "(test: a.py) (see #123)", is never
+# swallowed into the annotation) -- any other trailing parenthetical (e.g.
+# "(checked manually)") simply doesn't match and the AC stays plain text,
+# exactly as before this ticket.
+_AC_ANNOTATION_RE = re.compile(r"\((test|check):\s*([^()]+?)\)\s*$")
+
+
+@dataclass(frozen=True)
+class AcAnnotation:
+    """A parsed `test:`/`check:` annotation off one AC line (T-79).
+
+    `raw` is the annotation body verbatim. For `kind == "test"`, `path` is the
+    test file and `test_id` is the optional `::<id>` suffix (a bare file path
+    means "some test in that file, added by this diff, passes"). For
+    `kind == "check"`, `command` is the shell command that must exit 0.
+    """
+    kind: str  # "test" | "check"
+    raw: str
+    path: str | None = None
+    test_id: str | None = None
+    command: str | None = None
+
+
+def parse_ac_annotation(ac_text: str) -> AcAnnotation | None:
+    """Parse a trailing `(test: ...)` / `(check: ...)` annotation off one AC's
+    text, or ``None`` if the line carries no such annotation (or a different,
+    ordinary trailing parenthetical) -- nothing downstream treats an AC as
+    machine-checkable unless this returns non-``None``, which is what makes
+    the feature ship dark by construction."""
+    m = _AC_ANNOTATION_RE.search(ac_text)
+    if not m:
+        return None
+    kind, body = m.group(1), m.group(2).strip()
+    if not body:
+        return None
+    if kind == "check":
+        return AcAnnotation(kind="check", raw=body, command=body)
+    if "::" in body:
+        path, test_id = (p.strip() for p in body.split("::", 1))
+        if not path or not test_id:
+            return None
+        return AcAnnotation(kind="test", raw=body, path=path, test_id=test_id)
+    return AcAnnotation(kind="test", raw=body, path=body)
+
 
 def parse_acs(spec_text: str) -> list[str]:
-    """Extract acceptance-criteria line texts (in spec order) from a spec's body."""
+    """Extract acceptance-criteria line texts (in spec order) from a spec's body.
+
+    Byte-identical to before annotations existed (T-79): an annotation is just
+    trailing text on the line, part of the same string this always returned --
+    see `parse_ac_annotation` for pulling it back out."""
     return [m.group(1).strip() for m in _AC_RE.finditer(spec_text)]
 
 
@@ -186,6 +237,13 @@ class Snapshot:
     # tree_key wins. Never reset by a phase change -- a passing capture stays
     # valid across a fix-round bounce as long as the tree itself hasn't moved.
     test_runs: dict[str, dict] = field(default_factory=dict)
+    # tree_key -> ac_hash -> {"kind", "command", "exit_code", "passed",
+    # "failure_excerpt"?}, from AcCheckCaptured events (T-79) -- the per-AC
+    # counterpart to `test_runs` above, one entry per ANNOTATED AC the
+    # verifying stage has checked at that tree state. Same binding rule as
+    # `test_runs`: a record only ever matches the exact tree state it was
+    # captured at, and is never reset by a phase change.
+    ac_checks: dict[str, dict[str, dict]] = field(default_factory=dict)
     # Human-readable notes of malformed events `fold` coerced instead of
     # raising on (RB-2, law (b)) -- "seq <n> <Type>: <what was wrong>". Never
     # reset by a phase change; a corrupt log stays visible for as long as the
@@ -196,16 +254,46 @@ class Snapshot:
     def question_open(self) -> bool:
         return bool(self.open_questions)
 
-    def acs_unverified(self, spec_text: str) -> int:
-        """Count ACs in *spec_text* with no matching AcVerified attestation.
+    def acs_unverified(self, spec_text: str, tree_key: str | None = None) -> int:
+        """Count ACs in *spec_text* not yet satisfied for the `awaiting-ci` gate.
 
         Matching is by content hash of the AC's own line, so editing an AC's text
         (even without adding/removing checkboxes) makes its old attestation stop
         counting — the human's edit desyncs it rather than silently keeping a
-        now-stale "verified" against different wording.
+        now-stale "verified" against different wording. Same rule for an
+        annotation: editing or removing it invalidates any prior captured check
+        for that hash exactly like a text edit does (T-79 AC2).
+
+        `tree_key` is the T-79 annotation-aware gate switch: ``None`` (the
+        default) means the annotation regime is INACTIVE for this call -- every
+        AC, annotated or not, is judged purely by `ac_verified` self-attestation,
+        byte-identical to before this ticket (ships dark; see
+        `ops._annotations_active`). When a real `tree_key` is passed, an
+        ANNOTATED AC is instead judged by whether a current-tree PASSING
+        AcCheckCaptured record exists for its hash -- `verify_ac` stays
+        available as narrative evidence but stops being load-bearing for that
+        AC. Unannotated ACs are unaffected either way.
         """
-        hashes = {ac_hash(t) for t in parse_acs(spec_text)}
-        return len(hashes - set(self.ac_verified.keys()))
+        count = 0
+        for t in parse_acs(spec_text):
+            h = ac_hash(t)
+            ann = parse_ac_annotation(t) if tree_key is not None else None
+            if ann is not None:
+                if not self.ac_check_passing(tree_key, h):
+                    count += 1
+            elif h not in self.ac_verified:
+                count += 1
+        return count
+
+    def ac_check_record(self, tree_key: str, h: str) -> dict | None:
+        return self.ac_checks.get(tree_key, {}).get(h)
+
+    def ac_check_passing(self, tree_key: str, h: str) -> bool:
+        """True iff an AcCheckCaptured record exists for AC hash *h* at the
+        exact current *tree_key* and it passed -- the annotated-AC analogue of
+        `tests_passing` (T-79)."""
+        rec = self.ac_check_record(tree_key, h)
+        return bool(rec and rec.get("passed"))
 
     def qa_failing_acs(self, spec_text: str) -> list[str]:
         """AC texts (in spec order) whose latest independent spec-axis QA verdict
@@ -412,6 +500,19 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 if p.get("failure_excerpt"):
                     rec["failure_excerpt"] = p["failure_excerpt"]
                 s.test_runs[tk] = rec
+        elif t == E.AC_CHECK_CAPTURED:
+            tk = p.get("tree_key")
+            h = p.get("ac_hash")
+            if tk and h:
+                rec = {
+                    "kind": p.get("kind"),
+                    "command": p.get("command"),
+                    "exit_code": p.get("exit_code"),
+                    "passed": bool(p.get("passed")),
+                }
+                if p.get("failure_excerpt"):
+                    rec["failure_excerpt"] = p["failure_excerpt"]
+                s.ac_checks.setdefault(tk, {})[h] = rec
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.APPROVED:

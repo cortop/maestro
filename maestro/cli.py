@@ -739,14 +739,24 @@ _APPEND_DENYLIST = {
     events.AC_VERIFIED: "verify-ac",
     events.AC_QA_VERDICT: "qa-verdict",
     events.TEST_RUN_CAPTURED: "capture-tests",
+    # T-79: AcCheckCaptured gates awaiting-ci for an annotated AC exactly like
+    # TestRunCaptured gates the suite -- a raw append could forge a passing
+    # check, so it stays ops-owned even though it has no manual verb: only
+    # `ops.run_ac_checks` (called from the dispatcher's own verifying stage)
+    # ever appends it.
+    events.AC_CHECK_CAPTURED: None,
     events.FAILED: "fail",
     events.STALLED: "fail",
 }
 
 
 def cmd_append(args) -> int:
-    verb = _APPEND_DENYLIST.get(args.type)
-    if verb is not None:
+    if args.type in _APPEND_DENYLIST:
+        verb = _APPEND_DENYLIST[args.type]
+        if verb is None:
+            raise store.MaestroError(
+                f"maestro append: {args.type!r} is dispatcher-owned (verifying stage) -- "
+                "no manual verb")
         raise store.MaestroError(
             f"maestro append: {args.type!r} is ops-owned -- use `maestro {verb}` instead")
     cfg = _cfg(args)

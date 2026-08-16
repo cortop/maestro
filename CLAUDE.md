@@ -145,6 +145,21 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   tickets, don't invent fields. Some existing specs still carry a now-inert `approval_tier:`
   line (AD-7 removed the tier gate it drove) — tolerated as an unrecognized front-matter key,
   never rewritten in bulk.
+- An AC checkbox line may end with an OPT-IN, machine-checkable annotation (T-79):
+  `(test: <path>)`, `(test: <path>::<id>)`, or `(check: <shell command>)`. With
+  `test_command` configured (and the ticket not `mode: local`), the `verifying` stage
+  (T-74) runs each annotated AC's own check at the same tree state as the suite and
+  records it (`snapshot.parse_ac_annotation`, `ops.run_ac_checks`,
+  `events.AC_CHECK_CAPTURED`) — a current-tree passing capture is what the `awaiting-ci`
+  gate then requires for that AC instead of a `verify-ac` self-attestation
+  (`ops._acs_unverified_count`); `verify-ac` still records narrative evidence for it, it
+  just stops being load-bearing there. `test:` requires the named test (or, for a bare
+  file path, some test in that file) to actually be ADDED by the branch's diff against
+  base and pass — a green suite whose diff never added it does not satisfy the gate
+  (the T-55 seq-130 false-attestation class). `check:` requires the command to exit 0.
+  Ships dark by construction: an AC with no such trailing parenthetical, a spec with
+  `test_command` unset, or a `mode: local` ticket all behave byte-identically to before
+  this annotation grammar existed — zero bulk rewrite of the ~130 existing specs.
 
 ## Git
 

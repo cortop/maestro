@@ -44,6 +44,16 @@ TEST_RUN_CAPTURED = "TestRunCaptured"   # {tree_key, command, exit_code, passed,
                                          # to `implementing` with, so the next reconciler
                                          # starts from the actual failure, never re-derives it.
 
+# Per-AC machine-checkable annotation gate (T-79): the AcVerified-analogue for an
+# ANNOTATED AC -- maestro's own captured proof that AC's `test:`/`check:` check
+# passes, never an agent's self-attestation. Appended only by the `verifying`
+# stage (dispatcher.sync_test_runs -> ops.run_ac_checks), once per (tree_key,
+# ac_hash), after the whole suite (TestRunCaptured above) has already passed.
+AC_CHECK_CAPTURED = "AcCheckCaptured"   # {tree_key, ac_hash, ac_index, ac_text, kind,
+                                         # command, exit_code, passed, failure_excerpt?}
+                                         # kind: "test"|"check"; failure_excerpt present only
+                                         # when passed is False (same shape as TestRunCaptured's).
+
 # Approval
 # AD-7: historical-only -- `maestro approve` and the tier-2 implementing gate it
 # cleared are gone (30 existing event logs carry a real Approved event, and the
