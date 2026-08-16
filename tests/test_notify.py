@@ -9,7 +9,8 @@ from maestro.statemachine import Phase
 
 
 def _create(cfg, key):
-    store.atomic_write(store.spec_path(cfg.home, key), f"# {key}\n")
+    store.atomic_write(store.spec_path(cfg.home, key),
+                        f"# {key}\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(cfg.home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(cfg.home, key)}, actor="d")
     snap_mod.rebuild(cfg.home, key)

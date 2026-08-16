@@ -69,7 +69,10 @@ def _seed(home, key, phase, *, repo_name=None, pr=10):
     """Append events for one ticket bound (or not) to a [repos.<name>] entry,
     mimicking a real `create --repo` mint (frontmatter + TicketCreated.repo)."""
     front = f"repo: {repo_name}\n" if repo_name else ""
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n{front}")
+    store.atomic_write(
+        store.spec_path(home, key),
+        f"# {key}\napproval_tier: 0\n{front}\n## Acceptance criteria\n- [ ] ok\n",
+    )
     payload = {"title": key}
     if repo_name:
         payload["repo"] = repo_name
@@ -124,6 +127,19 @@ def test_dispatch_spawn_cwd_is_owning_repo_for_bound_pre_worktree_ticket(home, t
                      "--key", "U-1", "--no-nudge"]) == 0
     assert cli.main(["--home", str(home), "create", "Beta ticket",
                      "--key", "B-1", "--repo", "beta", "--no-nudge"]) == 0
+
+    # Mint from the `_new` inbox first -- spec.md doesn't exist until a sweep mints it.
+    disp.dispatch(cfg, DryRunSessions(), now=999)
+
+    # T-80: a fresh mint's AC section is a dangling placeholder -- fill it in like
+    # a human would, or the due-gate parks these tickets in awaiting-human instead
+    # of routing/spawning them, which isn't what this test is exercising.
+    for key in ("U-1", "B-1"):
+        spec_path = store.spec_path(home, key)
+        store.atomic_write(spec_path,
+                           spec_path.read_text(encoding="utf-8").replace(
+                               "## Acceptance criteria\n- \n",
+                               "## Acceptance criteria\n- [ ] ok\n"))
 
     sessions = DryRunSessions()
     disp.dispatch(cfg, sessions, now=1000)

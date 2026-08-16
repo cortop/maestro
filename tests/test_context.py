@@ -131,7 +131,12 @@ def test_render_output_is_stable_across_regenerate_calls(cfg):
 # ---------------------------------------------------------------------------
 
 def test_dossier_caps_phase_history_and_notes_the_omission(cfg):
-    _create(cfg, "T-1", acs=())  # no ACs -- unrelated to the AC gate, ping-pongs freely
+    # T-80: set_phase now refuses awaiting-ci both with zero ACs and with any AC
+    # unverified, so this test (about phase-history capping, not ACs) needs one
+    # AC, verified up front -- the spec text never changes in the loop below, so
+    # that single attestation stays valid for every later awaiting-ci hop.
+    _create(cfg, "T-1", acs=("ping-pong",))
+    ops.verify_ac(cfg, "T-1", 1, _evidence())
     # Ping-pong past the cap so there are more phase changes than MAX_PHASE_CHANGES.
     total = context.MAX_PHASE_CHANGES + 5
     for i in range(total):

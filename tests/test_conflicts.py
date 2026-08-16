@@ -7,9 +7,16 @@ from maestro.statemachine import Phase
 
 
 def _create(cfg, key):
-    store.atomic_write(store.spec_path(cfg.home, key), f"# {key}\napproval_tier: 1\n")
+    store.atomic_write(store.spec_path(cfg.home, key),
+                        f"# {key}\napproval_tier: 1\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(cfg.home, key, "TicketCreated", {"title": key}, actor="d")
     snap_mod.rebuild(cfg.home, key)
+    # T-80: set_phase now refuses awaiting-ci while any AC is unverified; verify
+    # the single seeded AC up front (spec text never changes afterward, so this
+    # attestation stays valid for every later plain `ops.set_phase(..., AWAITING_CI)`
+    # call these tests make) rather than threading `force=True` through the rest
+    # of this file's unrelated conflict-routing assertions.
+    ops.verify_ac(cfg, key, 1, {"what": "test setup", "where": "test_conflicts.py", "result": "ok"})
     ops.set_phase(cfg, key, Phase.AWAITING_CI)
 
 

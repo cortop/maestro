@@ -58,7 +58,8 @@ def _seed(home, key, *, phase=Phase.IMPLEMENTING, runner=None, runner_model=None
         extra += f"runner: {runner}\n"
     if runner_model:
         extra += f"runner_model: {runner_model}\n"
-    spec = f"# {key}\napproval_tier: {approval_tier}\n{extra}dependsOn: []\n"
+    spec = (f"# {key}\napproval_tier: {approval_tier}\n{extra}dependsOn: []\n\n"
+            "## Acceptance criteria\n- [ ] ok\n")
     store.atomic_write(store.spec_path(home, key), spec)
     event_log.append(home, key, "TicketCreated",
                       {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")

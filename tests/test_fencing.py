@@ -17,7 +17,8 @@ from maestro.statemachine import Phase
 
 
 def _seed(cfg, key, phase=Phase.READY, tier=0):
-    store.atomic_write(store.spec_path(cfg.home, key), f"# {key}\napproval_tier: {tier}\n")
+    store.atomic_write(store.spec_path(cfg.home, key),
+                       f"# {key}\napproval_tier: {tier}\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(cfg.home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(cfg.home, key)}, actor="d")
     event_log.append(cfg.home, key, "PhaseChanged", {"phase": phase.value}, actor="r")

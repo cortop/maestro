@@ -88,6 +88,13 @@ def test_end_to_end_create_runner_opencode_through_sweeps_to_awaiting_ci(
     assert "runner: opencode" in spec_text
     assert "runner_model: a:1b" in spec_text
 
+    # T-80: the create-minted spec's dangling `- [ ]` parses to zero ACs, and the
+    # new missing-ACs due-gate would park this ticket in awaiting-human before it
+    # ever reaches the implementing spawn this AC is actually about -- give it a
+    # real one (orthogonal to what this AC proves, see the note further down).
+    spec_path = store.spec_path(home, "T-1")
+    store.atomic_write(spec_path, spec_path.read_text(encoding="utf-8") + "\n- [ ] ok\n")
+
     # Jump straight to implementing -- triage/approval/worktree-adoption is
     # orthogonal to what this AC proves.
     event_log.append(home, "T-1", "PhaseChanged", {"phase": Phase.IMPLEMENTING.value}, actor="r")
@@ -114,12 +121,14 @@ def test_end_to_end_create_runner_opencode_through_sweeps_to_awaiting_ci(
     assert len(sessions_after_qa) == 2
     assert sessions_after_qa[0]["format"] != "opencode"  # newest -- claude's own format
 
-    # This create-minted spec has no `## Acceptance criteria` checkboxes (out
-    # of scope for what this AC proves -- qa-verdict's AC bookkeeping is
-    # exercised in full by test_qa_roundtrip.py), so hand off the last hop the
-    # same way the earlier implementing->qa hop above was driven -- directly.
+    # This create-minted spec's only AC (added above purely to clear the T-80
+    # missing-ACs due-gate) was never independently verified -- qa-verdict's AC
+    # bookkeeping is exercised in full by test_qa_roundtrip.py, out of scope
+    # here -- so hand off the last hop the same way the earlier
+    # implementing->qa hop above was driven -- directly, forcing past the
+    # now-legitimately-unverified AC exactly as a human override would.
     rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci",
-                   "--reason", "qa: all ACs pass"])
+                   "--reason", "qa: all ACs pass", "--force"])
     assert rc == 0
 
     assert snap_mod.load(home, "T-1").phase == Phase.AWAITING_CI.value

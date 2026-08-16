@@ -17,7 +17,8 @@ from conftest import git as _git, make_origin_and_repo as _make_origin_and_repo
 
 
 def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+    store.atomic_write(store.spec_path(home, key),
+                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
@@ -241,7 +242,8 @@ def test_hook_sync_worktrees_is_absent_under_dry_run(home, cfg, tmp_path):
     origin, repo = _make_origin_and_repo(tmp_path)
     cfg.repo_path = str(repo)
 
-    store.atomic_write(store.spec_path(home, "T-5"), "# T-5\napproval_tier: 0\n")
+    store.atomic_write(store.spec_path(home, "T-5"),
+                        "# T-5\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, "T-5", "TicketCreated", {"title": "T-5"}, actor="d")
     event_log.append(home, "T-5", "PrOpened",
                      {"number": 10, "url": "https://github.com/x/y/pull/10", "draft": False},

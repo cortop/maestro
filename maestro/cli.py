@@ -183,6 +183,18 @@ def _prompt(prompt_text: str, default: str = "") -> str:
     return raw if raw else default
 
 
+def _warn_missing_acs(spec_text: str) -> None:
+    """T-80: WARN-only, never gates creation -- seeding-then-filling is a
+    legitimate flow (a freshly-seeded spec's own dangling ``- [ ] `` parses to
+    zero ACs every time, until the human fills it in). Same "zero ACs"
+    definition every other T-80 gate shares (`snapshot.has_acs`): a bare
+    ``- `` bullet and a checkbox with empty/whitespace-only text both count."""
+    if not snap_mod.has_acs(spec_text):
+        print("warning: spec has no acceptance criteria yet -- fill in "
+              "'## Acceptance criteria' with '- [ ] ...' items before this "
+              "ticket reaches implementing", file=sys.stderr)
+
+
 def _editor_intent(title: str, priority: int) -> str | None:
     """Open $EDITOR with a pre-filled seed spec; return intent text on save."""
     import os
@@ -198,6 +210,10 @@ def _editor_intent(title: str, priority: int) -> str | None:
     with open(tmp) as f:
         content = f.read()
     os.unlink(tmp)
+    # T-80: warn on what the human actually left in the editor buffer's own AC
+    # section -- the ONE place `create` has direct visibility into it; the
+    # `intent_lines` extraction below discards everything else in `content`.
+    _warn_missing_acs(content)
     intent_lines = []
     in_intent = False
     for line in content.splitlines():
@@ -365,6 +381,11 @@ def cmd_create(args) -> int:
         # UX-1 AC4: never gates creation on a model being locally installed/reachable
         # -- WARN only, after the ticket is already minted.
         _warn_runner_model(cfg.home, runner, runner_model)
+        # T-80: same WARN-only posture -- read back the spec `mint_one` just wrote,
+        # since `a` never carries acceptance criteria (there's no `--ac` flag; a
+        # fresh mint always seeds the same dangling "- [ ] " until a human fills
+        # it in).
+        _warn_missing_acs(store.spec_path(cfg.home, key).read_text(encoding="utf-8"))
         if not args.no_nudge and cfg.nudge_on_human_input:
             _nudge(cfg)
         return 0

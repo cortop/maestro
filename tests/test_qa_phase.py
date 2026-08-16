@@ -26,7 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\n")
+    store.atomic_write(store.spec_path(home, key),
+                        f"# {key}\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
@@ -61,6 +62,7 @@ def test_real_set_phase_implementing_to_qa_records_no_unusual_transition_note(ho
 
 def test_real_set_phase_qa_to_implementing_and_awaiting_ci_record_no_unusual_note(home, cfg):
     _seed(home, "T-2", Phase.QA)
+    ops.verify_ac(cfg, "T-2", 1, {"what": "ran it", "where": "test", "result": "ok"})
     ops.set_phase(cfg, "T-2", Phase.AWAITING_CI, reason="qa: all ACs pass")
     events = event_log.read(home, "T-2")
     notes = [e for e in events if e["type"] == "Note"

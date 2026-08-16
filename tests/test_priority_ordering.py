@@ -15,6 +15,7 @@ def _seed(home, key, *, priority=None, phase=Phase.READY):
     lines = [f"# {key}", "approval_tier: 0"]
     if priority is not None:
         lines.append(f"priority: {priority}")
+    lines += ["", "## Acceptance criteria", "- [ ] ok"]
     store.atomic_write(store.spec_path(home, key), "\n".join(lines) + "\n")
     event_log.append(home, key, "TicketCreated",
                       {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
@@ -72,7 +73,8 @@ def test_malformed_priority_defaults_to_3(home):
 
 def test_malformed_priority_does_not_crash_a_real_sweep(home, cfg):
     store.atomic_write(store.spec_path(home, "T-1"),
-                        "# T-1\napproval_tier: 0\npriority: not-a-number\n")
+                        "# T-1\napproval_tier: 0\npriority: not-a-number\n"
+                        "\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, "T-1", "TicketCreated",
                       {"title": "T-1", "spec_hash": disp.spec_hash_on_disk(home, "T-1")}, actor="d")
     event_log.append(home, "T-1", "PhaseChanged", {"phase": Phase.READY.value}, actor="r")

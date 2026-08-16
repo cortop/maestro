@@ -26,7 +26,7 @@ from .config import Config
 from .gates import spec_runner
 from .providers import ollama as ollama_mod
 from .providers import pi as pi_mod
-from .statemachine import Phase
+from .statemachine import Phase, TERMINAL_PHASES
 
 WINDOW_SECONDS = 3600
 
@@ -283,6 +283,33 @@ def check_phantom_keys(cfg: Config, now: float) -> dict:
     detail = (f"{len(phantoms)} key(s) have event/snapshot data but no spec.md: "
               + ", ".join(phantoms)) if phantoms else "none"
     return {"name": "phantom_keys", "status": status, "detail": detail, "keys": phantoms}
+
+
+def check_missing_acs(cfg: Config, now: float) -> dict:
+    """T-80: WARN naming each non-terminal ticket whose spec.md parses to zero
+    acceptance criteria (`snapshot.has_acs`) -- report-only, the safety net
+    for a board that predates the dispatcher's own early due-gate
+    (`dispatcher.dispatch`'s per-key park, checked before a session ever
+    spawns), and for the rarer case of a ticket that reached a later phase
+    before a human edit cleared its ACs back out from under it (the write-path
+    half of that gate lives in `ops.set_phase`/`ops.qa_brief`). Skips a
+    DONE/terminal ticket -- finished work is never flagged, matching the
+    spec's "no spec rewrites, terminal tickets are never flagged" backward-
+    compat note."""
+    home = cfg.home
+    flagged = []
+    for key in dispatcher.list_keys(home):
+        if Phase(snap_mod.load(home, key).phase) in TERMINAL_PHASES:
+            continue
+        spec_file = store.spec_path(home, key)
+        if not spec_file.exists():
+            continue
+        if not snap_mod.has_acs(spec_file.read_text(encoding="utf-8")):
+            flagged.append(key)
+    status = "warn" if flagged else "ok"
+    detail = (f"{len(flagged)} non-terminal ticket(s) have no acceptance criteria: "
+              + ", ".join(flagged)) if flagged else "none"
+    return {"name": "missing_acs", "status": status, "detail": detail, "keys": flagged}
 
 
 # 2+ already means the exact same automated no-progress path tripped for the
@@ -1336,8 +1363,8 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
 # check_heartbeat's plist override is special-cased, by identity, since it's
 # the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
-          check_dead_letters, check_phantom_keys, check_watchdog_loops, check_depends_on,
-          check_repo_preflight, check_unknown_repo_bindings, check_missing_reconcile_skill,
+          check_dead_letters, check_phantom_keys, check_missing_acs, check_watchdog_loops,
+          check_depends_on, check_repo_preflight, check_unknown_repo_bindings, check_missing_reconcile_skill,
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
           check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
           check_runner_binary, check_pi_version, check_worktree_health, check_provider_availability)

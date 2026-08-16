@@ -44,6 +44,9 @@ def _seed(home, key, *, phase=Phase.IMPLEMENTING, priority=None, tier=0, runner=
         lines.append(f"priority: {priority}")
     if runner is not None:
         lines.append(f"runner: {runner}")
+    lines.append("")
+    lines.append("## Acceptance criteria")
+    lines.append("- [ ] ok")
     store.atomic_write(store.spec_path(home, key), "\n".join(lines) + "\n")
     event_log.append(home, key, "TicketCreated",
                       {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
@@ -221,7 +224,8 @@ def test_untimed_human_signal_bypasses_the_spawn_floor(home):
 
     # 1 second later -- nowhere near the 1000s floor -- but a spec edit changes
     # the due reason to "spec-changed", one of the untimed human signals.
-    store.atomic_write(store.spec_path(home, "T-1"), "# T-1\napproval_tier: 0\nEDITED: yes\n")
+    store.atomic_write(store.spec_path(home, "T-1"),
+                        "# T-1\napproval_tier: 0\nEDITED: yes\n\n## Acceptance criteria\n- [ ] ok\n")
     r2 = _sweep(home, cfg, sessions, 1001)
     assert r2.spawned == ["T-1"]
     assert dict(r2.due)["T-1"] == "spec-changed"

@@ -503,6 +503,28 @@ def _never_minted(home: Path, key: str) -> bool:
     return not event_log.read(home, key)
 
 
+# T-80: due reasons that mean "a human just answered something" -- exempted
+# from the missing-ACs due-gate below (see `dispatch`'s spawn loop) so a
+# ticket parked on `missing-acs-<key>` still spawns a real reconciler the
+# moment its human answer is pending, rather than re-parking itself forever
+# on the very sweep meant to let the human's fix take effect. Every OTHER due
+# reason means "about to spawn a worker with no human response to process",
+# which is exactly what this gate exists to intercept before it costs a spawn.
+_MISSING_ACS_EXEMPT_DUE_REASONS = frozenset({"inbox", "answered-pending"})
+
+
+def _missing_acs(home: Path, key: str) -> bool:
+    """True iff *key*'s spec.md, read fresh off disk, parses to zero acceptance
+    criteria (T-80's `snapshot.has_acs` definition -- a bare ``- `` bullet and
+    the seed template's own dangling ``- [ ] `` both count). False for a
+    missing spec.md -- nothing for this gate to act on; `_never_minted`
+    (checked earlier in the same loop) is what handles that shape."""
+    spec_file = store.spec_path(home, key)
+    if not spec_file.exists():
+        return False
+    return not snap_mod.has_acs(spec_file.read_text(encoding="utf-8"))
+
+
 def existing_prefixes(home: Path) -> list[str]:
     """Return sorted unique prefixes from all existing well-formed ticket keys."""
     seen: set[str] = set()
@@ -2348,6 +2370,30 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             )
             if not res.due:
                 decisions[key] = {"outcome": "not_due", "reason": res.reason}
+                continue
+            # T-80: the early catch -- before this key ever reaches the throttle,
+            # repo-preflight, or spawn gates below (let alone a worker), park a
+            # non-terminal ticket whose spec has no acceptance criteria. No LLM
+            # spent: `ops.ask` is plain deterministic plumbing, same precedent as
+            # the `runner-disabled-<key>-<runner>` permanent-verdict ask above.
+            # Exempted while a human answer is actually pending (`res.reason` in
+            # `_MISSING_ACS_EXEMPT_DUE_REASONS`) -- that sweep must fall through
+            # to a real spawn so the awaiting-human reconciler can fold the
+            # inbox and re-route, exactly like every other `ops.ask` park.
+            if (res.reason not in _MISSING_ACS_EXEMPT_DUE_REASONS
+                    and _missing_acs(home, key)):
+                decisions[key] = {
+                    "outcome": "would_park_missing_acs" if dry_run else "missing_acs",
+                    "reason": "spec has no acceptance criteria",
+                }
+                if not dry_run:
+                    from . import ops
+                    ops.ask(cfg, key,
+                            f"{key}: spec.md has no acceptance criteria (its "
+                            "'## Acceptance criteria' section parses to zero non-blank "
+                            "'- [ ] ...' lines) -- add at least one, then answer this "
+                            "question to unpark it",
+                            qid=f"missing-acs-{key}", actor="dispatcher")
                 continue
             if key in active:
                 claimed.append(key)        # per-key serialization: one reconciler per key

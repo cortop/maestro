@@ -115,8 +115,13 @@ def test_case_colliding_key_rejected_on_case_insensitive_filesystem(home, cfg, t
     if not _filesystem_is_case_insensitive(tmp_path):
         pytest.skip("filesystem is case-sensitive -- case aliasing cannot occur here")
 
+    # T-80: give the request a real AC (via intent text, since `has_acs` scans
+    # the whole spec body, not just its own section) so the new missing-ACs
+    # due-gate doesn't park "case-1" -- appending its own events -- between the
+    # two sweeps this test is comparing event counts across.
     rc = cli.main(["--home", str(home), "create", "Original",
-                    "--key", "case-1", "--no-nudge"])
+                    "--key", "case-1", "--no-nudge",
+                    "--intent", "Original.\n\n- [ ] initial scope defined"])
     assert rc == 0
     first = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert "case-1" in first.minted
