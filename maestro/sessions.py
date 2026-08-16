@@ -165,6 +165,7 @@ class ClaudeCliSessions:
                  base_allowed_tools: list[str] | None = None,
                  capture_session_logs: bool = True,
                  session_log_format: str = "stream-json",
+                 max_session_turns: int = 0,
                  clock: Callable[[], float] | None = None,
                  unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
                  claims_run=subprocess.run):
@@ -172,6 +173,9 @@ class ClaudeCliSessions:
         self.model = model
         self.permission_mode = permission_mode
         self.extra_args = extra_args or []
+        # RB-15: 0 (default) omits --max-turns entirely -- byte-identical argv to
+        # before this ticket for every existing home (see config.Config.max_session_turns).
+        self.max_session_turns = max_session_turns
         # GA-10: the process-wide "always-on" --allowedTools rules (maestro CLI verbs +
         # reconcile_web_tools, see cli._reconciler_tool_grants) -- bare rules, not a
         # pre-built "--allowedTools" pair, so spawn() can merge in the per-key
@@ -214,6 +218,13 @@ class ClaudeCliSessions:
         cmd = ["claude", "-p", prompt, "--model", effective_model, "-n", session_name(key)]
         if effort:
             cmd += ["--effort", effort]
+        if self.max_session_turns:
+            # RB-15: the native, undocumented cap (verified working live against a
+            # real `claude -p` invocation) -- the layer of defense a runaway
+            # session can't decline, since it never has to call anything to earn
+            # it. `run_watchdog`'s max_turn_wallclock_seconds is the backstop for
+            # a claude build that drops or ignores this flag.
+            cmd += ["--max-turns", str(self.max_session_turns)]
         if self.permission_mode:
             cmd += ["--permission-mode", self.permission_mode]
         if disallowed_tools:
@@ -377,6 +388,14 @@ class OpencodeCliSessions:
     STILL not done here (out of scope for T-64 too -- no AC exercises it, no
     writer exists for it): forbidding sub-agent ("task" tool) nesting via
     opencode's own declarative config. Left for whichever ticket adds that.
+
+    RB-15: this backend has no per-spawn turn-cap flag of its own (`opencode
+    run --help` carries none) -- its native raw-turn ceiling instead rides in
+    the generated `--agent` stub file itself (`cfg.max_session_turns` ->
+    `skills_install._opencode_agent_stub`'s `steps:` field), written once at
+    `maestro install-commands` time rather than composed per-spawn here.
+    `run_watchdog`'s `max_turn_wallclock_seconds` remains the backstop in case
+    a stale-installed stub predates a raised ceiling.
     """
 
     def __init__(self, home: Path, model_prefix: str = OPENCODE_MODEL_PROVIDER,
@@ -553,6 +572,13 @@ class PiCliSessions:
     Keeps ``start_new_session=True`` so pid == pgid -- ``run_watchdog`` kills
     by pgid, and without this a wedged pi session survives as an orphan while
     ``ops.fail`` records it as killed.
+
+    RB-15: unlike ``ClaudeCliSessions``/``OpencodeCliSessions``, this backend
+    has NO native raw-turn cap to pass -- checked both ``pi --help`` and the
+    compiled CLI's own strings dump, neither shows an argv flag or a config-file
+    equivalent. A pi reconciler's turn budget is bounded ENTIRELY by
+    ``run_watchdog``'s ``max_turn_wallclock_seconds`` backstop; this method
+    intentionally does not read ``cfg.max_session_turns`` at all.
     """
 
     def __init__(self, home: Path, capture_session_logs: bool = True,

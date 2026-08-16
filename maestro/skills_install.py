@@ -196,7 +196,7 @@ def _frontmatter_description(content: str) -> str:
     return ""
 
 
-def _opencode_agent_stub(description: str) -> str:
+def _opencode_agent_stub(description: str, steps: int | None = None) -> str:
     """T-64: the ``--agent <name>`` file ``OpencodeCliSessions.spawn``
     (``sessions.py:396``) has been passing at a path nothing ever wrote --
     every spawn logged ``agent "..." not found. Falling back to default agent``
@@ -205,8 +205,21 @@ def _opencode_agent_stub(description: str) -> str:
     actual prompt/body comes from the paired ``--command <name>`` (the payload
     file itself), so this file's only job is to make the name resolve.
     ``primary`` (not ``subagent``) matches ``sessions.py``'s own docstring: a
-    reconciler is a TOP-LEVEL session, never a subagent."""
-    return f"---\ndescription: {description}\nmode: primary\n---\n"
+    reconciler is a TOP-LEVEL session, never a subagent.
+
+    RB-15: *steps* (``cfg.max_session_turns``, ``None``/0 omits the line
+    entirely -- byte-identical stub to before this ticket) bakes opencode's own
+    native turn-count ceiling into the agent frontmatter -- confirmed against
+    the installed opencode binary's compiled schema (``steps: D.optional(j_)``,
+    described there as "Maximum number of agentic iterations before forcing
+    text-only response"; ``maxSteps`` is the same field, deprecated in favor of
+    ``steps``). This is opencode's equivalent of ``ClaudeCliSessions``'
+    ``--max-turns`` -- baked into the stub rather than argv because ``opencode
+    run`` has no turn-cap flag of its own (see ``opencode run --help``)."""
+    fields = [f"description: {description}", "mode: primary"]
+    if steps:
+        fields.append(f"steps: {steps}")
+    return "---\n" + "\n".join(fields) + "\n---\n"
 
 
 def _opencode_provider_block(cfg: Config) -> dict:
@@ -343,7 +356,8 @@ def install_repo(cfg: Config, name: str) -> dict:
         if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
             opencode_written.append(filename)
         agent_dest = opencode_agent_dir / filename
-        if _write_if_changed(agent_dest, _opencode_agent_stub(_frontmatter_description(content))):
+        if _write_if_changed(agent_dest, _opencode_agent_stub(
+                _frontmatter_description(content), steps=cfg.max_session_turns or None)):
             opencode_agent_written.append(filename)
     config_dest = opencode_repo_config_path(repo_root)
     config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
@@ -416,7 +430,8 @@ def install_user(cfg: Config) -> dict:
         if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
             opencode_written.append(filename)
         agent_dest = opencode_agent_dir / filename
-        if _write_if_changed(agent_dest, _opencode_agent_stub(_frontmatter_description(content))):
+        if _write_if_changed(agent_dest, _opencode_agent_stub(
+                _frontmatter_description(content), steps=cfg.max_session_turns or None)):
             opencode_agent_written.append(filename)
     config_dest = opencode_user_config_path(cfg)
     config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
