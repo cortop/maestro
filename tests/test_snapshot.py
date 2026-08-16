@@ -1,4 +1,4 @@
-from maestro import event_log, ops, snapshot as snap_mod
+from maestro import event_log, ops, snapshot as snap_mod, store
 from maestro.statemachine import Phase
 
 
@@ -56,6 +56,9 @@ def test_pr_and_ci_fold(home):
 
 
 def test_phase_change_resets_failures(home, cfg):
+    # RB-17: ops.fail funnels through the never-minted guard -- a real ticket
+    # (spec.md) must exist before any ops verb appends its first event.
+    store.atomic_write(store.spec_path(home, "T-1"), "# T-1\n")
     ops.fail(cfg, "T-1", "boom")
     ops.fail(cfg, "T-1", "boom")
     assert snap_mod.load(home, "T-1").failure_count == 2
