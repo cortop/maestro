@@ -160,11 +160,32 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     return ev
 
 
+def _annotations_active(cfg: Config, key: str) -> bool:
+    """T-79: whether the annotation-aware AC gate is live for *key* right now --
+    exactly the same ships-dark conditions as the T-74/RB-12 suite gate itself
+    (`_tests_stale_reason`): `test_command` configured, and *key* not bound
+    `mode: local` (no repo/suite to run there). False means every annotated AC
+    falls back to plain self-attestation, byte-identical to a spec with no
+    annotations at all (see `snapshot.Snapshot.acs_unverified`'s `tree_key=None`
+    behavior)."""
+    if not cfg.test_command:
+        return False
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    return binding.mode != "local"
+
+
+def _current_tree_key(cfg: Config, key: str) -> str:
+    from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
+
+    return _tree_state_key(_worker_cwd(cfg, key))
+
+
 def _acs_unverified_count(cfg: Config, key: str, snap) -> int:
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
         return 0
-    return snap.acs_unverified(spec_path.read_text(encoding="utf-8"))
+    tree_key = _current_tree_key(cfg, key) if _annotations_active(cfg, key) else None
+    return snap.acs_unverified(spec_path.read_text(encoding="utf-8"), tree_key=tree_key)
 
 
 def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
@@ -688,6 +709,21 @@ QA_VERDICTS = {"pass", "fail"}
 QA_AXES = {"spec", "standards"}
 
 
+def _qa_brief_ac_entry(index: int, text: str, tree_key: str, snap) -> dict:
+    """One `qa_brief` AC row (T-79): index/text/hash, unchanged, plus -- only
+    for an annotated AC -- its annotation and latest current-tree captured
+    check, if the verifying stage has already run one at this tree state."""
+    h = snap_mod.ac_hash(text)
+    entry = {"index": index, "text": text, "ac_hash": h}
+    ann = snap_mod.parse_ac_annotation(text)
+    if ann is not None:
+        entry["annotation"] = {"kind": ann.kind, "raw": ann.raw}
+        rec = snap.ac_check_record(tree_key, h)
+        if rec is not None:
+            entry["captured_check"] = rec
+    return entry
+
+
 def qa_brief(cfg: Config, key: str) -> dict:
     """Build the Implementer->QA hand-off packet for *key*, deterministically.
 
@@ -721,10 +757,16 @@ def qa_brief(cfg: Config, key: str) -> dict:
     base = binding.base_branch
     cwd = _worker_cwd(cfg, key)
     diff, base_ref, ahead, stderr = _qa_diff(cwd, base)
+    tree_key = _tree_state_key(cwd)
+    snap = snap_mod.load(cfg.home, key)
     return {
         "key": key,
-        "acs": [{"index": i, "text": t, "ac_hash": snap_mod.ac_hash(t)}
-                for i, t in enumerate(acs, start=1)],
+        # T-79: each AC's own `test:`/`check:` annotation (if any) plus its
+        # latest CURRENT-tree captured check, so QA can audit test-vs-AC
+        # fidelity -- does the named test's assertions actually match the AC's
+        # words? -- instead of re-deriving that from the raw diff every time.
+        # An unannotated AC carries neither key, unchanged from before.
+        "acs": [_qa_brief_ac_entry(i, t, tree_key, snap) for i, t in enumerate(acs, start=1)],
         "base_ref": base_ref,
         "cwd": str(cwd),
         "diff": diff,
@@ -921,6 +963,152 @@ def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
     payload = _record_test_run(cfg, key, tree_key=tree_key, command=cfg.test_command,
                                exit_code=exit_code, output=output, actor=actor)
     return {**payload, "cached": False}
+
+
+def _record_ac_check(cfg: Config, key: str, *, tree_key: str, h: str, ac_index: int, ac_text: str,
+                     kind: str, command: str, exit_code: int, output: str, actor: str) -> dict:
+    """Append one AcCheckCaptured event -- the per-AC counterpart to
+    `_record_test_run`, same shape/idempotency rule (T-79)."""
+    passed = exit_code == 0
+    payload = {"tree_key": tree_key, "ac_hash": h, "ac_index": ac_index, "ac_text": ac_text,
+               "kind": kind, "command": command, "exit_code": exit_code, "passed": passed}
+    if not passed:
+        payload["failure_excerpt"] = _bounded_excerpt(output)
+    _append(cfg, key, E.AC_CHECK_CAPTURED, payload, actor=actor,
+            sid=f"accheck-{key}-{tree_key}-{h}")
+    return payload
+
+
+def _run_shell(command: str, cwd: Path) -> tuple[int, str]:
+    try:
+        proc = subprocess.run(command, shell=True, cwd=cwd,
+                              capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        return -1, f"[maestro] check timed out after {_TEST_RUN_TIMEOUT}s"
+
+
+# T-79 `test:` semantics: an added `def test_whatever(...):` line in the
+# diff -- the primitive both the `::<id>` and bare-file-path forms below key
+# off. Top-level function defs only (no class-scoped tracking); the `::<id>`
+# form still works for a method by matching on its leaf name, see
+# `_run_named_test`.
+_TEST_DEF_RE = re.compile(r"^\+\s*def\s+(test_\w+)\s*\(")
+
+
+def _path_diff(cwd: Path, base: str, rel_path: str) -> str:
+    """The branch's diff against *base*, restricted to *rel_path* -- covers
+    both a tracked, modified file (anchored at the merge-base, same rule as
+    `_qa_diff`, so base-advancement never leaks in) and a brand-new, not-yet
+    `git add`-ed file (via `git diff --no-index`, same as `_untracked_diff`)."""
+    def _git(*args):
+        return subprocess.run(["git", "-C", str(cwd), *args],
+                              capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+    tracked = _git("ls-files", "--error-unmatch", "--", rel_path).returncode == 0
+    if tracked:
+        for ref in (f"origin/{base}", base):
+            mb = _git("merge-base", ref, "HEAD")
+            anchor = mb.stdout.strip() if mb.returncode == 0 and mb.stdout.strip() else ref
+            proc = _git("diff", anchor, "--", rel_path)
+            if proc.returncode == 0:
+                return proc.stdout
+        return ""
+    d = _git("diff", "--no-index", "--", "/dev/null", rel_path)
+    return d.stdout if d.returncode <= 1 else ""
+
+
+def _diff_added_test_names(cwd: Path, base: str, rel_path: str) -> set[str]:
+    """Test function names newly introduced (an added `+def test_*(` line) by
+    the branch's diff against *base*, restricted to *rel_path* -- what a
+    `test:` annotation's gate actually checks presence against, never just
+    "exists on disk" (that reproduces the T-55 seq-130 false-attestation
+    class: a green suite whose diff never actually added the named test)."""
+    diff_text = _path_diff(cwd, base, rel_path)
+    return {m.group(1) for line in diff_text.splitlines() if (m := _TEST_DEF_RE.match(line))}
+
+
+def _run_named_test(cfg: Config, cwd: Path, base: str, ann: "snap_mod.AcAnnotation") -> tuple[str, int, str]:
+    """Run (or refuse to run) a `test:` annotation's check -- returns
+    ``(command, exit_code, output)``, mirroring `_run_shell`'s shape so
+    `run_ac_checks` can record either uniformly.
+
+    Presence in the diff is checked FIRST, before anything is ever run: a
+    named test (`::<id>` form, matched by its leaf name to allow a
+    class-scoped `Class::test_method`) or, for a bare file-path form, ANY
+    added test in that file, must actually be part of this diff -- a suite
+    that happens to pass with an untouched, pre-existing test of the same
+    name satisfies nothing (T-79 AC4 / the T-55 class)."""
+    added = _diff_added_test_names(cwd, base, ann.path)
+    if ann.test_id:
+        leaf = ann.test_id.rsplit("::", 1)[-1]
+        selector = f"{ann.path}::{ann.test_id}"
+        command = f"{cfg.test_command} {selector}"
+        if leaf not in added:
+            return command, 1, (
+                f"[maestro] {selector} not found among tests added by this diff in "
+                f"{ann.path} -- a passing suite alone does not satisfy a test: annotation")
+    else:
+        if not added:
+            return (f"{cfg.test_command} {ann.path}", 1,
+                    f"[maestro] no test added by this diff in {ann.path} -- a passing "
+                    f"suite alone does not satisfy a test: annotation")
+        selector = " ".join(f"{ann.path}::{n}" for n in sorted(added))
+        command = f"{cfg.test_command} {selector}"
+    exit_code, output = _run_shell(command, cwd)
+    return command, exit_code, output
+
+
+def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher") -> dict:
+    """T-79: run every ANNOTATED AC's own `test:`/`check:` check at *cwd*'s
+    current tree state, and record each as an AcCheckCaptured event -- the
+    per-AC counterpart to `capture_tests`'s whole-suite run.
+
+    Called by `dispatcher._route_test_run` only once the suite itself is
+    already green -- never spawns an agent session, exactly like
+    `capture_tests`; both are a plain `subprocess.run` this (dispatcher)
+    process makes directly. Cached per (tree_key, ac_hash), same rule as
+    `capture_tests`: a tree state already checked is not re-run, just re-read.
+    No-op (`{"all_passed": True, "checked": [], "summary": ""}`) when the spec
+    has no acs section at all or no ACs carry an annotation.
+    """
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        return {"all_passed": True, "checked": [], "summary": ""}
+    text = spec_path.read_text(encoding="utf-8")
+    acs = snap_mod.parse_acs(text)
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode == "local":  # defensive -- verifying never reaches mode:local
+        return {"all_passed": True, "checked": [], "summary": ""}
+    base = binding.base_branch
+    tree_key = _tree_state_key(cwd)
+    snap = snap_mod.load(cfg.home, key)
+    cached = snap.ac_checks.get(tree_key, {})
+
+    all_passed = True
+    failures = []
+    checked = []
+    for i, t in enumerate(acs, start=1):
+        ann = snap_mod.parse_ac_annotation(t)
+        if ann is None:
+            continue
+        h = snap_mod.ac_hash(t)
+        rec = cached.get(h)
+        if rec is None:
+            if ann.kind == "check":
+                command = ann.command
+                exit_code, output = _run_shell(ann.command, cwd)
+            else:
+                command, exit_code, output = _run_named_test(cfg, cwd, base, ann)
+            rec = _record_ac_check(cfg, key, tree_key=tree_key, h=h, ac_index=i, ac_text=t,
+                                   kind=ann.kind, command=command, exit_code=exit_code,
+                                   output=output, actor=actor)
+        checked.append({"ac_index": i, "ac_hash": h, "passed": rec["passed"]})
+        if not rec["passed"]:
+            all_passed = False
+            failures.append(f"AC#{i} ({ann.kind}): "
+                            f"{rec.get('failure_excerpt') or ('exit ' + str(rec['exit_code']))}")
+    return {"all_passed": all_passed, "checked": checked, "summary": "; ".join(failures)[:2000]}
 
 
 def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, evidence: str, *,

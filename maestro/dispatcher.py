@@ -1576,7 +1576,7 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
             tree_key = ops._tree_state_key(cwd)
             cached = snap.test_runs.get(tree_key)
             if cached is not None:
-                _route_test_run(cfg, key, cached, actor="dispatcher")
+                _route_test_run(cfg, key, cached, actor="dispatcher", cwd=cwd)
                 continue
             in_flight = sum(
                 1 for c in claims.all_claims(home).values()
@@ -1651,25 +1651,46 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
     log_path.unlink(missing_ok=True)
     payload = ops._record_test_run(cfg, key, tree_key=tree_key, command=cfg.test_command,
                                    exit_code=exit_code, output=output, actor="dispatcher")
-    _route_test_run(cfg, key, payload, actor="dispatcher")
+    _route_test_run(cfg, key, payload, actor="dispatcher", cwd=Path(cwd))
 
 
-def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str) -> None:
+def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Path) -> None:
     """Advance *key* off `verifying` per a captured test-run record -- the
     routing half both the freshly-folded and the tree-cache-reuse paths in
     `sync_test_runs` share, so the two can never route the same shape of
-    record differently."""
+    record differently.
+
+    T-79: a green suite is no longer the whole story -- once it passes, every
+    ANNOTATED AC's own `test:`/`check:` check is also run at this same tree
+    state (`ops.run_ac_checks`, itself just a `subprocess.run`, no agent
+    session) before `qa` is admitted. A red check routes back to
+    `implementing` exactly like a red suite does, carrying its own failure
+    summary instead of the suite's.
+    """
     from . import ops
 
+    if not record.get("passed"):
+        fresh = snap_mod.rebuild(cfg.home, key)
+        excerpt = record.get("failure_excerpt") or ""
+        reason = f"tests failed (exit {record.get('exit_code')})"
+        if excerpt:
+            reason += f": {excerpt}"
+        ops.set_phase(cfg, key, Phase.IMPLEMENTING, reason=reason, actor=actor,
+                      expect=fresh.observed_seq)
+        return
+
+    # run_ac_checks may itself append AcCheckCaptured events -- the CAS
+    # `expect` below must be folded AFTER it runs, not before, or a genuinely
+    # annotated AC turns every routing call into a spurious StaleAppendError
+    # (silently absorbed by dispatch()'s per-hook error isolation, wedging
+    # the ticket in `verifying` forever).
+    ac_result = ops.run_ac_checks(cfg, key, cwd, actor=actor)
     fresh = snap_mod.rebuild(cfg.home, key)
-    if record.get("passed"):
+    if ac_result["all_passed"]:
         ops.set_phase(cfg, key, Phase.QA, reason="tests passed", actor=actor,
                       expect=fresh.observed_seq)
         return
-    excerpt = record.get("failure_excerpt") or ""
-    reason = f"tests failed (exit {record.get('exit_code')})"
-    if excerpt:
-        reason += f": {excerpt}"
+    reason = f"annotated AC check(s) failed: {ac_result['summary']}"
     ops.set_phase(cfg, key, Phase.IMPLEMENTING, reason=reason, actor=actor,
                   expect=fresh.observed_seq)
 
