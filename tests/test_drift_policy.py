@@ -28,7 +28,8 @@ def _add_worktree(repo, home, key, branch, base="main"):
 
 
 def _seed(home, key, phase, pr=10):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
     event_log.append(home, key, "PrOpened",
                      {"number": pr, "url": f"https://github.com/x/y/pull/{pr}", "draft": False},

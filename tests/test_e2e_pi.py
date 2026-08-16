@@ -61,6 +61,13 @@ def test_end_to_end_create_runner_pi_through_sweeps_to_awaiting_ci(
     assert "runner: pi" in spec_text
     assert "runner_model: glm-5.2" in spec_text
 
+    # T-80: the create-minted spec's dangling `- [ ]` parses to zero ACs, and the
+    # new missing-ACs due-gate would park this ticket in awaiting-human before it
+    # ever reaches the phase spawns this AC is actually about -- give it a real
+    # one (orthogonal to what this AC proves, see the note further down).
+    spec_path = store.spec_path(home, "T-1")
+    store.atomic_write(spec_path, spec_path.read_text(encoding="utf-8") + "\n- [ ] ok\n")
+
     # Jump straight to `researching` -- the phase [runner.pi] admits pi to --
     # triage/approval is orthogonal to what this AC proves.
     event_log.append(home, "T-1", "PhaseChanged", {"phase": Phase.RESEARCHING.value}, actor="r")
@@ -89,11 +96,13 @@ def test_end_to_end_create_runner_pi_through_sweeps_to_awaiting_ci(
     rc = cli.main(["--home", str(home), "set-phase", "T-1", "qa"])
     assert rc == 0
 
-    # This create-minted spec has no `## Acceptance criteria` checkboxes (out
-    # of scope for what this AC proves) -- hand off the last hop directly,
-    # same as test_e2e_opencode.py's own AC8 counterpart.
+    # This create-minted spec's only AC (added above purely to clear the T-80
+    # missing-ACs due-gate) was never independently verified -- out of scope
+    # for what this AC proves -- hand off the last hop directly, forcing past
+    # the now-legitimately-unverified AC, same as test_e2e_opencode.py's own
+    # AC8 counterpart.
     rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci",
-                   "--reason", "qa: all ACs pass"])
+                   "--reason", "qa: all ACs pass", "--force"])
     assert rc == 0
 
     assert snap_mod.load(home, "T-1").phase == Phase.AWAITING_CI.value

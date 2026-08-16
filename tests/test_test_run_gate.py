@@ -273,7 +273,8 @@ def test_mode_local_ticket_transitions_implementing_to_qa_unaffected(tmp_path, h
     cfg = config_mod.load(str(home))
     key = "V-1"
     store.atomic_write(store.spec_path(home, key),
-                       f"# {key}\napproval_tier: 0\n\n## Intent\nx\n")
+                       f"# {key}\napproval_tier: 0\n\n## Intent\nx\n\n"
+                       "## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated", {"title": key, "source": "test"}, actor="d")
     snap_mod.rebuild(home, key)
     ops.set_phase(cfg, key, Phase.READY, reason="approved")

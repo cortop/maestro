@@ -80,6 +80,19 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
               requeue_in: int | None = None, expect: int | None = None, force: bool = False) -> dict | None:
     """Advance the ticket's phase.
 
+    T-80: refuses (raises `MaestroError`, NO event appended, unconditionally --
+    `force` does not override this one, same posture as the QA-failing gate
+    below) a handoff to `qa` or entry into `awaiting-ci` while the CURRENT
+    spec.md parses to zero acceptance criteria (`snapshot.has_acs`) -- the
+    fail-closed half of T-80: the dispatcher's own due-gate (`dispatcher.dispatch`)
+    is what stops a zero-AC ticket from ever reaching `implementing` in the
+    ordinary case, but a human can still edit ACs back out from under a
+    ticket already past that point, and this is the write-path backstop for
+    that. Checked against the phase the CALLER asked for, before the
+    `verifying` redirect below can substitute a different one -- refusing the
+    `qa` handoff itself is the point, independent of whether it would have
+    been redirected.
+
     Entering `awaiting-ci` is gated two ways: a ticket with unattested ACs
     refuses (raises `MaestroError`, non-zero exit, NO event appended) unless
     `force=True`, and one with a failing independent QA verdict on a current AC
@@ -121,6 +134,8 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     ticket next pass, and nothing here should spend `failure_count` on it.
     """
     snap = snap_mod.load(cfg.home, key)
+    if phase in (Phase.QA, Phase.AWAITING_CI):
+        _refuse_if_missing_acs(cfg, key, phase)
     unverified = _acs_unverified_count(cfg, key, snap) if phase == Phase.AWAITING_CI else 0
     if unverified > 0 and not force:
         raise store.MaestroError(
@@ -158,6 +173,22 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
     return ev
+
+
+def _refuse_if_missing_acs(cfg: Config, key: str, phase: Phase) -> None:
+    """T-80: raise (no event appended) if *key*'s current spec.md parses to
+    zero acceptance criteria -- see `set_phase`'s own docstring for why this
+    is unconditional (no `force` override) and checked against the requested
+    *phase*, not the source. A missing spec.md is not this gate's problem
+    (nothing to check); some other, unrelated failure will surface that."""
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        return
+    if not snap_mod.has_acs(spec_path.read_text(encoding="utf-8")):
+        raise store.MaestroError(
+            f"{key}: refusing {phase.value} — spec.md has no acceptance criteria "
+            f"(its '## Acceptance criteria' section parses to zero non-blank "
+            f"'- [ ] ...' lines); add at least one AC first")
 
 
 def _acs_unverified_count(cfg: Config, key: str, snap) -> int:
@@ -713,9 +744,15 @@ def qa_brief(cfg: Config, key: str) -> dict:
     spec_file = store.spec_path(cfg.home, key)
     if not spec_file.exists():
         raise store.MaestroError(f"{key}: no spec.md to brief QA against")
-    acs = snap_mod.parse_acs(spec_file.read_text(encoding="utf-8"))
-    if not acs:
+    spec_text = spec_file.read_text(encoding="utf-8")
+    # T-80: `has_acs` (not a bare `parse_acs` truthiness check) -- a spec whose
+    # AC section parses to one entry with empty/whitespace-only text (the seed
+    # template's own dangling "- [ ] ") must refuse here too, not just a spec
+    # that parses to no entries at all; minting a QA packet with one blank AC
+    # is exactly the empty-packet shape this refusal exists to prevent.
+    if not snap_mod.has_acs(spec_text):
         raise store.MaestroError(f"{key}: spec.md has no acceptance criteria to check")
+    acs = snap_mod.parse_acs(spec_text)
 
     binding = repos_mod.resolve(cfg, cfg.home, key)
     base = binding.base_branch

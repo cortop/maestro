@@ -40,8 +40,13 @@ def test_dispatch_sweep_then_tui_reflects_board(home, cfg):
     seed_ticket(home, "T-2", "blocked on a human", phase="awaiting-human",
                 questions={"q1": "Which approach?"})
     seed_ticket(home, "T-3", "work in progress", phase="implementing", pr=15)
-    # ...and a brand-new request entering through the human inbox.
-    inbox.append_new(home, "build the new thing", key="T-9")
+    # ...and a brand-new request entering through the human inbox. T-80: the
+    # seed template's dangling `- [ ]` parses to zero ACs, and the new due-gate
+    # parks a zero-AC ticket before it's ever spawned/rendered -- give this
+    # request a real AC (via intent text, since `has_acs` scans the whole spec
+    # body) so it still mints straight through to a spawnable/renderable row.
+    inbox.append_new(home, "build the new thing", key="T-9",
+                      args={"intent": "build the new thing.\n\n- [ ] initial scope defined"})
 
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
@@ -88,7 +93,10 @@ def test_minted_ticket_starts_in_triaging(home, cfg):
     — the precondition the TUI relies on to show a freshly-created row."""
     from maestro import snapshot as snap_mod, store
 
-    inbox.append_new(home, "a fresh idea", key="T-42")
+    # T-80: give the request a real AC (via intent text) so the new missing-ACs
+    # due-gate doesn't park it in awaiting-human before it ever reaches triaging.
+    inbox.append_new(home, "a fresh idea", key="T-42",
+                      args={"intent": "a fresh idea.\n\n- [ ] initial scope defined"})
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
 
     assert "T-42" in report.minted

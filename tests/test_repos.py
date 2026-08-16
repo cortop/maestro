@@ -137,8 +137,15 @@ def test_precedence_frontmatter_beats_payload_beats_default(home):
 def test_env_key_prints_resolved_binding(home, capsys):
     cfg = _write_multi_repo_config(home)
     rc = cli_main(["--home", str(home), "create", "Env ticket",
-                   "--key", "X-3", "--repo", "beta", "--no-nudge"])
+                   "--key", "X-3", "--repo", "beta", "--no-nudge", "--json"])
     assert rc == 0
+    # T-80: the mint-time seed spec has no acceptance criteria yet (a dangling
+    # `- ` bullet) -- give it real ones, before the first sweep, so the new
+    # missing-ACs due-gate lets this ticket reach `triaging` as normal, which
+    # is what this test is actually about (`--json` mints synchronously, so
+    # spec.md already exists here, ahead of any dispatch sweep).
+    spec_path = store.spec_path(home, "X-3")
+    store.atomic_write(spec_path, spec_path.read_text(encoding="utf-8") + "- [ ] ok\n")
     dispatch(cfg, DryRunSessions(), now=1000)
 
     capsys.readouterr()
@@ -239,9 +246,17 @@ def test_dispatch_spawn_cwd_honors_repo_binding(home):
     )
     cfg = config_mod.load(str(home))
     assert cli_main(["--home", str(home), "create", "Ticket X-5",
-                     "--key", "X-5", "--no-nudge"]) == 0
+                     "--key", "X-5", "--no-nudge", "--json"]) == 0
     assert cli_main(["--home", str(home), "create", "Ticket X-6",
-                     "--key", "X-6", "--repo", "alpha", "--no-nudge"]) == 0
+                     "--key", "X-6", "--repo", "alpha", "--no-nudge", "--json"]) == 0
+    # T-80: give both mint-time seed specs real acceptance criteria, before the
+    # first sweep, so the new missing-ACs due-gate lets each ticket reach
+    # `triaging` (and spawn) as normal, which is what this test is actually
+    # about (`--json` mints synchronously, so spec.md already exists here,
+    # ahead of any dispatch sweep).
+    for key in ("X-5", "X-6"):
+        spec_path = store.spec_path(home, key)
+        store.atomic_write(spec_path, spec_path.read_text(encoding="utf-8") + "- [ ] ok\n")
 
     sessions = DryRunSessions()
     dispatch(cfg, sessions, now=1000)

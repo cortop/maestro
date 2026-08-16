@@ -28,7 +28,8 @@ def _enable(cfg, *names):
 
 def _seed(home, key, *, runner, runner_model, approval_tier=0):
     spec = (f"# {key}\napproval_tier: {approval_tier}\n"
-            f"runner: {runner}\nrunner_model: {runner_model}\ndependsOn: []\n")
+            f"runner: {runner}\nrunner_model: {runner_model}\ndependsOn: []\n\n"
+            "## Acceptance criteria\n- [ ] ok\n")
     store.atomic_write(store.spec_path(home, key), spec)
     event_log.append(home, key, "TicketCreated",
                       {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")

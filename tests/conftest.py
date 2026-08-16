@@ -111,7 +111,8 @@ def seed_ticket(home, key, title, *, phase=None, questions=None, pr=None, tier=1
     so the resulting home is indistinguishable from one a live run produced.
     """
     store.atomic_write(store.spec_path(home, key),
-                       f"# {key}\napproval_tier: {tier}\n\n## Intent\n{title}\n")
+                       f"# {key}\napproval_tier: {tier}\n\n## Intent\n{title}\n\n"
+                       "## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": title, "source": "test", "spec_hash": "x"}, actor="d")
     if pr is not None:

@@ -281,7 +281,8 @@ def test_test_run_claim_does_not_eat_a_max_concurrency_slot(tmp_path, home):
     claims.write_claim(home, "G-1", os.getpid(), "testrun-G-1", kind="testrun")
 
     key = "G-2"
-    store.atomic_write(store.spec_path(home, key), f"# {key}: t\npriority: 2\n\n## Intent\nx\n")
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}: t\npriority: 2\n\n## Intent\nx\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "source": "test", "spec_hash": disp.spec_hash_on_disk(home, key)},
                      actor="d")
@@ -338,7 +339,8 @@ def test_mode_local_ticket_in_verifying_never_wedges(tmp_path, home):
     cfg = Config(home=home, test_command=_FAIL_CMD,
                 repos={"vault": {"path": str(target), "mode": "local", "default": True}})
     key = "V-1"
-    store.atomic_write(store.spec_path(home, key), f"# {key}\n\n## Intent\nx\n")
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\n\n## Intent\nx\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "source": "test", "spec_hash": disp.spec_hash_on_disk(home, key)},
                      actor="d")

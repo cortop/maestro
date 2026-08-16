@@ -55,7 +55,10 @@ class FakeVCS:
 
 
 def _seed(cfg, key, phase, pr=42, repo=None, pr_url=None):
-    store.atomic_write(store.spec_path(cfg.home, key), f"# {key}\napproval_tier: 0\n")
+    store.atomic_write(
+        store.spec_path(cfg.home, key),
+        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n",
+    )
     spec_hash = disp.spec_hash_on_disk(cfg.home, key)
     created = {"title": key, "spec_hash": spec_hash}
     if repo:
@@ -138,7 +141,7 @@ def test_sync_vcs_ci_observed_is_idempotent_on_unchanged_state(cfg, monkeypatch)
     # so re-seed it back into awaiting-ci with the same PR to simulate the tick
     # observing the identical CI result on a later sweep.
     from maestro import ops
-    ops.set_phase(cfg, "T-5", Phase.AWAITING_CI, reason="re-check")
+    ops.set_phase(cfg, "T-5", Phase.AWAITING_CI, reason="re-check", force=True)
     n_after_phase = len(event_log.read(cfg.home, "T-5"))
 
     disp.sync_vcs(cfg, now=2000)

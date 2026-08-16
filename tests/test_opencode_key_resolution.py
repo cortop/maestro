@@ -69,7 +69,8 @@ def _install_stub_opencode(tmp_path, monkeypatch):
 
 def _seed(home, key, *, phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b"):
     spec = (f"# {key}\napproval_tier: 0\nrunner: {runner}\n"
-            f"runner_model: {runner_model}\ndependsOn: []\n")
+            f"runner_model: {runner_model}\ndependsOn: []\n"
+            f"\n## Acceptance criteria\n- [ ] ok\n")
     store.atomic_write(store.spec_path(home, key), spec)
     event_log.append(home, key, "TicketCreated",
                       {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")

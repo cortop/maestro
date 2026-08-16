@@ -50,6 +50,22 @@ def parse_acs(spec_text: str) -> list[str]:
     return [m.group(1).strip() for m in _AC_RE.finditer(spec_text)]
 
 
+def has_acs(spec_text: str) -> bool:
+    """True iff *spec_text* parses to at least one NON-BLANK acceptance
+    criterion -- the one canonical "zero ACs" definition every T-80 gate
+    (the dispatcher due-gate, `ops.set_phase`'s fail-closed handoff, `ops.qa_brief`,
+    `health.check_missing_acs`, `maestro create`'s mint-time warning) shares.
+
+    A bare ``- `` bullet (no checkbox) matches ``_AC_RE`` not at all, so
+    `parse_acs` returns no entries for it -- already zero. But the seed
+    template's own dangling ``- [ ] `` (checkbox, no text) matches once, with
+    an empty-string capture -- `len(parse_acs(...)) == 0` alone would miss
+    this, the single most common freshly-created-ticket shape. Checking for
+    any NON-BLANK entry (`parse_acs` already `.strip()`s each one) catches
+    both shapes uniformly."""
+    return any(parse_acs(spec_text))
+
+
 def parse_title(spec_text: str, key: str | None = None) -> str | None:
     """The spec's first level-1 heading, with a leading ``<KEY>: `` stripped.
 

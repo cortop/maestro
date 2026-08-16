@@ -181,7 +181,12 @@ def test_agent_minted_runner_is_inert_at_default_runner_enabled(home, cfg, monke
 
     rc = cli.main(["--home", str(home), "create", "Non-claude via agent",
                    "--key", "BAD-2", "--runner", RUNNER,
-                   "--runner-model", "qwen3-coder:30b", "--no-nudge"])
+                   "--runner-model", "qwen3-coder:30b",
+                   # T-80: there's no --ac flag; seed a real AC via --notes so
+                   # this key clears the missing-ACs due-gate below (unrelated
+                   # to what this AC is actually about: runner_enabled gating).
+                   "--notes", "## Acceptance criteria\n- [ ] ok",
+                   "--no-nudge"])
     assert rc == 0
 
     # Mint only (no due-check/spawn yet) -- a full sweep here would also spawn

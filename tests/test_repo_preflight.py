@@ -73,7 +73,8 @@ def _push_extra_commit_from_new_clone(origin, tmp_path):
 
 
 def _seed_due_ticket(home, key="T-1"):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": Phase.IMPLEMENTING.value}, actor="r")
@@ -210,7 +211,8 @@ def _repo_table(path, *, base_branch="main", default=False):
 
 def _seed_bound_ticket(home, key, repo_name, phase=Phase.IMPLEMENTING):
     store.atomic_write(store.spec_path(home, key),
-                       f"# {key}\napproval_tier: 0\nrepo: {repo_name}\n")
+                       f"# {key}\napproval_tier: 0\nrepo: {repo_name}\n"
+                       f"\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "repo": repo_name,
                       "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
@@ -511,7 +513,8 @@ def test_doctor_warns_on_unknown_repo_name_and_missing_reconcile_skill(
     # A spec naming an unconfigured repo (typo/unknown) -- resolves to the
     # implicit default per repos.resolve(), so the sweep still spawns it.
     store.atomic_write(store.spec_path(home, "T-1"),
-                       "# T-1\napproval_tier: 0\nrepo: typo-repo\n")
+                       "# T-1\napproval_tier: 0\nrepo: typo-repo\n"
+                       "\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, "T-1", "TicketCreated",
                      {"title": "T-1", "repo": "typo-repo",
                       "spec_hash": disp.spec_hash_on_disk(home, "T-1")}, actor="d")

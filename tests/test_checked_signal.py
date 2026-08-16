@@ -23,7 +23,21 @@ from maestro.cli import main as cli_main
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
-from test_dispatcher import _seed, _age_claim
+from test_dispatcher import _age_claim
+
+
+def _seed(home, key, phase=Phase.READY):
+    """Local override of test_dispatcher._seed: T-80's due-gate parks any
+    non-terminal ticket whose spec has no acceptance-criteria section into
+    awaiting-human before a sweep can spawn it. This file's tests are about
+    the checked-signal/no-op-vs-crash distinction, not ACs, so give every
+    seeded spec a trivial AC section to keep them exercising their original,
+    unrelated behavior."""
+    store.atomic_write(store.spec_path(home, key),
+                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
+    event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
+    snap_mod.rebuild(home, key)
 
 
 class _HonestNoopSessions(DryRunSessions):

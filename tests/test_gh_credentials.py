@@ -31,7 +31,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _seed(home, key, phase, *, repo=None, pr=None):
     """Mimic a real `create --repo` mint: TicketCreated.repo + PhaseChanged."""
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
     payload = {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}
     if repo:
         payload["repo"] = repo

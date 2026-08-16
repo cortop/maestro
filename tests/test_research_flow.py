@@ -35,7 +35,12 @@ def _make_research_ticket(home: Path, cfg, key: str = "R-1") -> None:
     inbox.append_new(
         home, f"Research: caching strategies for {key}",
         key=key,
-        args={"approval_tier": 0, "kind": "research", "priority": 2},
+        args={"approval_tier": 0, "kind": "research", "priority": 2,
+              # T-80: the mint template has no acceptance-criteria arg of its
+              # own, so seed a minimal AC section via notes -- otherwise the
+              # dispatcher's missing-ACs due-gate parks the freshly minted
+              # ticket into awaiting-human before this flow's first assert.
+              "notes": "## Acceptance criteria\n- [ ] ok"},
     )
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)

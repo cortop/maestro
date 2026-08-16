@@ -103,7 +103,8 @@ def test_arm_short_circuits_next_sweep_then_self_heals(home):
     # tiebreak would hand this sweep's one slot to T-9, not T-1. Pin T-1 to a
     # higher priority so MTO-7's own (unaffected-by-rotation) ordering, not
     # the tiebreak, is what this test is actually exercising.
-    store.atomic_write(store.spec_path(home, "T-1"), "# T-1\napproval_tier: 0\npriority: 1\n")
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 0\npriority: 1\n\n## Acceptance criteria\n- [ ] ok\n")
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=50)
     sessions = _EphemeralSessions()

@@ -359,6 +359,14 @@ def test_cli_worktree_ensure_then_dispatch_still_routes_ready_ticket(home, tmp_p
                      "--key", "Q-3", "--no-nudge"]) == 0
     from maestro.dispatcher import dispatch
     dispatch(cfg, DryRunSessions(), now=1000)
+    # T-80: a fresh mint's AC section is a dangling placeholder -- fill it in like
+    # a human would, or the due-gate parks the ticket in awaiting-human instead of
+    # routing it, which isn't what this test is exercising.
+    spec_path = store.spec_path(home, "Q-3")
+    store.atomic_write(spec_path,
+                       spec_path.read_text(encoding="utf-8").replace(
+                           "## Acceptance criteria\n- \n",
+                           "## Acceptance criteria\n- [ ] ok\n"))
     assert cli_main(["--home", str(home), "set-phase", "Q-3", "ready",
                      "--reason", "test: ready for worktree setup"]) == 0
 
@@ -387,6 +395,14 @@ def test_dispatch_never_executes_prime(home, tmp_path):
                      "--key", "Q-2", "--no-nudge"]) == 0
     from maestro.dispatcher import dispatch
     dispatch(cfg, DryRunSessions(), now=1000)
+    # T-80: a fresh mint's AC section is a dangling placeholder -- fill it in like
+    # a human would, or the due-gate parks the ticket in awaiting-human instead of
+    # routing it, which isn't what this test is exercising.
+    spec_path = store.spec_path(home, "Q-2")
+    store.atomic_write(spec_path,
+                       spec_path.read_text(encoding="utf-8").replace(
+                           "## Acceptance criteria\n- \n",
+                           "## Acceptance criteria\n- [ ] ok\n"))
     assert cli_main(["--home", str(home), "set-phase", "Q-2", "ready",
                      "--reason", "test: ready for worktree setup"]) == 0
 

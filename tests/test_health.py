@@ -552,7 +552,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
-                      "pi_version", "worktree_health", "provider_availability"}
+                      "pi_version", "worktree_health", "provider_availability", "missing_acs"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -609,14 +609,15 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     `watchdog_loops` -- same treatment. T-56 (PI-4) grew it by one more still --
     `pi_version` -- same treatment. T-61 (PI-9) grew it by one more still --
     `pi_models` -- same treatment. T-77 (RB-17) grew it by one more still --
-    `phantom_keys` -- same treatment.)"""
+    `phantom_keys` -- same treatment. T-80 grew it by one more still --
+    `missing_acs` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
         "pi_models", "runner_binary", "pi_version", "worktree_health",
-        "provider_availability", "burn",
+        "provider_availability", "burn", "missing_acs",
     }
     code, out = _sweep(home)
     assert code == 0

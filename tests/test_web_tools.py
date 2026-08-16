@@ -21,7 +21,8 @@ _HUMAN_ONLY_VERBS = ("ans", "answer", "restore", "fleet", "init",
 
 
 def _seed_ready(home, key="T-1"):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\n")
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": "x"}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": Phase.READY.value}, actor="r")
     snap_mod.rebuild(home, key)
@@ -220,7 +221,7 @@ reconcile_allowed_tools = ["Bash(npm test:*)"]
 
 def _seed_ready_bound(home, key, repo_name):
     store.atomic_write(store.spec_path(home, key),
-                       f"# {key}\nrepo: {repo_name}\n")
+                       f"# {key}\nrepo: {repo_name}\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": "x", "repo": repo_name}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": Phase.READY.value}, actor="r")

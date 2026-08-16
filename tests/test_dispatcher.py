@@ -18,7 +18,7 @@ from maestro.statemachine import Phase
 
 
 def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n")
+    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
     snap_mod.rebuild(home, key)
@@ -58,6 +58,12 @@ def test_triaging_asks_and_routes_to_awaiting_human_then_ans_moves_it_onward(hom
     rc = cli.main(["--home", str(home), "create", "risky change", "--key", key,
                    "--json", "--no-nudge"])
     assert rc == 0
+    # T-80: `--json` mints spec.md synchronously (before dispatch() ever runs), but
+    # the seed template's own dangling `- [ ]` parses to zero ACs -- give it a real
+    # one here so the new due-gate doesn't park it before this test's actual
+    # subject (the triaging ask/answer/route flow) ever runs.
+    spec_path = store.spec_path(home, key)
+    store.atomic_write(spec_path, spec_path.read_text(encoding="utf-8") + "\n- [ ] ok\n")
     disp.dispatch(cfg, DryRunSessions(), now=1000)  # mints the spec + TicketCreated
     assert snap_mod.load(home, key).phase == Phase.TRIAGING.value
 
@@ -433,7 +439,13 @@ def test_dispatch_skips_live_session_for_same_key(home, cfg):
 
 
 def test_mint_new_tickets_from_inbox(home, cfg):
-    inbox.append_new(home, "build the thing", key="T-9")
+    # T-80: the mint-time seed template's dangling `- [ ]` parses to zero ACs, and
+    # the new due-gate parks a zero-AC ticket before it ever reaches triaging --
+    # give the queued create request a real AC (via the intent text, since
+    # `has_acs` scans the whole spec body, not just its own section) so this
+    # test's actual subject (mint-from-inbox reaching triaging) still runs.
+    inbox.append_new(home, "build the thing", key="T-9",
+                      args={"intent": "build the thing.\n\n- [ ] initial scope defined"})
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert "T-9" in report.minted
     assert store.spec_path(home, "T-9").exists()
@@ -595,7 +607,7 @@ def test_parse_depends_on_multiple():
 
 def _seed_with_deps(home, key, phase=Phase.READY, depends_on=None):
     deps_str = ", ".join(depends_on) if depends_on else ""
-    spec = f"# {key}\napproval_tier: 0\ndependsOn: [{deps_str}]\n"
+    spec = f"# {key}\napproval_tier: 0\ndependsOn: [{deps_str}]\n\n## Acceptance criteria\n- [ ] ok\n"
     store.atomic_write(store.spec_path(home, key), spec)
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
@@ -746,7 +758,7 @@ def test_spec_with_legacy_approval_tier_line_folds_and_dispatches_clean(home, cf
     fold warning -- no bulk rewrite of existing specs is required."""
     key = "T-1"
     store.atomic_write(store.spec_path(home, key),
-                       f"# {key}\napproval_tier: 2\npriority: 1\ndependsOn: []\n")
+                       f"# {key}\napproval_tier: 2\npriority: 1\ndependsOn: []\n\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
     event_log.append(home, key, "PhaseChanged", {"phase": Phase.READY.value}, actor="r")
@@ -768,7 +780,7 @@ def _seed_with_overrides(home, key, *, kind=None, model=None, effort=None, phase
         extra += f"model: {model}\n"
     if effort:
         extra += f"effort: {effort}\n"
-    spec = f"# {key}\napproval_tier: 0\n{extra}dependsOn: []\n"
+    spec = f"# {key}\napproval_tier: 0\n{extra}dependsOn: []\n\n## Acceptance criteria\n- [ ] ok\n"
     store.atomic_write(store.spec_path(home, key), spec)
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
