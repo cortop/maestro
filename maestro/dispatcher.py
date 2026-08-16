@@ -162,16 +162,17 @@ def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution
     return credentials.resolve_cached(gh_account, token_env, cache)
 
 
-# GA-16: the verb whitelist a spawned reconciler is granted via one
-# ``Bash(maestro <verb>:*)`` rule per entry, unioned into --allowedTools at
-# spawn time (``cli._reconciler_tool_grants``). Lives here, not cli.py, so
-# ``health.check_reconciler_permissions`` can read the very same tuple
-# ``cli._reconciler_tool_grants`` builds from without an import cycle
-# (cli.py already imports this module; the reverse would be circular) --
-# MTO-5, replacing a hand-maintained duplicate in ``RECONCILER_REQUIRED_TOOLS``
-# below that had silently drifted from what GA-3 actually emits.
-# ``cli._AGENT_TOOL_VERBS`` re-exports this tuple under its old name for
-# backward-compat imports.
+# GA-16: the FULL verb whitelist ANY spawned reconciler could ever be granted
+# -- the ceiling `health.check_reconciler_permissions` measures a bound repo's
+# settings against, and the universe `phase_verb_grant`/`phase_verb_denylist`
+# below (RB-16) partition per phase for what a given spawn ACTUALLY gets via
+# --allowedTools/--disallowedTools. Lives here, not cli.py, so
+# ``health.check_reconciler_permissions`` can read the very same tuple without
+# an import cycle (cli.py already imports this module; the reverse would be
+# circular) -- MTO-5, replacing a hand-maintained duplicate in
+# ``RECONCILER_REQUIRED_TOOLS`` below that had silently drifted from what GA-3
+# actually emits. ``cli._AGENT_TOOL_VERBS`` re-exports this tuple under its
+# old name for backward-compat imports.
 #
 # NEVER add "approve" (self-clears the tier-2 gate AD-1 exists to enforce),
 # "restore" (the one irreversible verb), "fleet" (launchd + the pause kill
@@ -201,16 +202,153 @@ MAESTRO_COARSE_GRANT = "Bash(maestro:*)"
 
 
 def maestro_verb_grant(verbs=AGENT_TOOL_VERBS) -> list[str]:
-    """The narrowed, verb-scoped ``Bash(maestro <verb>:*)`` rules a spawned
-    reconciler is actually granted -- the literal form GA-3 emits in place of
-    the bare ``Bash(maestro:*)`` wildcard, which the spawner is tested to
-    never emit (AD-1, ``tests/test_web_tools.py::test_bare_wildcard_never_appears``).
-    MTO-5: the single source both ``cli._reconciler_tool_grants`` (spawn time)
-    and ``health.check_reconciler_permissions`` (the permission check) build
-    from, so the emitted grant and the required grant can't drift the way the
-    old hand-maintained ``RECONCILER_REQUIRED_TOOLS`` tuple did.
+    """The verb-scoped ``Bash(maestro <verb>:*)`` rules for *verbs* -- the
+    literal rule shape GA-3 emits in place of the bare ``Bash(maestro:*)``
+    wildcard, which the spawner is tested to never emit (AD-1,
+    ``tests/test_web_tools.py::test_bare_wildcard_never_appears``). Called
+    with the default (the full ``AGENT_TOOL_VERBS`` ceiling) by
+    ``health.check_reconciler_permissions`` (the settings.json doctor check --
+    a bound repo's static permissions must cover everything ANY phase could
+    ever request) and with a phase-narrowed subset by ``phase_verb_grant``/
+    ``phase_verb_denylist`` below (RB-16 -- what a given spawn actually gets).
+    One render function, so neither drifts from the ``Bash(maestro <verb>:*)``
+    shape the other expects.
     """
     return [f"Bash(maestro {verb}:*)" for verb in verbs]
+
+
+# RB-16: the maestro-verb SUBSET each phase's own skill file actually invokes
+# (see skills/maestro-reconcile-<suffix>.md), replacing the flat
+# AGENT_TOOL_VERBS every spawned reconciler was granted regardless of phase
+# before this ticket. Keyed by the same skill suffix `_PHASE_COMMAND_SUFFIX`
+# resolves (defined below, beside `resolve_reconcile_command`) -- so a
+# phase's verb grant always matches the verb set of the skill it is actually
+# about to spawn, never a second, independently-drifting phase->verb table.
+# Hand-authored, same "exhaustive table + drift test" posture as
+# `PHASE_CLASS`/`_PHASE_COMMAND_SUFFIX` themselves -- runtime-parsing the
+# skill markdown would tie this to one specific install layout (maestro is
+# project-agnostic; a bound repo's skills may not even live at this path), so
+# the sanctioned fallback (RB-16 spec Notes) is a hand table plus a test that
+# fails on drift: `tests/test_phase_verb_grant.py` greps every skill file for
+# `maestro <verb>` invocations and fails if one names a verb its phase isn't
+# granted here.
+#
+# `capture-tests`/`check-conflicts`/`check-merged`/`fold-steps`/`events` are
+# granted to NO phase: the first four are dispatcher-owned (`ops.route_
+# conflict`/`ops.check_merged` run in-process, actor="dispatcher", never via
+# a reconciler's own Bash; `capture-tests` is for a `test_command`-configured
+# board whose `implementing` skill calls it explicitly -- unset on this board,
+# so its own skill file doesn't yet, see that skill's step 2) and `events`
+# has no current skill caller at all -- granting a verb nothing calls is
+# exactly the surplus surface this ticket exists to remove.
+_PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
+    "triaging": ("ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
+    "awaiting-human": ("append", "create", "env", "finalize", "fold-inbox", "inbox-ack",
+                        "observe-spec", "release", "set-phase", "snapshot"),
+    "ready": ("env", "fold-inbox", "observe-spec", "release", "requeue", "set-phase",
+              "snapshot", "worktree"),
+    "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
+    "implementing": ("append", "ask", "env", "fail", "finalize", "fold-inbox", "impl-turn",
+                      "local-backup", "observe-spec", "release", "set-phase", "snapshot",
+                      "verify-ac", "worktree"),
+    "qa": ("append", "ask", "env", "fold-inbox", "observe-spec", "qa-brief", "qa-verdict",
+           "release", "set-phase", "snapshot"),
+    "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",
+                "observe-spec", "release", "set-phase", "show", "snapshot"),
+}
+
+
+def _phase_verb_suffix(phase: str) -> str:
+    """Same resolution `resolve_reconcile_command` uses for which skill file
+    spawns -- an unrecognized *phase* falls back to "passive" here too, so a
+    phase this table hasn't caught up with yet still gets *a* working verb
+    set (fail toward working, never toward wedged)."""
+    try:
+        return _PHASE_COMMAND_SUFFIX[Phase(phase)]
+    except (ValueError, KeyError):
+        return "passive"
+
+
+def phase_verbs_by_suffix(suffix: str) -> tuple[str, ...]:
+    """RB-16: the raw (unrendered) maestro-verb tuple for skill-file SUFFIX
+    *suffix* (e.g. ``"qa"``, ``"passive"``) -- the same key
+    ``skills_install.PHASE_FILES``/``_PHASE_COMMAND_SUFFIX`` already share.
+    The one place ``_PHASE_VERB_GRANT_BY_SUFFIX`` is read from, so every
+    consumer of a phase's verb set -- a claude spawn's ``--allowedTools``
+    (`phase_verb_grant`/`phase_verb_denylist` below), an opencode agent
+    stub's own ``permission.bash`` override (`skills_install`), a pi spawn's
+    guard data (`sessions.PiCliSessions.spawn` via `verbs_from_allowed_tools`
+    below) -- reads the identical set, never a second hand-typed one.
+    """
+    return _PHASE_VERB_GRANT_BY_SUFFIX[suffix]
+
+
+def phase_verb_grant(phase: str) -> list[str]:
+    """The ``Bash(maestro <verb>:*)`` ALLOW rules a *phase*-spawned reconciler
+    is granted (RB-16) -- the phase-narrowed replacement for handing every
+    spawn the full ``maestro_verb_grant(AGENT_TOOL_VERBS)``. Resolved per key
+    at the same spawn site as `phase_denylist`/`resolved_allowed_tools` (see
+    `dispatch()` below), so a `qa` spawn and a `triaging` spawn in the same
+    sweep -- sharing one `SessionManager` -- get different verb grants.
+    """
+    return maestro_verb_grant(phase_verbs_by_suffix(_phase_verb_suffix(phase)))
+
+
+def phase_verb_denylist(phase: str) -> list[str]:
+    """The ``Bash(maestro <verb>:*)`` DENY rules for every verb `phase_verb_grant`
+    does NOT grant *phase* -- the enforcement half of RB-16's narrowing.
+
+    Emitted via ``--disallowedTools`` (unioned with `MERGE_DENYLIST`/
+    `phase_denylist` at the same `dispatch()` spawn site) rather than left to
+    mere omission from ``--allowedTools``: a bound repo's OWN Claude settings
+    can separately grant the coarse ``Bash(maestro:*)`` wildcard for humans
+    (this repo's own ``.claude/settings.json`` does exactly that, left
+    untouched by design -- RB-16 spec Notes/AC3), and Claude Code lets an
+    explicit deny win over any allow -- the same precedent `phase_denylist`'s
+    Edit/Write block for `qa` already relies on (that block would be just as
+    moot under `permission_mode="acceptEdits"` otherwise). Without an explicit
+    deny, a narrower ``--allowedTools`` alone would be silently defeated in
+    exactly the repo that most needs it: maestro's own dogfood checkout.
+    """
+    granted = set(phase_verbs_by_suffix(_phase_verb_suffix(phase)))
+    return maestro_verb_grant([v for v in AGENT_TOOL_VERBS if v not in granted])
+
+
+# RB-16 fix round: the non-Claude runners (opencode, pi) have no --allowedTools/
+# --disallowedTools flag of their own -- OpencodeCliSessions.spawn and
+# PiCliSessions.spawn (sessions.py) both discard those two dispatch()-supplied
+# params outright. Before this, that meant they fell back to their own static,
+# board-wide permission surfaces (runner_permissions.opencode_permission_block,
+# pi_guard.install), which -- unlike phase_verb_grant/phase_verb_denylist above
+# -- always rendered the FULL AGENT_TOOL_VERBS ceiling regardless of phase: a
+# qa-phase ticket with runner=opencode or runner=pi could still call `maestro
+# finalize` (this board's own config has both runners enabled -- see
+# tests/test_phase_verb_grant.py's opencode/pi coverage). Rather than thread a
+# THIRD, independently-shaped phase argument through the `SessionManager`
+# Protocol (four backends, every call site, every test), this recovers the
+# exact same phase-narrowed verb set from the rendered `--allowedTools` list
+# dispatch() already builds via `phase_verb_grant` above -- the one shared
+# source every runner's own permission surface keys off, matching
+# `runner_permissions._risky_verbs`'s own "extract from the rendered form,
+# never a second hand-typed copy" precedent.
+_MAESTRO_VERB_GRANT_RE = re.compile(r"^Bash\(maestro ([\w-]+):\*\)$")
+
+
+def verbs_from_allowed_tools(allowed_tools: Iterable[str] | None) -> tuple[str, ...]:
+    """Recover the raw maestro-verb tuple `phase_verb_grant` rendered into
+    *allowed_tools* (a real spawn's resolved ``--allowedTools`` list) -- the
+    single source a non-Claude runner's own declarative permission surface
+    keys off (see the module comment above). Any entry that isn't a
+    ``Bash(maestro <verb>:*)`` rule (e.g. ``resolved_allowed_tools``'
+    repo-specific grants) is silently skipped, never mistaken for a verb.
+    Returns ``()`` for ``None``/empty input -- callers fall back to their own
+    ceiling default (RB-16: fail toward working, not toward wedged) rather
+    than treating an empty tuple as "deny everything".
+    """
+    if not allowed_tools:
+        return ()
+    return tuple(m.group(1) for rule in allowed_tools
+                 if (m := _MAESTRO_VERB_GRANT_RE.match(rule)))
 
 
 # GA-16 / MTO-5: the spawned-reconciler Bash surface a bound repo's Claude Code
@@ -248,6 +386,14 @@ RECONCILER_REQUIRED_TOOLS = (
     "Bash(gh:*)",
     "Bash(python3:*)",
 )
+
+# Module-load-time guard: was `cli._reconciler_tool_grants`'s own assert
+# before RB-16 moved the maestro-verb grant out of that (process-wide, phase-
+# blind) function into `phase_verb_grant`/`phase_verb_denylist` above (per-key,
+# phase-scoped). Lives here now instead -- both sides of the equality are
+# module-level constants of THIS module, so this needs no call site to run.
+assert RECONCILER_REQUIRED_TOOLS[0] == MAESTRO_COARSE_GRANT == "Bash(maestro:*)", \
+    "RECONCILER_REQUIRED_TOOLS's maestro-verb entry moved -- update phase_verb_denylist too"
 
 # MTO-5: required only of the binding that resolves to maestro's own repo
 # checkout -- see ``health._is_maestro_own_repo``. A foreign yarn/Bazel-bound
@@ -2537,8 +2683,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                     cwd = _worker_cwd(cfg, key)
                     command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
                     model, effort = _resolve_model_effort(cfg, key)
-                    disallowed_tools = MERGE_DENYLIST + phase_denylist(phase_by_key.get(key, ""))
-                    allowed_tools = resolved_allowed_tools(cfg, binding)
+                    phase_here = phase_by_key.get(key, "")
+                    # RB-16: phase_verb_denylist is the enforcement half of the
+                    # narrowed grant below -- see its own docstring for why an
+                    # explicit deny is required, not just an allowedTools omission.
+                    disallowed_tools = (MERGE_DENYLIST + phase_denylist(phase_here)
+                                        + phase_verb_denylist(phase_here))
+                    allowed_tools = phase_verb_grant(phase_here) + resolved_allowed_tools(cfg, binding)
                     # RF-1: hand the resolved command and key to spawn() as separate
                     # arguments -- each backend composes its own invocation (the Claude
                     # CLI concatenates "<command> <key>" into one prompt string; a

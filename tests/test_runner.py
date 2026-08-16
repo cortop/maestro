@@ -89,9 +89,13 @@ def test_no_runner_override_sweep_is_byte_identical_baseline(home, cfg):
 
     key, prompt, cwd, model, effort, disallowed, allowed, overlay, runner, runner_model = (
         sessions.spawned[0])
+    # RB-16: disallowed/allowed are now phase-scoped (ready's own narrowed verb
+    # grant/denylist), not the flat "deny only gh pr merge / allow nothing extra"
+    # pair every phase shared before this ticket.
     assert (key, prompt, cwd, model, effort, disallowed, allowed, overlay) == (
         "T-1", "/maestro-reconcile-ready T-1", str(home), "sonnet", None,
-        ["Bash(gh pr merge:*)"], [], {})
+        ["Bash(gh pr merge:*)"] + disp.phase_verb_denylist(Phase.READY.value),
+        disp.phase_verb_grant(Phase.READY.value), {})
     assert runner == "claude"
     assert runner_model is None
 

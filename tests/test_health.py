@@ -827,17 +827,24 @@ def test_reconciler_permissions_ok_when_permission_mode_bypasses(home, tmp_path,
 
 
 def test_reconciler_permissions_emitted_maestro_grant_satisfies_check(home, tmp_path, monkeypatch):
-    """MTO-5 AC1: the exact --allowedTools grant cli._reconciler_tool_grants
-    emits at spawn time (the narrow per-verb form -- never the bare wildcard,
+    """MTO-5 AC1: the narrow per-verb form (never the bare wildcard,
     test_bare_wildcard_never_appears) satisfies the 'maestro' portion of this
     check. The check and the spawner now agree on what 'granted' means,
     instead of the check demanding a literal (Bash(maestro:*)) the spawner is
-    tested to never emit."""
+    tested to never emit.
+
+    RB-16: a real spawn's own --allowedTools is phase-narrowed now
+    (dispatcher.phase_verb_grant), so it's no longer the right thing to check
+    a repo's static settings.json against -- a repo's settings can't vary by
+    phase the way a spawn's argv does. `dispatcher.maestro_verb_grant()`
+    (its default, the full AGENT_TOOL_VERBS ceiling) is: the union of every
+    verb ANY phase could ever request, exactly what `_missing_maestro_grant`
+    checks for (see its own docstring)."""
     monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
     cfg = Config(home=home, repo_path=str(repo), reconcile_web_tools=False)
-    emitted = cli._reconciler_tool_grants(cfg)   # the real spawn-time grant
+    emitted = disp.maestro_verb_grant()          # the full per-phase-union ceiling
     assert "Bash(maestro:*)" not in emitted      # never the bare wildcard (AD-1)
     _write_repo_settings(repo, allow=emitted + ["Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)"])
 
@@ -1163,9 +1170,10 @@ def test_reconciler_permissions_warns_for_pi_binding_with_no_guard_extension_ins
 def test_reconciler_permissions_ok_for_pi_binding_once_guard_extension_is_installed(
         home, tmp_path):
     """Once `pi_guard.install` has actually materialized the extension (a
-    real prior pi spawn's own belt-and-suspenders call, PI-7) -- the SAME
-    board-wide `store.pi_agent_dir(cfg.home)` this check reads -- the check
-    reports `ok`."""
+    real prior pi spawn's own belt-and-suspenders call, PI-7) -- under a
+    per-KEY subdirectory of `store.pi_agent_dir(cfg.home)` (RB-16 fix round --
+    see `store.pi_agent_key_dir`'s docstring), the same directory
+    `_pi_permission_gap` now scans -- the check reports `ok`."""
     from maestro import pi_guard
 
     repo = tmp_path / "repo"
@@ -1173,7 +1181,7 @@ def test_reconciler_permissions_ok_for_pi_binding_once_guard_extension_is_instal
     cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
     cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
     _seed_with_runner(home, "T-1", runner="pi")
-    pi_guard.install(store.pi_agent_dir(home))
+    pi_guard.install(store.pi_agent_key_dir(store.pi_agent_dir(home), "T-1"))
 
     checks = health.run_checks(cfg, 1000)
     check = next(c for c in checks if c["name"] == "reconciler_permissions")
@@ -1191,7 +1199,7 @@ def test_reconciler_permissions_pi_never_reads_claude_code_settings(home, tmp_pa
     cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
     _seed_with_runner(home, "T-1", runner="pi")
     from maestro import pi_guard
-    pi_guard.install(store.pi_agent_dir(home))
+    pi_guard.install(store.pi_agent_key_dir(store.pi_agent_dir(home), "T-1"))
 
     checks = health.run_checks(cfg, 1000)
     check = next(c for c in checks if c["name"] == "reconciler_permissions")

@@ -56,31 +56,23 @@ _AGENT_TOOL_VERBS = disp.AGENT_TOOL_VERBS
 
 
 def _reconciler_tool_grants(cfg: Config) -> list[str]:
-    """The process-wide, "always-on" --allowedTools rules for spawned reconcilers.
+    """The process-wide, "always-on" --allowedTools rules for spawned reconcilers:
+    WebSearch/WebFetch when reconcile_web_tools is enabled, nothing else.
 
-    Always grants the maestro CLI verbs in _AGENT_TOOL_VERBS -- unconditionally,
-    not gated behind reconcile_web_tools (that used to also disarm a
-    reconciler's own bookkeeping whenever web tools were turned off). Adds
-    WebSearch/WebFetch when reconcile_web_tools is enabled. Per-verb rules are
-    prefix matches on the literal command string, so this only ever matches
-    spawns that omit --home (they do -- the home is pinned via the
-    MAESTRO_HOME env var instead, sessions.py).
-
-    Returns the bare rule list, NOT a "--allowedTools <value>" pair -- GA-10's
-    per-key reconcile_allowed_tools (dispatcher.resolved_allowed_tools) merges
-    into this same list at spawn time (ClaudeCliSessions.base_allowed_tools),
-    so there is exactly one --allowedTools flag in the final argv, never two.
-
-    GA-16 / MTO-5: health.check_reconciler_permissions accepts this whole
-    per-verb grant as satisfying the 'maestro' requirement, dual with the
-    coarser ``Bash(maestro:*)`` pattern a human grants by hand -- the assert
-    below reads dispatcher.RECONCILER_REQUIRED_TOOLS (the same shared constant
-    that check reads) so the two can never silently drift apart; it never
-    changes this function's returned grant.
+    RB-16: the maestro CLI verb grant used to be baked in here too,
+    unconditionally and identically for every phase (_AGENT_TOOL_VERBS in
+    full) -- it no longer is. This function builds the `SessionManager`'s
+    `base_allowed_tools` exactly ONCE per sweep (`_nudge`/`cmd_dispatch`
+    below, before the per-key spawn loop even starts), so it structurally
+    cannot vary by phase; the verb grant needs to, so it moved to
+    `dispatcher.phase_verb_grant`/`phase_verb_denylist`, resolved per key
+    inside `dispatcher.dispatch()`'s own spawn loop instead (the same site
+    `phase_denylist`/`resolved_allowed_tools` already live at) and passed as
+    that call's `allowed_tools`/`disallowed_tools` args. `ClaudeCliSessions.
+    spawn` still merges this base with the per-key list into exactly ONE
+    --allowedTools flag, never two -- unchanged.
     """
-    assert disp.RECONCILER_REQUIRED_TOOLS[0] == disp.MAESTRO_COARSE_GRANT == "Bash(maestro:*)", \
-        "dispatcher.RECONCILER_REQUIRED_TOOLS's maestro-verb entry moved -- update both sites"
-    rules = disp.maestro_verb_grant(_AGENT_TOOL_VERBS)
+    rules: list[str] = []
     if cfg.reconcile_web_tools:
         rules += ["WebSearch", "WebFetch"]
     return rules

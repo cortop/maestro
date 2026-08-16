@@ -651,17 +651,29 @@ def _pi_permission_gap(cfg: Config) -> str | None:
     settings.json or opencode's opencode.jsonc, a pi binding has no
     repo-local permission file of its own to read).
 
+    RB-16 fix round: `PiCliSessions.spawn` now installs the guard's own
+    extension tree into a PER-KEY subdirectory (`store.pi_agent_key_dir`),
+    not the bare board-wide dir, so each real spawn's ``pi_guard_data.json``
+    can carry its own phase-narrowed verb set without a race against a
+    concurrently-spawned, differently-phased key (see that function's
+    docstring). This check follows suit: ``ok`` once ANY key's extension has
+    been installed under ``<pi_agent_dir>/by-key/*/`` -- the same "has pi ever
+    actually been gated on this board" smoke signal as before, just resolved
+    against the directory a real spawn now writes to.
+
     Read-only existence check -- never calls `pi_guard.install` itself (a
     doctor check must never write); `PiCliSessions.spawn` is what actually
     installs it, belt-and-suspenders re-verified there on every real spawn
-    (see its own docstring). Returns ``None`` when the extension is already
-    installed, else a short reason -- an ungated pi board must never report
-    ``ok`` (the Note this check exists for: "a green doctor on an ungated pi
-    board is the worst possible output")."""
-    ext = pi_guard.extension_path(store.pi_agent_dir(cfg.home))
-    if ext.exists():
-        return None
-    return f"pi guard extension not installed at {ext} -- no pi session has spawned yet"
+    (see its own docstring). Returns ``None`` when at least one key's
+    extension is already installed, else a short reason -- an ungated pi
+    board must never report ``ok`` (the Note this check exists for: "a green
+    doctor on an ungated pi board is the worst possible output")."""
+    by_key = store.pi_agent_dir(cfg.home) / "by-key"
+    if by_key.is_dir():
+        for key_dir in by_key.iterdir():
+            if pi_guard.extension_path(key_dir).exists():
+                return None
+    return f"pi guard extension not installed under {by_key} -- no pi session has spawned yet"
 
 
 def check_reconciler_permissions(cfg: Config, now: float) -> dict:
