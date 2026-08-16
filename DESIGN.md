@@ -76,6 +76,33 @@ are isolated; one dying is one ticket, self-healed next sweep. The no-subagent-s
 rule is honored because fan-out lives only at two top-level layers (dispatcher→reconcilers,
 `qa` reconciler→its one Standards-axis subagent), never inside `implementing`.
 
+## Acceptance criteria
+
+A ticket's `## Acceptance criteria` are `- [ ]` checkbox lines in `spec.md`, each
+identified by a content hash of its own line text (`snapshot.ac_hash`) — so a human's
+edit to an AC's wording invalidates whatever was attested or checked against the old
+text, rather than silently matching by index. Two evidence tiers gate `awaiting-ci`:
+
+- **Self-attestation** (`maestro verify-ac`) — the implementer's own structured claim
+  (what/where/result), independently re-checked by the `qa` phase's verdict. This is
+  the default for prose ACs, and stays the only tier for a home with no `test_command`.
+- **Machine-checked** (T-79, opt-in per AC) — a trailing annotation on the checkbox
+  line, `(test: <path>[::<id>])` or `(check: <shell command>)`, makes that ONE AC
+  provable by a subprocess instead of an attestation. With `test_command` configured
+  (and the ticket not `mode: local`), the `verifying` stage (below) runs each
+  annotated AC's own check at the same tree state as the suite and records it as an
+  `AcCheckCaptured` event; a current-tree passing capture is what `awaiting-ci` then
+  requires for that AC — `verify-ac` still records narrative evidence, it just stops
+  being load-bearing. `test:` requires the named test (or, for a bare file path, some
+  test in that file) to actually be part of the branch's diff against base and pass —
+  the primitive that catches a green suite whose diff never added the test it claims
+  to (the false-attestation failure mode this exists to close). Nothing here weakens
+  independent QA: it still judges every AC, prose or annotated, and for an annotated
+  one its job sharpens to auditing whether the named test's assertions actually match
+  the AC's words. Unannotated ACs, a `test_command`-unset home, and a `mode: local`
+  ticket are all unaffected — the annotation ships dark by construction, so the ~130
+  pre-existing prose-only specs keep working untouched.
+
 ## State machine
 
 See [`docs/state-machine.md`](docs/state-machine.md) for the maintained phase diagram
