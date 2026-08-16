@@ -14,6 +14,7 @@ class Phase(str, Enum):
     AWAITING_HUMAN = "awaiting-human"  # blocked on an answer/approval (SLEEPING)
     READY = "ready"                  # approved + unblocked; waiting for a worker slot
     IMPLEMENTING = "implementing"    # ralph-loop running in a worktree
+    VERIFYING = "verifying"          # dispatcher runs cfg.test_command itself (SLEEPING)
     QA = "qa"                        # adversarial review of a diff; may not Edit/Write
     RESEARCHING = "researching"      # research agent active in a worktree
     AWAITING_CI = "awaiting-ci"      # PR open; polling checks on a timer (SLEEPING)
@@ -48,6 +49,13 @@ PHASE_CLASS: dict[Phase, PhaseClass] = {
     Phase.READY: "active",
     # the ralph-loop coding step runs to completion on every spawn.
     Phase.IMPLEMENTING: "active",
+    # RB-14: PR-not-open-yet analog of AWAITING_CI below -- the dispatcher's
+    # own `sync_test_runs` tick starts/polls `cfg.test_command` as a tracked,
+    # detached subprocess directly (never an LLM call) and advances the phase
+    # itself once it exits, exactly the way `sync_vcs` polls CI/reviews for
+    # AWAITING_CI/IN_REVIEW -- so no reconciler is ever spawned to sit and
+    # wait on a test run either.
+    Phase.VERIFYING: "sleeping",
     # the adversarial review step runs to completion on every spawn.
     Phase.QA: "active",
     # the research step runs to completion on every spawn.
@@ -133,8 +141,17 @@ TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.AWAITING_HUMAN: {Phase.READY, Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.TRIAGING,
                            Phase.RESEARCHING, Phase.DEGRADED, Phase.TERMINATING},
     Phase.READY: {Phase.IMPLEMENTING, Phase.RESEARCHING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
-    Phase.IMPLEMENTING: {Phase.QA, Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DEGRADED,
-                         Phase.AWAITING_HUMAN, Phase.TERMINATING, Phase.DONE},
+    # RB-14: `-> QA` survives directly for the byte-identical-when-unconfigured
+    # case (`test_command` unset, or a `mode: local` binding) -- `ops.set_phase`
+    # transparently redirects the same call to VERIFYING instead whenever a
+    # real test-run gate applies, so this edge is only ever actually taken
+    # dark/local. `-> VERIFYING` is that redirect's destination.
+    Phase.IMPLEMENTING: {Phase.QA, Phase.VERIFYING, Phase.AWAITING_CI, Phase.IN_REVIEW,
+                         Phase.DEGRADED, Phase.AWAITING_HUMAN, Phase.TERMINATING, Phase.DONE},
+    # RB-14: the dispatcher's own `sync_test_runs` routes a passing run on to
+    # QA and a failing one back to IMPLEMENTING -- no reconciler ever chooses
+    # either edge itself.
+    Phase.VERIFYING: {Phase.QA, Phase.IMPLEMENTING, Phase.DEGRADED, Phase.TERMINATING},
     Phase.QA: {Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.DEGRADED,
               Phase.AWAITING_HUMAN, Phase.TERMINATING},
     Phase.RESEARCHING: {Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING, Phase.DONE},

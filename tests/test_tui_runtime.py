@@ -1360,6 +1360,32 @@ def test_researching_rows_render_without_crash(seeded_home):
     asyncio.run(_inner())
 
 
+def test_verifying_phase_in_phase_style():
+    """RB-14: _PHASE_STYLE must contain 'verifying' with a non-empty style."""
+    from maestro.tui import _PHASE_STYLE
+    assert "verifying" in _PHASE_STYLE, "verifying phase not in _PHASE_STYLE"
+    assert _PHASE_STYLE["verifying"], "verifying style must be non-empty"
+
+
+def test_verifying_rows_render_without_crash(seeded_home):
+    """RB-14: DataTable with a verifying-phase ticket mounts and renders without error."""
+    from maestro import event_log, snapshot as snap_mod
+
+    event_log.append(seeded_home, "T-5", "PhaseChanged",
+                     {"phase": "verifying", "reason": "test"}, actor="test")
+    snap_mod.rebuild(seeded_home, "T-5")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_create_modal_has_kind_model_effort_fields(seeded_home):
     """_CreateModal exposes kind Select, model Input, and effort Input widgets."""
     from textual.widgets import Select

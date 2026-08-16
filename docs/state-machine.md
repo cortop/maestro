@@ -10,6 +10,7 @@ stateDiagram-v2
     state "awaiting-human" as awaiting_human
     state "ready" as ready
     state "implementing" as implementing
+    state "verifying" as verifying
     state "qa" as qa
     state "researching" as researching
     state "awaiting-ci" as awaiting_ci
@@ -40,6 +41,11 @@ stateDiagram-v2
     implementing --> in_review
     implementing --> qa
     implementing --> terminating
+    implementing --> verifying
+    verifying --> degraded
+    verifying --> implementing
+    verifying --> qa
+    verifying --> terminating
     qa --> awaiting_ci
     qa --> awaiting_human
     qa --> degraded
@@ -68,7 +74,7 @@ stateDiagram-v2
     classDef sleeping fill:#fff3cd,stroke:#997404
     classDef terminal fill:#d1e7dd,stroke:#0f5132
     classDef active fill:#cfe2ff,stroke:#084298
-    class awaiting_ci awaiting_human degraded in_review sleeping
+    class awaiting_ci awaiting_human degraded in_review verifying sleeping
     class done terminal
     class implementing qa ready researching terminating triaging active
 ```

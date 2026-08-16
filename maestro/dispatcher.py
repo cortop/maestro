@@ -1314,6 +1314,190 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
                  expect=fresh.observed_seq)
 
 
+# RB-14: board-wide cap on IN-FLIGHT dispatcher-owned test-run subprocesses --
+# mirrors `_RUNNER_DEFAULT_CONCURRENCY`'s shape (a small, explicit, documented
+# ceiling below), but is its own knob: a test run costs CPU/IO, never a token,
+# so it has nothing to do with `max_concurrency` (agent sessions) or any
+# per-runner LLM cap. A plain module constant, not per-repo config -- nothing
+# here has ever needed per-repo tuning; raise it in code if that changes.
+TEST_RUN_CONCURRENCY = 4
+
+
+def _test_run_dir(home: Path, key: str) -> Path:
+    return home / "derived" / "testruns" / store.validate_key(key)
+
+
+def _test_run_result_path(home: Path, key: str) -> Path:
+    """Where a detached test-run subprocess (`_start_test_run`) writes its own
+    exit code once done -- the only way its result survives past THIS
+    `dispatch()` process exiting (see `_start_test_run`'s docstring)."""
+    return _test_run_dir(home, key) / "result"
+
+
+def _test_run_log_path(home: Path, key: str) -> Path:
+    return _test_run_dir(home, key) / "output.log"
+
+
+def sync_test_runs(cfg: Config, now: float) -> dict:
+    """RB-14: dispatcher-owned test verification -- the `sync_vcs` pattern
+    (poll/advance a sleeping phase directly, no reconciler spawn) applied to
+    `cfg.test_command` instead of a PR. For every `verifying` ticket: start its
+    test run as a tracked, detached subprocess if none is in flight yet, or
+    fold one that has already finished and route the phase on (`qa` on a pass;
+    back to `implementing`, with a bounded failure excerpt, on a fail).
+
+    Never blocks: a started run is left running (`start_new_session=True`,
+    exactly like `sessions.ClaudeCliSessions.spawn`) and this function returns
+    immediately either way -- a still-running key is simply left for a later
+    sweep to fold. The in-flight run holds *key*'s existing per-ticket claim
+    (`claims.write_claim(..., kind="testrun")`) -- the SAME runner-agnostic
+    liveness/dedup machinery a reconciler session's claim already uses
+    (RF-2's Notes: `claims._verdict` keys only on pid + `start_epoch`, never
+    the spawned command string), not a second mechanism.
+
+    No-op (`{"checked": 0}`) when `test_command` is unset -- ships dark, same
+    posture as every other RB-12/RB-14 gate.
+    """
+    home = cfg.home
+    if not cfg.test_command:
+        return {"checked": 0}
+    from . import ops, repos as repos_mod
+
+    checked = 0
+    started: list[str] = []
+    folded: list[str] = []
+    # T-52: the same race `_spawn_lock_target` exists to close -- two
+    # concurrent `dispatch()` calls (a launchd tick racing `cli._nudge`) must
+    # not both decide the same key's claim is free and both Popen a test run
+    # for it. Held for this whole sweep's worth of verifying keys, mirroring
+    # the real spawn region's own single-lock-for-the-region shape; this
+    # function always runs (and fully returns) before `dispatch()`'s own
+    # `with store.file_lock(_spawn_lock_target(home)):` block, so there is no
+    # nesting/deadlock risk.
+    with store.file_lock(_spawn_lock_target(home)):
+        for key in list_keys(home):
+            snap = snap_mod.load(home, key)
+            if Phase(snap.phase) != Phase.VERIFYING:
+                continue
+            checked += 1
+            claim = claims.read_claim(home, key)
+            if claim is not None and claim.get("kind") == "testrun":
+                if claims.pid_alive(claim.get("pid")):
+                    continue  # in flight -- fold on a later sweep
+                _fold_test_run(cfg, key, claim)
+                folded.append(key)
+                continue
+            if claim is not None:
+                continue  # some other claim still holds this key -- leave it alone
+            binding = repos_mod.resolve(cfg, home, key)
+            if binding.mode == "local":
+                # Should never route here (the set_phase redirect excludes
+                # mode:local), but never wedge a ticket that somehow did.
+                ops.set_phase(cfg, key, Phase.QA, reason="mode:local, no suite to run",
+                              actor="dispatcher")
+                continue
+            cwd = _worker_cwd(cfg, key)
+            tree_key = ops._tree_state_key(cwd)
+            cached = snap.test_runs.get(tree_key)
+            if cached is not None:
+                _route_test_run(cfg, key, cached, actor="dispatcher")
+                continue
+            in_flight = sum(
+                1 for c in claims.all_claims(home).values()
+                if c.get("kind") == "testrun" and claims.pid_alive(c.get("pid")))
+            if in_flight >= TEST_RUN_CONCURRENCY:
+                continue  # at the board-wide cap -- retried next sweep
+            _start_test_run(home, key, cwd, cfg.test_command)
+            started.append(key)
+    return {"checked": checked, "started": started, "folded": folded}
+
+
+def _start_test_run(home: Path, key: str, cwd: Path, command: str) -> None:
+    """Launch *command* for *key* as a detached, tracked subprocess -- the
+    Popen half of `ops.capture_tests`'s own blocking `subprocess.run`, made
+    non-blocking. Wrapped in a shell so the CHILD, not this (about-to-exit)
+    `dispatch()` process, writes its own exit code once done: a detached
+    (`start_new_session=True`) child is reparented to init the moment this
+    process exits, so a LATER `maestro dispatch` invocation is never its
+    parent and can't `waitpid()` it -- it can only read what the child left
+    behind for itself (`_test_run_result_path`/`_test_run_log_path`)."""
+    import shlex
+    import subprocess
+
+    result_path = _test_run_result_path(home, key)
+    log_path = _test_run_log_path(home, key)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.unlink(missing_ok=True)
+    tmp_result = result_path.with_suffix(".tmp")
+    wrapped = (f"{command} > {shlex.quote(str(log_path))} 2>&1; "
+              f"echo $? > {shlex.quote(str(tmp_result))} && "
+              f"mv {shlex.quote(str(tmp_result))} {shlex.quote(str(result_path))}")
+    # T-52's own reservation order: write the claim with THIS process's own
+    # pid (self-healing the instant this process dies too, before Popen even
+    # runs) first, then overwrite with the real child pid -- see
+    # `sessions.ClaudeCliSessions.spawn`'s identical comment; claims are
+    # runner-agnostic (RF-2), so a bare subprocess needs the exact same fix,
+    # not a second one.
+    claims.write_claim(home, key, os.getpid(), f"testrun-{key}",
+                       cwd=str(cwd), kind="testrun")
+    try:
+        proc = subprocess.Popen(["sh", "-c", wrapped], cwd=str(cwd),
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except Exception:
+        claims.release(home, key)
+        raise
+    claims.write_claim(home, key, proc.pid, f"testrun-{key}",
+                       cwd=str(cwd), kind="testrun")
+
+
+def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
+    """Read back a finished test-run subprocess's result and route the phase
+    on it. A missing/unparsable result (the wrapper shell itself was killed,
+    or crashed, before it could write one) folds as a failure -- never wedges
+    the ticket in `verifying` forever over a process that's already gone."""
+    home = cfg.home
+    result_path = _test_run_result_path(home, key)
+    log_path = _test_run_log_path(home, key)
+    claims.release(home, key)
+    cwd = claim.get("cwd") or str(_worker_cwd(cfg, key))
+    from . import ops
+
+    tree_key = ops._tree_state_key(Path(cwd))
+    try:
+        exit_code = int(result_path.read_text(encoding="utf-8").strip())
+        output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    except (OSError, ValueError):
+        exit_code = -1
+        output = "[maestro] test-run process left no result -- treated as a failure"
+    result_path.unlink(missing_ok=True)
+    log_path.unlink(missing_ok=True)
+    payload = ops._record_test_run(cfg, key, tree_key=tree_key, command=cfg.test_command,
+                                   exit_code=exit_code, output=output, actor="dispatcher")
+    _route_test_run(cfg, key, payload, actor="dispatcher")
+
+
+def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str) -> None:
+    """Advance *key* off `verifying` per a captured test-run record -- the
+    routing half both the freshly-folded and the tree-cache-reuse paths in
+    `sync_test_runs` share, so the two can never route the same shape of
+    record differently."""
+    from . import ops
+
+    fresh = snap_mod.rebuild(cfg.home, key)
+    if record.get("passed"):
+        ops.set_phase(cfg, key, Phase.QA, reason="tests passed", actor=actor,
+                      expect=fresh.observed_seq)
+        return
+    excerpt = record.get("failure_excerpt") or ""
+    reason = f"tests failed (exit {record.get('exit_code')})"
+    if excerpt:
+        reason += f": {excerpt}"
+    ops.set_phase(cfg, key, Phase.IMPLEMENTING, reason=reason, actor=actor,
+                  expect=fresh.observed_seq)
+
+
 def maintenance_tick(home: Path, name: str, interval: int, now: float, fn) -> dict | None:
     """Generic cursor-gated maintenance tick: run ``fn()`` at most once per
     ``interval`` seconds, persisted in ``derived/.<name>_cursor.json``
@@ -1838,6 +2022,9 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg, now)
         vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
         worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
+        # RB-14: same sleeping-phase-observation shape as sync_vcs just above,
+        # applied to `verifying`/`cfg.test_command` instead of a PR.
+        _run_hook("sync_test_runs", hook_errors, sync_test_runs, cfg, now, default={})
         _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
         _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
         _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
@@ -1869,6 +2056,16 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     # last claim commit below -- see _spawn_lock_target's docstring for why.
     with store.file_lock(_spawn_lock_target(home)):
         active = sessions.list_active()
+        # RB-14: a dispatcher-owned test-run subprocess is NOT an agent
+        # session -- it must never eat into `max_concurrency`'s fleet-wide
+        # agent-slot budget (that's what `TEST_RUN_CONCURRENCY` bounds
+        # instead). `sessions.list_active()` for every REAL backend delegates
+        # to `claims.active_keys`, which has no notion of `kind` -- filter its
+        # test-run-claimed keys back out here, at the one place that budget is
+        # computed, rather than teaching every backend's `list_active()` (or
+        # `claims.active_keys` itself, whose other callers -- e.g. spend.py's
+        # cost-settlement check -- have no reason to make the same exclusion).
+        active -= {k for k, c in claims.all_claims(home).items() if c.get("kind") == "testrun"}
         due: list[tuple[str, str]] = []
         claimed: list[str] = []
         observed_seq_by_key: dict[str, int] = {}
@@ -2348,6 +2545,13 @@ _PHASE_COMMAND_SUFFIX = {
     Phase.QA: "qa",
     Phase.AWAITING_CI: "passive",
     Phase.IN_REVIEW: "passive",
+    # RB-14: sleeping, dispatcher-owned (`sync_test_runs`) -- never actually
+    # spawned, since `is_due` has no signal that wakes `verifying`, but listed
+    # here anyway for the same documentation-completeness reason AWAITING_CI/
+    # IN_REVIEW are: if it ever somehow WERE spawned, "passive" is the
+    # correct, harmless fallback (a no-op reconcile), never a nonexistent
+    # `/maestro-reconcile-verifying` command.
+    Phase.VERIFYING: "passive",
     Phase.DEGRADED: "passive",
     Phase.TERMINATING: "passive",
 }

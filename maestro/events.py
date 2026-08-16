@@ -30,12 +30,19 @@ IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one
 # Self-review
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  evidence: {what, where, result}; content-hash keyed
 
-# Test-run gate (RB-12): maestro's OWN captured proof the suite passes at a given
-# tree state -- produced only by ops.capture_tests's own subprocess call, never
-# an agent's self-attestation. See ops._refuse_if_tests_stale (the gate on
-# implementing -> qa) and snapshot.Snapshot.test_runs (keyed by tree_key: HEAD
-# sha + a hash of the dirty tree, so a stale pass never satisfies a changed tree).
-TEST_RUN_CAPTURED = "TestRunCaptured"   # {tree_key, command, exit_code, passed}
+# Test-run gate (RB-12/RB-14): maestro's OWN captured proof the suite passes at
+# a given tree state -- produced only by a real subprocess call (ops.capture_tests,
+# or RB-14's dispatcher-owned async equivalent, dispatcher.sync_test_runs), never
+# an agent's self-attestation. See ops._tests_stale_reason (whether the current
+# tree state already has a satisfying record) and snapshot.Snapshot.test_runs
+# (keyed by tree_key: HEAD sha + a hash of the dirty tree, so a stale pass never
+# satisfies a changed tree).
+TEST_RUN_CAPTURED = "TestRunCaptured"   # {tree_key, command, exit_code, passed, failure_excerpt?}
+                                         # failure_excerpt (RB-14): a bounded tail of the
+                                         # run's combined stdout+stderr, present only when
+                                         # exit_code != 0 -- what a red VERIFYING routes back
+                                         # to `implementing` with, so the next reconciler
+                                         # starts from the actual failure, never re-derives it.
 
 # Approval
 # AD-7: historical-only -- `maestro approve` and the tier-2 implementing gate it

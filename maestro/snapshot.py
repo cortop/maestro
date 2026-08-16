@@ -384,11 +384,18 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.TEST_RUN_CAPTURED:
             tk = p.get("tree_key")
             if tk:
-                s.test_runs[tk] = {
+                rec = {
                     "command": p.get("command"),
                     "exit_code": p.get("exit_code"),
                     "passed": bool(p.get("passed")),
                 }
+                # RB-14: only present on a failing record (see events.py) --
+                # carried into the snapshot so a CACHED record (one already
+                # captured before `verifying` re-checks it) still has an
+                # excerpt to route with, not just a freshly-folded one.
+                if p.get("failure_excerpt"):
+                    rec["failure_excerpt"] = p["failure_excerpt"]
+                s.test_runs[tk] = rec
         elif t == E.RESEARCH_PROPOSED:
             s.proposal_path = p.get("proposal_path", s.proposal_path)
         elif t == E.APPROVED:
