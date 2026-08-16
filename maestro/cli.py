@@ -124,6 +124,7 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
             base_allowed_tools=_reconciler_tool_grants(cfg),
             capture_session_logs=cfg.capture_session_logs,
             session_log_format=cfg.session_log_format,
+            max_session_turns=cfg.max_session_turns,
             unverified_claim_max_age=cfg.unverified_claim_max_age,
         ),
         "opencode": OpencodeCliSessions(
@@ -568,6 +569,7 @@ def cmd_dispatch(args) -> int:
                 base_allowed_tools=_reconciler_tool_grants(cfg),
                 capture_session_logs=cfg.capture_session_logs,
                 session_log_format=cfg.session_log_format,
+                max_session_turns=cfg.max_session_turns,
                 unverified_claim_max_age=cfg.unverified_claim_max_age),
             "opencode": OpencodeCliSessions(
                 cfg.home,

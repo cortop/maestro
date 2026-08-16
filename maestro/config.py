@@ -48,6 +48,20 @@ class Config:
     # the comment there.
     max_failures: int = 4
     max_impl_turns: int = 20               # ralph-loop circuit breaker
+    # RB-15: NOT max_impl_turns -- that counter is self-reported (a session that
+    # never calls `maestro impl-turn`, or calls it once, binds nothing; measured
+    # 2026-08-15: turn 2 by that counter, 191 raw model turns, 61.1M input tokens,
+    # ~95x off). This bounds RAW MODEL TURNS per spawned session instead, enforced
+    # at a layer the agent cannot decline: natively at spawn where the runner
+    # supports one (`ClaudeCliSessions` passes `--max-turns`; `OpencodeCliSessions`
+    # bakes a `steps:` ceiling into the generated `--agent` stub -- see
+    # `skills_install._opencode_agent_stub`), with `max_turn_wallclock_seconds`
+    # below as the dispatcher-side backstop for a runner with no native cap (pi
+    # has none -- checked `--help` and the compiled CLI's own strings) or that
+    # ignores the one it was given. 0 (default) disables the native cap entirely
+    # -- an existing home is unchanged until it opts in, matching
+    # min_spawn_interval/test_command's posture.
+    max_session_turns: int = 0
     # Watchdog: reap a claim whose session has run past this many seconds (0 disables).
     # Generous by default -- real implementation sessions legitimately run 30-60+ min.
     max_session_seconds: int = 7200
@@ -62,6 +76,18 @@ class Config:
     # Exempt when the claim has no `log_path` (capture_session_logs = false --
     # missing data, never reap on it; falls back to the age-based rule only).
     no_output_timeout: int = 600
+    # RB-15: a THIRD, independent watchdog clock -- the dispatcher-side backstop
+    # for `max_session_turns` above. Deliberately separate from
+    # `max_session_seconds` (which stays a generous ceiling so a legitimate
+    # 30-60+ min session is never killed) -- this one is meant to be set
+    # SHORTER, as a wall-clock approximation of "this session has almost
+    # certainly blown its turn budget by now". Wall-clock, not a real turn
+    # count, on purpose: the dispatcher can't observe a runner's true turn
+    # count without parsing its transcript, and RB-15 deliberately doesn't
+    # build that -- see `run_watchdog`. Independent of `max_session_turns`
+    # itself (a board running only `pi`, which has no native cap at all, can
+    # set this alone). 0 (default) disables the backstop.
+    max_turn_wallclock_seconds: int = 0
     # MTO-1: `git worktree add`/adopt's own timeout (worktree_ensure), separate from every
     # other short git plumbing call in ops.py (those stay on the internal 30s _GIT_TIMEOUT).
     # A monorepo checkout (~230k tracked files) measured ~56s; 30s killed it mid-checkout,
@@ -335,9 +361,12 @@ def load(home_arg: str | None = None) -> Config:
         cfg.backoff_cap = int(m.get("backoff_cap", cfg.backoff_cap))
         cfg.max_failures = int(m.get("max_failures", cfg.max_failures))
         cfg.max_impl_turns = int(m.get("max_impl_turns", cfg.max_impl_turns))
+        cfg.max_session_turns = int(m.get("max_session_turns", cfg.max_session_turns))
         cfg.max_session_seconds = int(m.get("max_session_seconds", cfg.max_session_seconds))
         cfg.max_spawn_attempts = int(m.get("max_spawn_attempts", cfg.max_spawn_attempts))
         cfg.no_output_timeout = int(m.get("no_output_timeout", cfg.no_output_timeout))
+        cfg.max_turn_wallclock_seconds = int(
+            m.get("max_turn_wallclock_seconds", cfg.max_turn_wallclock_seconds))
         cfg.worktree_timeout = int(m.get("worktree_timeout", cfg.worktree_timeout))
         raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
         cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
@@ -516,6 +545,13 @@ max_failures = 4                 # lifetime (never-reset) failure count -> dead-
                                   # (DEGRADED); a one-shot trip, not a per-attempt retry
                                   # budget -- see the field's docstring in this module.
 max_impl_turns = 20
+# max_session_turns = 250         # RB-15: raw model-turn cap per spawned session (0
+                                  # disables), enforced natively at spawn where the runner
+                                  # supports one (claude --max-turns; opencode's generated
+                                  # --agent stub gets a `steps:` ceiling) -- NOT the same
+                                  # counter as max_impl_turns (self-reported implementer/QA
+                                  # rounds). pi has no native equivalent; relies entirely on
+                                  # max_turn_wallclock_seconds below.
 # max_session_seconds = 7200      # kill+fail a claim whose session ran longer than this
                                   # (0 disables). Generous default -- real implementation
                                   # sessions legitimately run 30-60+ min.
@@ -525,6 +561,13 @@ max_impl_turns = 20
                                   # to in this many seconds (0 disables); independent of
                                   # max_session_seconds above. Exempt when the claim has no
                                   # log_path (capture_session_logs = false).
+# max_turn_wallclock_seconds = 900  # RB-15: dispatcher-side backstop for max_session_turns
+                                  # (0 disables) -- a wall-clock approximation ("this session
+                                  # has almost certainly blown its turn budget by now"),
+                                  # deliberately shorter than max_session_seconds above.
+                                  # pi's ONLY protection (no native turn cap of its own);
+                                  # defense-in-depth for claude/opencode too, in case the
+                                  # native cap is ignored.
 worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1); raise this
                                   # for a monorepo whose checkout legitimately takes longer --
                                   # never scale it down, a killed-mid-checkout worktree looks
