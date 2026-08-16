@@ -1,10 +1,16 @@
 """L-7/GA-3: spawned reconciler sessions must get the maestro CLI agent verbs
-(never the bare wildcard) and WebSearch/WebFetch via --allowedTools."""
+(never the bare wildcard) and WebSearch/WebFetch via --allowedTools.
+
+RB-16: the maestro-verb grant is phase-scoped (`dispatcher.phase_verb_grant`/
+`phase_verb_denylist`), resolved per key at spawn time -- `_seed_ready` puts
+every ticket in this file's tests in `ready`, so `_expected_grant` below
+builds its expectation from `ready`'s own narrowed grant, not the flat
+`_AGENT_TOOL_VERBS` every phase got before this ticket."""
 import argparse
 import os
 from unittest.mock import MagicMock, patch
 
-from maestro import cli, event_log, inbox, snapshot as snap_mod, store
+from maestro import cli, dispatcher as disp, event_log, inbox, snapshot as snap_mod, store
 from maestro.cli import _AGENT_TOOL_VERBS
 from maestro.config import load
 from maestro.dispatcher import MERGE_DENYLIST
@@ -71,10 +77,14 @@ def test_config_repos_table_parses_reconcile_allowed_tools(home):
     assert cfg.repos["beta"]["reconcile_allowed_tools"] == []
 
 
-def _expected_grant(*, web_tools: bool) -> str:
-    rules = [f"Bash(maestro {verb}:*)" for verb in _AGENT_TOOL_VERBS]
+def _expected_grant(*, web_tools: bool, phase: str = Phase.READY.value) -> str:
+    # Argv order mirrors ClaudeCliSessions.spawn's own merge: the process-wide
+    # base (web tools) first, then the per-key additions (RB-16's phase verb
+    # grant, then GA-10's resolved_allowed_tools).
+    rules: list[str] = []
     if web_tools:
         rules += ["WebSearch", "WebFetch"]
+    rules += disp.phase_verb_grant(phase)
     return ",".join(rules)
 
 
@@ -92,9 +102,9 @@ def test_dispatch_spawn_command_includes_web_search_and_fetch(home):
 
 
 def test_dispatch_grants_maestro_verbs_without_web_tools_when_disabled(home):
-    """reconcile_web_tools=false must still grant the maestro CLI verbs -- only
-    WebSearch/WebFetch drop out (GA-3: previously --allowedTools was omitted
-    entirely, disarming the reconciler's own bookkeeping)."""
+    """reconcile_web_tools=false must still grant the phase's maestro CLI
+    verbs -- only WebSearch/WebFetch drop out (GA-3: previously --allowedTools
+    was omitted entirely, disarming the reconciler's own bookkeeping)."""
     (home / "config.toml").write_text("[maestro]\nreconcile_web_tools = false\n")
     _seed_ready(home)
     captured, capture_popen = _capture_popen_cmds()
@@ -109,7 +119,7 @@ def test_dispatch_grants_maestro_verbs_without_web_tools_when_disabled(home):
     assert value == _expected_grant(web_tools=False)
     assert "WebSearch" not in value
     assert "WebFetch" not in value
-    for verb in _AGENT_TOOL_VERBS:
+    for verb in disp._PHASE_VERB_GRANT_BY_SUFFIX["ready"]:
         assert f"Bash(maestro {verb}:*)" in value
 
 
@@ -129,7 +139,7 @@ def test_nudge_spawn_command_includes_web_search_and_fetch(home):
     assert len(captured) == 1
     cmd = captured[0]
     idx = cmd.index("--allowedTools")
-    assert cmd[idx + 1] == _expected_grant(web_tools=True)
+    assert cmd[idx + 1] == _expected_grant(web_tools=True, phase=Phase.AWAITING_HUMAN.value)
 
 
 def test_agent_tool_verbs_named_exactly():
@@ -179,8 +189,8 @@ def test_agent_grant_matches_cli_agent_tags():
 
 def test_dispatch_allowed_tools_composes_with_merge_denylist(home):
     """AD-7: every key's spawn argv must carry both --disallowedTools (the
-    unconditional gh-pr-merge deny) and --allowedTools (the maestro grant),
-    with no overlap between them."""
+    unconditional gh-pr-merge deny, plus RB-16's phase-verb deny) and
+    --allowedTools (the phase-scoped maestro grant), with no overlap."""
     _seed_ready(home)
     captured, capture_popen = _capture_popen_cmds()
     with patch("subprocess.Popen", side_effect=capture_popen):
@@ -190,7 +200,7 @@ def test_dispatch_allowed_tools_composes_with_merge_denylist(home):
     cmd = captured[0]
     assert "--disallowedTools" in cmd
     deny_value = cmd[cmd.index("--disallowedTools") + 1]
-    assert deny_value == ",".join(MERGE_DENYLIST)
+    assert deny_value == ",".join(MERGE_DENYLIST + disp.phase_verb_denylist(Phase.READY.value))
     allow_value = cmd[cmd.index("--allowedTools") + 1]
     assert not (set(deny_value.split(",")) & set(allow_value.split(",")))
 
@@ -250,7 +260,7 @@ def test_dispatch_per_repo_allowed_tools_reach_their_own_spawn_argv_only(home):
         cmd = by_key[key]
         assert cmd.count("--allowedTools") == 1, f"{key}: expected exactly one --allowedTools flag"
         value = cmd[cmd.index("--allowedTools") + 1].split(",")
-        for verb in _AGENT_TOOL_VERBS:
+        for verb in disp._PHASE_VERB_GRANT_BY_SUFFIX["ready"]:
             assert f"Bash(maestro {verb}:*)" in value
         assert "WebSearch" in value and "WebFetch" in value
         assert other_tool not in value, f"{key}'s argv leaked the other repo's tool"

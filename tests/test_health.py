@@ -826,17 +826,24 @@ def test_reconciler_permissions_ok_when_permission_mode_bypasses(home, tmp_path,
 
 
 def test_reconciler_permissions_emitted_maestro_grant_satisfies_check(home, tmp_path, monkeypatch):
-    """MTO-5 AC1: the exact --allowedTools grant cli._reconciler_tool_grants
-    emits at spawn time (the narrow per-verb form -- never the bare wildcard,
+    """MTO-5 AC1: the narrow per-verb form (never the bare wildcard,
     test_bare_wildcard_never_appears) satisfies the 'maestro' portion of this
     check. The check and the spawner now agree on what 'granted' means,
     instead of the check demanding a literal (Bash(maestro:*)) the spawner is
-    tested to never emit."""
+    tested to never emit.
+
+    RB-16: a real spawn's own --allowedTools is phase-narrowed now
+    (dispatcher.phase_verb_grant), so it's no longer the right thing to check
+    a repo's static settings.json against -- a repo's settings can't vary by
+    phase the way a spawn's argv does. `dispatcher.maestro_verb_grant()`
+    (its default, the full AGENT_TOOL_VERBS ceiling) is: the union of every
+    verb ANY phase could ever request, exactly what `_missing_maestro_grant`
+    checks for (see its own docstring)."""
     monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
     cfg = Config(home=home, repo_path=str(repo), reconcile_web_tools=False)
-    emitted = cli._reconciler_tool_grants(cfg)   # the real spawn-time grant
+    emitted = disp.maestro_verb_grant()          # the full per-phase-union ceiling
     assert "Bash(maestro:*)" not in emitted      # never the bare wildcard (AD-1)
     _write_repo_settings(repo, allow=emitted + ["Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)"])
 
