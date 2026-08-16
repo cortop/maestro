@@ -168,6 +168,29 @@ def pi_agent_dir(home: Path) -> Path:
     return home / ".pi-agent"
 
 
+def pi_agent_key_dir(pi_agent_dir: Path, key: str) -> Path:
+    """RB-16 fix round: per-KEY isolation for the pi guard's OWN installed
+    files (``pi_guard.install``'s ``extensions/`` dir), so a phase-narrowed
+    ``pi_guard_data.json`` (one key's own `maestro` verb allowlist) can never
+    be overwritten mid-run by a DIFFERENT key's spawn while the first key's
+    pi process is still alive -- ``pi_guard_check.py`` re-reads that file
+    fresh on every single tool call, not just at process start, so sharing
+    one file across concurrently-running, differently-phased pi reconcilers
+    (``max_concurrency`` allows more than one at once) would let one key's
+    session silently run under another key's verb grant.
+
+    Deliberately NOT a change to ``pi_agent_dir`` itself (``$PI_CODING_AGENT_
+    DIR``, pi's own ENTIRE agent home -- see that function's docstring):
+    ``models.json``/``sessions/`` stay board-wide and shared exactly as
+    before. Only the guard's own tiny install tree moves under this per-key
+    subdirectory -- safe because pi's ``--extension <path>``/``-e`` flag
+    loads an explicit file path with no requirement it live anywhere under
+    ``PI_CODING_AGENT_DIR`` (verified via ``pi --help``: "Load an extension
+    file", no such constraint documented or observed).
+    """
+    return pi_agent_dir / "by-key" / validate_key(key)
+
+
 # T-56: the `providers.<name>` key `generate_pi_models_json` registers the
 # `[runner.pi]` table under when the config doesn't set `provider` itself --
 # "zai" because that is the one vendor this ticket's own config comments and

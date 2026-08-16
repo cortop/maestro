@@ -432,10 +432,21 @@ class OpencodeCliSessions:
         # This backend only ever speaks opencode; `runner` doesn't affect the
         # argv below (RoutingSessions passes it uniformly). opencode has no
         # equivalent of Claude's --model tier (`model`/`effort`),
-        # --disallowedTools, or --allowedTools -- its permission surface is the
-        # board-wide, declarative `runner_permissions.opencode_bash_permissions`
-        # block instead, not a per-spawn flag -- so those four are accepted (for
-        # call-site uniformity through RoutingSessions) and otherwise unused.
+        # --disallowedTools, or --allowedTools -- its permission surface is
+        # declarative config instead, not a per-spawn flag -- so those four
+        # are accepted (for call-site uniformity through RoutingSessions) and
+        # otherwise unused. RB-16: unlike `PiCliSessions.spawn`, this backend
+        # does NOT recover a phase-narrowed verb set from `allowed_tools` at
+        # spawn time -- the `--agent <name>` flag below already resolves to a
+        # phase-specific, STATICALLY generated stub
+        # (`skills_install._opencode_agent_stub`) carrying its own
+        # `permission.bash` override, installed once by `maestro
+        # install-commands` from the exact same `phase_verb_grant` source
+        # (see `runner_permissions.opencode_permission_block`'s docstring) --
+        # a second, per-spawn narrowing here would be redundant, and a
+        # dynamically-rewritten `.opencode/opencode.jsonc` inside a git
+        # worktree would dirty the very tree this session is about to commit
+        # from.
         # T-54: `runner` IS still threaded into the claim written below -- see
         # `ClaudeCliSessions.spawn`'s identical comment.
         del model, effort, disallowed_tools, allowed_tools
@@ -613,12 +624,15 @@ class PiCliSessions:
               runner: str | None = None,
               runner_model: str | None = None) -> int | None:
         # This backend only ever speaks pi; `model`/`effort` are Claude's own
-        # tier vocabulary and `disallowed_tools`/`allowed_tools` are Claude's
-        # own flag shapes -- none apply here (pi's tool surface is the frozen
-        # `pi_guard.PI_GUARD_TOOLS` allowlist instead, not a per-spawn grant).
-        # Accepted anyway for call-site uniformity through RoutingSessions,
-        # same posture as `OpencodeCliSessions.spawn`.
-        del model, effort, disallowed_tools, allowed_tools
+        # tier vocabulary and `disallowed_tools` is a Claude-only flag shape --
+        # neither applies here. `allowed_tools` DOES still matter (RB-16 fix
+        # round): dispatch() renders it as `phase_verb_grant(phase) +
+        # resolved_allowed_tools(...)`, the SAME phase-narrowed maestro-verb
+        # source the claude runner's own --allowedTools gets -- recovered
+        # below via `dispatcher.verbs_from_allowed_tools` and baked into this
+        # spawn's OWN guard data, rather than the unfiltered AGENT_TOOL_VERBS
+        # ceiling every phase got before this ticket.
+        del model, effort, disallowed_tools
         claimed_runner = runner or "claude"
         if not runner_model:
             # Must never happen: OC-2/PI-3's preflight (dispatcher.dispatch)
@@ -633,7 +647,22 @@ class PiCliSessions:
         pi_config = (config.load(self.home).provider_config.get("runner") or {}).get("pi") or {}
         provider = store.pi_model_provider(pi_config)
 
-        guard_argv = pi_guard.spawn_argv(pi_dir)
+        from . import dispatcher  # lazy: avoids the load-time cycle dispatcher -> sessions -> dispatcher
+        # `or None` -- an empty recovered tuple (allowed_tools carried no
+        # Bash(maestro ...) rules at all, e.g. a caller that didn't go through
+        # a real dispatch() sweep) falls back to install()'s own ceiling
+        # default rather than being read as "grant nothing" (RB-16: fail
+        # toward working, never toward wedged).
+        verbs = dispatcher.verbs_from_allowed_tools(allowed_tools) or None
+        # Per-key install directory, not the shared board-wide `pi_dir` --
+        # `pi_guard_data.json` is now phase-narrowed per spawn, and
+        # `pi_guard_check.py` re-reads it fresh on every tool call for the
+        # life of the session, so sharing one file across concurrently-
+        # running, differently-phased pi reconcilers would let one key's
+        # session silently run under another key's grant (see
+        # `store.pi_agent_key_dir`'s docstring).
+        guard_dir = store.pi_agent_key_dir(pi_dir, key)
+        guard_argv = pi_guard.spawn_argv(guard_dir, verbs)
         extension_path = Path(guard_argv[guard_argv.index("--extension") + 1])
         if not extension_path.exists():
             # T-59's guard is non-negotiable -- `pi_guard.install` (called by
