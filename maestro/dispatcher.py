@@ -473,6 +473,36 @@ def list_keys(home: Path) -> list[str]:
     return sorted(keys, key=split_key)
 
 
+def _never_minted(home: Path, key: str) -> bool:
+    """True if *key* has no spec.md, no ticket directory, and no event-log
+    history -- i.e. it was never minted via ``maestro create`` (every real
+    minting path, ``_mint_ticket`` below included, writes spec.md before its
+    first event -- see its docstring) and has never had a single event
+    recorded against it either. RB-17: this is the shape a reconciler finds
+    when it's spawned for a key that doesn't exist -- the guard here (and its
+    twin, ``ops._refuse_unminted``) is what stops that discovery from minting
+    the key by the mere act of failing against it.
+
+    A key can be a ``list_keys`` member -- has SOME derived-only footprint,
+    e.g. a stray ``derived/snapshots/<key>.json`` left over from a fold that
+    ran before this guard existed -- while still being ``_never_minted``:
+    that footprint carries no real history, only a fold artifact, so this
+    checks the three ACTUAL sources of truth (ticket dir, spec.md, event log)
+    rather than trusting ``list_keys`` membership.
+
+    Deliberately False for a key with event-log history even if spec.md is
+    now missing (deleted, or never restored) -- that key already has a real
+    history; ``maestro cmd <KEY> discard`` must keep retiring it end to end
+    (RB-17 AC4). This function never touches ``list_keys``'s own
+    archived/dead-letter exclusion.
+    """
+    if store.spec_path(home, key).exists():
+        return False
+    if store.ticket_dir(home, key).exists():
+        return False
+    return not event_log.read(home, key)
+
+
 def existing_prefixes(home: Path) -> list[str]:
     """Return sorted unique prefixes from all existing well-formed ticket keys."""
     seen: set[str] = set()
@@ -2137,10 +2167,16 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     filter_keys: frozenset[str] | None = None
     if key_filter is not None:
         filter_keys = frozenset(key_filter)
-        unknown = sorted(k for k in filter_keys if k not in set(list_keys(home)))
+        unknown = set(k for k in filter_keys if k not in set(list_keys(home)))
+        # RB-17: a key can be a `list_keys` member -- some derived-only
+        # footprint on disk, e.g. a stray leftover snapshot -- while still
+        # never having been minted (no spec.md, no ticket dir, no event-log
+        # history). Surfaced as the same clear, attributable error as an
+        # outright-unknown key (AC3) rather than let dispatch attempt it.
+        unknown |= set(k for k in filter_keys if k not in unknown and _never_minted(home, k))
         if unknown:
             raise store.MaestroError(
-                f"dispatch --key: unknown ticket key(s): {', '.join(unknown)}")
+                f"dispatch --key: unknown ticket key(s): {', '.join(sorted(unknown))}")
 
     if fleet.pause_state(home, now) is not None:
         # The kill switch. Ahead of EVERYTHING else — mint/sync/scheduled-tasks/
@@ -2249,6 +2285,27 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # computed, let alone spawned.
         candidates = sorted(filter_keys, key=split_key) if filter_keys is not None else list_keys(home)
         for key in candidates:
+            # RB-17: never fold or spawn a key that was never minted -- no
+            # spec.md, ticket directory, or event-log history. A stray
+            # `derived/snapshots/<key>.json` (left by a fold that ran before
+            # this guard existed, or by any other bug) is exactly what would
+            # keep `list_keys` returning this key forever -- the self-
+            # bootstrapping this ticket closes -- so a real sweep prunes it
+            # here (never in `dry_run`, per GA-4's strictly-read-only
+            # contract). A key with real event-log history but no spec.md is
+            # NOT `_never_minted` -- it keeps sweeping normally below,
+            # unaffected, so `maestro cmd <KEY> discard` can still retire it
+            # end to end (RB-17 AC4).
+            if _never_minted(home, key):
+                if not dry_run:
+                    snap_path = store.snapshot_path(home, key)
+                    if snap_path.exists():
+                        snap_path.unlink()
+                decisions[key] = {
+                    "outcome": "phantom",
+                    "reason": "never minted -- no spec.md, ticket directory, or event log",
+                }
+                continue
             # RB-2: `snapshot.fold` is total by construction (never raises), but this
             # is defense-in-depth against a future/unforeseen corruption -- ONE bad
             # ticket must never abort the sweep for every other ticket on the board.
