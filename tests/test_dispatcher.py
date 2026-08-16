@@ -860,7 +860,11 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
     """AC2: a real dispatch sweep over a plain seeded READY ticket records the exact
     same spawn tuple RF-1 found before the split -- dispatcher no longer pre-flattens
     "<command> <key>" itself, but DryRunSessions.spawn still composes and records it,
-    so every existing reader of sessions.spawned sees byte-identical values."""
+    so every existing reader of sessions.spawned sees byte-identical values.
+
+    RB-16: disallowed_tools/allowed_tools are now phase-scoped (ready's own narrowed
+    verb denylist/grant), not the flat "deny only gh pr merge / allow nothing extra"
+    pair every phase shared before this ticket."""
     _seed_with_overrides(home, "T-1")
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
@@ -875,8 +879,8 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
         str(home),
         "sonnet",
         None,
-        ["Bash(gh pr merge:*)"],  # AD-7: unconditional merge denylist
-        [],
+        ["Bash(gh pr merge:*)"] + disp.phase_verb_denylist(Phase.READY.value),
+        disp.phase_verb_grant(Phase.READY.value),
         {},
         "claude",  # RF-2: READY forces "claude" regardless of any spec runner: override
         None,      # OC-4: no non-claude runner in play here

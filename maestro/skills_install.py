@@ -53,7 +53,7 @@ import json
 import os
 from pathlib import Path
 
-from . import runner_permissions, store
+from . import dispatcher, runner_permissions, store
 from .config import Config
 from .providers import ollama as ollama_mod
 from .sessions import OPENCODE_MODEL_PROVIDER
@@ -196,7 +196,8 @@ def _frontmatter_description(content: str) -> str:
     return ""
 
 
-def _opencode_agent_stub(description: str, steps: int | None = None) -> str:
+def _opencode_agent_stub(description: str, steps: int | None = None,
+                          permission_bash: dict[str, str] | None = None) -> str:
     """T-64: the ``--agent <name>`` file ``OpencodeCliSessions.spawn``
     (``sessions.py:396``) has been passing at a path nothing ever wrote --
     every spawn logged ``agent "..." not found. Falling back to default agent``
@@ -215,11 +216,42 @@ def _opencode_agent_stub(description: str, steps: int | None = None) -> str:
     text-only response"; ``maxSteps`` is the same field, deprecated in favor of
     ``steps``). This is opencode's equivalent of ``ClaudeCliSessions``'
     ``--max-turns`` -- baked into the stub rather than argv because ``opencode
-    run`` has no turn-cap flag of its own (see ``opencode run --help``)."""
+    run`` has no turn-cap flag of its own (see ``opencode run --help``).
+
+    RB-16 fix round: *permission_bash* (when given -- ``install_repo``/
+    ``install_user`` pass this phase's own
+    ``runner_permissions.opencode_permission_block(cfg.home, verbs=...)
+    ["bash"]``) is embedded as this agent's own ``permission.bash`` YAML
+    frontmatter block, so a reconciler spawned with ``--agent
+    maestro-reconcile-qa`` gets a QA-narrowed maestro-verb grant instead of
+    the board-wide ceiling every phase's opencode agent got before this
+    ticket (see ``runner_permissions.opencode_permission_block``'s docstring
+    for the full rationale and its evidentiary basis). Keys/values are
+    ``json.dumps``-quoted -- valid YAML flow scalars, and the only safe way to
+    emit a pattern containing spaces/``*`` as a mapping key without a real
+    YAML writer (this package stays stdlib-only, no PyYAML dependency)."""
     fields = [f"description: {description}", "mode: primary"]
     if steps:
         fields.append(f"steps: {steps}")
-    return "---\n" + "\n".join(fields) + "\n---\n"
+    body = "---\n" + "\n".join(fields) + "\n"
+    if permission_bash:
+        body += "permission:\n  bash:\n"
+        for pattern in sorted(permission_bash):
+            body += f"    {json.dumps(pattern)}: {permission_bash[pattern]}\n"
+    body += "---\n"
+    return body
+
+
+def _opencode_agent_permission_bash(cfg: Config, filename: str) -> dict[str, str]:
+    """The phase-narrowed ``permission.bash`` block for the agent stub paired
+    with payload *filename* (e.g. ``"maestro-reconcile-qa.md"``) -- derives
+    the skill suffix the exact same way ``PHASE_FILES``/``PAYLOAD_NAMES``
+    were built, then feeds it through the ONE shared source
+    (``dispatcher.phase_verbs_by_suffix``) `phase_verb_grant` (claude) and
+    `pi_guard` (RB-16 fix round) both key off too."""
+    suffix = filename[len("maestro-reconcile-"):-len(".md")]
+    verbs = dispatcher.phase_verbs_by_suffix(suffix)
+    return runner_permissions.opencode_permission_block(cfg.home, verbs=verbs)["bash"]
 
 
 def _opencode_provider_block(cfg: Config) -> dict:
@@ -338,7 +370,10 @@ def install_repo(cfg: Config, name: str) -> dict:
     T-64: also writes a ``--agent`` stub per phase into ``<repo>/.opencode/
     agent/`` (same filenames again — ``<name>`` is reused for both ``--command``
     and ``--agent``, per ``sessions.py``'s own docstring) and one
-    ``<repo>/.opencode/opencode.jsonc`` (permission + provider blocks)."""
+    ``<repo>/.opencode/opencode.jsonc`` (permission + provider blocks). RB-16:
+    each agent stub now carries its OWN phase-narrowed ``permission.bash``
+    override (``_opencode_agent_permission_bash``) — see
+    ``_opencode_agent_stub``'s docstring."""
     repo_root = resolve_repo_target(cfg, name)
     target_dir = repo_root / ".claude" / "commands"
     opencode_dir = opencode_repo_commands_dir(repo_root)
@@ -356,8 +391,10 @@ def install_repo(cfg: Config, name: str) -> dict:
         if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
             opencode_written.append(filename)
         agent_dest = opencode_agent_dir / filename
-        if _write_if_changed(agent_dest, _opencode_agent_stub(
-                _frontmatter_description(content), steps=cfg.max_session_turns or None)):
+        stub = _opencode_agent_stub(
+            _frontmatter_description(content), steps=cfg.max_session_turns or None,
+            permission_bash=_opencode_agent_permission_bash(cfg, filename))
+        if _write_if_changed(agent_dest, stub):
             opencode_agent_written.append(filename)
     config_dest = opencode_repo_config_path(repo_root)
     config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
@@ -430,8 +467,10 @@ def install_user(cfg: Config) -> dict:
         if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
             opencode_written.append(filename)
         agent_dest = opencode_agent_dir / filename
-        if _write_if_changed(agent_dest, _opencode_agent_stub(
-                _frontmatter_description(content), steps=cfg.max_session_turns or None)):
+        stub = _opencode_agent_stub(
+            _frontmatter_description(content), steps=cfg.max_session_turns or None,
+            permission_bash=_opencode_agent_permission_bash(cfg, filename))
+        if _write_if_changed(agent_dest, stub):
             opencode_agent_written.append(filename)
     config_dest = opencode_user_config_path(cfg)
     config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
