@@ -46,20 +46,27 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     refuses (raises `MaestroError`, non-zero exit, NO event appended) unless
     `force=True`, and one with a failing independent QA verdict on a current AC
     refuses unconditionally (`force` does not override QA — that gate is fixed
-    by re-running `maestro qa-verdict`, not by a human override). Entering `qa`
-    from `implementing` is gated a third way (RB-12): if `cfg.test_command` is
-    set and this ticket isn't a `mode: local` binding, the transition refuses
-    unless `maestro capture-tests` has already recorded a PASSING run — a real
-    subprocess maestro itself ran, never an agent's word — at the exact current
-    tree state (see `_tests_stale_reason`/`ops.capture_tests`). Each of these is
-    a separate escape hatch: the `--force` below overrides the unattested-ACs
-    gate AND the test-run gate, but never the QA-verdict gate (fixed only by
-    re-running `maestro qa-verdict`).
+    by re-running `maestro qa-verdict`, not by a human override).
 
-    The `--force` escape hatch is for a human overriding the unverified-ACs
-    and/or test-run gates; the event log still has to show that they did, so a
-    forced transition records `forced_by=<actor>` on the PhaseChanged event
-    plus a Note per gate overridden, spelling out what was skipped.
+    Entering `qa` from `implementing` is handled a third way (RB-14, replacing
+    RB-12's earlier raise-or-force gate): if `cfg.test_command` is set and this
+    ticket isn't a `mode: local` binding, the call is transparently REDIRECTED
+    to `verifying` instead — never refused, and `force` has no effect on this
+    one (there is nothing left to force past: `verifying` is where the
+    dispatcher's own `sync_test_runs` tick runs the suite itself, a real
+    subprocess, and routes on to `qa` or back to `implementing` once it has an
+    answer — see `dispatcher.sync_test_runs`). This is what dissolves the old
+    `--force` hole (T-71's spec Notes: a forced transition could still land a
+    captured-red tree in front of QA) — there's no longer a decision here for
+    `--force` to override. `_tests_stale_reason` decides whether the redirect
+    is even needed: unconfigured, `mode: local`, or a CURRENT tree state that
+    already has a captured PASSING record all skip straight to `qa` exactly as
+    before (ships dark; see `Config.test_command`).
+
+    The `--force` escape hatch above is for a human overriding the
+    unverified-ACs gate only now; the event log still has to show that they
+    did, so a forced transition records `forced_by=<actor>` on the
+    PhaseChanged event plus a Note naming what was skipped.
 
     `expect` (RB-7) is the fencing CAS, scoped to this one call site — the
     state-machine gate — and to nowhere else in `ops`: a caller that already
@@ -83,14 +90,11 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
             f"run `maestro verify-ac` for each, or pass --force to override")
     forced_acs = unverified > 0 and force
 
-    tests_reason = None
+    # RB-14: transparent redirect, never a refusal and never forceable -- see
+    # this function's docstring. `force` is deliberately not consulted here.
     if phase == Phase.QA and Phase(snap.phase) == Phase.IMPLEMENTING:
-        tests_reason = _tests_stale_reason(cfg, key, snap)
-        if tests_reason and not force:
-            raise store.MaestroError(
-                f"{key}: refusing qa — {tests_reason}; run `maestro capture-tests {key}`, "
-                f"or pass --force to override")
-    forced_tests = tests_reason is not None and force
+        if _tests_stale_reason(cfg, key, snap) is not None:
+            phase = Phase.VERIFYING
 
     if phase == Phase.AWAITING_CI:
         _refuse_if_qa_failing(cfg, key, snap)
@@ -102,9 +106,8 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
                 actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, f"note-transition-{phase.value}"))
         snap = snap_mod.load(cfg.home, key)
 
-    forced = forced_acs or forced_tests
     payload = {"phase": phase.value, "reason": reason}
-    if forced:
+    if forced_acs:
         payload["forced_by"] = actor
     sid = step_id(key, snap.phase, snap.observed_seq, f"phase:{phase.value}")
     ev = _append(cfg, key, E.PHASE_CHANGED, payload, actor=actor, sid=sid, expect=expect)
@@ -112,12 +115,7 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
         _append(cfg, key, E.NOTE,
                 {"text": f"forced past {unverified} unverified acceptance criteria by {actor}"},
                 actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "force-ac-override"))
-    if forced_tests:
-        _append(cfg, key, E.NOTE,
-                {"text": f"forced past failing test-run gate for `{cfg.test_command}` "
-                         f"({tests_reason}) by {actor}"},
-                actor=actor, sid=step_id(key, snap.phase, snap.observed_seq, "force-tests-override"))
-    if not forced and phase == Phase.AWAITING_CI:
+    if not forced_acs and phase == Phase.AWAITING_CI:
         _warn_unverified_acs(cfg, key, actor=actor)
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
@@ -154,17 +152,20 @@ def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
 
 
 def _tests_stale_reason(cfg: Config, key: str, snap) -> str | None:
-    """None if the RB-12 test-run gate is satisfied for *key* right now;
-    otherwise the human-facing reason `set_phase` refuses `implementing -> qa`
-    with. Satisfied means any of: the gate is unconfigured (`test_command`
-    unset — ships dark, see `Config.test_command`), *key* is bound `mode:
-    local` (AD-6, no repo/suite to run), or the CURRENT tree state (HEAD sha +
-    a hash of the dirty tree, see `_tree_state_key`) already has a captured
-    PASSING record in `snap.test_runs` — one `maestro capture-tests` actually
-    ran a subprocess and recorded, never a free-text claim (that's the whole
-    point: see `Snapshot.tests_passing`). A record from a stale tree state (one
-    more edit since it was captured) is invisible here — it simply isn't keyed
-    under the current tree_key — so it can never satisfy this check."""
+    """None if the RB-12/RB-14 test-run gate is already satisfied for *key*
+    right now -- in which case `set_phase` lets `implementing -> qa` through
+    directly, with no `verifying` detour; otherwise the human-facing reason,
+    and `set_phase` redirects to `verifying` instead so the dispatcher can run
+    the suite itself. Satisfied means any of: the gate is unconfigured
+    (`test_command` unset — ships dark, see `Config.test_command`), *key* is
+    bound `mode: local` (AD-6, no repo/suite to run), or the CURRENT tree state
+    (HEAD sha + a hash of the dirty tree, see `_tree_state_key`) already has a
+    captured PASSING record in `snap.test_runs` — a real subprocess actually
+    ran and recorded (`capture_tests`, or `dispatcher.sync_test_runs`'s async
+    equivalent), never a free-text claim (that's the whole point: see
+    `Snapshot.tests_passing`). A record from a stale tree state (one more edit
+    since it was captured) is invisible here — it simply isn't keyed under the
+    current tree_key — so it can never satisfy this check."""
     if not cfg.test_command:
         return None
     binding = repos_mod.resolve(cfg, cfg.home, key)
@@ -803,13 +804,48 @@ def _tree_state_key(cwd: Path) -> str:
     return f"{sha}:{content_hash(dirty_text)}"
 
 
+# RB-14: bounded tail of a failing run's combined stdout+stderr kept on its
+# TestRunCaptured event -- generous enough to show the actual pytest failure
+# (a traceback, an assertion diff), capped so a giant red log can never bloat
+# the append-only event log the way an unbounded one would (spec Notes: "bound
+# the size"). A passing run carries no excerpt at all -- nothing to show.
+_EXCERPT_TAIL_CHARS = 4000
+
+
+def _bounded_excerpt(output: str) -> str:
+    if not output:
+        return ""
+    return output[-_EXCERPT_TAIL_CHARS:]
+
+
+def _record_test_run(cfg: Config, key: str, *, tree_key: str, command: str,
+                      exit_code: int, output: str, actor: str) -> dict:
+    """Append one TestRunCaptured event -- the single place BOTH the
+    synchronous, agent-invoked `capture_tests` below and the dispatcher-owned
+    async runner (`dispatcher.sync_test_runs`/`_fold_test_run`, RB-14) build
+    the payload, so the two callers can never drift on what fields a captured
+    run carries. `output` is the run's combined stdout+stderr; only a bounded
+    tail is kept, and only on a failing run (see `_bounded_excerpt`)."""
+    passed = exit_code == 0
+    payload = {"tree_key": tree_key, "command": command, "exit_code": exit_code, "passed": passed}
+    if not passed:
+        payload["failure_excerpt"] = _bounded_excerpt(output)
+    _append(cfg, key, E.TEST_RUN_CAPTURED, payload, actor=actor,
+            sid=f"testrun-{key}-{tree_key}")
+    return payload
+
+
 def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
     """Run `cfg.test_command` for real -- a subprocess, ITS OWN exit code --
     at *key*'s current tree state, and record the result as a TestRunCaptured
-    event. This is the only thing `_tests_stale_reason` (the `implementing ->
-    qa` gate in `set_phase`) ever trusts; a Note, a `verify-ac`, or any other
-    free-text claim of "tests pass" satisfies nothing (RB-12: "the evidence
-    must be captured, never claimed").
+    event. This is the only thing `_tests_stale_reason` (consulted by
+    `set_phase`'s `implementing -> qa`/`verifying` redirect) ever trusts; a
+    Note, a `verify-ac`, or any other free-text claim of "tests pass" satisfies
+    nothing (RB-12: "the evidence must be captured, never claimed"). RB-14 made
+    calling this manually optional -- the dispatcher's own `sync_test_runs`
+    tick now does the same thing asynchronously once a ticket reaches
+    `verifying` -- but it stays available (and this caching rule keeps it
+    cheap to call anyway, e.g. a human checking early).
 
     Caching -- the chosen rule for "do not run the suite on every sweep": if a
     record already exists for this exact tree_key (HEAD sha + a hash of the
@@ -840,12 +876,12 @@ def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
         proc = subprocess.run(cfg.test_command, shell=True, cwd=cwd,
                               capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT)
         exit_code = proc.returncode
+        output = (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
         exit_code = -1
-    payload = {"tree_key": tree_key, "command": cfg.test_command,
-               "exit_code": exit_code, "passed": exit_code == 0}
-    _append(cfg, key, E.TEST_RUN_CAPTURED, payload, actor=actor,
-            sid=f"testrun-{key}-{tree_key}")
+        output = "[maestro] test run timed out after " + str(_TEST_RUN_TIMEOUT) + "s"
+    payload = _record_test_run(cfg, key, tree_key=tree_key, command=cfg.test_command,
+                               exit_code=exit_code, output=output, actor=actor)
     return {**payload, "cached": False}
 
 

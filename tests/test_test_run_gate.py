@@ -1,5 +1,5 @@
-"""RB-12: gate `implementing -> qa` on a captured, current, passing test run,
-not on the implementer's word.
+"""RB-12/RB-14: gate `implementing -> qa` on a captured, current, passing test
+run, not on the implementer's word.
 
 Nothing anywhere previously checked that the project's test suite actually
 passes -- an implementer could hand off to `qa` with a red suite simply by not
@@ -11,6 +11,16 @@ subprocess, its own exit code) and gates the transition on a PASSING record
 that matches the CURRENT tree state (HEAD sha + a hash of the dirty tree) --
 never a free-text self-attestation.
 
+RB-12 (T-71) enforced this by RAISING (refusing `implementing -> qa`, forceable
+by a human). RB-14 (T-74) replaced that raise with a transparent REDIRECT to
+`verifying` instead -- `ops.set_phase` never refuses this transition anymore;
+it silently routes to `verifying`, where the DISPATCHER (`dispatcher.
+sync_test_runs`, see tests/test_dispatcher_test_runs.py) runs the suite itself
+and routes on to `qa`/`implementing` once it has an answer. `--force` no longer
+has any effect on this specific gate (there's nothing left to force past) --
+this file's tests were rewritten accordingly; the async dispatcher-owned
+runner itself is covered separately.
+
 Every test here drives the real `ops`/`cli` surface against a real throwaway
 git repo (`conftest.make_origin_and_repo`) and a real worktree
 (`ops.worktree_ensure`) -- never mocked, per this repo's own QA convention.
@@ -18,8 +28,6 @@ git repo (`conftest.make_origin_and_repo`) and a real worktree
 from __future__ import annotations
 
 import sys
-
-import pytest
 
 from maestro import cli, config as config_mod, dispatcher as disp, event_log, ops, snapshot as snap_mod, store
 from maestro.sessions import DryRunSessions
@@ -92,35 +100,38 @@ def test_unset_test_command_leaves_implementing_to_qa_unaffected(tmp_path, home)
 
 
 # ---------------------------------------------------------------------------
-# AC2: configured + no passing record for the current tree -> refuse, no event.
+# AC2 (RB-14): configured + no passing record for the current tree -> a
+# transparent REDIRECT to `verifying`, no raise, no event lost.
 # ---------------------------------------------------------------------------
 
-def test_set_phase_qa_refuses_without_a_captured_test_run(tmp_path, home):
+def test_set_phase_qa_redirects_to_verifying_without_a_captured_test_run(tmp_path, home):
     _origin, repo = make_origin_and_repo(tmp_path)
     cfg = _write_config(home, repo, test_command=_PASS_CMD)
     _seed_ready_implementing(cfg, "G-1")
-    before = event_log.read(home, "G-1")
 
-    with pytest.raises(store.MaestroError, match="refusing qa"):
-        ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")
+    ev = ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")
 
-    assert event_log.read(home, "G-1") == before  # no event appended
-    assert snap_mod.load(home, "G-1").phase == Phase.IMPLEMENTING.value
+    assert ev is not None
+    assert ev["payload"]["phase"] == Phase.VERIFYING.value
+    assert snap_mod.load(home, "G-1").phase == Phase.VERIFYING.value
 
 
-def test_set_phase_qa_refuses_via_the_real_cli(tmp_path, home, capsys):
+def test_set_phase_qa_redirects_to_verifying_via_the_real_cli(tmp_path, home):
     _origin, repo = make_origin_and_repo(tmp_path)
     cfg = _write_config(home, repo, test_command=_PASS_CMD)
     _seed_ready_implementing(cfg, "G-1")
 
     rc = cli.main(["--home", str(home), "set-phase", "G-1", "qa"])
 
-    assert rc != 0
-    assert "refusing qa" in capsys.readouterr().err
-    assert snap_mod.load(home, "G-1").phase == Phase.IMPLEMENTING.value
+    assert rc == 0
+    assert snap_mod.load(home, "G-1").phase == Phase.VERIFYING.value
 
 
-def test_capture_tests_then_set_phase_qa_succeeds(tmp_path, home):
+def test_capture_tests_then_set_phase_qa_skips_the_verifying_detour(tmp_path, home):
+    """A record already captured for the CURRENT tree (e.g. a reconciler that
+    still chooses to call `capture-tests` itself, RB-12's original path) lets
+    `set_phase` go straight to `qa` -- no need for the dispatcher to run
+    anything, since the answer is already known."""
     _origin, repo = make_origin_and_repo(tmp_path)
     cfg = _write_config(home, repo, test_command=_PASS_CMD)
     _seed_ready_implementing(cfg, "G-1")
@@ -137,7 +148,8 @@ def test_capture_tests_then_set_phase_qa_succeeds(tmp_path, home):
 # ---------------------------------------------------------------------------
 # AC3: the record is a REAL captured run, not an agent's word -- a raw
 # self-attestation (Note, or even a forged raw append) never satisfies it, and
-# a real failing exit code refuses even while such a claim sits in the log.
+# a real failing exit code redirects to `verifying` even while such a claim
+# sits in the log.
 # ---------------------------------------------------------------------------
 
 def test_self_attested_success_does_not_satisfy_the_gate(tmp_path, home):
@@ -156,8 +168,8 @@ def test_self_attested_success_does_not_satisfy_the_gate(tmp_path, home):
     assert result["passed"] is False
     assert result["exit_code"] == 1
 
-    with pytest.raises(store.MaestroError, match="refusing qa"):
-        ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")
+    ev = ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")
+    assert ev["payload"]["phase"] == Phase.VERIFYING.value  # not QA -- the lie changes nothing
 
 
 def test_raw_append_cannot_forge_a_passing_test_run_record(tmp_path, home, capsys):
@@ -194,8 +206,8 @@ def test_a_passing_record_does_not_survive_a_tree_edit(tmp_path, home):
     wt = store.worktree_path(home, "G-1")
     (wt / "one_more_edit.txt").write_text("edit\n", encoding="utf-8")
 
-    with pytest.raises(store.MaestroError, match="refusing qa"):
-        ops.set_phase(cfg, "G-1", Phase.QA, reason="re-request review")
+    ev = ops.set_phase(cfg, "G-1", Phase.QA, reason="re-request review")
+    assert ev["payload"]["phase"] == Phase.VERIFYING.value  # the stale pass no longer satisfies it
 
 
 # ---------------------------------------------------------------------------
@@ -227,29 +239,24 @@ def test_matching_tree_state_is_reused_not_rerun(tmp_path, home, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# AC6: --force overrides, records forced_by, and appends a Note naming the
-# failing command -- matching the unverified-ACs gate's shape.
+# AC6 (RB-14): `--force` no longer has any effect on this gate -- there is
+# nothing left to force past (the transition redirects, it never refuses).
 # ---------------------------------------------------------------------------
 
-def test_force_overrides_the_test_gate_and_records_forced_by_and_a_note(tmp_path, home):
+def test_force_no_longer_bypasses_the_redirect_to_verifying(tmp_path, home):
     _origin, repo = make_origin_and_repo(tmp_path)
     cfg = _write_config(home, repo, test_command=_FAIL_CMD)
     _seed_ready_implementing(cfg, "G-1")
     ops.capture_tests(cfg, "G-1")  # a real, captured FAIL
 
-    with pytest.raises(store.MaestroError, match="refusing qa"):
-        ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")
-
     ev = ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened", actor="valentin", force=True)
 
-    assert ev["payload"]["forced_by"] == "valentin"
-    assert snap_mod.load(home, "G-1").phase == Phase.QA.value
-    notes = [e for e in event_log.read(home, "G-1")
-             if e["type"] == "Note" and "test-run gate" in e["payload"]["text"]]
-    assert len(notes) == 1
-    assert "valentin" in notes[0]["payload"]["text"]
-    assert "failed" in notes[0]["payload"]["text"]
-    assert _FAIL_CMD in notes[0]["payload"]["text"]  # names the failing command, not just an exit code
+    # force=True still lands in `verifying`, never `qa` -- a red tree can no
+    # longer be placed in front of QA by a human overriding this gate (the
+    # ticket's own AC6).
+    assert "forced_by" not in ev["payload"]
+    assert ev["payload"]["phase"] == Phase.VERIFYING.value
+    assert snap_mod.load(home, "G-1").phase == Phase.VERIFYING.value
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +287,8 @@ def test_mode_local_ticket_transitions_implementing_to_qa_unaffected(tmp_path, h
 
 # ---------------------------------------------------------------------------
 # AC8: reproduces the two measured incidents -- a real subprocess failure of
-# each shape blocks implementing -> qa un-forced, over two real ops calls
-# standing in for two real dispatcher sweeps.
+# each shape redirects implementing -> verifying (never straight to qa),
+# over two real ops calls standing in for two real dispatcher sweeps.
 # ---------------------------------------------------------------------------
 
 def test_reproduces_the_stale_generated_doc_incident(tmp_path, home):
@@ -302,8 +309,8 @@ def test_reproduces_the_stale_generated_doc_incident(tmp_path, home):
     result = ops.capture_tests(cfg, "G-1")  # real sweep 1
     assert result["passed"] is False
 
-    with pytest.raises(store.MaestroError, match="refusing qa"):
-        ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")  # real sweep 2
+    ev = ops.set_phase(cfg, "G-1", Phase.QA, reason="pr opened")  # real sweep 2
+    assert ev["payload"]["phase"] == Phase.VERIFYING.value
 
 
 def test_reproduces_the_renamed_symbol_incident(tmp_path, home):
@@ -327,5 +334,5 @@ def test_reproduces_the_renamed_symbol_incident(tmp_path, home):
     result = ops.capture_tests(cfg, "G-2")  # real sweep 1
     assert result["passed"] is False
 
-    with pytest.raises(store.MaestroError, match="refusing qa"):
-        ops.set_phase(cfg, "G-2", Phase.QA, reason="pr opened")  # real sweep 2
+    ev = ops.set_phase(cfg, "G-2", Phase.QA, reason="pr opened")  # real sweep 2
+    assert ev["payload"]["phase"] == Phase.VERIFYING.value

@@ -2,8 +2,8 @@
 transition table. The 2026-07-19 runaway (21,731 no-op reconcilers, ~$845) was a
 correct requeue-timer check sitting inside the wrong `if` branch -- a bug the
 existing hand-picked-phase test would have caught only by luck. The input space
-is finite (11 phases x a handful of flags), so this checks it completely instead
-of sampling: 1056 points against the REAL `dispatcher.is_due`, in milliseconds.
+is finite (12 phases x a handful of flags), so this checks it completely instead
+of sampling: 1152 points against the REAL `dispatcher.is_due`, in milliseconds.
 
 Each property below is checked twice: once against the real, shipped code (must
 hold), and once against a deliberately broken variant (must NOT hold) -- a guard
@@ -33,8 +33,9 @@ from maestro.statemachine import (
 # ---------------------------------------------------------------------------
 # The grid: phase x inbox_pending x spec_changed x open_questions x
 # answered_questions x blocked_dep x timer_state --
-# 11 * 2 * 2 * 2 * 2 * 2 * 3 == 1056 points (RF-6 added the `qa` phase, an
-# 11th enum member, atop the ticket's original 10-phase/960-point count).
+# 12 * 2 * 2 * 2 * 2 * 2 * 3 == 1152 points (RB-14 added the `verifying`
+# phase, a 12th enum member, atop RF-6's 11-phase/1056-point count, which
+# itself added `qa` atop the ticket's original 10-phase/960-point count).
 # `blocked_dep` only ever affects the READY phase (dispatcher.py's
 # `phase == Phase.READY and blocked_dep` line) but is included as a full axis
 # rather than a separate narrower test, so it's covered by the same single
@@ -62,7 +63,7 @@ def _next_requeue_at(timer_state: str) -> float | None:
 
 def all_points():
     """Every (phase, inbox_pending, spec_changed, open_q, answered_q,
-    blocked_dep, timer_state) combination -- 1056 total."""
+    blocked_dep, timer_state) combination -- 1152 total."""
     return list(itertools.product(
         list(Phase), (False, True), (False, True), (False, True), (False, True),
         (False, True), _TIMER_STATES,
@@ -92,21 +93,21 @@ def evaluate(home, is_due_fn, point):
 def grid_home(tmp_path_factory):
     # `is_due` never touches the filesystem at all (AD-7 removed the only spec
     # read it used to do, via `needs_approval` -> `spec_tier`) -- one shared,
-    # empty home is enough for all 1056 points, no per-point construction
+    # empty home is enough for all 1152 points, no per-point construction
     # (that's the trap the ticket's Notes call out).
     return tmp_path_factory.mktemp("rb9-exhaustive-home")
 
 
 @pytest.fixture(scope="module")
 def grid(grid_home):
-    """(point, DueResult) for all 1056 points, against the REAL `dispatcher.is_due`."""
+    """(point, DueResult) for all 1152 points, against the REAL `dispatcher.is_due`."""
     points = all_points()
-    assert len(points) == 1056
+    assert len(points) == 1152
     return [(p, evaluate(grid_home, disp.is_due, p)) for p in points]
 
 
-def test_grid_covers_the_full_1056_point_space(grid):
-    assert len(grid) == 1056
+def test_grid_covers_the_full_1152_point_space(grid):
+    assert len(grid) == 1152
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +124,7 @@ def test_property_future_timer_holds_every_nonterminal_phase(grid):
         checked += 1
         if result.due:
             assert result.reason in _ALLOWED_DUE_UNDER_FUTURE_TIMER, (point, result)
-    assert checked == 10 * 2 * 2 * 2 * 2 * 2  # 10 non-terminal phases, timer fixed to "future"
+    assert checked == 11 * 2 * 2 * 2 * 2 * 2  # 11 non-terminal phases, timer fixed to "future"
 
 
 def _pre_fix_is_due(home, key, snap, *, inbox_pending, current_spec_hash, now, blocked_dep=False):

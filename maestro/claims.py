@@ -76,7 +76,8 @@ def pid_alive(pid) -> bool:
 
 def write_claim(home: Path, key: str, pid: int, name: str,
                 *, log_path: str | None = None, cwd: str | None = None,
-                prompt: str | None = None, runner: str | None = None) -> None:
+                prompt: str | None = None, runner: str | None = None,
+                kind: str | None = None) -> None:
     data: dict = {"pid": pid, "name": name, "ts": store.iso_now(),
                   "epoch": store.now_epoch()}
     if log_path is not None:
@@ -98,6 +99,13 @@ def write_claim(home: Path, key: str, pid: int, name: str,
     # runner is no longer eligible; see `dispatcher.dispatch`'s cap check).
     if runner is not None:
         data["runner"] = runner
+    # RB-14: distinguishes a dispatcher-owned test-run subprocess's claim
+    # (kind="testrun") from an ordinary reconciler session's -- the ONLY new
+    # field a non-LLM claim holder needed; `_verdict`/`_evaluate` still key
+    # purely on pid + epoch (see this module's docstring), so liveness/dedup
+    # stays exactly as runner-agnostic as it already was for `runner` above.
+    if kind is not None:
+        data["kind"] = kind
     store.write_json(claim_path(home, key), data)
 
 

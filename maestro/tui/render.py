@@ -11,6 +11,7 @@ from ..statemachine import Phase
 # Phase → Rich style string for row coloring
 _PHASE_STYLE: dict[str, str] = {
     Phase.IMPLEMENTING.value:   "green",
+    Phase.VERIFYING.value:      "cyan",
     Phase.QA.value:             "blue",
     Phase.RESEARCHING.value:    "magenta",
     Phase.AWAITING_CI.value:    "cyan",
