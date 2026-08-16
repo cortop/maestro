@@ -269,6 +269,20 @@ def _phase_verb_suffix(phase: str) -> str:
         return "passive"
 
 
+def phase_verbs_by_suffix(suffix: str) -> tuple[str, ...]:
+    """RB-16: the raw (unrendered) maestro-verb tuple for skill-file SUFFIX
+    *suffix* (e.g. ``"qa"``, ``"passive"``) -- the same key
+    ``skills_install.PHASE_FILES``/``_PHASE_COMMAND_SUFFIX`` already share.
+    The one place ``_PHASE_VERB_GRANT_BY_SUFFIX`` is read from, so every
+    consumer of a phase's verb set -- a claude spawn's ``--allowedTools``
+    (`phase_verb_grant`/`phase_verb_denylist` below), an opencode agent
+    stub's own ``permission.bash`` override (`skills_install`), a pi spawn's
+    guard data (`sessions.PiCliSessions.spawn` via `verbs_from_allowed_tools`
+    below) -- reads the identical set, never a second hand-typed one.
+    """
+    return _PHASE_VERB_GRANT_BY_SUFFIX[suffix]
+
+
 def phase_verb_grant(phase: str) -> list[str]:
     """The ``Bash(maestro <verb>:*)`` ALLOW rules a *phase*-spawned reconciler
     is granted (RB-16) -- the phase-narrowed replacement for handing every
@@ -277,7 +291,7 @@ def phase_verb_grant(phase: str) -> list[str]:
     `dispatch()` below), so a `qa` spawn and a `triaging` spawn in the same
     sweep -- sharing one `SessionManager` -- get different verb grants.
     """
-    return maestro_verb_grant(_PHASE_VERB_GRANT_BY_SUFFIX[_phase_verb_suffix(phase)])
+    return maestro_verb_grant(phase_verbs_by_suffix(_phase_verb_suffix(phase)))
 
 
 def phase_verb_denylist(phase: str) -> list[str]:
@@ -296,8 +310,45 @@ def phase_verb_denylist(phase: str) -> list[str]:
     deny, a narrower ``--allowedTools`` alone would be silently defeated in
     exactly the repo that most needs it: maestro's own dogfood checkout.
     """
-    granted = set(_PHASE_VERB_GRANT_BY_SUFFIX[_phase_verb_suffix(phase)])
+    granted = set(phase_verbs_by_suffix(_phase_verb_suffix(phase)))
     return maestro_verb_grant([v for v in AGENT_TOOL_VERBS if v not in granted])
+
+
+# RB-16 fix round: the non-Claude runners (opencode, pi) have no --allowedTools/
+# --disallowedTools flag of their own -- OpencodeCliSessions.spawn and
+# PiCliSessions.spawn (sessions.py) both discard those two dispatch()-supplied
+# params outright. Before this, that meant they fell back to their own static,
+# board-wide permission surfaces (runner_permissions.opencode_permission_block,
+# pi_guard.install), which -- unlike phase_verb_grant/phase_verb_denylist above
+# -- always rendered the FULL AGENT_TOOL_VERBS ceiling regardless of phase: a
+# qa-phase ticket with runner=opencode or runner=pi could still call `maestro
+# finalize` (this board's own config has both runners enabled -- see
+# tests/test_phase_verb_grant.py's opencode/pi coverage). Rather than thread a
+# THIRD, independently-shaped phase argument through the `SessionManager`
+# Protocol (four backends, every call site, every test), this recovers the
+# exact same phase-narrowed verb set from the rendered `--allowedTools` list
+# dispatch() already builds via `phase_verb_grant` above -- the one shared
+# source every runner's own permission surface keys off, matching
+# `runner_permissions._risky_verbs`'s own "extract from the rendered form,
+# never a second hand-typed copy" precedent.
+_MAESTRO_VERB_GRANT_RE = re.compile(r"^Bash\(maestro ([\w-]+):\*\)$")
+
+
+def verbs_from_allowed_tools(allowed_tools: Iterable[str] | None) -> tuple[str, ...]:
+    """Recover the raw maestro-verb tuple `phase_verb_grant` rendered into
+    *allowed_tools* (a real spawn's resolved ``--allowedTools`` list) -- the
+    single source a non-Claude runner's own declarative permission surface
+    keys off (see the module comment above). Any entry that isn't a
+    ``Bash(maestro <verb>:*)`` rule (e.g. ``resolved_allowed_tools``'
+    repo-specific grants) is silently skipped, never mistaken for a verb.
+    Returns ``()`` for ``None``/empty input -- callers fall back to their own
+    ceiling default (RB-16: fail toward working, not toward wedged) rather
+    than treating an empty tuple as "deny everything".
+    """
+    if not allowed_tools:
+        return ()
+    return tuple(m.group(1) for rule in allowed_tools
+                 if (m := _MAESTRO_VERB_GRANT_RE.match(rule)))
 
 
 # GA-16 / MTO-5: the spawned-reconciler Bash surface a bound repo's Claude Code

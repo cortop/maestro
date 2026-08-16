@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.resources
 import json
 from pathlib import Path
+from typing import Iterable
 
 from . import store
 
@@ -81,7 +82,7 @@ def _write_if_changed(path: Path, content: str) -> bool:
     return True
 
 
-def install(pi_agent_dir: Path) -> Path:
+def install(pi_agent_dir: Path, allowed_verbs: Iterable[str] | None = None) -> Path:
     """Materialize the pi guard extension + its checker + the predicate it
     reuses under ``<pi_agent_dir>/extensions/`` -- write-if-changed (mirrors
     ``store.generate_pi_models_json``), so calling this on every spawn is a
@@ -94,13 +95,19 @@ def install(pi_agent_dir: Path) -> Path:
     precedent ``maestro/_skill_commands/`` already establishes, see
     ``pyproject.toml``), so this resolves identically from an editable
     checkout and a real ``pip install``. ``pi_guard_data.json`` is the one
-    GENERATED file: baked fresh from ``dispatcher.AGENT_TOOL_VERBS`` (lazy
-    import -- avoids the load-time cycle ``sessions -> pi_guard -> dispatcher
-    -> sessions``, matching ``runner_permissions.opencode_permission_block``'s
-    own precedent) and ``FORCE_PUSH_GLOBS`` on every call, exactly like
+    GENERATED file: baked fresh from *allowed_verbs* -- ``dispatcher.
+    AGENT_TOOL_VERBS`` (the full ceiling) when left ``None`` (every existing
+    caller: the doctor check, the provider probe, every test that doesn't
+    care about phase) or a phase-narrowed subset when
+    ``sessions.PiCliSessions.spawn`` passes one (RB-16 fix round -- lazy
+    import avoids the load-time cycle ``sessions -> pi_guard -> dispatcher ->
+    sessions``, matching ``runner_permissions.opencode_permission_block``'s
+    own precedent) -- and ``FORCE_PUSH_GLOBS`` on every call, exactly like
     ``generate_pi_models_json`` bakes ``[runner.pi]`` into ``models.json``.
     """
     from . import dispatcher  # lazy: avoids a load-time import cycle (see docstring)
+
+    verbs = tuple(allowed_verbs) if allowed_verbs is not None else dispatcher.AGENT_TOOL_VERBS
 
     dest_dir = _extensions_dir(pi_agent_dir)
     src_dir = _package_asset_dir()
@@ -109,7 +116,7 @@ def install(pi_agent_dir: Path) -> Path:
         _write_if_changed(dest_dir / name, content)
 
     data = json.dumps({
-        "allowed_verbs": sorted(dispatcher.AGENT_TOOL_VERBS),
+        "allowed_verbs": sorted(verbs),
         "force_push_globs": list(FORCE_PUSH_GLOBS),
     }, indent=2, sort_keys=True) + "\n"
     _write_if_changed(dest_dir / _DATA_FILENAME, data)
@@ -117,7 +124,7 @@ def install(pi_agent_dir: Path) -> Path:
     return dest_dir / _EXTENSION_FILENAME
 
 
-def spawn_argv(pi_agent_dir: Path) -> list[str]:
+def spawn_argv(pi_agent_dir: Path, allowed_verbs: Iterable[str] | None = None) -> list[str]:
     """The argv fragment EVERY pi invocation maestro constructs must carry:
     the guard extension explicitly loaded, ALL other extension discovery
     disabled (so a hostile or misconfigured project can't shadow it with its
@@ -130,10 +137,11 @@ def spawn_argv(pi_agent_dir: Path) -> list[str]:
     run already ignores project-local resources unless
     ``defaultProjectTrust: "always"`` is configured).
 
-    Calls ``install(pi_agent_dir)`` first, so the ``--extension`` path this
-    returns always exists before an argv referencing it is ever used.
+    Calls ``install(pi_agent_dir, allowed_verbs)`` first, so the
+    ``--extension`` path this returns always exists before an argv
+    referencing it is ever used.
     """
-    extension_path = install(pi_agent_dir)
+    extension_path = install(pi_agent_dir, allowed_verbs)
     return [
         "--extension", str(extension_path),
         "--no-extensions",

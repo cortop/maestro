@@ -10,6 +10,7 @@ owns.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -51,7 +52,10 @@ def test_argv_is_exact_list(home):
     worktree = home / "worktrees" / "T-9"
     cmd, _ = _capture_cmd(home, key="T-9", cwd=worktree, runner_model="glm-5.2")
 
-    guard_extension = pi_guard.install(store.pi_agent_dir(home))
+    # RB-16: the guard now installs under a per-KEY subdirectory, not the
+    # bare board-wide pi_agent_dir (see store.pi_agent_key_dir's docstring).
+    guard_dir = store.pi_agent_key_dir(store.pi_agent_dir(home), "T-9")
+    guard_extension = pi_guard.install(guard_dir)
     payload_dir = _payload_dir()
 
     assert cmd == [
@@ -142,7 +146,7 @@ def test_spawn_raises_without_runner_model(home):
 def test_spawn_raises_when_guard_extension_missing(home, monkeypatch):
     sess = _make_sessions(home, capture_session_logs=False)
     missing_path = store.pi_agent_dir(home) / "extensions" / "does-not-exist.ts"
-    monkeypatch.setattr(pi_guard, "install", lambda pi_agent_dir: missing_path)
+    monkeypatch.setattr(pi_guard, "install", lambda pi_agent_dir, allowed_verbs=None: missing_path)
     with patch("subprocess.Popen") as mock_popen:
         with pytest.raises(store.MaestroError, match="guard extension missing"):
             sess.spawn("T-1", "/maestro-reconcile-implementing", cwd=home,
@@ -168,8 +172,12 @@ def test_log_file_uses_the_pi_log_identity_slot(home):
 
 
 def test_unused_claude_only_kwargs_are_accepted_and_ignored(home):
-    """model/effort/disallowed_tools/allowed_tools are accepted for call-site
-    uniformity through RoutingSessions but have no pi equivalent."""
+    """model/effort/disallowed_tools are accepted for call-site uniformity
+    through RoutingSessions but have no pi equivalent. `allowed_tools` DOES
+    matter now (RB-16 -- see test_spawn_installs_a_phase_narrowed_guard_data
+    below), but a non-`Bash(maestro <verb>:*)` entry like "Read" is simply
+    skipped by `dispatcher.verbs_from_allowed_tools`, so it's still a no-op
+    here."""
     sess = _make_sessions(home, capture_session_logs=False)
     fake_proc = MagicMock()
     fake_proc.pid = os.getpid()
@@ -180,6 +188,70 @@ def test_unused_claude_only_kwargs_are_accepted_and_ignored(home):
                   runner_model="glm-5.2")
     c = claims.read_claim(home, "T-1")
     assert c is not None
+
+
+# --- RB-16 fix round: phase-narrowed guard data, isolated per key -----------
+
+def test_spawn_installs_a_phase_narrowed_guard_data(home):
+    """The exact scenario QA's own evidence named: a qa-phase ticket with
+    runner=pi could still call `maestro finalize` because pi's guard data
+    always baked the full AGENT_TOOL_VERBS ceiling. `allowed_tools` now
+    carries `phase_verb_grant`'s own rendered rules (as a real dispatch()
+    sweep supplies them), and `PiCliSessions.spawn` recovers the raw verb set
+    from it via `dispatcher.verbs_from_allowed_tools`."""
+    sess = _make_sessions(home, capture_session_logs=False)
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    qa_grant = disp.phase_verb_grant("qa")
+    with patch("subprocess.Popen", return_value=fake_proc):
+        sess.spawn("T-1", "/maestro-reconcile-qa", cwd=home,
+                  allowed_tools=qa_grant, runner_model="glm-5.2")
+
+    data_path = (store.pi_agent_key_dir(store.pi_agent_dir(home), "T-1")
+                 / "extensions" / "pi_guard_data.json")
+    data = json.loads(data_path.read_text())
+    assert "finalize" not in data["allowed_verbs"]
+    assert "snapshot" in data["allowed_verbs"]
+
+
+def test_spawn_with_no_allowed_tools_falls_back_to_the_full_ceiling(home):
+    """A caller that doesn't go through a real dispatch() sweep (no
+    `Bash(maestro ...)` rules in `allowed_tools`) must still get a WORKING
+    grant, not an empty one -- RB-16: fail toward working, never wedged."""
+    sess = _make_sessions(home, capture_session_logs=False)
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    with patch("subprocess.Popen", return_value=fake_proc):
+        sess.spawn("T-1", "/maestro-reconcile-implementing", cwd=home,
+                  runner_model="glm-5.2")
+
+    data_path = (store.pi_agent_key_dir(store.pi_agent_dir(home), "T-1")
+                 / "extensions" / "pi_guard_data.json")
+    data = json.loads(data_path.read_text())
+    assert set(data["allowed_verbs"]) == set(disp.AGENT_TOOL_VERBS)
+
+
+def test_two_keys_get_isolated_guard_data_no_cross_key_clobber(home):
+    """A shared `pi_guard_data.json` would let a concurrently-running,
+    differently-phased key silently overwrite another key's verb grant mid-
+    run (`pi_guard_check.py` re-reads the file fresh on every tool call) --
+    `store.pi_agent_key_dir` isolates each key's own install tree instead."""
+    sess = _make_sessions(home, capture_session_logs=False)
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    with patch("subprocess.Popen", return_value=fake_proc):
+        sess.spawn("T-1", "/maestro-reconcile-qa", cwd=home,
+                  allowed_tools=disp.phase_verb_grant("qa"), runner_model="glm-5.2")
+        sess.spawn("T-2", "/maestro-reconcile-implementing", cwd=home,
+                  allowed_tools=disp.phase_verb_grant("implementing"), runner_model="glm-5.2")
+
+    pi_dir = store.pi_agent_dir(home)
+    t1_data = json.loads((store.pi_agent_key_dir(pi_dir, "T-1") / "extensions"
+                          / "pi_guard_data.json").read_text())
+    t2_data = json.loads((store.pi_agent_key_dir(pi_dir, "T-2") / "extensions"
+                          / "pi_guard_data.json").read_text())
+    assert "finalize" not in t1_data["allowed_verbs"]
+    assert "finalize" in t2_data["allowed_verbs"]
 
 
 # --- T-52: claim reserved before Popen, rolled back on a failed launch ------

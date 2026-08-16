@@ -35,6 +35,7 @@ from __future__ import annotations
 import importlib.util
 import re
 from pathlib import Path
+from typing import Iterable
 
 _CORE_MODULE_NAME = "destructive_command_guard"
 _CORE_RELATIVE_PATH = Path(".claude/hooks/destructive_command_guard.py")
@@ -120,7 +121,7 @@ def opencode_bash_permissions(home: Path) -> dict[str, str]:
 _EXTERNAL_DIRECTORY_SUBTREES = ("tickets", "inbox", "derived")
 
 
-def opencode_permission_block(home: Path) -> dict:
+def opencode_permission_block(home: Path, verbs: Iterable[str] | None = None) -> dict:
     """T-64: the full declarative ``permission`` block ``skills_install`` writes
     into opencode.jsonc -- the write path both this function and
     ``opencode_bash_permissions`` (T-34/RF-5) were left waiting on (see that
@@ -129,14 +130,39 @@ def opencode_permission_block(home: Path) -> dict:
     Two keys:
 
     ``bash`` -- ``opencode_bash_permissions`` (the destructive-command guard,
-    unchanged) plus an explicit ALLOW for the maestro-verb surface a reconciler
-    actually invokes (``dispatcher.AGENT_TOOL_VERBS`` -- the SAME definition
-    ``cli._reconciler_tool_grants`` renders into Claude's ``--allowedTools``, so
-    this can never drift into a second, hand-typed verb list). Belt-and-suspenders:
+    unchanged) plus an explicit ALLOW for the maestro-verb surface named by
+    *verbs* -- ``dispatcher.AGENT_TOOL_VERBS`` (the full ceiling) when *verbs*
+    is left ``None``, or a phase-narrowed subset (``dispatcher.
+    phase_verbs_by_suffix``) when the caller passes one. Belt-and-suspenders:
     opencode's own bash default is already allow (nothing here relies on that
     staying true), and these entries can never collide with the guard's deny
     patterns (those are all ``rm``/``mv``/``truncate``/``git clean``/redirect
     patterns, never ``maestro *``).
+
+    RB-16 fix round: the board-wide ``opencode.jsonc`` this function's default
+    call feeds (``skills_install._opencode_declarative_config``) stays at the
+    full ceiling -- it's a single, committed, per-repo file, not something a
+    per-spawn phase can own, so it plays the same role for opencode that the
+    coarse ``Bash(maestro:*)`` wildcard in ``.claude/settings.json`` plays for
+    Claude (RB-16 spec AC3): a fallback surface, narrowed for real by a more
+    specific mechanism. For opencode that mechanism is per-phase, not
+    per-spawn: ``skills_install._opencode_agent_permission_bash`` calls this
+    function AGAIN with each phase's own ``phase_verbs_by_suffix`` result,
+    and ``_opencode_agent_stub`` embeds the result directly in that phase's
+    own ``--agent <name>.md`` frontmatter
+    (``.opencode/agent/<phase>.md``) as its own ``permission.bash`` override
+    -- verified empirically (this ticket) that opencode's own agent frontmatter
+    schema accepts and resolves a per-agent ``permission.bash`` map distinctly
+    from the board-wide one (``opencode debug config`` echoes it back under
+    ``agent.<name>.permission.bash``, spiked manually against a real installed
+    opencode 1.18.15, same "accepted and echoed back" evidentiary bar this
+    module's own docstring already uses for the top-level block). Embedding
+    the FULL block (guard denies + phase allows) rather than just the phase's
+    own allow/deny delta keeps each agent stub self-contained regardless of
+    whether opencode deep-merges or replaces a per-agent permission override
+    at runtime -- unverified either way (no live tool-call run backs this,
+    same caveat the module docstring already carries), so the self-contained
+    shape is the one that can't be wrong about it.
 
     ``external_directory`` -- T-64's actual fix for the failure the spec's Notes
     describe: every reconcile skill Reads ``<MAESTRO_HOME>/tickets/<KEY>/spec.md``
@@ -156,8 +182,11 @@ def opencode_permission_block(home: Path) -> dict:
     """
     from . import dispatcher  # lazy: avoids a load-time cycle (matches repos.resolve's own note)
 
+    if verbs is None:
+        verbs = dispatcher.AGENT_TOOL_VERBS
+
     bash = dict(opencode_bash_permissions(home))
-    for verb in dispatcher.AGENT_TOOL_VERBS:
+    for verb in verbs:
         bash[f"maestro {verb} *"] = "allow"
         bash[f"maestro {verb}"] = "allow"
 

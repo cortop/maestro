@@ -1169,9 +1169,10 @@ def test_reconciler_permissions_warns_for_pi_binding_with_no_guard_extension_ins
 def test_reconciler_permissions_ok_for_pi_binding_once_guard_extension_is_installed(
         home, tmp_path):
     """Once `pi_guard.install` has actually materialized the extension (a
-    real prior pi spawn's own belt-and-suspenders call, PI-7) -- the SAME
-    board-wide `store.pi_agent_dir(cfg.home)` this check reads -- the check
-    reports `ok`."""
+    real prior pi spawn's own belt-and-suspenders call, PI-7) -- under a
+    per-KEY subdirectory of `store.pi_agent_dir(cfg.home)` (RB-16 fix round --
+    see `store.pi_agent_key_dir`'s docstring), the same directory
+    `_pi_permission_gap` now scans -- the check reports `ok`."""
     from maestro import pi_guard
 
     repo = tmp_path / "repo"
@@ -1179,7 +1180,7 @@ def test_reconciler_permissions_ok_for_pi_binding_once_guard_extension_is_instal
     cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
     cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
     _seed_with_runner(home, "T-1", runner="pi")
-    pi_guard.install(store.pi_agent_dir(home))
+    pi_guard.install(store.pi_agent_key_dir(store.pi_agent_dir(home), "T-1"))
 
     checks = health.run_checks(cfg, 1000)
     check = next(c for c in checks if c["name"] == "reconciler_permissions")
@@ -1197,7 +1198,7 @@ def test_reconciler_permissions_pi_never_reads_claude_code_settings(home, tmp_pa
     cfg.provider_config = {"runner": {"pi": {"phases": ["implementing"]}}}
     _seed_with_runner(home, "T-1", runner="pi")
     from maestro import pi_guard
-    pi_guard.install(store.pi_agent_dir(home))
+    pi_guard.install(store.pi_agent_key_dir(store.pi_agent_dir(home), "T-1"))
 
     checks = health.run_checks(cfg, 1000)
     check = next(c for c in checks if c["name"] == "reconciler_permissions")

@@ -97,6 +97,18 @@ def test_permission_block_external_directory_does_not_admit_an_unrelated_path(ho
     assert not any(fnmatch.fnmatch(outside, p) for p in perms["external_directory"])
 
 
+def test_permission_block_honors_a_phase_narrowed_verb_set(home):
+    """RB-16 fix round: `verbs=` narrows the ALLOW set (unaffected: the
+    destructive-guard denies), and a verb outside it is simply absent, not
+    "allow" or "deny" -- opencode's own default (`ask`) then applies, same as
+    any other unmatched bash pattern."""
+    narrow = runner_permissions.opencode_permission_block(home, verbs=("snapshot", "env"))
+    assert narrow["bash"]["maestro snapshot *"] == "allow"
+    assert "maestro finalize *" not in narrow["bash"]
+    full = runner_permissions.opencode_permission_block(home)
+    assert full["bash"]["maestro finalize *"] == "allow"  # default (verbs=None) is still the ceiling
+
+
 # ---------------------------------------------------------------------------
 # AC1/AC4: install-commands writes opencode.jsonc + per-phase --agent stubs,
 # idempotently, from both --repo and --user.
@@ -120,6 +132,32 @@ def test_install_repo_writes_opencode_config_and_agent_stubs(home, tmp_path):
     one = (agent_dir / "maestro-reconcile-implementing.md").read_text()
     assert "mode: primary" in one
     assert "description:" in one
+
+
+def test_agent_stub_permission_bash_is_phase_narrowed_not_the_flat_ceiling(home, tmp_path):
+    """RB-16 fix round -- the exact gap QA's own evidence named: a qa-phase
+    ticket with runner=opencode could still call `maestro finalize` because
+    every phase's opencode surface carried the flat AGENT_TOOL_VERBS ceiling.
+    Each phase's own --agent stub now embeds a permission.bash override
+    scoped to exactly the verbs `dispatcher.phase_verb_grant` (the claude
+    runner's own source) grants that phase -- verified against a real
+    installed opencode (`opencode debug config`) during this ticket, see
+    `runner_permissions.opencode_permission_block`'s docstring."""
+    repo = tmp_path / "acme"
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+    assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
+
+    agent_dir = repo / ".opencode" / "agent"
+    qa_stub = (agent_dir / "maestro-reconcile-qa.md").read_text()
+    assert '"maestro finalize *": allow' not in qa_stub
+    assert '"maestro snapshot *": allow' in qa_stub
+
+    impl_stub = (agent_dir / "maestro-reconcile-implementing.md").read_text()
+    assert '"maestro finalize *": allow' in impl_stub
+
+    triaging_stub = (agent_dir / "maestro-reconcile-triaging.md").read_text()
+    assert '"maestro verify-ac *": allow' not in triaging_stub
+    assert '"maestro ask *": allow' in triaging_stub
 
 
 def test_install_repo_opencode_config_and_agents_idempotent(home, tmp_path):
