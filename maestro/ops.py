@@ -29,8 +29,46 @@ from .statemachine import Phase, can_transition
 ANSWER_COMMANDS = {"ans", "answer", "approve", "yes", "ok", "no", "reject", "discard", "retry"}
 
 
+def _refuse_unminted(cfg: Config, key: str) -> None:
+    """RB-17: refuse to append the FIRST event ever recorded for *key*.
+
+    A reconciler mistakenly spawned for a key that was never minted via
+    `maestro create` (a typo'd `--key`, a stale `make reconcile KEY=...`, ...)
+    finds no spec.md and no ticket directory, and its own discovery of that --
+    typically an eventual `maestro fail "no spec.md found"` -- used to be the
+    FIRST event ever appended for that key. That single append is what made
+    the key real: `dispatcher.list_keys` unions ticket dirs, event logs AND
+    snapshots, so the moment an event log exists the key is permanently
+    swept, and every respawn just re-discovers the same absence and fails
+    again (the T-999 incident this ticket's spec documents -- four `Failed`
+    events and a dead-letter entry for a key that never should have existed).
+    Checked here, the one append chokepoint every mutating verb in this
+    module funnels through, rather than duplicated per-verb.
+
+    Deliberately does NOT block a key that already has event-log history,
+    however it got there -- including a legacy phantom that bootstrapped
+    before this guard existed. That key is already real: `maestro cmd <KEY>
+    discard` must keep working on it end to end (RB-17 AC4), and this guard's
+    whole job is stopping the FIRST event, not stranding one that already has
+    a history. `dispatcher.list_keys`'s archived/dead-letter exclusion is
+    unaffected -- this never touches list membership, only appends.
+    """
+    if store.spec_path(cfg.home, key).exists():
+        return
+    if store.ticket_dir(cfg.home, key).exists():
+        return
+    if event_log.read(cfg.home, key):
+        return
+    raise store.MaestroError(
+        f"{key}: refusing to append -- no spec.md, ticket directory, or event "
+        f"log exists for this key; it was never minted via `maestro create`. "
+        f"Not appending the event that would bootstrap a phantom ticket into "
+        f"existence (RB-17).")
+
+
 def _append(cfg: Config, key: str, type: str, payload: dict, *, actor: str,
             sid: str | None, expect: int | None = None) -> dict | None:
+    _refuse_unminted(cfg, key)
     ev = event_log.append(cfg.home, key, type, payload, actor=actor,
                           step_id=sid, expected_last_seq=expect)
     snap_mod.rebuild(cfg.home, key)

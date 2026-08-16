@@ -262,6 +262,29 @@ def check_dead_letters(cfg: Config, now: float) -> dict:
     }
 
 
+def check_phantom_keys(cfg: Config, now: float) -> dict:
+    """WARN when a key `list_keys` knows about (an event log and/or a derived
+    snapshot on disk) has no `spec.md` -- RB-17's shape: a reconciler was
+    spawned in error for a key never minted via `maestro create`, and
+    recorded real event-log history against it anyway (typically before
+    RB-17's spawn/append guards existed -- `dispatcher._never_minted` and
+    `ops._refuse_unminted` now stop a NEW one from ever getting this far).
+
+    Flagged for manual triage only, never auto-cleaned here: the event log is
+    the sole source of truth (see CLAUDE.md), so deleting one is a decision
+    for a human, made via `maestro cmd <KEY> discard` -- which stays fully
+    functional against a flagged key (RB-17 AC4; `_never_minted` is False for
+    any key with real event-log history, so the dispatcher keeps sweeping it
+    normally)."""
+    home = cfg.home
+    phantoms = sorted(key for key in dispatcher.list_keys(home)
+                       if not store.spec_path(home, key).exists())
+    status = "warn" if phantoms else "ok"
+    detail = (f"{len(phantoms)} key(s) have event/snapshot data but no spec.md: "
+              + ", ".join(phantoms)) if phantoms else "none"
+    return {"name": "phantom_keys", "status": status, "detail": detail, "keys": phantoms}
+
+
 # 2+ already means the exact same automated no-progress path tripped for the
 # same key more than once -- the shape of the 2026-08-14 degraded-respawn-
 # forever incident (OC-7, T-65), where it happened dozens of times per key.
@@ -1301,11 +1324,11 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
 # check_heartbeat's plist override is special-cased, by identity, since it's
 # the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
-          check_dead_letters, check_watchdog_loops, check_depends_on, check_repo_preflight,
-          check_unknown_repo_bindings, check_missing_reconcile_skill, check_reconciler_permissions,
-          check_spawn_floor, check_daily_spend, check_burn, check_gh_credential_reachability,
-          check_launchctl, check_ollama_models, check_pi_models, check_runner_binary, check_pi_version,
-          check_worktree_health, check_provider_availability)
+          check_dead_letters, check_phantom_keys, check_watchdog_loops, check_depends_on,
+          check_repo_preflight, check_unknown_repo_bindings, check_missing_reconcile_skill,
+          check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
+          check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
+          check_runner_binary, check_pi_version, check_worktree_health, check_provider_availability)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
