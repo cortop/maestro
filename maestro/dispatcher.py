@@ -1538,26 +1538,41 @@ def _killpg_best_effort(pid) -> None:
 
 
 def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
-    """Reap a claim that is either too OLD (``max_session_seconds``, 0 disables)
-    or has gone SILENT (``no_output_timeout``, 0 disables). ``claims.active_keys``
-    only checks pid-alive, so a live-but-stuck session -- wedged at startup with
-    no output, no error, no exit -- holds its key and a concurrency slot forever;
-    this closes that gap. Both clocks are independent: a fresh log survives past
-    ``max_session_seconds``, and a stale log is reaped even with a young claim
-    epoch. Must run before ``active`` is computed so a reaped claim never counts
-    toward concurrency. *kill* defaults to a best-effort SIGTERM-to-pgid
-    (``_killpg_best_effort``); injectable so a test can assert the pid passed to
-    it without spawning a real process.
+    """Reap a claim that is too OLD (``max_session_seconds``, 0 disables), has
+    gone SILENT (``no_output_timeout``, 0 disables), or has almost certainly
+    blown its turn budget (``max_turn_wallclock_seconds``, 0 disables -- RB-15's
+    dispatcher-side backstop for ``max_session_turns``, see that field's own
+    docstring). ``claims.active_keys`` only checks pid-alive, so a live-but-stuck
+    session -- wedged at startup with no output, no error, no exit -- holds its
+    key and a concurrency slot forever; this closes that gap. All three clocks
+    are independent: a fresh log survives past ``max_session_seconds``, a stale
+    log is reaped even with a young claim epoch, and the turn-budget backstop
+    fires off the same claim epoch as ``max_session_seconds`` but is meant to be
+    configured shorter. Must run before ``active`` is computed so a reaped claim
+    never counts toward concurrency. *kill* defaults to a best-effort
+    SIGTERM-to-pgid (``_killpg_best_effort``); injectable so a test can assert
+    the pid passed to it without spawning a real process.
 
     The no-output check is exempt for a claim recorded without ``log_path``
     (``capture_session_logs = false`` -- no output signal, never reap on missing
-    data) -- it still falls through to the age-based check below.
+    data) -- it still falls through to the age-based checks below.
+
+    RB-15's turn-budget backstop is deliberately wall-clock, not a real turn
+    count: the dispatcher can't observe a runner's true turn count without
+    parsing its transcript, and this ships without that machinery on purpose
+    (see the spec's Notes) -- a killed session is still routed through
+    ``ops.fail`` exactly like the other two clocks below, so it reads as a
+    bounded stop (a fresh ``Failed`` event, the ticket resumable next sweep),
+    never as T-68's completed-no-op ``Checked`` signal (a killed session never
+    reaches that call) and never mistaken for T-45's 0-turn-spawn crash
+    detection (the claim is already released by the time that check runs).
     """
     home = cfg.home
     max_seconds = cfg.max_session_seconds
     no_output_timeout = cfg.no_output_timeout
+    turn_wallclock = cfg.max_turn_wallclock_seconds
     kill = kill or _killpg_best_effort
-    if not max_seconds and not no_output_timeout:
+    if not max_seconds and not no_output_timeout and not turn_wallclock:
         return []
     reaped: list[str] = []
     for key, claim in claims.all_claims(home).items():
@@ -1570,6 +1585,16 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
                 mtime = None
             if mtime is not None and now - mtime > no_output_timeout:
                 reason = f"no output for over {no_output_timeout}s (log: {log_path})"
+        if reason is None:
+            epoch = claim.get("epoch")
+            # Checked before the generic max_session_seconds rule below so a
+            # session that trips both (turn_wallclock is meant to be the
+            # shorter of the two) is reported with the more specific reason.
+            if (turn_wallclock and isinstance(epoch, (int, float))
+                    and now - epoch > turn_wallclock):
+                reason = (f"RB-15 turn budget: session ran past the "
+                          f"{turn_wallclock}s wall-clock backstop for "
+                          f"max_session_turns")
         if reason is None:
             epoch = claim.get("epoch")
             if (max_seconds and isinstance(epoch, (int, float))
