@@ -93,11 +93,15 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     `qa` handoff itself is the point, independent of whether it would have
     been redirected.
 
-    Entering `awaiting-ci` is gated two ways: a ticket with unattested ACs
+    Entering `awaiting-ci` is gated three ways: a ticket with unattested ACs
     refuses (raises `MaestroError`, non-zero exit, NO event appended) unless
-    `force=True`, and one with a failing independent QA verdict on a current AC
+    `force=True`; one with a failing independent QA verdict on a current AC
     refuses unconditionally (`force` does not override QA — that gate is fixed
-    by re-running `maestro qa-verdict`, not by a human override).
+    by re-running `maestro qa-verdict`, not by a human override); and (T-85,
+    `cfg.awaiting_ci_qa_gate`, default ON) one where any current AC has no
+    *passing* spec-axis QA verdict at all -- not merely no failing one -- also
+    refuses unconditionally, same posture as the QA-failing gate (see
+    `_refuse_if_qa_incomplete`).
 
     Entering `qa` from `implementing` is handled a third way (RB-14, replacing
     RB-12's earlier raise-or-force gate): if `cfg.test_command` is set and this
@@ -151,6 +155,7 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
 
     if phase == Phase.AWAITING_CI:
         _refuse_if_qa_failing(cfg, key, snap)
+        _refuse_if_qa_incomplete(cfg, key, snap)
 
     src = Phase(snap.phase)
     if src != phase and not can_transition(src, phase):
@@ -239,6 +244,26 @@ def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
         raise store.MaestroError(
             f"{key}: refusing awaiting-ci — QA verdict is fail on {len(failing)} "
             f"acceptance criteria: {'; '.join(failing)} — fix and re-run `maestro qa-verdict`")
+
+
+def _refuse_if_qa_incomplete(cfg: Config, key: str, snap) -> None:
+    """T-85: block `implementing -> awaiting-ci` unless every current-hash AC carries a
+    PASSING spec-axis QA verdict -- stricter than `_refuse_if_qa_failing` just above,
+    which only blocks a recorded *fail* (zero verdicts used to satisfy it silently, the
+    bug this ticket closes). Config-gated by `cfg.awaiting_ci_qa_gate` (default ON) so a
+    board can revert to HEAD's weaker check; unconditional (no `force` override) when
+    live, same posture as `_refuse_if_qa_failing`."""
+    if not cfg.awaiting_ci_qa_gate:
+        return
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        return
+    unpassed = snap.qa_unpassed_acs(spec_path.read_text(encoding="utf-8"))
+    if unpassed:
+        raise store.MaestroError(
+            f"{key}: refusing awaiting-ci — {len(unpassed)} acceptance criteria have no "
+            f"passing spec-axis QA verdict: {'; '.join(unpassed)} — run `maestro qa-verdict "
+            f"--verdict pass` for each from the qa phase")
 
 
 def _tests_stale_reason(cfg: Config, key: str, snap) -> str | None:
@@ -1299,11 +1324,24 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
     expected to be re-verdicted after each fix-and-retry round, so a later
     call (once the log has moved on) must record a new event rather than
     collapse into the first one.
+
+    T-85: refuses (raises `MaestroError`, NO event appended) when the ticket's
+    folded phase is not `qa`, unless `cfg.qa_phase_gate` is off (default ON) --
+    the write-path counterpart to the runner-level spawn denylist
+    (`dispatcher.phase_verb_denylist('implementing')`), which blocks the CLI
+    verb from an `implementing`-phase runner but is a permission grant, not an
+    invariant this function itself enforced until now.
     """
     if verdict not in QA_VERDICTS:
         raise store.MaestroError(f"{key}: --verdict must be one of {sorted(QA_VERDICTS)}, got {verdict!r}")
     if axis not in QA_AXES:
         raise store.MaestroError(f"{key}: --axis must be one of {sorted(QA_AXES)}, got {axis!r}")
+    snap = snap_mod.load(cfg.home, key)
+    if cfg.qa_phase_gate and snap.phase != Phase.QA.value:
+        raise store.MaestroError(
+            f"{key}: refusing qa-verdict — ticket phase is {snap.phase!r}, not 'qa'; an "
+            f"independent QA verdict may only be recorded while the ticket is in the qa "
+            f"phase (set qa_phase_gate = false in config.toml to disable)")
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
         raise store.MaestroError(f"{key}: no spec.md to verify ACs against")
@@ -1312,7 +1350,6 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
         raise store.MaestroError(f"{key}: AC #{ac_index} out of range (spec has {len(acs)} AC(s))")
     ac_text = acs[ac_index - 1]
     h = snap_mod.ac_hash(ac_text)
-    snap = snap_mod.load(cfg.home, key)
     sid = step_id(key, snap.phase, snap.observed_seq, f"qaverdict-{axis}-{h}-{verdict}")
     _append(cfg, key, E.AC_QA_VERDICT,
             {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "verdict": verdict,

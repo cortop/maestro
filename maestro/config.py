@@ -231,6 +231,18 @@ class Config:
     # qa-verdict --axis standards`) but is advisory only: unlike a spec-axis fail, it does NOT
     # block `set-phase awaiting-ci` (see ops._refuse_if_qa_failing).
     qa_standards_axis: bool = False
+    # T-85: `maestro qa-verdict` refuses (raises, no event appended) unless the ticket's
+    # folded phase is `qa` -- the write-path counterpart to the runner-level spawn denylist
+    # (dispatcher.phase_verb_denylist('implementing') already blocks the CLI verb itself, but
+    # that's a permission grant, not an invariant; this closes the gap for a runner that grants
+    # it anyway). Default ON; OFF reverts to HEAD's behavior (a verdict is honored from any
+    # phase) -- see ops.record_qa_verdict.
+    qa_phase_gate: bool = True
+    # T-85: `set_phase(..., AWAITING_CI)` refuses unless every current-hash spec AC carries a
+    # PASSING spec-axis QA verdict -- not merely no *failing* one (HEAD's `_refuse_if_qa_failing`
+    # only blocked a recorded fail; zero verdicts silently passed). Default ON; OFF reverts to
+    # HEAD's weaker check -- see ops._refuse_if_qa_incomplete.
+    awaiting_ci_qa_gate: bool = True
     # Maintenance ticks (dispatcher.run_compact_tick / run_archive_tick).
     compact_interval: int = 0          # seconds between dispatcher-driven compact sweeps (0 disables)
     compact_min_events: int = 200      # only compact a key once its folded log reaches this many events
@@ -470,6 +482,8 @@ def load(home_arg: str | None = None) -> Config:
                 f"{sorted(_BASE_DRIFT_POLICIES)}, got {raw_drift_policy!r}")
         cfg.base_drift_policy = raw_drift_policy
         cfg.qa_standards_axis = bool(m.get("qa_standards_axis", cfg.qa_standards_axis))
+        cfg.qa_phase_gate = bool(m.get("qa_phase_gate", cfg.qa_phase_gate))
+        cfg.awaiting_ci_qa_gate = bool(m.get("awaiting_ci_qa_gate", cfg.awaiting_ci_qa_gate))
         cfg.compact_interval = int(m.get("compact_interval", cfg.compact_interval))
         cfg.compact_min_events = int(m.get("compact_min_events", cfg.compact_min_events))
         raw_archive_after = m.get("archive_after", cfg.archive_after)
@@ -647,6 +661,12 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
+# qa_phase_gate = false            # T-85: default ON refuses `maestro qa-verdict` (no event
+                                  # appended) unless the ticket's folded phase is `qa` -- set
+                                  # false to revert to HEAD (a verdict honored from any phase)
+# awaiting_ci_qa_gate = false      # T-85: default ON refuses `set-phase awaiting-ci` unless every
+                                  # current-hash AC has a PASSING spec-axis QA verdict, not merely
+                                  # no failing one -- set false to revert to HEAD's weaker check
 # compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
                                   # (0 disables; a manual `maestro compact <key>` always works)
 # compact_min_events = 200        # skip compacting a key until its folded log reaches this size

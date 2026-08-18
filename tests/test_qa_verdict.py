@@ -41,6 +41,7 @@ def _create(cfg, key, **spec_kwargs):
 def test_record_qa_verdict_appends_event_and_updates_snapshot(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget", "document it"))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     h = ops.record_qa_verdict(cfg, "T-1", 1, "pass", "diff shows widget.py builds; ran test_widget green")
     snap = snap_mod.load(home, "T-1")
@@ -56,6 +57,7 @@ def test_qa_verdict_via_real_cli(cfg):
     """CLI-driven, per the QA convention: exercise the actual `maestro` surface."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     rc = cli.main(["--home", str(home), "qa-verdict", "T-1", "--ac", "1",
                    "--verdict", "fail", "--evidence", "diff has no widget.py at all"])
@@ -71,12 +73,14 @@ def test_qa_verdict_via_real_cli(cfg):
 
 def test_qa_verdict_rejects_unknown_verdict_value(cfg):
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
     with pytest.raises(store.MaestroError, match="verdict"):
         ops.record_qa_verdict(cfg, "T-1", 1, "maybe", "n/a")
 
 
 def test_qa_verdict_out_of_range_raises(cfg):
     _create(cfg, "T-1", acs=("only one thing",))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
     with pytest.raises(store.MaestroError, match="out of range"):
         ops.record_qa_verdict(cfg, "T-1", 2, "pass", "n/a")
 
@@ -86,6 +90,7 @@ def test_qa_verdict_re_recorded_after_a_fix_is_not_deduped(cfg):
     fix must land as a new event — the step id folds in observed_seq."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     ops.record_qa_verdict(cfg, "T-1", 1, "fail", "missing edge case")
     # Something else happens in between (the implementer's fix breadcrumb),
@@ -112,6 +117,7 @@ def test_failing_qa_verdict_blocks_awaiting_ci(cfg):
     _create(cfg, "T-1", acs=("build the widget",))
     ops.set_phase(cfg, "T-1", Phase.READY, reason="approved")
     ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     ops.record_qa_verdict(cfg, "T-1", 1, "fail", "diff does not build the widget")
 
@@ -119,7 +125,7 @@ def test_failing_qa_verdict_blocks_awaiting_ci(cfg):
         ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
 
     snap = snap_mod.load(home, "T-1")
-    assert snap.phase == Phase.IMPLEMENTING.value  # never advanced
+    assert snap.phase == Phase.QA.value  # never advanced
 
 
 def test_passing_qa_verdict_after_fix_unblocks_awaiting_ci(cfg):
@@ -127,6 +133,7 @@ def test_passing_qa_verdict_after_fix_unblocks_awaiting_ci(cfg):
     _create(cfg, "T-1", acs=("build the widget",))
     ops.set_phase(cfg, "T-1", Phase.READY, reason="approved")
     ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     ops.record_qa_verdict(cfg, "T-1", 1, "fail", "diff does not build the widget")
     event_log.append(home, "T-1", "ImplTurnRecorded", {"turn": 2, "role": "implementer"}, actor="reconciler")
@@ -140,13 +147,31 @@ def test_passing_qa_verdict_after_fix_unblocks_awaiting_ci(cfg):
     assert snap.phase == Phase.AWAITING_CI.value
 
 
-def test_no_qa_verdicts_recorded_does_not_block(cfg):
-    """A ticket that never ran the QA loop (e.g. pre-existing behavior, or a
-    conflict-only re-entry that skips it) is unaffected — this is a gate on an
-    explicit fail, not a requirement that QA always run. (ACs are still
-    verify_ac'd here so this test isolates the QA-verdict gate from AD-3's
-    separate unverified-AC gate, which blocks regardless of QA verdicts.)"""
+def test_no_qa_verdicts_recorded_blocks_awaiting_ci_by_default(cfg):
+    """T-85: zero verdicts on a current AC used to satisfy the gate silently
+    (the bug this ticket closes) -- by default (`awaiting_ci_qa_gate=True`) it
+    no longer does, even with the AC self-attested via `verify-ac`. (ACs are
+    still verify_ac'd here so this test isolates the QA-completeness gate from
+    AD-3's separate unverified-AC gate, which blocks for its own reason.)"""
     home = cfg.home
+    _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.READY, reason="approved")
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
+
+    ops.verify_ac(cfg, "T-1", 1, {"what": "ran pytest", "where": "tests/test_widget.py",
+                                   "result": "PASSED"})
+    with pytest.raises(store.MaestroError, match="refusing awaiting-ci"):
+        ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
+    snap = snap_mod.load(home, "T-1")
+    assert snap.phase == Phase.IMPLEMENTING.value  # never advanced
+
+
+def test_no_qa_verdicts_recorded_does_not_block_with_gate_off(cfg):
+    """T-85 AC4: `awaiting_ci_qa_gate = false` reverts byte-identically to HEAD
+    -- a ticket that never ran the QA loop is unaffected by the completeness
+    check (only a recorded *fail*, via `_refuse_if_qa_failing`, still gates)."""
+    home = cfg.home
+    cfg.awaiting_ci_qa_gate = False
     _create(cfg, "T-1", acs=("build the widget",))
     ops.set_phase(cfg, "T-1", Phase.READY, reason="approved")
     ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")

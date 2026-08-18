@@ -63,6 +63,9 @@ def test_real_set_phase_implementing_to_qa_records_no_unusual_transition_note(ho
 def test_real_set_phase_qa_to_implementing_and_awaiting_ci_record_no_unusual_note(home, cfg):
     _seed(home, "T-2", Phase.QA)
     ops.verify_ac(cfg, "T-2", 1, {"what": "ran it", "where": "test", "result": "ok"})
+    # T-85: awaiting-ci now also requires a passing spec-axis QA verdict --
+    # the ticket is already seeded in `qa`, so record one for real.
+    ops.record_qa_verdict(cfg, "T-2", 1, "pass", "ran it, looks good")
     ops.set_phase(cfg, "T-2", Phase.AWAITING_CI, reason="qa: all ACs pass")
     events = event_log.read(home, "T-2")
     notes = [e for e in events if e["type"] == "Note"

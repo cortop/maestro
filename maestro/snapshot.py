@@ -308,6 +308,20 @@ class Snapshot:
                 out.append(t)
         return out
 
+    def qa_unpassed_acs(self, spec_text: str) -> list[str]:
+        """AC texts (in spec order) that do NOT carry a latest spec-axis QA verdict of
+        "pass" -- i.e. no verdict recorded at all, or the latest one is "fail" (T-85).
+        Stricter than `qa_failing_acs`: that one only catches a recorded fail, so zero
+        verdicts on an AC used to satisfy the `awaiting-ci` gate silently; this is what
+        `ops._refuse_if_qa_incomplete` requires be empty (config-gated by
+        `awaiting_ci_qa_gate`) before `implementing -> awaiting-ci` is allowed."""
+        out = []
+        for t in parse_acs(spec_text):
+            v = self.qa_verdicts.get(ac_hash(t))
+            if not v or v.get("verdict") != "pass":
+                out.append(t)
+        return out
+
     def tests_passing(self, tree_key: str) -> bool:
         """True iff a TestRunCaptured record exists for *tree_key* (the exact
         current tree state) and it passed -- the whole gate, in one predicate

@@ -40,9 +40,12 @@ def test_end_to_end_create_runner_pi_through_sweeps_to_awaiting_ci(
         home, tmp_path, monkeypatch):
     _install_stub(tmp_path, monkeypatch, "pi")
     _install_stub(tmp_path, monkeypatch, "claude")
+    # T-85: `--force` overrides the unverified-ACs gate below but not the new
+    # QA-completeness gate; disable the latter, off-topic for this runner-
+    # routing AC.
     (home / "config.toml").write_text(
         "[maestro]\nmin_spawn_interval = 0\n"
-        "runner_enabled = [\"claude\", \"pi\"]\n\n"
+        "runner_enabled = [\"claude\", \"pi\"]\nawaiting_ci_qa_gate = false\n\n"
         "[runner.pi]\nphases = [\"researching\"]\n",
         encoding="utf-8")
     # No repo_path configured -- _worker_cwd falls back to `home` itself (a

@@ -71,6 +71,7 @@ def test_maestro_env_surfaces_qa_standards_axis(home, capsys):
 def test_record_qa_verdict_defaults_to_spec_axis(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
     h = ops.record_qa_verdict(cfg, "T-1", 1, "pass", "diff builds the widget")
     snap = snap_mod.load(home, "T-1")
     assert snap.qa_verdicts[h]["verdict"] == "pass"
@@ -80,6 +81,7 @@ def test_record_qa_verdict_defaults_to_spec_axis(cfg):
 def test_record_qa_verdict_standards_axis_lands_in_a_separate_bucket(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     # Right feature, wrong conventions: spec axis passes, standards axis fails.
     h_spec = ops.record_qa_verdict(cfg, "T-1", 1, "pass", "widget.py builds and works",
@@ -102,6 +104,7 @@ def test_qa_verdict_axis_via_real_cli(cfg):
     """CLI-driven, per the QA convention: exercise the actual `maestro` surface."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     rc = cli.main(["--home", str(home), "qa-verdict", "T-1", "--ac", "1",
                    "--verdict", "fail", "--axis", "standards",
@@ -163,6 +166,7 @@ def test_standards_axis_fail_does_not_block_awaiting_ci(cfg):
     _create(cfg, "T-1", acs=("build the widget",))
     ops.set_phase(cfg, "T-1", Phase.READY, reason="approved")
     ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     ops.record_qa_verdict(cfg, "T-1", 1, "pass", "diff builds the widget", axis="spec")
     ops.record_qa_verdict(cfg, "T-1", 1, "fail", "mocks the real app", axis="standards")
@@ -186,6 +190,7 @@ def test_spec_axis_fail_still_blocks_awaiting_ci_alongside_standards_axis(cfg):
     _create(cfg, "T-1", acs=("build the widget",))
     ops.set_phase(cfg, "T-1", Phase.READY, reason="approved")
     ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
     ops.record_qa_verdict(cfg, "T-1", 1, "fail", "widget.py missing", axis="spec")
     ops.record_qa_verdict(cfg, "T-1", 1, "pass", "conventions look fine", axis="standards")
@@ -193,7 +198,7 @@ def test_spec_axis_fail_still_blocks_awaiting_ci_alongside_standards_axis(cfg):
     with pytest.raises(store.MaestroError, match="refusing awaiting-ci"):
         ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
     snap = snap_mod.load(home, "T-1")
-    assert snap.phase == Phase.IMPLEMENTING.value
+    assert snap.phase == Phase.QA.value  # never advanced
 
 
 def test_standards_axis_gate_choice_is_documented_in_the_skill():
