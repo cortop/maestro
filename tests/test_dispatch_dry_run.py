@@ -249,6 +249,9 @@ def test_hook_sync_worktrees_is_absent_under_dry_run(home, cfg, tmp_path):
                      {"number": 10, "url": "https://github.com/x/y/pull/10", "draft": False},
                      actor="r")
     event_log.append(home, "T-5", "PhaseChanged", {"phase": Phase.AWAITING_CI.value}, actor="r")
+    # T-82: a drift-only reroute now requires a positively known-safe CI state.
+    event_log.append(home, "T-5", "CiObserved",
+                     {"state": "passing", "failing_checks": []}, actor="r")
     snap_mod.rebuild(home, "T-5")
     wt = home / "worktrees" / "T-5"
     _git("worktree", "add", "-q", "-b", "maestro/T-5", str(wt), "main", cwd=repo)

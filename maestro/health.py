@@ -1334,18 +1334,29 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
     under ``<home>/worktrees`` that fails `ops.worktree_health` -- no index, or
     a mass-deletion `git status`. MTO-1: this exact shape was invisible until a
     human ran `git status` inside the worktree by hand; a fresh `worktree
-    ensure` on the same key already self-heals it (recreates rather than
-    skipping), so this check exists to surface it BEFORE that next reconcile,
-    not to fix it itself. Lazy `ops` import -- `ops` imports `dispatcher`,
-    which lazily imports `health` itself; importing `ops` at module level here
-    would round-trip that cycle at import time."""
+    ensure` on the same key now only self-heals it when its creation genuinely
+    never completed (T-81: a completed worktree that later trips this
+    heuristic is left alone, not torn down), so this check is what surfaces it
+    at all. Lazy `ops` import -- `ops` imports `dispatcher`, which lazily
+    imports `health` itself; importing `ops` at module level here would
+    round-trip that cycle at import time.
+
+    `ops.worktree_health` now runs its probes under `cfg.worktree_timeout`
+    (T-81 AC3) and can raise `store.MaestroError` if a probe itself times out
+    or errors -- that is NOT the same as "unhealthy" (AC5), so this loop
+    catches it per-worktree and reports it as its own broken entry rather
+    than letting one slow probe crash the rest of `maestro doctor`."""
     from . import ops
 
     worktrees_dir = cfg.home / "worktrees"
     broken = []
     if worktrees_dir.is_dir():
         for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
-            health = ops.worktree_health(wt)
+            try:
+                health = ops.worktree_health(wt, timeout=cfg.worktree_timeout)
+            except store.MaestroError as exc:
+                broken.append({"key": wt.name, "reason": f"health probe error: {exc}"})
+                continue
             if not health["healthy"]:
                 broken.append({"key": wt.name, "reason": health["reason"]})
     status = "warn" if broken else "ok"

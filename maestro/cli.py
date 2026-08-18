@@ -613,7 +613,9 @@ def cmd_dispatch(args) -> int:
            "repo_blocked": report.repo_blockers,
            "repo_blocked_by_repo": report.repo_blockers_by_repo,
            "runner_blocked": report.runner_blockers,
-           "worktree_removal_errors": report.worktree_removal_errors}
+           "worktree_removal_errors": report.worktree_removal_errors,
+           "drift_skipped": report.drift_skipped,
+           "drift_skip_reasons": report.drift_skip_reasons}
     _print(out)
     return 0
 
