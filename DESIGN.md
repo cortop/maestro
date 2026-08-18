@@ -103,6 +103,20 @@ text, rather than silently matching by index. Two evidence tiers gate `awaiting-
   ticket are all unaffected — the annotation ships dark by construction, so the ~130
   pre-existing prose-only specs keep working untouched.
 
+  T-84: `test:`'s added-test extraction and selector syntax (pytest `path::id`, `go
+  test -run`, jest `-t`) are looked up per the ticket's repo binding `language`
+  (`[repos.<name>] language`; `maestro/testlang.py` — unset means `"python"`, byte-
+  identical to before this table existed). An unrecognized `language` fails
+  `config.load()` closed, so a `test:` annotation can never fail-closed forever the way
+  an unhandled language once could. `check:` performs no added-by-diff verification on
+  any language, so it does not close the false-attestation class the way `test:` does.
+
+  A green suite is a weak oracle for REMOVAL, not just addition: the `verifying` stage
+  also diffs test NAMES (in each language's own test-file scope) against base once the
+  suite passes. A net deletion routes to `awaiting-human` for a human sign-off instead
+  of admitting `qa` — a rename never counts, and the sign-off is scoped to the exact
+  tree state that asked for it (`test_deletion_gate`, default on).
+
 ## State machine
 
 See [`docs/state-machine.md`](docs/state-machine.md) for the maintained phase diagram

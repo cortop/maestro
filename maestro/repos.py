@@ -71,6 +71,15 @@ class RepoBinding:
     # through instead of Config.test_command directly. None means the gate is
     # fully disabled for this key (ships dark).
     test_command: str | None = None
+    # T-84: this repo's test surface language, selecting the added/deleted
+    # test-name extractor + selector formatter every T-79 `test:` annotation
+    # and the H4 test-deletion gate resolve through (`testlang.resolve`).
+    # None (unset -- no board-wide fallback; unlike test_command/prime this
+    # has no [maestro]-level default) resolves to "python", byte-identical to
+    # before this field existed (ships dark). Any other value must be one of
+    # `testlang.SUPPORTED` -- config.load fails closed on anything else, the
+    # same posture as base_drift_policy.
+    language: str | None = None
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -94,6 +103,8 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         base_drift_policy=table.get("base_drift_policy") or cfg.base_drift_policy,
         # T-83: same precedence as base_drift_policy above.
         test_command=table.get("test_command") or cfg.test_command,
+        # T-84: no board-wide fallback -- unset means "python" (see RepoBinding.language).
+        language=table.get("language") or None,
     )
 
 

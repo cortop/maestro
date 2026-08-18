@@ -29,6 +29,7 @@ stateDiagram-v2
     awaiting_human --> researching
     awaiting_human --> terminating
     awaiting_human --> triaging
+    awaiting_human --> verifying
     ready --> awaiting_human
     ready --> degraded
     ready --> implementing
@@ -42,6 +43,7 @@ stateDiagram-v2
     implementing --> qa
     implementing --> terminating
     implementing --> verifying
+    verifying --> awaiting_human
     verifying --> degraded
     verifying --> implementing
     verifying --> qa

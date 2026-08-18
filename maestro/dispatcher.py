@@ -1801,6 +1801,49 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
     _route_test_run(cfg, key, payload, actor="dispatcher", cwd=Path(cwd))
 
 
+def _diff_deleted_test_names(cwd: Path, base: str, profile) -> list[str]:
+    """Test names NET-deleted by the tree's diff against *base*, scoped to
+    *profile*'s own `test_file_globs` (T-84: generalized from H4's original
+    python-only, hard-`tests/`-scoped regex -- see `testlang.py`) -- a name
+    both deleted and (re)added within that scope is a move, never a
+    deletion. Anchored at the merge-base like `ops._path_diff`, and
+    workdir-inclusive (`diff <anchor>` with no second rev) so an uncommitted
+    deletion can't slip past the gate either. Empty on any git failure --
+    fail open here; the gate strengthens the oracle, it is not a correctness
+    invariant, and a broken git must never wedge routing."""
+    import subprocess
+
+    def _git(*args: str):
+        try:
+            return subprocess.run(["git", "-C", str(cwd), *args],
+                                  capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    anchor = base
+    for ref in (f"origin/{base}", base):
+        mb = _git("merge-base", ref, "HEAD")
+        if mb is not None and mb.returncode == 0 and mb.stdout.strip():
+            anchor = mb.stdout.strip()
+            break
+    diff = _git("diff", anchor, "--", *profile.test_file_globs)
+    if diff is None or diff.returncode != 0:
+        return []
+    removed: set[str] = set()
+    added: set[str] = set()
+    for line in diff.stdout.splitlines():
+        m = profile.line_re.match(line)
+        if m:
+            (removed if m.group(1) == "-" else added).add(m.group(2))
+    return sorted(removed - added)
+
+
+def _question_answered(home: Path, key: str, qid: str) -> bool:
+    return any(e.get("type") == E.QUESTION_ANSWERED
+               and (e.get("payload") or {}).get("qid") == qid
+               for e in event_log.read(home, key))
+
+
 def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Path) -> None:
     """Advance *key* off `verifying` per a captured test-run record -- the
     routing half both the freshly-folded and the tree-cache-reuse paths in
@@ -1813,8 +1856,23 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
     session) before `qa` is admitted. A red check routes back to
     `implementing` exactly like a red suite does, carrying its own failure
     summary instead of the suite's.
+
+    T-84: two more outcomes hang off the same green suite. (a) H4 -- ported
+    from the unmerged pi-preflight-fixes lab branch and generalized per
+    language: the diff net-deletes an existing test (`binding.language`'s
+    own `test_file_globs`, never a hardcoded `tests/`) -- "a passing suite is
+    a weak oracle for removal", so this routes to `awaiting-human` for a
+    sign-off instead of admitting QA; the qid encodes the tree state, so an
+    ANSWERED sign-off for THIS exact tree passes straight through (the
+    awaiting-human round-trip re-lands the unchanged tree back here), while
+    any new tree re-evaluates from scratch. (b) an annotated `test:` AC on a
+    repo binding whose `language` `run_ac_checks` couldn't resolve -- should
+    never actually happen (T-84: `config.load` already fails closed on an
+    unrecognized `language`) but is handled here as defense in depth: one
+    clear, one-time `ops.fail(..., dead_letter=True)` rather than a bounce
+    back to `implementing` that could never converge.
     """
-    from . import ops
+    from . import ops, repos as repos_mod, testlang
 
     if not record.get("passed"):
         fresh = snap_mod.rebuild(cfg.home, key)
@@ -1826,6 +1884,31 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
                       expect=fresh.observed_seq)
         return
 
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if cfg.test_deletion_gate and binding.mode != "local":
+        try:
+            profile = testlang.resolve(binding.language)
+        except testlang.UnsupportedLanguage as exc:
+            # Same defense-in-depth as `run_ac_checks`'s own catch below --
+            # caught here too since H4 resolves the profile BEFORE any
+            # `test:` AC's own check would.
+            ops.fail(cfg, key, f"unsupported language for this repo binding -- {exc}",
+                    actor=actor, dead_letter=True)
+            return
+        deleted = _diff_deleted_test_names(cwd, binding.base_branch or "main", profile)
+        if deleted:
+            tree_key = ops._tree_state_key(cwd)
+            qid = f"test-deletion-{key}-{content_hash(tree_key)[:8]}"
+            if not _question_answered(cfg.home, key, qid):
+                shown = ", ".join(deleted[:10]) + (" …" if len(deleted) > 10 else "")
+                ops.ask(cfg, key,
+                        f"{key}: the suite is green but this diff DELETES existing "
+                        f"test(s): {shown}. A passing suite is a weak oracle for "
+                        "removal -- answer to approve the deletion(s) as intended, "
+                        "or say what must be restored.",
+                        qid=qid, actor=actor)
+                return
+
     # run_ac_checks may itself append AcCheckCaptured events -- the CAS
     # `expect` below must be folded AFTER it runs, not before, or a genuinely
     # annotated AC turns every routing call into a spurious StaleAppendError
@@ -1833,6 +1916,12 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
     # the ticket in `verifying` forever).
     ac_result = ops.run_ac_checks(cfg, key, cwd, actor=actor)
     fresh = snap_mod.rebuild(cfg.home, key)
+    unsupported = ac_result.get("unsupported") or []
+    if unsupported:
+        detail = "; ".join(f"AC#{u['ac_index']}: {u['error']}" for u in unsupported)
+        ops.fail(cfg, key, f"test: annotation can't run -- {detail}", actor=actor,
+                 dead_letter=True)
+        return
     if ac_result["all_passed"]:
         ops.set_phase(cfg, key, Phase.QA, reason="tests passed", actor=actor,
                       expect=fresh.observed_seq)

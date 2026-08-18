@@ -12,7 +12,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import schedule, store
+from . import schedule, store, testlang
 
 
 @dataclass
@@ -137,6 +137,15 @@ class Config:
     # spanning more than one repo/language can give each its own correct suite
     # command instead of leaving the whole verification tier dark.
     test_command: str | None = None
+    # T-84 (H4, ported from the unmerged pi-preflight-fixes lab branch and
+    # generalized per-language): a green suite is a weak oracle for REMOVAL --
+    # a session that deletes an existing test keeps everything green. The
+    # `verifying` stage diffs test names (per `repos.RepoBinding.language`'s
+    # own test-file scope, see `testlang.py`) against base; net deletions
+    # route to `awaiting-human` for sign-off instead of QA. A rename (same
+    # name deleted and re-added within that language's test-file scope)
+    # never counts. False disables.
+    test_deletion_gate: bool = True
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -284,6 +293,7 @@ _REPO_TABLE_KEYS = frozenset({
     "path", "slug", "base_branch", "branch_prefix", "default",
     "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
     "gh_account", "token_env", "prime", "base_drift_policy", "test_command",
+    "language",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -399,6 +409,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
         cfg.prime = m.get("prime", cfg.prime) or None
         cfg.test_command = m.get("test_command", cfg.test_command) or None
+        cfg.test_deletion_gate = bool(m.get("test_deletion_gate", cfg.test_deletion_gate))
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.opencode_user_commands_dir = m.get(
             "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
@@ -432,6 +443,15 @@ def load(home_arg: str | None = None) -> Config:
                     raise store.MaestroError(
                         f"config.toml: [repos.{name}] base_drift_policy must be one of "
                         f"{sorted(_BASE_DRIFT_POLICIES)}, got {raw_repo_drift_policy!r}")
+                # T-84: fail closed on a typo'd language too -- unset (None) is valid
+                # (RepoBinding.language's own None-means-python fallback), a set-but-
+                # unrecognized value is a config error the human should fix at load
+                # time, not a `test:` annotation that fails closed forever later.
+                raw_language = table.get("language") or None
+                if raw_language is not None and raw_language not in testlang.SUPPORTED:
+                    raise store.MaestroError(
+                        f"config.toml: [repos.{name}] language must be one of "
+                        f"{sorted(testlang.SUPPORTED)} (or unset), got {raw_language!r}")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -456,6 +476,9 @@ def load(home_arg: str | None = None) -> Config:
                     # cfg.test_command, same precedence as base_drift_policy above -- see
                     # repos.RepoBinding.test_command / repos.resolve(...).
                     "test_command": table.get("test_command") or None,
+                    # T-84: this repo's test-surface language -- validated above; None
+                    # (unset) means "python" (see repos.RepoBinding.language).
+                    "language": raw_language,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -668,6 +691,12 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # suite for nothing. `--force` on `set-phase` overrides, same
                                   # as the unverified-ACs gate. No-ops for a `mode = "local"`
                                   # binding (no suite to run).
+# test_deletion_gate = true        # T-84 (H4): a green suite is a weak oracle for REMOVAL. The
+                                  # verifying stage diffs test names (per-language, see
+                                  # [repos.<name>] language below) against base; net deletions
+                                  # route to awaiting-human for sign-off instead of QA (renames
+                                  # never count; an answered sign-off for the same tree state
+                                  # passes). false disables.
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
@@ -747,6 +776,14 @@ implementer = "claude_skill"
                                      # yarn repo elsewhere) give each its own correct suite
                                      # command instead of leaving the whole verification tier
                                      # (RB-12/RB-14, and T-79's `check:` annotation) dark.
+# language = "go"                   # T-84: this repo's test surface language -- "python"
+                                     # (default: unset), "go", or "typescript". Selects the
+                                     # added/deleted test-name extractor and the `test:`
+                                     # annotation's selector syntax (pytest `path::id`, `go test
+                                     # -run`, jest `-t`) and the H4 test-deletion gate's test-file
+                                     # scope (see maestro/testlang.py) -- unset keeps every
+                                     # existing pytest-only home byte-identical. An unrecognized
+                                     # value fails config load closed (see testlang.SUPPORTED).
 # gh_account = "work-login"         # resolve this repo's gh credential via
                                      # `gh auth token --user <login>` at spawn/poll time
                                      # (needs `gh` + an unlocked keychain on the dispatcher

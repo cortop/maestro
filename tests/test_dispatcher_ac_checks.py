@@ -302,6 +302,45 @@ def test_awaiting_ci_gate_still_blocks_when_annotated_check_never_ran(tmp_path, 
 
 
 # ---------------------------------------------------------------------------
+# T-84 AC6: an unsupported `language` must fail legibly (one clear, one-time
+# dead-letter), never a `test:` check that fails closed forever and accrues
+# bounces. `config.load()` already fails closed on a typo'd `language` before
+# any ticket ever reaches `verifying` (tests/test_repos.py) -- this is the
+# defense-in-depth runtime path for a binding constructed some other way.
+# ---------------------------------------------------------------------------
+
+def test_unsupported_language_dead_letters_instead_of_bouncing(tmp_path, home):
+    _origin, repo = make_origin_and_repo(tmp_path)
+    cfg = Config(home=home, repos={
+        "default": {"path": str(repo), "default": True, "test_command": _PYTEST,
+                   "language": "cobol"},
+    })
+    wt = _seed_to_worktree(
+        cfg, "G-1", acs=["widget works (test: tests/test_widget.py::test_widget)"])
+    _commit_test_file(wt, "tests/test_widget.py",
+                      "def test_widget():\n    assert True\n")
+    _advance_to_verifying(cfg, "G-1")
+
+    sessions = DryRunSessions()
+    _run_verifying_to_completion(cfg, "G-1", sessions)
+
+    snap = snap_mod.load(home, "G-1")
+    assert snap.phase == Phase.DEGRADED.value
+    events = event_log.read(home, "G-1")
+    assert any(e["type"] == "Stalled" for e in events)
+    failed = [e for e in events if e["type"] == "Failed"][-1]
+    assert "cobol" in failed["payload"]["error"]
+    # dead-lettered straight from `verifying` -- no bounce back to
+    # `implementing` first (that would just reproduce the accrual this
+    # exists to avoid).
+    verifying_seq = next(e["seq"] for e in events if e["type"] == "PhaseChanged"
+                         and e["payload"]["phase"] == "verifying")
+    assert [e for e in events if e["seq"] > verifying_seq and e["type"] == "PhaseChanged"
+           and e["payload"]["phase"] == "implementing"] == []
+    assert all("qa" not in p for _k, p, *_r in sessions.spawned)
+
+
+# ---------------------------------------------------------------------------
 # Ships dark: `test_command` unset, and separately `mode: local`, make
 # annotated ACs behave byte-identically to plain prose ACs.
 # ---------------------------------------------------------------------------

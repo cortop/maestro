@@ -160,6 +160,24 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   Ships dark by construction: an AC with no such trailing parenthetical, a spec with
   `test_command` unset, or a `mode: local` ticket all behave byte-identically to before
   this annotation grammar existed — zero bulk rewrite of the ~130 existing specs.
+  `test:`'s added/deleted-test extraction and selector syntax are selected per the
+  ticket's repo binding's `language` (T-84, `maestro/testlang.py`; `[repos.<name>]
+  language = "python" | "go" | "typescript"`, unset = `"python"`) — pytest `path::id`,
+  `go test -run`, or jest `-t`, and the H4 test-deletion gate's own test-file scope
+  (see below), all keyed off the same field. An unrecognized `language` fails
+  `config.load()` closed rather than ever reaching a `test:` check. `check:` performs
+  NO added-by-diff verification on any language — it is satisfied by a pre-existing
+  green suite the branch never touched, so it does not close the T-55 seq-130 class the
+  way `test:` does; treat it as a stopgap, not a substitute.
+- H4 (T-84, `dispatcher._route_test_run`/`_diff_deleted_test_names`): once the suite is
+  green, the `verifying` stage also diffs test names (per the repo binding's `language`
+  test-file scope — `tests/` for python, co-located `*_test.go` for go, `*.spec.ts` /
+  `__tests__/` for typescript) against base. A net deletion (not a rename — the same
+  name deleted and re-added in scope never counts) routes to `awaiting-human` for a
+  human sign-off instead of admitting `qa` — "a passing suite is a weak oracle for
+  removal." The qid encodes the tree state, so an answered sign-off for that EXACT tree
+  passes straight through; any new tree re-evaluates from scratch. `test_deletion_gate
+  = false` disables.
 
 ## Git
 

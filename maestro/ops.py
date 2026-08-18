@@ -21,6 +21,7 @@ from . import context as context_mod
 from . import config as config_mod
 from . import gates
 from . import event_log, inbox, repos as repos_mod, schedule as schedule_mod, snapshot as snap_mod, store
+from . import testlang
 from .config import Config
 from .dispatcher import spec_hash_on_disk
 from .idempotency import content_hash, step_id
@@ -1187,14 +1188,6 @@ def _run_shell(command: str, cwd: Path) -> tuple[int, str]:
         return -1, f"[maestro] check timed out after {_TEST_RUN_TIMEOUT}s"
 
 
-# T-79 `test:` semantics: an added `def test_whatever(...):` line in the
-# diff -- the primitive both the `::<id>` and bare-file-path forms below key
-# off. Top-level function defs only (no class-scoped tracking); the `::<id>`
-# form still works for a method by matching on its leaf name, see
-# `_run_named_test`.
-_TEST_DEF_RE = re.compile(r"^\+\s*def\s+(test_\w+)\s*\(")
-
-
 def _path_diff(cwd: Path, base: str, rel_path: str) -> str:
     """The branch's diff against *base*, restricted to *rel_path* -- covers
     both a tracked, modified file (anchored at the merge-base, same rule as
@@ -1217,46 +1210,52 @@ def _path_diff(cwd: Path, base: str, rel_path: str) -> str:
     return d.stdout if d.returncode <= 1 else ""
 
 
-def _diff_added_test_names(cwd: Path, base: str, rel_path: str) -> set[str]:
-    """Test function names newly introduced (an added `+def test_*(` line) by
-    the branch's diff against *base*, restricted to *rel_path* -- what a
-    `test:` annotation's gate actually checks presence against, never just
-    "exists on disk" (that reproduces the T-55 seq-130 false-attestation
-    class: a green suite whose diff never actually added the named test)."""
+def _diff_added_test_names(cwd: Path, base: str, rel_path: str,
+                           profile: "testlang.LanguageProfile") -> set[str]:
+    """Test names newly introduced (an added line matching *profile*'s own
+    `added_re`) by the branch's diff against *base*, restricted to
+    *rel_path* -- what a `test:` annotation's gate actually checks presence
+    against, never just "exists on disk" (that reproduces the T-55 seq-130
+    false-attestation class: a green suite whose diff never actually added
+    the named test). T-84: *profile* is the caller's already-resolved
+    per-key language table entry (`testlang.resolve(binding.language)`),
+    never a module-level regex -- the sole per-language selection point."""
     diff_text = _path_diff(cwd, base, rel_path)
-    return {m.group(1) for line in diff_text.splitlines() if (m := _TEST_DEF_RE.match(line))}
+    return {m.group(1) for line in diff_text.splitlines() if (m := profile.added_re.match(line))}
 
 
-def _run_named_test(test_command: str, cwd: Path, base: str,
-                    ann: "snap_mod.AcAnnotation") -> tuple[str, int, str]:
+def _run_named_test(profile: "testlang.LanguageProfile", test_command: str, cwd: Path,
+                    base: str, ann: "snap_mod.AcAnnotation") -> tuple[str, int, str]:
     """Run (or refuse to run) a `test:` annotation's check -- returns
     ``(command, exit_code, output)``, mirroring `_run_shell`'s shape so
     `run_ac_checks` can record either uniformly. *test_command* is the
     caller's already-resolved per-key command (T-83: `binding.test_command`),
-    never `cfg.test_command` directly.
+    never `cfg.test_command` directly. *profile* (T-84) is the caller's
+    already-resolved language table entry -- selector syntax (pytest
+    `path::id`, `go test -run`, jest `-t`) comes from `profile.format_selector`,
+    never hardcoded here.
 
     Presence in the diff is checked FIRST, before anything is ever run: a
-    named test (`::<id>` form, matched by its leaf name to allow a
-    class-scoped `Class::test_method`) or, for a bare file-path form, ANY
-    added test in that file, must actually be part of this diff -- a suite
-    that happens to pass with an untouched, pre-existing test of the same
-    name satisfies nothing (T-79 AC4 / the T-55 class)."""
-    added = _diff_added_test_names(cwd, base, ann.path)
+    named test (`::<id>` form -- for python, matched by its leaf name to
+    allow a class-scoped `Class::test_method`) or, for a bare file-path
+    form, ANY added test in that file, must actually be part of this diff --
+    a suite that happens to pass with an untouched, pre-existing test of the
+    same name satisfies nothing (T-79 AC4 / the T-55 class)."""
+    added = _diff_added_test_names(cwd, base, ann.path, profile)
     if ann.test_id:
         leaf = ann.test_id.rsplit("::", 1)[-1]
-        selector = f"{ann.path}::{ann.test_id}"
-        command = f"{test_command} {selector}"
+        command = profile.format_selector(test_command, ann.path, [ann.test_id])
         if leaf not in added:
             return command, 1, (
-                f"[maestro] {selector} not found among tests added by this diff in "
-                f"{ann.path} -- a passing suite alone does not satisfy a test: annotation")
+                f"[maestro] {ann.path}::{ann.test_id} not found among tests added by "
+                f"this diff in {ann.path} -- a passing suite alone does not satisfy a "
+                "test: annotation")
     else:
         if not added:
             return (f"{test_command} {ann.path}", 1,
                     f"[maestro] no test added by this diff in {ann.path} -- a passing "
                     f"suite alone does not satisfy a test: annotation")
-        selector = " ".join(f"{ann.path}::{n}" for n in sorted(added))
-        command = f"{test_command} {selector}"
+        command = profile.format_selector(test_command, ann.path, sorted(added))
     exit_code, output = _run_shell(command, cwd)
     return command, exit_code, output
 
@@ -1273,15 +1272,28 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
     `capture_tests`: a tree state already checked is not re-run, just re-read.
     No-op (`{"all_passed": True, "checked": [], "summary": ""}`) when the spec
     has no acs section at all or no ACs carry an annotation.
+
+    T-84: a `test:` annotation's added/deleted-name extraction and selector
+    syntax are selected per `binding.language` (`testlang.resolve`) -- never
+    hardcoded pytest here. `binding.language` is already fail-closed at
+    `config.load()` time (an unrecognized value refuses to load the home at
+    all -- see `config._REPO_TABLE_KEYS`'s validation), so `testlang.resolve`
+    raising `UnsupportedLanguage` here should never actually happen; it is
+    caught anyway (defense in depth against a binding constructed by some
+    other path) and surfaced via the `"unsupported"` key instead of ever
+    running (and thus ever failing-closed forever) a check that cannot mean
+    anything for that language -- the caller (`_route_test_run`) turns a
+    non-empty `"unsupported"` into one clear, one-time `ops.fail(...,
+    dead_letter=True)` rather than a bounce back to `implementing`.
     """
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
-        return {"all_passed": True, "checked": [], "summary": ""}
+        return {"all_passed": True, "checked": [], "summary": "", "unsupported": []}
     text = spec_path.read_text(encoding="utf-8")
     acs = snap_mod.parse_acs(text)
     binding = repos_mod.resolve(cfg, cfg.home, key)
     if binding.mode == "local":  # defensive -- verifying never reaches mode:local
-        return {"all_passed": True, "checked": [], "summary": ""}
+        return {"all_passed": True, "checked": [], "summary": "", "unsupported": []}
     base = binding.base_branch
     tree_key = _tree_state_key(cwd)
     snap = snap_mod.load(cfg.home, key)
@@ -1290,6 +1302,7 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
     all_passed = True
     failures = []
     checked = []
+    unsupported = []
     for i, t in enumerate(acs, start=1):
         ann = snap_mod.parse_ac_annotation(t)
         if ann is None:
@@ -1301,7 +1314,14 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
                 command = ann.command
                 exit_code, output = _run_shell(ann.command, cwd)
             else:
-                command, exit_code, output = _run_named_test(binding.test_command, cwd, base, ann)
+                try:
+                    profile = testlang.resolve(binding.language)
+                except testlang.UnsupportedLanguage as exc:
+                    unsupported.append({"ac_index": i, "ac_hash": h,
+                                        "language": binding.language, "error": str(exc)})
+                    continue
+                command, exit_code, output = _run_named_test(profile, binding.test_command,
+                                                              cwd, base, ann)
             rec = _record_ac_check(cfg, key, tree_key=tree_key, h=h, ac_index=i, ac_text=t,
                                    kind=ann.kind, command=command, exit_code=exit_code,
                                    output=output, actor=actor)
@@ -1310,7 +1330,8 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
             all_passed = False
             failures.append(f"AC#{i} ({ann.kind}): "
                             f"{rec.get('failure_excerpt') or ('exit ' + str(rec['exit_code']))}")
-    return {"all_passed": all_passed, "checked": checked, "summary": "; ".join(failures)[:2000]}
+    return {"all_passed": all_passed and not unsupported, "checked": checked,
+            "summary": "; ".join(failures)[:2000], "unsupported": unsupported}
 
 
 def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, evidence: str, *,

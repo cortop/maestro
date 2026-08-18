@@ -138,8 +138,12 @@ ACTIVE_PHASES = frozenset(p for p, c in PHASE_CLASS.items() if c == "active")
 # Allowed transitions — used to validate a PhaseChanged and to document the flow.
 TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.TRIAGING: {Phase.AWAITING_HUMAN, Phase.READY, Phase.DEGRADED, Phase.TERMINATING},
-    Phase.AWAITING_HUMAN: {Phase.READY, Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.TRIAGING,
-                           Phase.RESEARCHING, Phase.DEGRADED, Phase.TERMINATING},
+    # T-84: `-> VERIFYING` is the H4 test-deletion gate's own round-trip --
+    # an answered deletion sign-off re-lands the (unchanged) tree back in
+    # VERIFYING so `_route_test_run` re-evaluates it, this time with the
+    # `QuestionAnswered` on record (see dispatcher._route_test_run).
+    Phase.AWAITING_HUMAN: {Phase.READY, Phase.IMPLEMENTING, Phase.VERIFYING, Phase.AWAITING_CI,
+                           Phase.TRIAGING, Phase.RESEARCHING, Phase.DEGRADED, Phase.TERMINATING},
     Phase.READY: {Phase.IMPLEMENTING, Phase.RESEARCHING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
     # RB-14: `-> QA` survives directly for the byte-identical-when-unconfigured
     # case (`test_command` unset, or a `mode: local` binding) -- `ops.set_phase`
@@ -150,8 +154,13 @@ TRANSITIONS: dict[Phase, set[Phase]] = {
                          Phase.DEGRADED, Phase.AWAITING_HUMAN, Phase.TERMINATING, Phase.DONE},
     # RB-14: the dispatcher's own `sync_test_runs` routes a passing run on to
     # QA and a failing one back to IMPLEMENTING -- no reconciler ever chooses
-    # either edge itself.
-    Phase.VERIFYING: {Phase.QA, Phase.IMPLEMENTING, Phase.DEGRADED, Phase.TERMINATING},
+    # either edge itself. `-> AWAITING_HUMAN` is H4 (T-84, ported from the
+    # unmerged pi-preflight-fixes branch and generalized per-language): a
+    # green diff that DELETES existing tests needs a human's sign-off before
+    # QA ("a passing suite is a weak oracle for removal"), asked by the same
+    # deterministic routing.
+    Phase.VERIFYING: {Phase.QA, Phase.IMPLEMENTING, Phase.AWAITING_HUMAN,
+                      Phase.DEGRADED, Phase.TERMINATING},
     Phase.QA: {Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.DEGRADED,
               Phase.AWAITING_HUMAN, Phase.TERMINATING},
     Phase.RESEARCHING: {Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING, Phase.DONE},
