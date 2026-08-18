@@ -1243,7 +1243,8 @@ def test_reconciler_permissions_warns_for_opencode_runner_missing_config(home, t
     monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(tmp_path / "no-opencode-user-commands"))
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
-    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0,
+                 runner_enabled=["claude", "opencode"])
     _seed_with_runner(home, "T-1", runner="opencode")
 
     checks = health.run_checks(cfg, 1000)
