@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 
-from maestro import cli, claims, dispatcher as disp, health, ops, store
+from maestro import backup, cli, claims, dispatcher as disp, health, ops, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
@@ -226,19 +226,97 @@ def test_check_backup_age_ok_when_disabled(home, cfg):
     assert result == {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
 
 
-def test_check_backup_age_warns_when_stale(home, cfg):
+def test_check_backup_age_never_swept_is_ok_not_warn(home, cfg):
+    """T-88 AC3: a freshly-initialized home with no backups and no dispatcher
+    sweep (no derived/.heartbeat.json) reports its own non-warning state,
+    mirroring check_heartbeat's "no heartbeat yet" -> status ok contract --
+    not the noisy `warn` a never-swept board used to get."""
+    cfg.backup_interval = 100
+    assert not (home / "derived" / ".heartbeat.json").exists()
+    result = health.check_backup_age(cfg, store.now_epoch())
+    assert result["status"] == "ok"
+    assert result["age_s"] is None
+    assert "never swept" in result["detail"]
+
+
+def test_check_backup_age_warns_when_swept_and_no_backups_exist(home, cfg):
+    """A board that HAS swept (has a heartbeat) but has no tarballs at all is a
+    real fault, distinct from the never-swept case above."""
+    cfg.backup_interval = 100
+    store.write_json(home / "derived" / ".heartbeat.json",
+                     {"ts": "x", "epoch": store.now_epoch(), "spawned": 0})
+    result = health.check_backup_age(cfg, store.now_epoch())
+    assert result["status"] == "warn"
+    assert result["age_s"] is None
+
+
+def test_check_backup_age_ignores_a_stale_cursor_over_an_emptied_backup_dir(home, cfg):
+    """T-88 AC2: grounded in the tarballs, not the cursor -- a fresh cursor
+    epoch over an empty backup_dir must NOT read as ok."""
     cfg.backup_interval = 100
     now = store.now_epoch()
-    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now - 1000})
+    store.write_json(home / "derived" / ".heartbeat.json", {"ts": "x", "epoch": now, "spawned": 0})
+    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now})
+    assert not backup.resolve_backup_dir(cfg).exists()
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] != "ok"
+
+
+def test_check_backup_age_warns_when_newest_tarball_is_stale(home, cfg):
+    cfg.backup_interval = 100
+    now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
+    backup.create_backup(cfg, now - 1000)
     result = health.check_backup_age(cfg, now)
     assert result["status"] == "warn"
     assert result["age_s"] == 1000
 
 
-def test_check_backup_age_ok_when_fresh(home, cfg):
+def test_check_backup_age_ok_when_newest_tarball_is_fresh(home, cfg):
     cfg.backup_interval = 3600
+    now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
+    backup.create_backup(cfg, now - 10)
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] == "ok"
+    assert result["age_s"] == 10
+
+
+def test_check_backup_age_uses_the_newest_of_several_tarballs(home, cfg):
+    """A stale cursor (or none at all) must not shadow a newer tarball that a
+    manual `maestro backup` created after the dispatcher's last sweep."""
+    cfg.backup_interval = 3600
+    now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
+    backup.create_backup(cfg, now - 5000)
+    backup.create_backup(cfg, now - 5)
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] == "ok"
+    assert result["age_s"] == 5
+
+
+def test_check_backup_age_ok_via_real_cli_init_backup_doctor_strict(tmp_path, capsys):
+    """T-88 AC1: `init` -> `backup` -> `doctor --strict` over a temp home, driven
+    entirely through the real CLI (never a hand-written cursor) -- and exits 0
+    with `backup_age` reporting `status == "ok"`, matching the spec's own
+    reproduction (a fresh backup_interval-armed home used to WARN "no backup
+    yet" here despite the tarball `backup` just wrote)."""
+    home = tmp_path / "home"
+    assert cli.main(["--home", str(home), "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["--home", str(home), "backup"]) == 0
+    capsys.readouterr()
+    rc = cli.main(["--home", str(home), "doctor", "--strict"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    check = next(c for c in out["checks"] if c["name"] == "backup_age")
+    assert check["status"] == "ok"
+
+
+def test_check_backup_age_ok_after_dispatcher_sweep_runs_maybe_backup(home, cfg):
+    """T-88 AC6: the existing dispatcher-timer path (`backup.maybe_backup`) is
+    not regressed -- a real sweep still leaves `backup_age` at status "ok"."""
+    _seed(home, "T-1", Phase.READY)
     now = store.now_epoch()
-    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now - 10})
+    disp.dispatch(cfg, DryRunSessions(), now=now)
+    assert backup.list_backups(cfg)  # maybe_backup actually ran
     result = health.check_backup_age(cfg, now)
     assert result["status"] == "ok"
 
@@ -924,8 +1002,12 @@ def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypa
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
     _install_dummy_reconcile_skill(repo)
+    # T-88: backup_interval is left at its default (3600, armed) rather than
+    # disabled -- the never-swept board (no derived/.heartbeat.json here) reads
+    # as backup_age status "ok" on its own now, so this exercises --strict with
+    # backups actually armed instead of sidestepping that check entirely.
     (home / "config.toml").write_text(
-        f'[maestro]\nbackup_interval = 0\ndaily_spend_ceiling_usd = 50.0\n\n'
+        f'[maestro]\ndaily_spend_ceiling_usd = 50.0\n\n'
         f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
     _seed_bound_ticket(home, "T-1", "alpha")
 

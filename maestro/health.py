@@ -19,6 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import backup as backup_mod
 from . import claims, credentials, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, spend as spend_mod, store
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
@@ -155,16 +156,30 @@ def check_heartbeat(cfg: Config, now: float, *, plist=None) -> dict:
 
 
 def check_backup_age(cfg: Config, now: float) -> dict:
+    """Grounded in the actual tarballs `backup.list_backups` finds -- never in
+    `derived/.backup_cursor.json`, which only the dispatcher's periodic
+    `backup.maybe_backup` writes and which a manual `maestro backup` or a wiped
+    `backup_dir` leave dangerously wrong in either direction (T-88). A board
+    that has never swept (no `derived/.heartbeat.json`) and has no tarballs
+    reports its own non-warning state, mirroring `check_heartbeat`'s "no
+    heartbeat yet" -> status ok contract above; a board that HAS swept and
+    still has no tarballs is a real fault.
+    """
     if not cfg.backup_interval or cfg.backup_interval <= 0:
         return {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
-    cursor = store.read_json(cfg.home / "derived" / ".backup_cursor.json", {}) or {}
-    epoch = cursor.get("epoch")
-    age = round(now - epoch) if epoch else None
-    stale = age is None or age > cfg.backup_interval * 2
+    epoch = backup_mod.newest_backup_epoch(cfg)
+    if epoch is None:
+        swept = (cfg.home / "derived" / ".heartbeat.json").exists()
+        return {
+            "name": "backup_age", "status": "warn" if swept else "ok",
+            "detail": "no backups found in backup_dir" if swept else "no backup yet -- board never swept",
+            "age_s": None,
+        }
+    age = round(now - epoch)
+    stale = age > cfg.backup_interval * 2
     return {
         "name": "backup_age", "status": "warn" if stale else "ok",
-        "detail": f"last backup {age}s ago" if age is not None else "no backup yet",
-        "age_s": age,
+        "detail": f"last backup {age}s ago", "age_s": age,
     }
 
 
