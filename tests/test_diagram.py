@@ -4,6 +4,7 @@ and an AST walk of maestro/dispatcher.py, never hand-retyped -- these tests are 
 makes forgetting `make diagram` after touching either source fail `make test`."""
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,26 @@ from pathlib import Path
 from maestro import diagram
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# T-93: an independent regex scan of dispatcher.py's `decisions[key]` outcome
+# sites -- deliberately NOT built on `diagram._outcome_assignments`, so that
+# extractor agreeing with itself can no longer be mistaken for the doc being
+# complete. Two patterns, matching the two assignment forms `_outcome_assignments`
+# now widens across: `decisions[key]["outcome"] = "<lit>"`, and a
+# `"outcome": "<lit>"` dict-literal key (optionally a `<a> if <cond> else <b>`
+# conditional, whose second literal is capture group 2).
+_SUBSCRIPT_OUTCOME_RE = re.compile(r'decisions\[key\]\["outcome"\]\s*=\s*"([a-zA-Z_]+)"')
+_DICT_OUTCOME_RE = re.compile(
+    r'"outcome":\s*"([a-zA-Z_]+)"(?:\s+if\s+.+?\s+else\s+"([a-zA-Z_]+)")?')
+
+
+def _independent_outcome_literals(source: str) -> set[str]:
+    literals = set(_SUBSCRIPT_OUTCOME_RE.findall(source))
+    for first, second in _DICT_OUTCOME_RE.findall(source):
+        literals.add(first)
+        if second:
+            literals.add(second)
+    return literals
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +97,34 @@ def test_dispatch_gates_row_count_matches_source_today():
     assert f"{len(rows)} gates today." in text
     for _, outcome in rows:
         assert f"`{outcome}`" in text
+
+
+def test_dispatch_gates_outcome_set_is_complete_independent_of_extractor():
+    """T-93: the doc's outcome set is validated against `_independent_outcome_literals`
+    (a plain regex scan, above) instead of `diagram._outcome_assignments` -- so this
+    test cannot pass merely because the generator agrees with itself the way
+    `test_dispatch_gates_row_count_matches_source_today` (which reuses the same
+    extractor) always would. Deleting the dict-literal branch of the widened AST walk
+    in `diagram._outcome_assignments` drops `phantom`/`fold_error`/`not_due`/
+    `missing_acs`/`would_park_missing_acs`/`claimed`/`due` from the generated table,
+    and this test -- unlike the extractor-reusing one -- catches it."""
+    source = diagram.DISPATCHER_SOURCE_PATH.read_text()
+    expected = _independent_outcome_literals(source)
+    assert len(expected) >= 10, "expected a real outcome set, not an empty/stub regex match"
+    text = diagram.DISPATCH_GATES_PATH.read_text()
+    missing = sorted(o for o in expected if f"`{o}`" not in text)
+    assert not missing, f"outcome(s) missing from docs/dispatch-gates.md: {missing}"
+
+
+def test_dispatch_gates_records_the_four_sweep_level_brakes():
+    """T-93: fleet pause, the rate-limit pause, the runaway auto-brake and the
+    spend ceiling all short-circuit the spawn phase before any per-key outcome
+    reaches `spawned`/`would_spawn` -- none of them has a `decisions[key]["outcome"]`
+    entry of its own, so the outcome table above can never mention them; this is
+    the only place they're recorded at all."""
+    text = diagram.DISPATCH_GATES_PATH.read_text()
+    for name in ("fleet pause", "rate-limit pause", "runaway auto-brake", "spend ceiling"):
+        assert name in text, f"sweep-level brake {name!r} missing from docs/dispatch-gates.md"
 
 
 def test_outcome_assignments_ast_walk_matches_real_dispatcher_source():
