@@ -282,6 +282,12 @@ def test_awaiting_ci_gate_on_annotated_ac_follows_per_key_arming(home):
         "goapp": {"path": "/repo/goapp", "test_command": "go test ./..."},
         "web": {"path": "/repo/web"},  # no test_command, board-wide also unset
     })
+    # T-85 landed after this test and added its own, independent unconditional
+    # awaiting-ci gate (every current-hash AC needs a passing spec-axis QA
+    # verdict, regardless of T-79 annotation arming) -- orthogonal to what this
+    # test is about (the T-79 per-key arming of _acs_unverified_count), so opt
+    # out of it here exactly like every other pre-T-85 test in this suite does.
+    cfg.awaiting_ci_qa_gate = False
     for key, repo_name in (("G-1", "goapp"), ("W-1", "web")):
         store.atomic_write(
             store.spec_path(home, key),
