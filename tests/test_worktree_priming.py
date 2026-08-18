@@ -27,6 +27,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from maestro import config as config_mod
 from maestro import event_log, ops, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
@@ -470,12 +472,21 @@ def test_ensure_rebuilds_a_worktree_dir_with_no_index(home, tmp_path):
     assert branch == "maestro/H-1"
 
 
-def test_ensure_rebuilds_a_worktree_with_a_truncated_checkout(home, tmp_path):
-    """AC1 (the real reproduction, MTO-1): a worktree dir that exists and even
-    has a real index, but whose checkout was interrupted -- files the index
-    references are missing on disk, the exact `git status` signature of the
-    2026-08-10 incident (229,695 staged deletions on a real ~230k-file repo,
-    scaled down here to stay in-tree per the ticket's testing note)."""
+def test_ensure_never_discards_uncommitted_work_on_a_completed_worktree(home, tmp_path, capsys):
+    """T-81 AC1/AC2/AC3 -- the serious half of the ticket, and the exact live
+    repro recorded in its spec: a worktree that has ALREADY completed
+    creation (carries the completion witness) later trips the mass-deletion
+    heuristic (55 of 60 tracked files removed by a plain `rm`, an ordinary
+    mid-implementation refactor -- no slowness, no interruption) while also
+    holding an untracked new file and an uncommitted edit to a tracked file.
+    `worktree_health` alone can't tell this apart from a checkout that never
+    finished (see the sibling test below) -- so `ensure` must NOT `--force`
+    remove it. It fails loudly instead (`store.MaestroError`, non-zero CLI
+    exit, no event appended) naming the worktree and the remedy, and the new
+    file / the edit / every one of the un-`rm`'d tracked files survive
+    completely untouched -- this is the regression test for the
+    "silent-half-complete" bug pointed the other way (the old code returned
+    `{"created": True}` with exit 0 here and silently discarded both)."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
     _seed_many_tracked_files(repo, 60)
     cfg = _write_config(home, repo)
@@ -485,14 +496,58 @@ def test_ensure_rebuilds_a_worktree_with_a_truncated_checkout(home, tmp_path):
     wt = store.worktree_path(home, "H-2")
     assert ops.worktree_health(wt)["healthy"] is True
 
-    # Simulate a checkout killed partway through: 55 of the 60 tracked files
-    # never got written, but the index (written first) still references them
-    # -- `git status` now reports them "deleted".
+    # Uncommitted work a human/agent is mid-refactor on: a new untracked file,
+    # an edit to a tracked one, and 55 of the 60 tracked files `rm`'d.
+    (wt / "scratch-notes.md").write_text("work in progress\n", encoding="utf-8")
+    (wt / "file0.txt").write_text("edited content\n", encoding="utf-8")
+    for i in range(1, 56):
+        (wt / f"file{i}.txt").unlink()
+    assert ops.worktree_health(wt) == {"healthy": False, "reason": "mass deletion in git status"}
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-2"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert str(wt) in err
+    assert "remove" in err.lower() or "remedy" in err.lower() or "inspect" in err.lower()
+
+    # Nothing was touched -- the uncommitted new file, the edit, and every
+    # surviving tracked file are exactly as left.
+    assert (wt / "scratch-notes.md").read_text(encoding="utf-8") == "work in progress\n"
+    assert (wt / "file0.txt").read_text(encoding="utf-8") == "edited content\n"
+    for i in range(56, 60):
+        assert (wt / f"file{i}.txt").exists()
+    assert event_log.read(home, "H-2") == []
+
+
+def test_ensure_still_tears_down_and_rebuilds_when_creation_never_witnessed(home, tmp_path):
+    """T-81 AC2 (the other half) + AC7 -- the same `git status` mass-deletion
+    signature as the test above, but this time creation genuinely never
+    finished (simulated honestly by deleting the completion witness itself,
+    the only way `ensure` could tell -- a real crash between the checkout
+    finishing and the witness being written would leave exactly this state):
+    the worktree carries no completion witness at all, so `ensure` tears it
+    down and rebuilds it, exactly as the pre-T-81 `worktree_health`-driven
+    fix did for this MTO-1 reproduction (229,695 staged deletions on a real
+    ~230k-file repo, scaled down here to stay in-tree)."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    _seed_many_tracked_files(repo, 60)
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "H-2b")
+
+    ops.worktree_ensure(cfg, "H-2b")
+    wt = store.worktree_path(home, "H-2b")
+    assert ops.worktree_health(wt)["healthy"] is True
+
+    witness = ops._git_dir(wt) / ops._WORKTREE_COMPLETE_MARKER
+    assert witness.exists()
+    witness.unlink()
+
     for i in range(55):
         (wt / f"file{i}.txt").unlink()
     assert ops.worktree_health(wt) == {"healthy": False, "reason": "mass deletion in git status"}
 
-    result = ops.worktree_ensure(cfg, "H-2")
+    result = ops.worktree_ensure(cfg, "H-2b")
     assert result["created"] is True
     assert ops.worktree_health(wt) == {"healthy": True, "reason": None}
     for i in range(60):
@@ -646,3 +701,247 @@ def test_ensure_interrupted_create_then_retry_never_reports_success_on_broken_wo
     branch = subprocess.run(["git", "-C", str(wt), "branch", "--show-current"],
                             capture_output=True, text=True, check=True).stdout.strip()
     assert branch == "maestro/H-6"
+
+
+# ---------------------------------------------------------------------------
+# T-81: the recovery path (`_cleanup_partial_worktree` + both `worktree_health`
+# probes) runs under `worktree_timeout`, wraps a `TimeoutExpired`/`OSError`
+# into `store.MaestroError` instead of letting it escape or silently reading
+# as "unhealthy", and the revival paths that route back into `worktree_ensure`
+# never lose uncommitted work either.
+# ---------------------------------------------------------------------------
+
+def test_cleanup_partial_worktree_uses_worktree_timeout_not_git_timeout(home, tmp_path, monkeypatch):
+    """AC3: every git call inside `_cleanup_partial_worktree` -- `worktree
+    remove --force`, `worktree prune`, `rev-list`, `branch -D` -- runs under
+    the configured `worktree_timeout`, never the short 30s `_GIT_TIMEOUT`
+    every other plumbing call in this module uses."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 5\n")
+    _seed_spec(home, "H-7")
+    wt = store.worktree_path(home, "H-7")
+
+    # A directory that exists but was never a real git worktree -- no
+    # witness, so `ensure` tears it down via `_cleanup_partial_worktree`
+    # before rebuilding. A same-named branch with zero commits ahead of base
+    # (as if `worktree add -b` had just created it) exercises the trailing
+    # `rev-list`/`branch -D` calls too.
+    wt.mkdir(parents=True)
+    (wt / "some-file.txt").write_text("not a real worktree\n", encoding="utf-8")
+    _git("branch", "maestro/H-7", cwd=repo)
+
+    seen_timeouts = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        if cmd[0] == "git" and ("remove" in cmd or "prune" in cmd or "rev-list" in cmd
+                                or "-D" in cmd):
+            seen_timeouts.append(kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    ops.worktree_ensure(cfg, "H-7")
+
+    assert len(seen_timeouts) == 4, f"expected 4 recovery-path calls, saw {seen_timeouts}"
+    assert set(seen_timeouts) == {5}, "every recovery-path call must use worktree_timeout, not 30"
+
+
+def test_cleanup_recovery_path_timeout_surfaces_as_maestro_error_not_a_poison_pill(
+        home, tmp_path, monkeypatch, capsys):
+    """AC5: a `TimeoutExpired` from a call on `_cleanup_partial_worktree`'s
+    own recovery path (`worktree remove --force` here) surfaces as
+    `store.MaestroError` from the real CLI -- non-zero exit, a clear message,
+    never a raw traceback -- and the retry that follows (with the fault
+    lifted) still succeeds: the failed cleanup attempt left no poison-pill
+    state behind for every subsequent retry to skip past."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _seed_spec(home, "H-8")
+    wt = store.worktree_path(home, "H-8")
+    wt.mkdir(parents=True)
+    (wt / "not-a-real-worktree.txt").write_text("x\n", encoding="utf-8")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[0] == "git" and "remove" in cmd and "--force" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-8"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "timeout" in err.lower()
+
+    monkeypatch.undo()  # lift the fault for the retry
+
+    capsys.readouterr()
+    rc2 = cli_main(["--home", str(home), "worktree", "ensure", "H-8"])
+    assert rc2 == 0, "the earlier failed cleanup must not have left a poison-pill state"
+    assert ops.worktree_health(wt) == {"healthy": True, "reason": None}
+
+
+def test_health_probe_timeout_is_an_error_not_silently_unhealthy(
+        home, tmp_path, monkeypatch, capsys):
+    """AC6: a health probe that times out is not folded into "unhealthy" and
+    does not fail-close into the destructive branch -- it surfaces as
+    `store.MaestroError` from the real CLI instead, leaving the (witnessed,
+    already-completed) worktree and its uncommitted work completely
+    untouched."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 5\n")
+    _seed_spec(home, "H-9")
+
+    ops.worktree_ensure(cfg, "H-9")
+    wt = store.worktree_path(home, "H-9")
+    (wt / "scratch.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(wt), "rev-parse", "--git-path"] and "index" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-9"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "timeout" in err.lower()
+
+    monkeypatch.undo()
+    assert (wt / "scratch.txt").read_text(encoding="utf-8") == "uncommitted\n"
+    assert ops.worktree_health(wt)["healthy"] is True
+
+
+def test_witness_check_timeout_surfaces_as_maestro_error_and_uses_worktree_timeout(
+        home, tmp_path, monkeypatch, capsys):
+    """AC5, round 2 (QA fail on the first pass): `_worktree_witness_path`'s
+    own `_git_dir` probe runs unconditionally on `worktree_ensure`'s hot
+    path -- before any recovery-path logic -- so it is not exempt from AC3/
+    AC5 just because it lives outside `_cleanup_partial_worktree`. A
+    `TimeoutExpired` there must surface as `store.MaestroError` (never a raw
+    traceback escaping `cli.main`, and never silently read as "no witness"
+    and torn down -- that would reintroduce this ticket's own Finding 1) and
+    must run under `worktree_timeout`, never the short 30s `_GIT_TIMEOUT`
+    every other plumbing call in this module defaults to."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 5\n")
+    _seed_spec(home, "H-11")
+
+    ops.worktree_ensure(cfg, "H-11")
+    wt = store.worktree_path(home, "H-11")
+    (wt / "scratch.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    real_run = subprocess.run
+    seen_timeouts = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(wt), "rev-parse", "--git-dir"]:
+            seen_timeouts.append(kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-11"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "timeout" in err.lower()
+    assert seen_timeouts == [5], (
+        f"witness check must run under worktree_timeout (5), never _GIT_TIMEOUT (30): {seen_timeouts}")
+
+    monkeypatch.undo()  # lift the fault: the worktree and its uncommitted work must be untouched
+    assert (wt / "scratch.txt").read_text(encoding="utf-8") == "uncommitted\n"
+    assert ops.worktree_health(wt)["healthy"] is True
+
+
+def test_revival_from_awaiting_human_and_degraded_preserves_uncommitted_worktree_work(
+        home, tmp_path):
+    """The `awaiting-human -> ready` and `degraded -> ready` revival paths,
+    end to end: a ticket parked in each phase with an existing worktree that
+    holds uncommitted work (plus the same mass-deletion signature the
+    heuristic dislikes) is revived to `ready`, a real `dispatch(cfg,
+    DryRunSessions(), ...)` sweep routes it straight back to the ready
+    reconciler command, and -- the actual point of this ticket -- calling
+    `ops.worktree_ensure` again (exactly what that reconciler does next)
+    still refuses to destroy it rather than silently discarding the work."""
+    from maestro.dispatcher import dispatch
+
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    _seed_many_tracked_files(repo, 60)
+    cfg = _write_config(home, repo)
+
+    for key, from_phase in (("P-1", "awaiting-human"), ("P-2", "degraded")):
+        # `_seed_spec` deliberately has no AC section (most tests here don't
+        # care) -- this test's `dispatch()` sweep DOES care (T-80 parks an
+        # AC-less spec instead of ever calling it due), so write one directly.
+        store.atomic_write(store.spec_path(home, key),
+                           f"# {key}\napproval_tier: 1\n\n## Intent\nx\n\n"
+                           f"## Acceptance criteria\n- [ ] ok\n")
+        assert cli_main(["--home", str(home), "set-phase", key, "ready",
+                         "--reason", "test: seed"]) == 0
+
+        ops.worktree_ensure(cfg, key)
+        wt = store.worktree_path(home, key)
+        (wt / "uncommitted.txt").write_text(f"{key} work in progress\n", encoding="utf-8")
+        for i in range(55):
+            (wt / f"file{i}.txt").unlink()
+        assert ops.worktree_health(wt) == {"healthy": False, "reason": "mass deletion in git status"}
+
+        assert cli_main(["--home", str(home), "set-phase", key, from_phase,
+                         "--reason", "test: park"]) == 0
+        assert cli_main(["--home", str(home), "set-phase", key, "ready",
+                         "--reason", "test: revive"]) == 0
+
+    sessions = DryRunSessions()
+    dispatch(cfg, sessions, now=5000)
+    spawned = {k: p for k, p, *_ in sessions.spawned}
+    assert spawned.get("P-1") == "/maestro-reconcile-ready P-1"
+    assert spawned.get("P-2") == "/maestro-reconcile-ready P-2"
+
+    for key in ("P-1", "P-2"):
+        wt = store.worktree_path(home, key)
+        # dispatch() itself never touches worktree files...
+        assert (wt / "uncommitted.txt").read_text(encoding="utf-8") == f"{key} work in progress\n"
+        # ...and the ready reconciler's own `worktree ensure` call -- the
+        # thing this ticket fixes -- refuses to destroy it either.
+        with pytest.raises(store.MaestroError):
+            ops.worktree_ensure(cfg, key)
+        assert (wt / "uncommitted.txt").read_text(encoding="utf-8") == f"{key} work in progress\n"
+
+
+def test_ensure_fetch_timeout_surfaces_as_maestro_error_not_a_poison_pill(
+        home, tmp_path, monkeypatch, capsys):
+    """AC5 names `fetch` explicitly among the calls whose `TimeoutExpired`
+    must surface as `store.MaestroError` rather than a raw traceback -- it is
+    the very first git call `_worktree_create_or_adopt` makes, before
+    `worktree add` even runs, so this is the earliest point on the whole path
+    a timeout can happen."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "H-10")
+    wt = store.worktree_path(home, "H-10")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(repo), "fetch", "-q"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-10"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "timeout" in err.lower()
+    assert not wt.exists()
+    assert event_log.read(home, "H-10") == []

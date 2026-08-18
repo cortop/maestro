@@ -383,15 +383,60 @@ _NODE_MODULES_SYNCED_MARKER = "maestro-node-modules-synced"
 # is mid-committing inside the worktree.
 _MASS_DELETE_THRESHOLD = 50
 
+# T-81: the positive completion witness. Written under the worktree's OWN git dir (see
+# `_git_dir`, same posture as `_NODE_MODULES_SYNCED_MARKER`) ONLY after
+# `_worktree_create_or_adopt` returns successfully -- never inferred from `worktree_health`,
+# which is a heuristic (an ordinary mid-refactor `rm` of 50+ tracked files trips the same
+# "mass deletion" signature an interrupted checkout does) and cannot tell "never finished
+# creating" apart from "a live worktree in a state the heuristic dislikes". Teardown in
+# `worktree_ensure` is gated on this marker's ABSENCE, not on `worktree_health`'s verdict --
+# see that function's docstring.
+_WORKTREE_COMPLETE_MARKER = "maestro-worktree-complete"
 
-def _git_dir(wt: Path) -> Path:
+
+def _run_recovery_git(args: list[str], *, timeout: int, what: str) -> subprocess.CompletedProcess:
+    """`subprocess.run` for the worktree-recovery path (`_cleanup_partial_worktree` and both
+    `worktree_health` probes) -- *timeout* is always the caller's `worktree_timeout`, never the
+    short plumbing `_GIT_TIMEOUT`, and a `TimeoutExpired`/`OSError` is wrapped into
+    `store.MaestroError` here rather than left to escape as a raw traceback (T-81 finding 2:
+    every call on this path used to run under 30s, uncaught, so cleanup itself could time out
+    and leave a poison-pill directory behind)."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise store.MaestroError(
+            f"{what} did not complete within {timeout}s ({exc}) -- raise `worktree_timeout` in "
+            f"config.toml if this repo's git operations legitimately take longer.") from exc
+
+
+def _git_dir(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path:
     """The worktree-SPECIFIC git dir (e.g. ``<repo>/.git/worktrees/<KEY>``) --
     distinct from ``--git-common-dir``/``--git-path``, which resolve to the
     dir SHARED by every worktree of the repo. Self-cleaning: `git worktree
     remove` (dispatcher.py's merge-triggered cleanup) deletes this whole
-    directory, so anything stored under it never outlives its worktree."""
-    out = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
-                         capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True).stdout.strip()
+    directory, so anything stored under it never outlives its worktree.
+
+    *timeout* defaults to the short plumbing `_GIT_TIMEOUT` for call sites
+    that only ever run after a worktree is already known-good (marker writes
+    in `_worktree_create_or_adopt`/`_prime_worktree_extras`). Callers on
+    `worktree_ensure`'s hot path (`_worktree_witness_path`, checked on every
+    `ensure` before any recovery logic runs) pass `cfg.worktree_timeout`
+    instead, and a `TimeoutExpired`/`OSError` here is wrapped into
+    `store.MaestroError` rather than left to escape as a raw traceback --
+    T-81 AC5, round 2: this call used to be unguarded on that same hot path,
+    reintroducing the exact poison-pill-timeout bug class the rest of this
+    module's recovery path already closed via `_run_recovery_git`. A non-zero
+    exit (not a worktree at all) still raises `CalledProcessError`, unchanged
+    -- callers that treat "not a worktree" as a legitimate answer (e.g.
+    `_worktree_witness_path`) catch that themselves."""
+    try:
+        out = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                             capture_output=True, text=True, timeout=timeout, check=True).stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise store.MaestroError(
+            f"`git rev-parse --git-dir` on {wt} did not complete within {timeout}s ({exc}) -- "
+            f"raise `worktree_timeout` in config.toml if this repo's git operations legitimately "
+            f"take longer.") from exc
     p = Path(out)
     return p if p.is_absolute() else wt / p
 
@@ -409,17 +454,18 @@ def _has_prior_implementing_history(cfg: Config, key: str) -> bool:
     )
 
 
-def _worktree_has_index(wt: Path) -> bool:
+def _worktree_has_index(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> bool:
     """True iff `git -C wt rev-parse --git-path index` resolves to a file that
-    actually exists on disk. False (never raises) for anything that isn't a
-    usable git worktree at all: not-a-worktree, killed rev-parse, missing
-    index -- every one of those means "not safe to treat as complete"."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(wt), "rev-parse", "--git-path", "index"],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
-    except (subprocess.TimeoutExpired, OSError):
-        return False
+    actually exists on disk. False for anything that isn't a usable git
+    worktree at all: not-a-worktree, killed rev-parse (non-zero exit), missing
+    index -- every one of those means "not safe to treat as complete". A
+    `TimeoutExpired`/`OSError` running the probe itself is NOT one of those --
+    it means the check never got an answer, not that the worktree is
+    unhealthy (T-81 AC5), so it raises `store.MaestroError` (via
+    `_run_recovery_git`) rather than silently returning False."""
+    result = _run_recovery_git(
+        ["git", "-C", str(wt), "rev-parse", "--git-path", "index"],
+        timeout=timeout, what=f"health probe (`git rev-parse --git-path index` on {wt})")
     if result.returncode != 0:
         return False
     out = result.stdout.strip()
@@ -431,46 +477,54 @@ def _worktree_has_index(wt: Path) -> bool:
     return p.exists()
 
 
-def _worktree_status_clean_enough(wt: Path) -> bool:
+def _worktree_status_clean_enough(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> bool:
     """False iff `git status --porcelain` carries a mass deletion block (>=
     `_MASS_DELETE_THRESHOLD` lines whose worktree-status column is `D`) -- the
     signature of a truncated index (files present on disk, index believes
-    them gone). Also false on anything that can't even run the check."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(wt), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
-    except (subprocess.TimeoutExpired, OSError):
-        return False
+    them gone). A probe timeout raises `store.MaestroError` rather than
+    silently returning False -- see `_worktree_has_index`."""
+    result = _run_recovery_git(
+        ["git", "-C", str(wt), "status", "--porcelain"],
+        timeout=timeout, what=f"health probe (`git status --porcelain` on {wt})")
     if result.returncode != 0:
         return False
     deletions = sum(1 for line in result.stdout.splitlines() if line[1:2] == "D")
     return deletions < _MASS_DELETE_THRESHOLD
 
 
-def worktree_health(wt: Path) -> dict:
-    """The postcondition for "is *wt* a complete, usable worktree" -- used by
-    both `worktree_ensure`'s recreate-vs-skip gate and `maestro doctor`'s
-    detective check (health.py). Bare directory existence (the pre-MTO-1
-    check) says nothing about whether `git worktree add` actually finished;
-    an interrupted one can leave the directory behind with no index at all,
-    or an index that never got the checkout it describes -- `git status` then
-    reports every tracked file as a staged deletion. Two independent probes
-    because MTO-1's one root cause (an interrupted `worktree add`) produced
-    both symptoms depending on exactly when it was killed.
+def worktree_health(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
+    """The postcondition for "is *wt* a complete, usable worktree" -- `maestro
+    doctor`'s detective check (health.py) and `worktree_ensure`'s
+    witnessed-but-unhealthy refusal (see that function's docstring; NOT its
+    teardown gate -- that's the completion witness, `_WORKTREE_COMPLETE_MARKER`).
+    Bare directory existence (the pre-MTO-1 check) says nothing about whether
+    `git worktree add` actually finished; an interrupted one can leave the
+    directory behind with no index at all, or an index that never got the
+    checkout it describes -- `git status` then reports every tracked file as a
+    staged deletion. Two independent probes because MTO-1's one root cause (an
+    interrupted `worktree add`) produced both symptoms depending on exactly
+    when it was killed.
 
-    Returns ``{"healthy": bool, "reason": str | None}`` -- never raises."""
+    *timeout* should be the caller's `worktree_timeout`, not the default short
+    `_GIT_TIMEOUT` (T-81 AC3) -- callers with a `Config` in hand (both call
+    sites do) should pass `cfg.worktree_timeout` explicitly.
+
+    Returns ``{"healthy": bool, "reason": str | None}``. Unlike before T-81,
+    this CAN raise `store.MaestroError` if a probe itself times out or errors
+    -- a probe timeout is not evidence of an unhealthy worktree and must never
+    be silently folded into "unhealthy" (AC5); `health.check_worktree_health`
+    catches this per-worktree so one slow probe can't crash `maestro doctor`."""
     if not wt.exists():
         return {"healthy": False, "reason": "missing"}
-    if not _worktree_has_index(wt):
+    if not _worktree_has_index(wt, timeout=timeout):
         return {"healthy": False, "reason": "no index"}
-    if not _worktree_status_clean_enough(wt):
+    if not _worktree_status_clean_enough(wt, timeout=timeout):
         return {"healthy": False, "reason": "mass deletion in git status"}
     return {"healthy": True, "reason": None}
 
 
 def _cleanup_partial_worktree(repo: str, wt: Path, *, branch: str | None = None,
-                              base: str | None = None) -> None:
+                              base: str | None = None, timeout: int) -> None:
     """Tear down *wt* regardless of how far its creation got -- git may or may
     not have finished registering it. `git worktree remove --force` first
     (the clean path: deregisters the repo's own worktree admin dir too, not
@@ -479,6 +533,17 @@ def _cleanup_partial_worktree(repo: str, wt: Path, *, branch: str | None = None,
     raw `rmtree`. Either way, finish with `worktree prune` so a half-linked
     admin entry never makes the next `worktree add` for the same path fail
     with "already exists".
+
+    Callers only ever reach this when the completion witness
+    (`_WORKTREE_COMPLETE_MARKER`) is ABSENT -- i.e. *wt*'s creation never
+    finished -- never on a witnessed, completed worktree just because
+    `worktree_health` dislikes its current state (T-81).
+
+    *timeout* is the caller's `worktree_timeout` (T-81 AC3) -- every call here
+    used to run under the short 30s `_GIT_TIMEOUT`, uncaught, so on a large
+    repo the cleanup itself could time out and leave a poison-pill directory
+    behind (finding 2); `_run_recovery_git` now bounds each call by *timeout*
+    and wraps a `TimeoutExpired`/`OSError` into `store.MaestroError`.
 
     When *branch*/*base* are given, ALSO discards the local *branch* ref if it
     carries zero commits beyond ``origin/<base>`` -- indistinguishable from a
@@ -491,19 +556,19 @@ def _cleanup_partial_worktree(repo: str, wt: Path, *, branch: str | None = None,
     colliding with its own interrupted attempt's leftover empty branch and
     falling through to the T-44 guard, which would then correctly-but-
     unhelpfully refuse (no prior `implementing` history yet, this early)."""
-    removed = subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", str(wt)],
-                             capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    removed = _run_recovery_git(["git", "-C", repo, "worktree", "remove", "--force", str(wt)],
+                                timeout=timeout, what=f"`git worktree remove --force {wt}`")
     if removed.returncode != 0 and wt.exists():
         shutil.rmtree(wt, ignore_errors=True)
-    subprocess.run(["git", "-C", repo, "worktree", "prune"],
-                   capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    _run_recovery_git(["git", "-C", repo, "worktree", "prune"],
+                      timeout=timeout, what="`git worktree prune`")
     if branch and base:
-        ahead = subprocess.run(
+        ahead = _run_recovery_git(
             ["git", "-C", repo, "rev-list", "--count", f"origin/{base}..{branch}"],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+            timeout=timeout, what=f"`git rev-list --count origin/{base}..{branch}`")
         if ahead.returncode == 0 and ahead.stdout.strip() == "0":
-            subprocess.run(["git", "-C", repo, "branch", "-D", branch],
-                           capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+            _run_recovery_git(["git", "-C", repo, "branch", "-D", branch],
+                              timeout=timeout, what=f"`git branch -D {branch}`")
 
 
 def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch: str, base: str,
@@ -533,9 +598,17 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
     proof *this* run has been in `implementing` before -- and refuses
     (`store.MaestroError`, no event appended, non-zero exit) naming the
     branch and telling the operator to archive/rename it, rather than
-    adopting-and-hoping."""
-    fetch = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", base],
-                           capture_output=True, text=True, timeout=_FETCH_TIMEOUT)
+    adopting-and-hoping. On success (create or adopt), writes the completion
+    witness (`_WORKTREE_COMPLETE_MARKER`, under *wt*'s own git dir) that
+    `worktree_ensure` gates teardown on -- never before this point, so a
+    crash/timeout anywhere above leaves no witness behind (T-81)."""
+    try:
+        fetch = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", base],
+                               capture_output=True, text=True, timeout=_FETCH_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise store.MaestroError(
+            f"git fetch origin {base!r} in {repo} did not complete within {_FETCH_TIMEOUT}s "
+            f"({exc})") from exc
     if fetch.returncode != 0:
         raise store.MaestroError(
             f"git fetch origin {base!r} in {repo} failed (rc={fetch.returncode}): "
@@ -547,7 +620,7 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
                                   capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             _cleanup_partial_worktree(repo, wt, branch=branch if prune_branch else None,
-                                      base=base if prune_branch else None)
+                                      base=base if prune_branch else None, timeout=timeout)
             raise store.MaestroError(
                 f"{key}: `git worktree add` ({attempt}) exceeded its {timeout}s "
                 f"worktree_timeout in {repo} -- killed and cleaned up the partial worktree "
@@ -569,6 +642,10 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
             raise store.MaestroError(
                 f"git worktree add failed for {wt} in {repo}: create "
                 f"({created.stderr.strip()}) and adopt ({adopted.stderr.strip()}) both failed")
+
+    witness = _git_dir(wt) / _WORKTREE_COMPLETE_MARKER
+    witness.parent.mkdir(parents=True, exist_ok=True)
+    witness.write_text(store.iso_now() + "\n", encoding="utf-8")
 
 
 def _prime_worktree_extras(repo: str, wt: Path) -> None:
@@ -648,6 +725,31 @@ def _run_prime(binding: repos_mod.RepoBinding, wt: Path, repo: str, key: str, ti
             f"prime for repo {binding.name!r} ({key}) failed (rc={result.returncode}): {detail}")
 
 
+def _worktree_witness_path(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path | None:
+    """Path to *wt*'s completion witness (`_WORKTREE_COMPLETE_MARKER`), or
+    None if *wt* isn't even a usable git worktree yet -- in which case no
+    witness could possibly exist. A directory that exists but isn't a real
+    git worktree (no index at all, T-44/MTO-1's "no index" repro) makes
+    `_git_dir`'s `rev-parse --git-dir` fail non-zero (`check=True`,
+    `CalledProcessError`), which reads the same as "no witness" here.
+
+    *timeout* should be `cfg.worktree_timeout` -- this runs unconditionally
+    on `worktree_ensure`'s hot path, before any recovery logic, so a
+    `TimeoutExpired`/`OSError` probing it is NOT "no witness": that would
+    make `worktree_ensure` mistake "we don't know" for "creation never
+    finished" and tear down a live, witnessed worktree -- the exact failure
+    this ticket exists to close. `_git_dir` wraps that case into
+    `store.MaestroError`, which is deliberately NOT caught here and
+    propagates up as a loud, non-zero-exit failure instead (T-81 AC5,
+    round 2)."""
+    if not wt.exists():
+        return None
+    try:
+        return _git_dir(wt, timeout=timeout) / _WORKTREE_COMPLETE_MARKER
+    except subprocess.CalledProcessError:
+        return None
+
+
 def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIME_TIMEOUT) -> dict:
     """Idempotently create-or-adopt *key*'s reconciler worktree, absorb GA-7's
     CLAUDE.local.md/.claude/settings.local.json/node_modules priming, and run
@@ -658,23 +760,41 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     field or a ``TicketCreated`` payload, neither of which this function or
     anything it calls ever reads.
 
-    Idempotence: a fresh ``git worktree add`` is skipped once `worktree_health`
-    finds the worktree dir complete (MTO-1: NOT bare directory existence -- a
-    real git index that resolves, plus no mass-deletion `git status`; an
-    unhealthy directory is torn down via `_cleanup_partial_worktree` and
-    recreated rather than skipped). `prime` is skipped once its worktree-local
-    marker (under the worktree's OWN git dir -- see `_git_dir` -- so it
-    self-cleans when the worktree is removed) is present. If a fresh branch
-    can't be created (it already exists), the adopt fallback (see
-    `_worktree_create_or_adopt`) only fires when *key*'s own event log shows
-    it was already `implementing` before -- otherwise it refuses
-    (`store.MaestroError` naming the branch, T-44) rather than silently
-    binding this run to a stale branch left by an earlier ticket that reused
-    this key. Raises ``store.MaestroError`` -- never a silent success -- if
-    worktree add/adopt fails or times out (`worktree_timeout`), or if `prime`
-    exits non-zero or exceeds *prime_timeout*; the CLI wrapper surfaces that
-    as a non-zero exit with the repo name and rc in stderr, and appends no
-    event, so no phase transition follows a failed ensure.
+    Idempotence (T-81, replacing the old `worktree_health`-driven gate): a
+    fresh ``git worktree add`` is skipped once *wt* carries the completion
+    witness written by `_worktree_create_or_adopt` on its last successful
+    run -- NOT once `worktree_health` merely finds the worktree "healthy".
+    `worktree_health` is a heuristic (an ordinary mid-refactor `rm` of 50+
+    tracked files trips the same "mass deletion" signature a truncated
+    checkout does) and cannot tell "this worktree's creation never finished"
+    apart from "this is a live worktree in a state the heuristic dislikes" --
+    conflating the two used to mean a live worktree holding uncommitted work
+    got silently `--force` removed and reported `{"created": True}` on exit 0
+    (T-81 finding 1). So:
+      - NO witness -> creation never finished (or *wt* doesn't exist at all) --
+        torn down (`_cleanup_partial_worktree`, safe: there is nothing
+        completed to lose) and recreated.
+      - Witness present, `worktree_health` healthy -> real no-op, as before.
+      - Witness present, `worktree_health` UNHEALTHY -> creation genuinely
+        finished but the worktree now looks wrong (mass deletion, no index
+        anymore, ...) -- likely carrying uncommitted work. Ensure REFUSES
+        (`store.MaestroError`, no event appended, non-zero CLI exit) naming
+        the worktree and the remedy, rather than guessing and possibly
+        discarding it; a human inspects and either fixes it in place or
+        removes it themselves before re-running `ensure`.
+    `prime` is skipped once its own worktree-local marker (under the
+    worktree's OWN git dir -- see `_git_dir` -- so it self-cleans when the
+    worktree is removed) is present. If a fresh branch can't be created (it
+    already exists), the adopt fallback (see `_worktree_create_or_adopt`)
+    only fires when *key*'s own event log shows it was already `implementing`
+    before -- otherwise it refuses (`store.MaestroError` naming the branch,
+    T-44) rather than silently binding this run to a stale branch left by an
+    earlier ticket that reused this key. Raises ``store.MaestroError`` --
+    never a silent success -- if worktree add/adopt fails or times out
+    (`worktree_timeout`), or if `prime` exits non-zero or exceeds
+    *prime_timeout*; the CLI wrapper surfaces that as a non-zero exit with the
+    repo name and rc in stderr, and appends no event, so no phase transition
+    follows a failed ensure.
 
     AD-6 ``mode = "local"`` bindings have no worktree at all: a successful,
     side-effect-free no-op.
@@ -687,14 +807,26 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
 
     repo = binding.path
     wt = store.worktree_path(cfg.home, key)
+    branch = f"{binding.branch_prefix}{key}"
+    witness = _worktree_witness_path(wt, timeout=cfg.worktree_timeout)
     created = False
-    if not worktree_health(wt)["healthy"]:
-        branch = f"{binding.branch_prefix}{key}"
+    if witness is None or not witness.exists():
         if wt.exists():
-            _cleanup_partial_worktree(repo, wt, branch=branch, base=binding.base_branch)
+            _cleanup_partial_worktree(repo, wt, branch=branch, base=binding.base_branch,
+                                      timeout=cfg.worktree_timeout)
         _worktree_create_or_adopt(cfg, key, repo, wt, branch, binding.base_branch,
                                   timeout=cfg.worktree_timeout)
         created = True
+    else:
+        health = worktree_health(wt, timeout=cfg.worktree_timeout)
+        if not health["healthy"]:
+            raise store.MaestroError(
+                f"{key}: worktree at {wt} already completed creation but now fails its health "
+                f"check ({health['reason']}) -- refusing to `--force` remove a worktree that may "
+                f"be carrying uncommitted work. Inspect it by hand (e.g. `git -C {wt} status`); "
+                f"if it is genuinely broken beyond repair, remove it yourself "
+                f"(`git -C {repo} worktree remove --force {wt}`) and re-run "
+                f"`maestro worktree ensure {key}`.")
 
     _prime_worktree_extras(repo, wt)
 
