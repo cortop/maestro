@@ -63,6 +63,10 @@ def test_dossier_regenerated_by_ops_append_with_all_sections(cfg):
                      {"turn": 1, "role": "Implementer", "kind": "edit", "tool": "Edit",
                       "summary": "maestro/widget.py"}, actor="reconciler")
     ops.verify_ac(cfg, "T-1", 1, _evidence())
+    # T-85: this test is about dossier content, not the QA-completeness gate
+    # -- no qa-verdict is ever recorded here, so disable the new gate rather
+    # than thread an unrelated qa-phase round trip through it.
+    cfg.awaiting_ci_qa_gate = False
     ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
 
     path = context.context_path(home, "T-1")
@@ -137,6 +141,9 @@ def test_dossier_caps_phase_history_and_notes_the_omission(cfg):
     # that single attestation stays valid for every later awaiting-ci hop.
     _create(cfg, "T-1", acs=("ping-pong",))
     ops.verify_ac(cfg, "T-1", 1, _evidence())
+    # T-85: no qa-verdict is recorded in this ping-pong loop either -- same
+    # off-topic-gate rationale as above.
+    cfg.awaiting_ci_qa_gate = False
     # Ping-pong past the cap so there are more phase changes than MAX_PHASE_CHANGES.
     total = context.MAX_PHASE_CHANGES + 5
     for i in range(total):
@@ -289,6 +296,9 @@ def test_set_phase_awaiting_ci_succeeds_once_all_acs_verified(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
     ops.verify_ac(cfg, "T-1", 1, _evidence())
+    # T-85: this test is scoped to AD-3's unverified-AC gate, not the new
+    # QA-completeness gate -- no qa-verdict is recorded here.
+    cfg.awaiting_ci_qa_gate = False
 
     ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
 
@@ -303,6 +313,10 @@ def test_set_phase_force_overrides_gate_and_records_actor(cfg):
     the event log records who did it."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget", "document it"))
+    # T-85: `force` overrides the unverified-ACs gate this test targets, but
+    # NOT the new QA-completeness gate (same unconditional posture as the
+    # QA-failing gate) -- disable it here, off-topic for this test.
+    cfg.awaiting_ci_qa_gate = False
 
     ev = ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="human override",
                        actor="valentin", force=True)
@@ -326,6 +340,7 @@ def test_set_phase_force_not_needed_and_inert_when_all_acs_verified(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
     ops.verify_ac(cfg, "T-1", 1, _evidence())
+    cfg.awaiting_ci_qa_gate = False  # T-85: off-topic for this test, see above
 
     ev = ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green", force=True)
 
@@ -339,6 +354,10 @@ def test_set_phase_force_via_real_cli(cfg):
     temp home, driving the actual `maestro` verbs."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    # T-85: `--force` overrides the unverified-ACs gate this test targets, but
+    # NOT the new QA-completeness gate -- disable it via config.toml, since
+    # the CLI loads its own Config fresh from disk rather than reusing `cfg`.
+    (home / "config.toml").write_text("[maestro]\nawaiting_ci_qa_gate = false\n")
 
     # Refusal first: no --force, unattested AC -> non-zero exit, no event.
     rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci", "--reason", "tests green"])

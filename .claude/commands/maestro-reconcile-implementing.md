@@ -114,8 +114,13 @@ If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteri
 implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
 step 5 (push the rebased branch + `set-phase awaiting-ci`). Keep the prior attestations and QA
 verdicts as-is (the spec, and so their content hashes, didn't change) — do not re-implement the
-feature, re-run `verify-ac`, or route the ticket through `qa` for this pass. If you truly cannot
-reconcile the two intents yourself, escalate:
+feature, re-run `verify-ac`, or route the ticket through `qa` for this pass. `set-phase
+awaiting-ci` enforces the same write-path gates here as everywhere else (T-85: every current-hash
+AC needs a passing spec-axis `qa-verdict`, recorded from the `qa` phase) — since the spec didn't
+change, the ticket's existing verdicts and attestations already satisfy them, so this call
+succeeds with no extra step; if it unexpectedly refuses (a prior pass never actually reached a
+clean `qa` verdict), fix that per its error rather than forcing past it — `--force` does not
+override the QA gates. If you truly cannot reconcile the two intents yourself, escalate:
 `maestro ask "$KEY" "PR #<n> conflict I couldn't auto-resolve: <detail>" --qid "conflict-$KEY-<n>"`
 and exit.
 

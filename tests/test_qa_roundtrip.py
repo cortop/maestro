@@ -118,21 +118,23 @@ def test_full_roundtrip_implementing_qa_fail_implementing_qa_pass_awaiting_ci(ho
 
 
 # ---------------------------------------------------------------------------
-# AC3: a verdict recorded while `snap.phase == "implementing"` and a later
-# re-verdict recorded while `snap.phase == "qa"` fold to ONE logical verdict
-# per AC for gate purposes -- the phase-keyed step-id (record_qa_verdict)
-# keeps them as two distinct events (proven above, AC2), but the snapshot
-# fold only ever tracks the latest verdict per ac_hash, so crossing the
-# implementing/qa boundary mid-flight never double-counts a vote.
+# AC3: two verdicts for the SAME AC, recorded on two separate visits to `qa`
+# (a fail round, a fix, then a pass round -- RF-7's real routing) fold to ONE
+# logical verdict for gate purposes -- the phase-keyed step-id
+# (record_qa_verdict) keeps them as two distinct events (proven above, AC2),
+# but the snapshot fold only ever tracks the latest verdict per ac_hash, so
+# the fail-then-pass round trip never double-counts a vote. (T-85: both
+# verdicts are recorded from the `qa` phase itself -- the old pre-T-85 shape,
+# a verdict recorded while `snap.phase == "implementing"`, is now refused
+# outright; see test_qa_phase_gate.py.)
 # ---------------------------------------------------------------------------
 
 def test_verdict_across_phase_change_does_not_double_count_for_gate(cfg):
     home = cfg.home
     _create(cfg, "T-1")
     ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
 
-    # Recorded while still phase "implementing" -- the pre-RF-7 shape (or a
-    # ticket whose QA loop started before this deploy landed).
     ops.record_qa_verdict(cfg, "T-1", 1, "fail", "diff never exports widget.py's public function")
     try:
         ops.set_phase(cfg, "T-1", Phase.AWAITING_CI, reason="tests green")
@@ -140,8 +142,10 @@ def test_verdict_across_phase_change_does_not_double_count_for_gate(cfg):
     except store.MaestroError as e:
         assert "refusing awaiting-ci" in str(e)
 
-    # The ticket crosses into `qa` (RF-7's real routing) and gets re-verdicted there.
-    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
+    # The fail sends the ticket back to `implementing` for a fix, then it
+    # crosses into `qa` again (RF-7's real routing) and gets re-verdicted there.
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="qa: fail")
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off again")
     ops.record_qa_verdict(cfg, "T-1", 1, "pass", "diff now exports widget.py's public function")
 
     events = event_log.read(home, "T-1")

@@ -17,6 +17,11 @@ def _create(cfg, key):
     # call these tests make) rather than threading `force=True` through the rest
     # of this file's unrelated conflict-routing assertions.
     ops.verify_ac(cfg, key, 1, {"what": "test setup", "where": "test_conflicts.py", "result": "ok"})
+    # T-85: same rationale -- these tests jump straight to awaiting-ci without
+    # ever routing through `qa`, so satisfying the new spec-axis-verdict gate
+    # is off-topic for a conflict-routing test file; disable it here rather
+    # than threading a `qa-verdict` call through every case below.
+    cfg.awaiting_ci_qa_gate = False
     ops.set_phase(cfg, key, Phase.AWAITING_CI)
 
 
