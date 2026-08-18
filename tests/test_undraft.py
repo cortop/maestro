@@ -9,6 +9,7 @@ never wedges the ticket; a second sweep after success is a true no-op.
 from maestro import dispatcher as disp
 from maestro import event_log, ops, providers, snapshot as snap_mod, store
 from maestro.config import Config
+from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 
@@ -75,7 +76,7 @@ def test_undraft_fires_once_when_all_three_gates_pass(cfg, monkeypatch):
     _use_fake(cfg, monkeypatch, fake)
     _seed(cfg, "T-5", Phase.IN_REVIEW)
 
-    disp.sync_vcs(cfg, now=1000)
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
 
     assert fake.ready_calls == [("x/y", 42)]
     snap = snap_mod.load(cfg.home, "T-5")
