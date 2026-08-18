@@ -322,3 +322,35 @@ def test_doctor_cli_reports_ok_when_user_scope_install_satisfies_check(
                     if c["name"] == "missing_reconcile_skill")
     assert ok_check["status"] == "ok"
     assert ok_check["missing"] == []
+
+
+def test_doctor_cli_reports_ok_when_repo_scope_install_satisfies_check(
+        home, tmp_path, monkeypatch, capsys):
+    """T-87 AC8's `--repo` counterpart: a single real `install-commands --repo`
+    run flips the check from warn to ok in one step -- the completeness rule
+    and the installer agree on the same `PAYLOAD_NAMES` set (a stub loop that
+    only wrote a subset would have left this warning)."""
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "no-user-commands"))
+    repo = tmp_path / "acme"
+    _init_git_repo(repo)
+    _write_config(home, f'[maestro]\nmin_spawn_interval = 0\n\n'
+                        f'[repos.acme]\npath = "{repo}"\ndefault = true\n')
+    store.atomic_write(store.spec_path(home, "T-1"), "# T-1\napproval_tier: 0\n")
+    event_log.append(home, "T-1", "TicketCreated",
+                     {"title": "T-1", "spec_hash": disp.spec_hash_on_disk(home, "T-1")}, actor="d")
+    event_log.append(home, "T-1", "PhaseChanged", {"phase": Phase.IMPLEMENTING.value}, actor="r")
+    snap_mod.rebuild(home, "T-1")
+
+    assert cli_main(["--home", str(home), "doctor"]) == 0
+    warn_check = next(c for c in json.loads(capsys.readouterr().out)["checks"]
+                      if c["name"] == "missing_reconcile_skill")
+    assert warn_check["status"] == "warn"
+
+    assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
+    capsys.readouterr()  # discard install-commands' own JSON output
+
+    assert cli_main(["--home", str(home), "doctor"]) == 0
+    ok_check = next(c for c in json.loads(capsys.readouterr().out)["checks"]
+                    if c["name"] == "missing_reconcile_skill")
+    assert ok_check["status"] == "ok"
+    assert ok_check["missing"] == []
