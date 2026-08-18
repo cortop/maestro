@@ -93,15 +93,20 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     `qa` handoff itself is the point, independent of whether it would have
     been redirected.
 
-    Entering `awaiting-ci` is gated two ways: a ticket with unattested ACs
+    Entering `awaiting-ci` is gated three ways: a ticket with unattested ACs
     refuses (raises `MaestroError`, non-zero exit, NO event appended) unless
-    `force=True`, and one with a failing independent QA verdict on a current AC
+    `force=True`; one with a failing independent QA verdict on a current AC
     refuses unconditionally (`force` does not override QA — that gate is fixed
-    by re-running `maestro qa-verdict`, not by a human override).
+    by re-running `maestro qa-verdict`, not by a human override); and (T-85,
+    `cfg.awaiting_ci_qa_gate`, default ON) one where any current AC has no
+    *passing* spec-axis QA verdict at all -- not merely no failing one -- also
+    refuses unconditionally, same posture as the QA-failing gate (see
+    `_refuse_if_qa_incomplete`).
 
     Entering `qa` from `implementing` is handled a third way (RB-14, replacing
-    RB-12's earlier raise-or-force gate): if `cfg.test_command` is set and this
-    ticket isn't a `mode: local` binding, the call is transparently REDIRECTED
+    RB-12's earlier raise-or-force gate): if a `test_command` resolves for
+    this ticket (T-83: its repo's own override, or the board-wide default)
+    and this ticket isn't a `mode: local` binding, the call is transparently REDIRECTED
     to `verifying` instead — never refused, and `force` has no effect on this
     one (there is nothing left to force past: `verifying` is where the
     dispatcher's own `sync_test_runs` tick runs the suite itself, a real
@@ -151,6 +156,7 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
 
     if phase == Phase.AWAITING_CI:
         _refuse_if_qa_failing(cfg, key, snap)
+        _refuse_if_qa_incomplete(cfg, key, snap)
 
     src = Phase(snap.phase)
     if src != phase and not can_transition(src, phase):
@@ -178,14 +184,15 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
 def _annotations_active(cfg: Config, key: str) -> bool:
     """T-79: whether the annotation-aware AC gate is live for *key* right now --
     exactly the same ships-dark conditions as the T-74/RB-12 suite gate itself
-    (`_tests_stale_reason`): `test_command` configured, and *key* not bound
+    (`_tests_stale_reason`): a `test_command` resolved for *key* (T-83: its
+    repo's own override, or the board-wide default), and *key* not bound
     `mode: local` (no repo/suite to run there). False means every annotated AC
     falls back to plain self-attestation, byte-identical to a spec with no
     annotations at all (see `snapshot.Snapshot.acs_unverified`'s `tree_key=None`
     behavior)."""
-    if not cfg.test_command:
-        return False
     binding = repos_mod.resolve(cfg, cfg.home, key)
+    if not binding.test_command:
+        return False
     return binding.mode != "local"
 
 
@@ -241,24 +248,45 @@ def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
             f"acceptance criteria: {'; '.join(failing)} — fix and re-run `maestro qa-verdict`")
 
 
+def _refuse_if_qa_incomplete(cfg: Config, key: str, snap) -> None:
+    """T-85: block `implementing -> awaiting-ci` unless every current-hash AC carries a
+    PASSING spec-axis QA verdict -- stricter than `_refuse_if_qa_failing` just above,
+    which only blocks a recorded *fail* (zero verdicts used to satisfy it silently, the
+    bug this ticket closes). Config-gated by `cfg.awaiting_ci_qa_gate` (default ON) so a
+    board can revert to HEAD's weaker check; unconditional (no `force` override) when
+    live, same posture as `_refuse_if_qa_failing`."""
+    if not cfg.awaiting_ci_qa_gate:
+        return
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists():
+        return
+    unpassed = snap.qa_unpassed_acs(spec_path.read_text(encoding="utf-8"))
+    if unpassed:
+        raise store.MaestroError(
+            f"{key}: refusing awaiting-ci — {len(unpassed)} acceptance criteria have no "
+            f"passing spec-axis QA verdict: {'; '.join(unpassed)} — run `maestro qa-verdict "
+            f"--verdict pass` for each from the qa phase")
+
+
 def _tests_stale_reason(cfg: Config, key: str, snap) -> str | None:
     """None if the RB-12/RB-14 test-run gate is already satisfied for *key*
     right now -- in which case `set_phase` lets `implementing -> qa` through
     directly, with no `verifying` detour; otherwise the human-facing reason,
     and `set_phase` redirects to `verifying` instead so the dispatcher can run
-    the suite itself. Satisfied means any of: the gate is unconfigured
-    (`test_command` unset — ships dark, see `Config.test_command`), *key* is
-    bound `mode: local` (AD-6, no repo/suite to run), or the CURRENT tree state
-    (HEAD sha + a hash of the dirty tree, see `_tree_state_key`) already has a
-    captured PASSING record in `snap.test_runs` — a real subprocess actually
-    ran and recorded (`capture_tests`, or `dispatcher.sync_test_runs`'s async
-    equivalent), never a free-text claim (that's the whole point: see
+    the suite itself. Satisfied means any of: the gate is unconfigured for
+    *key* (T-83: no `test_command` resolves for it — its repo's own override
+    or the board-wide default — ships dark, see `Config.test_command`), *key*
+    is bound `mode: local` (AD-6, no repo/suite to run), or the CURRENT tree
+    state (HEAD sha + a hash of the dirty tree, see `_tree_state_key`) already
+    has a captured PASSING record in `snap.test_runs` — a real subprocess
+    actually ran and recorded (`capture_tests`, or `dispatcher.sync_test_runs`'s
+    async equivalent), never a free-text claim (that's the whole point: see
     `Snapshot.tests_passing`). A record from a stale tree state (one more edit
     since it was captured) is invisible here — it simply isn't keyed under the
     current tree_key — so it can never satisfy this check."""
-    if not cfg.test_command:
-        return None
     binding = repos_mod.resolve(cfg, cfg.home, key)
+    if not binding.test_command:
+        return None
     if binding.mode == "local":
         return None
     from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
@@ -1085,16 +1113,18 @@ def _record_test_run(cfg: Config, key: str, *, tree_key: str, command: str,
 
 
 def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
-    """Run `cfg.test_command` for real -- a subprocess, ITS OWN exit code --
-    at *key*'s current tree state, and record the result as a TestRunCaptured
-    event. This is the only thing `_tests_stale_reason` (consulted by
-    `set_phase`'s `implementing -> qa`/`verifying` redirect) ever trusts; a
-    Note, a `verify-ac`, or any other free-text claim of "tests pass" satisfies
-    nothing (RB-12: "the evidence must be captured, never claimed"). RB-14 made
-    calling this manually optional -- the dispatcher's own `sync_test_runs`
-    tick now does the same thing asynchronously once a ticket reaches
-    `verifying` -- but it stays available (and this caching rule keeps it
-    cheap to call anyway, e.g. a human checking early).
+    """Run *key*'s resolved `test_command` (T-83: its repo's own override, or
+    the board-wide `[maestro] test_command` default -- see
+    `repos.resolve(...).test_command`) for real -- a subprocess, ITS OWN exit code
+    -- at *key*'s current tree state, and record the result as a
+    TestRunCaptured event. This is the only thing `_tests_stale_reason`
+    (consulted by `set_phase`'s `implementing -> qa`/`verifying` redirect)
+    ever trusts; a Note, a `verify-ac`, or any other free-text claim of "tests
+    pass" satisfies nothing (RB-12: "the evidence must be captured, never
+    claimed"). RB-14 made calling this manually optional -- the dispatcher's
+    own `sync_test_runs` tick now does the same thing asynchronously once a
+    ticket reaches `verifying` -- but it stays available (and this caching
+    rule keeps it cheap to call anyway, e.g. a human checking early).
 
     Caching -- the chosen rule for "do not run the suite on every sweep": if a
     record already exists for this exact tree_key (HEAD sha + a hash of the
@@ -1104,13 +1134,13 @@ def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
     across repeated calls (e.g. two dispatcher sweeps back to back) costs
     exactly one suite run, not one per call.
 
-    No-ops (`{"skipped": "..."}`, no event appended) when `test_command` is
-    unset (the gate is disabled board-wide) or *key*'s repo binding is `mode:
-    local` (AD-6 -- a plain, non-git target with no suite to run).
+    No-ops (`{"skipped": "..."}`, no event appended) when no `test_command`
+    resolves for *key* (the gate is disabled for it) or *key*'s repo binding
+    is `mode: local` (AD-6 -- a plain, non-git target with no suite to run).
     """
-    if not cfg.test_command:
-        return {"skipped": "unconfigured"}
     binding = repos_mod.resolve(cfg, cfg.home, key)
+    if not binding.test_command:
+        return {"skipped": "unconfigured"}
     if binding.mode == "local":
         return {"skipped": "local"}
     from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
@@ -1122,14 +1152,14 @@ def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
     if cached is not None:
         return {**cached, "tree_key": tree_key, "cached": True}
     try:
-        proc = subprocess.run(cfg.test_command, shell=True, cwd=cwd,
+        proc = subprocess.run(binding.test_command, shell=True, cwd=cwd,
                               capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT)
         exit_code = proc.returncode
         output = (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
         exit_code = -1
         output = "[maestro] test run timed out after " + str(_TEST_RUN_TIMEOUT) + "s"
-    payload = _record_test_run(cfg, key, tree_key=tree_key, command=cfg.test_command,
+    payload = _record_test_run(cfg, key, tree_key=tree_key, command=binding.test_command,
                                exit_code=exit_code, output=output, actor=actor)
     return {**payload, "cached": False}
 
@@ -1197,10 +1227,13 @@ def _diff_added_test_names(cwd: Path, base: str, rel_path: str) -> set[str]:
     return {m.group(1) for line in diff_text.splitlines() if (m := _TEST_DEF_RE.match(line))}
 
 
-def _run_named_test(cfg: Config, cwd: Path, base: str, ann: "snap_mod.AcAnnotation") -> tuple[str, int, str]:
+def _run_named_test(test_command: str, cwd: Path, base: str,
+                    ann: "snap_mod.AcAnnotation") -> tuple[str, int, str]:
     """Run (or refuse to run) a `test:` annotation's check -- returns
     ``(command, exit_code, output)``, mirroring `_run_shell`'s shape so
-    `run_ac_checks` can record either uniformly.
+    `run_ac_checks` can record either uniformly. *test_command* is the
+    caller's already-resolved per-key command (T-83: `binding.test_command`),
+    never `cfg.test_command` directly.
 
     Presence in the diff is checked FIRST, before anything is ever run: a
     named test (`::<id>` form, matched by its leaf name to allow a
@@ -1212,18 +1245,18 @@ def _run_named_test(cfg: Config, cwd: Path, base: str, ann: "snap_mod.AcAnnotati
     if ann.test_id:
         leaf = ann.test_id.rsplit("::", 1)[-1]
         selector = f"{ann.path}::{ann.test_id}"
-        command = f"{cfg.test_command} {selector}"
+        command = f"{test_command} {selector}"
         if leaf not in added:
             return command, 1, (
                 f"[maestro] {selector} not found among tests added by this diff in "
                 f"{ann.path} -- a passing suite alone does not satisfy a test: annotation")
     else:
         if not added:
-            return (f"{cfg.test_command} {ann.path}", 1,
+            return (f"{test_command} {ann.path}", 1,
                     f"[maestro] no test added by this diff in {ann.path} -- a passing "
                     f"suite alone does not satisfy a test: annotation")
         selector = " ".join(f"{ann.path}::{n}" for n in sorted(added))
-        command = f"{cfg.test_command} {selector}"
+        command = f"{test_command} {selector}"
     exit_code, output = _run_shell(command, cwd)
     return command, exit_code, output
 
@@ -1268,7 +1301,7 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
                 command = ann.command
                 exit_code, output = _run_shell(ann.command, cwd)
             else:
-                command, exit_code, output = _run_named_test(cfg, cwd, base, ann)
+                command, exit_code, output = _run_named_test(binding.test_command, cwd, base, ann)
             rec = _record_ac_check(cfg, key, tree_key=tree_key, h=h, ac_index=i, ac_text=t,
                                    kind=ann.kind, command=command, exit_code=exit_code,
                                    output=output, actor=actor)
@@ -1299,11 +1332,24 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
     expected to be re-verdicted after each fix-and-retry round, so a later
     call (once the log has moved on) must record a new event rather than
     collapse into the first one.
+
+    T-85: refuses (raises `MaestroError`, NO event appended) when the ticket's
+    folded phase is not `qa`, unless `cfg.qa_phase_gate` is off (default ON) --
+    the write-path counterpart to the runner-level spawn denylist
+    (`dispatcher.phase_verb_denylist('implementing')`), which blocks the CLI
+    verb from an `implementing`-phase runner but is a permission grant, not an
+    invariant this function itself enforced until now.
     """
     if verdict not in QA_VERDICTS:
         raise store.MaestroError(f"{key}: --verdict must be one of {sorted(QA_VERDICTS)}, got {verdict!r}")
     if axis not in QA_AXES:
         raise store.MaestroError(f"{key}: --axis must be one of {sorted(QA_AXES)}, got {axis!r}")
+    snap = snap_mod.load(cfg.home, key)
+    if cfg.qa_phase_gate and snap.phase != Phase.QA.value:
+        raise store.MaestroError(
+            f"{key}: refusing qa-verdict — ticket phase is {snap.phase!r}, not 'qa'; an "
+            f"independent QA verdict may only be recorded while the ticket is in the qa "
+            f"phase (set qa_phase_gate = false in config.toml to disable)")
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
         raise store.MaestroError(f"{key}: no spec.md to verify ACs against")
@@ -1312,7 +1358,6 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
         raise store.MaestroError(f"{key}: AC #{ac_index} out of range (spec has {len(acs)} AC(s))")
     ac_text = acs[ac_index - 1]
     h = snap_mod.ac_hash(ac_text)
-    snap = snap_mod.load(cfg.home, key)
     sid = step_id(key, snap.phase, snap.observed_seq, f"qaverdict-{axis}-{h}-{verdict}")
     _append(cfg, key, E.AC_QA_VERDICT,
             {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "verdict": verdict,

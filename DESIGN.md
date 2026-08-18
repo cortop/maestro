@@ -158,7 +158,9 @@ rewritten.
 5. Cut over `implementing` (your existing Impl↔QA loop, raw worktrees, raise the cap).
    Add the launchd pin + a cloud-routine health-ping. Delete the global mutex + wave barrier.
 6. Harden: dead-letter reaper, per-ticket budgets, finalizers, log compaction,
-   `dependsOn` overlap auto-detection.
+   `dependsOn` overlap auto-detection. This is where the real fleet's rate/spend/detection
+   controls actually landed, driven by two incidents rather than foresight — see
+   `docs/postmortem-2026-07-19.md` for the full control set and why each exists.
 
 ## SOTA sources
 

@@ -68,8 +68,12 @@ def test_end_to_end_create_runner_opencode_through_sweeps_to_awaiting_ci(
         home, tmp_path, monkeypatch):
     _install_stub(tmp_path, monkeypatch, "opencode")
     _install_stub(tmp_path, monkeypatch, "claude")
+    # T-85: `--force` overrides the unverified-ACs gate below but not the new
+    # QA-completeness gate; disable the latter, off-topic for this runner-
+    # routing AC.
     (home / "config.toml").write_text(
-        "[maestro]\nmin_spawn_interval = 0\nrunner_enabled = [\"claude\", \"opencode\"]\n",
+        "[maestro]\nmin_spawn_interval = 0\nrunner_enabled = [\"claude\", \"opencode\"]\n"
+        "awaiting_ci_qa_gate = false\n",
         encoding="utf-8")
     # No repo_path configured -- _worker_cwd falls back to `home` itself (a real
     # dir), so a real Popen spawn needs no git worktree machinery -- orthogonal

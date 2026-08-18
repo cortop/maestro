@@ -85,7 +85,8 @@ def test_opencode_agent_stub_omits_steps_by_default():
 def test_install_repo_bakes_configured_turn_cap_into_agent_stubs(home, tmp_path):
     repo = tmp_path / "acme"
     store.atomic_write(home / "config.toml",
-                       f'[maestro]\nmax_session_turns = 75\n\n[repos.acme]\npath = "{repo}"\n')
+                       f'[maestro]\nmax_session_turns = 75\nrunner_enabled = ["claude", "opencode"]\n'
+                       f'\n[repos.acme]\npath = "{repo}"\n')
     from maestro import config as config_mod
     from maestro.cli import main as cli_main
     assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0

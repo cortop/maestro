@@ -1199,15 +1199,20 @@ def cmd_install_commands(args) -> int:
     ``--repo <name>`` copies them into a configured repo's checkout,
     ``--user`` symlinks them into the user commands directory instead (for a
     repo the board doesn't own). Replaces DOGFOOD.md's old "vendor by hand"
-    step."""
+    step.
+
+    T-91: the opencode side of either target is gated on ``"opencode" in
+    cfg.runner_enabled`` -- ``--all-runners`` opts into installing it anyway
+    (e.g. to pre-install before flipping ``runner_enabled``, or for a
+    per-ticket ``runner: opencode`` spec on an otherwise claude-only board)."""
     cfg = _cfg(args)
     if bool(args.repo) == bool(args.user):
         print("error: exactly one of --repo <name> or --user is required", file=sys.stderr)
         return 2
     if args.user:
-        _print(skills_install.install_user(cfg))
+        _print(skills_install.install_user(cfg, force_opencode=args.all_runners))
     else:
-        _print(skills_install.install_repo(cfg, args.repo))
+        _print(skills_install.install_repo(cfg, args.repo, force_opencode=args.all_runners))
     return 0
 
 
@@ -1415,6 +1420,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="[repos.<name>] (or 'default' for the legacy repo_path) to copy into")
     sp.add_argument("--user", action="store_true",
                     help="symlink into the user commands directory instead of a repo checkout")
+    sp.add_argument("--all-runners", action="store_true",
+                    help="also install the opencode payload even if runner_enabled doesn't admit it yet")
 
     sp = add("restore", cmd_restore, "restore a backup tarball into the home")
     sp.add_argument("archive", nargs="?", default=None,

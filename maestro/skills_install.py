@@ -349,6 +349,22 @@ def resolve_repo_target(cfg: Config, name: str) -> Path:
         f"unknown repo '{name}'; configured repos: {', '.join(configured) if configured else 'none'}")
 
 
+def _opencode_gate_reason(cfg: Config, force: bool) -> str | None:
+    """T-91: ``None`` when this run should write the opencode payload --
+    ``force`` is ``install-commands --all-runners``'s explicit opt-in, or the
+    board itself already admits the runner (``"opencode" in
+    cfg.runner_enabled``, the exact same gate the dispatcher's own spawn loop
+    reads, ``dispatcher.py`` around its ``runner not in cfg.runner_enabled``
+    check) -- a runner nobody enabled gets no global config written for it
+    either. Otherwise, the reason the payload was skipped this run, verbatim
+    what the verb reports back as ``opencode_skipped`` (never written
+    silently)."""
+    if force or "opencode" in cfg.runner_enabled:
+        return None
+    return (f"opencode not in runner_enabled ({sorted(cfg.runner_enabled)!r}); "
+            "pass --all-runners to install-commands to install its payload anyway")
+
+
 def _write_if_changed(target: Path, content: str) -> bool:
     """Atomically write *content* to *target* unless it's already identical.
     Returns whether a write happened (for the verb's reported summary)."""
@@ -358,7 +374,7 @@ def _write_if_changed(target: Path, content: str) -> bool:
     return True
 
 
-def install_repo(cfg: Config, name: str) -> dict:
+def install_repo(cfg: Config, name: str, *, force_opencode: bool = False) -> dict:
     """Copy the six payload files into ``<repo>/.claude/commands/`` as real,
     byte-identical files — the target repo may not be this one, and needs to
     be able to commit + review them like any other change.
@@ -373,12 +389,22 @@ def install_repo(cfg: Config, name: str) -> dict:
     ``<repo>/.opencode/opencode.jsonc`` (permission + provider blocks). RB-16:
     each agent stub now carries its OWN phase-narrowed ``permission.bash``
     override (``_opencode_agent_permission_bash``) — see
-    ``_opencode_agent_stub``'s docstring."""
+    ``_opencode_agent_stub``'s docstring.
+
+    T-91: the opencode side of this (command copies, agent stubs, the config
+    file) is gated on ``"opencode" in cfg.runner_enabled`` -- a runner nobody
+    enabled gets no global config written for it -- unless *force_opencode*
+    (``install-commands --all-runners``) opts in early. Gated, nothing under
+    ``.opencode/`` is created at all; the skip reason comes back as
+    ``opencode_skipped`` instead of being silent. The Claude side is never
+    gated -- unaffected either way."""
     repo_root = resolve_repo_target(cfg, name)
     target_dir = repo_root / ".claude" / "commands"
     opencode_dir = opencode_repo_commands_dir(repo_root)
     opencode_agent_dir = opencode_repo_agent_dir(repo_root)
+    config_dest = opencode_repo_config_path(repo_root)
     src_dir = payload_dir()
+    skip_reason = _opencode_gate_reason(cfg, force_opencode)
     written = []
     opencode_written = []
     opencode_agent_written = []
@@ -387,6 +413,8 @@ def install_repo(cfg: Config, name: str) -> dict:
         dest = target_dir / filename
         if _write_if_changed(dest, content):
             written.append(filename)
+        if skip_reason is not None:
+            continue
         opencode_dest = opencode_dir / filename
         if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
             opencode_written.append(filename)
@@ -396,18 +424,19 @@ def install_repo(cfg: Config, name: str) -> dict:
             permission_bash=_opencode_agent_permission_bash(cfg, filename))
         if _write_if_changed(agent_dest, stub):
             opencode_agent_written.append(filename)
-    config_dest = opencode_repo_config_path(repo_root)
-    config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
+    config_written = False if skip_reason is not None else _write_if_changed(
+        config_dest, _dump_opencode_config(cfg))
     return {"target": str(target_dir), "opencode_target": str(opencode_dir),
             "opencode_agent_target": str(opencode_agent_dir),
             "opencode_config_target": str(config_dest),
             "installed": list(PAYLOAD_NAMES), "written": written,
             "opencode_written": opencode_written,
             "opencode_agent_written": opencode_agent_written,
-            "opencode_config_written": config_written}
+            "opencode_config_written": config_written,
+            "opencode_skipped": skip_reason}
 
 
-def install_user(cfg: Config) -> dict:
+def install_user(cfg: Config, *, force_opencode: bool = False) -> dict:
     """Symlink the six payload files into the user commands directory.
 
     Idempotent: a symlink already pointing at the payload is left alone; a
@@ -429,14 +458,25 @@ def install_user(cfg: Config) -> dict:
     opencode command copy, and the exact path (``~/.config/opencode/
     opencode.jsonc``) a human had been hand-maintaining before this ticket
     (spec Notes) — this generator now owns it.
+
+    T-91: the opencode side (dirs, command copies, agent stubs, the config
+    file) is gated on ``"opencode" in cfg.runner_enabled`` unless
+    *force_opencode* (``install-commands --all-runners``) opts in early --
+    gated, NOTHING under the opencode user scope is even ``mkdir``'d, so a
+    refused Claude-side install (the conflict check below) leaves no opencode
+    directories behind either. The Claude side is never gated. The skip
+    reason comes back as ``opencode_skipped`` instead of being silent.
     """
     target_dir = user_commands_dir(cfg)
     opencode_dir = opencode_user_commands_dir(cfg)
     opencode_agent_dir = opencode_user_agent_dir(cfg)
+    config_dest = opencode_user_config_path(cfg)
     src_dir = payload_dir()
+    skip_reason = _opencode_gate_reason(cfg, force_opencode)
     target_dir.mkdir(parents=True, exist_ok=True)
-    opencode_dir.mkdir(parents=True, exist_ok=True)
-    opencode_agent_dir.mkdir(parents=True, exist_ok=True)
+    if skip_reason is None:
+        opencode_dir.mkdir(parents=True, exist_ok=True)
+        opencode_agent_dir.mkdir(parents=True, exist_ok=True)
 
     conflicts = []
     for filename in PAYLOAD_NAMES:
@@ -462,6 +502,8 @@ def install_user(cfg: Config) -> dict:
             dest.symlink_to(src)
             written.append(filename)
 
+        if skip_reason is not None:
+            continue
         content = src.read_text(encoding="utf-8")
         opencode_dest = opencode_dir / filename
         if _write_if_changed(opencode_dest, _opencode_frontmatter(content)):
@@ -472,12 +514,13 @@ def install_user(cfg: Config) -> dict:
             permission_bash=_opencode_agent_permission_bash(cfg, filename))
         if _write_if_changed(agent_dest, stub):
             opencode_agent_written.append(filename)
-    config_dest = opencode_user_config_path(cfg)
-    config_written = _write_if_changed(config_dest, _dump_opencode_config(cfg))
+    config_written = False if skip_reason is not None else _write_if_changed(
+        config_dest, _dump_opencode_config(cfg))
     return {"target": str(target_dir), "opencode_target": str(opencode_dir),
             "opencode_agent_target": str(opencode_agent_dir),
             "opencode_config_target": str(config_dest),
             "installed": list(PAYLOAD_NAMES), "written": written,
             "opencode_written": opencode_written,
             "opencode_agent_written": opencode_agent_written,
-            "opencode_config_written": config_written}
+            "opencode_config_written": config_written,
+            "opencode_skipped": skip_reason}

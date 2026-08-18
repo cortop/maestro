@@ -108,7 +108,7 @@ def test_allowed_type_still_appends_and_folds(home, cfg, allowed_type, payload, 
 
 def test_raw_phase_changed_cannot_bypass_qa_failing_gate(home, cfg):
     store_spec = home / "tickets" / "T-1" / "spec.md"
-    seed_ticket(home, "T-1", "do the thing", phase="implementing")
+    seed_ticket(home, "T-1", "do the thing", phase="qa")
     store_spec.parent.mkdir(parents=True, exist_ok=True)
     store_spec.write_text(
         "# T-1\napproval_tier: 1\n\n## Intent\ndo the thing\n\n"
@@ -120,4 +120,4 @@ def test_raw_phase_changed_cannot_bypass_qa_failing_gate(home, cfg):
 
     assert rc == 2
     snap = snap_mod.load(home, "T-1")
-    assert snap.phase == "implementing"
+    assert snap.phase == "qa"
