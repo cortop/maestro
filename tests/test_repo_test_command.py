@@ -282,7 +282,10 @@ def test_awaiting_ci_gate_on_annotated_ac_follows_per_key_arming(home):
         "goapp": {"path": "/repo/goapp", "test_command": "go test ./..."},
         "web": {"path": "/repo/web"},  # no test_command, board-wide also unset
     })
-    cfg.awaiting_ci_qa_gate = False  # T-85: off-topic for this test, see test_qa_phase_gate.py
+    # T-85: off-topic for this test, which is about per-key `check:` annotation
+    # arming (T-83), not the independent spec-axis QA-verdict gate -- same fix
+    # applied to the other pre-T-85 tests it collided with (see test_context.py).
+    cfg.awaiting_ci_qa_gate = False
     for key, repo_name in (("G-1", "goapp"), ("W-1", "web")):
         store.atomic_write(
             store.spec_path(home, key),
