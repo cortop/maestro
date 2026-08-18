@@ -1650,10 +1650,13 @@ def _test_run_log_path(home: Path, key: str) -> Path:
 def sync_test_runs(cfg: Config, now: float) -> dict:
     """RB-14: dispatcher-owned test verification -- the `sync_vcs` pattern
     (poll/advance a sleeping phase directly, no reconciler spawn) applied to
-    `cfg.test_command` instead of a PR. For every `verifying` ticket: start its
-    test run as a tracked, detached subprocess if none is in flight yet, or
-    fold one that has already finished and route the phase on (`qa` on a pass;
-    back to `implementing`, with a bounded failure excerpt, on a fail).
+    each key's resolved `test_command` (T-83: its repo's own override, or the
+    board-wide `[maestro] test_command` default -- see
+    `repos.resolve(...).test_command`) instead of a PR. For every `verifying`
+    ticket: start its test run as a tracked, detached subprocess if none is in
+    flight yet, or fold one that has already finished and route the phase on
+    (`qa` on a pass; back to `implementing`, with a bounded failure excerpt, on
+    a fail).
 
     Never blocks: a started run is left running (`start_new_session=True`,
     exactly like `sessions.ClaudeCliSessions.spawn`) and this function returns
@@ -1664,13 +1667,18 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
     (RF-2's Notes: `claims._verdict` keys only on pid + `start_epoch`, never
     the spawned command string), not a second mechanism.
 
-    No-op (`{"checked": 0}`) when `test_command` is unset -- ships dark, same
-    posture as every other RB-12/RB-14 gate.
+    No-op (`{"checked": 0}`) when NEITHER the board-wide `test_command` NOR any
+    `[repos.<name>] test_command` is set -- ships dark, same posture as every
+    other RB-12/RB-14 gate. T-83: a board-wide unset no longer short-circuits
+    the whole sweep by itself -- a `verifying` ticket whose OWN repo binding
+    resolves a `test_command` still gets checked and its run started/folded,
+    even while `[maestro] test_command` itself is unset.
     """
     home = cfg.home
-    if not cfg.test_command:
-        return {"checked": 0}
     from . import ops, repos as repos_mod
+
+    if not cfg.test_command and not any(t.get("test_command") for t in cfg.repos.values()):
+        return {"checked": 0}
 
     checked = 0
     started: list[str] = []
@@ -1699,11 +1707,13 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
             if claim is not None:
                 continue  # some other claim still holds this key -- leave it alone
             binding = repos_mod.resolve(cfg, home, key)
-            if binding.mode == "local":
+            if binding.mode == "local" or not binding.test_command:
                 # Should never route here (the set_phase redirect excludes
-                # mode:local), but never wedge a ticket that somehow did.
-                ops.set_phase(cfg, key, Phase.QA, reason="mode:local, no suite to run",
-                              actor="dispatcher")
+                # mode:local / no-command keys), but never wedge a ticket that
+                # somehow did.
+                reason = ("mode:local, no suite to run" if binding.mode == "local"
+                         else "no test_command resolves for this key, no suite to run")
+                ops.set_phase(cfg, key, Phase.QA, reason=reason, actor="dispatcher")
                 continue
             cwd = _worker_cwd(cfg, key)
             tree_key = ops._tree_state_key(cwd)
@@ -1716,7 +1726,7 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
                 if c.get("kind") == "testrun" and claims.pid_alive(c.get("pid")))
             if in_flight >= TEST_RUN_CONCURRENCY:
                 continue  # at the board-wide cap -- retried next sweep
-            _start_test_run(home, key, cwd, cfg.test_command)
+            _start_test_run(home, key, cwd, binding.test_command)
             started.append(key)
     return {"checked": checked, "started": started, "folded": folded}
 
@@ -1771,9 +1781,13 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
     log_path = _test_run_log_path(home, key)
     claims.release(home, key)
     cwd = claim.get("cwd") or str(_worker_cwd(cfg, key))
-    from . import ops
+    from . import ops, repos as repos_mod
 
     tree_key = ops._tree_state_key(Path(cwd))
+    # T-83: the same per-key resolved command `_start_test_run` was launched
+    # with -- never `cfg.test_command` directly, so a mid-flight config change
+    # can never record a DIFFERENT command than the one that actually ran.
+    binding = repos_mod.resolve(cfg, home, key)
     try:
         exit_code = int(result_path.read_text(encoding="utf-8").strip())
         output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
@@ -1782,7 +1796,7 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
         output = "[maestro] test-run process left no result -- treated as a failure"
     result_path.unlink(missing_ok=True)
     log_path.unlink(missing_ok=True)
-    payload = ops._record_test_run(cfg, key, tree_key=tree_key, command=cfg.test_command,
+    payload = ops._record_test_run(cfg, key, tree_key=tree_key, command=binding.test_command,
                                    exit_code=exit_code, output=output, actor="dispatcher")
     _route_test_run(cfg, key, payload, actor="dispatcher", cwd=Path(cwd))
 
