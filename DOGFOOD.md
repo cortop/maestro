@@ -182,9 +182,10 @@ maestro prune-logs --all             # prune every key
 maestro prune-logs <KEY>             # prune just one key
 ```
 
-One-off cleanup of a backlog (e.g. after a runaway spawn incident): back up first — the backup
-protects `events/`, not the logs themselves, which are disposable by design — then dry-run to
-see what would go, then actually prune:
+One-off cleanup of a backlog (e.g. after a runaway spawn incident — see
+`docs/postmortem-2026-07-19.md` for what a real one looked like and the control set it produced):
+back up first — the backup protects `events/`, not the logs themselves, which are disposable by
+design — then dry-run to see what would go, then actually prune:
 
 ```bash
 maestro backup
