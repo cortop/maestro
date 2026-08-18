@@ -713,10 +713,15 @@ def _write_repo_settings(repo, *, allow=None, deny=None, local=False):
 
 def _install_dummy_reconcile_skill(repo):
     """Satisfies the unrelated missing_reconcile_skill check so a --strict
-    assertion below is about reconciler_permissions specifically."""
+    assertion below is about reconciler_permissions specifically -- T-87's
+    per-file completeness rule needs the FULL PAYLOAD_NAMES set installed, not
+    just one file, or this check itself would warn and confound the --strict
+    assertion this helper exists to isolate."""
+    from maestro import skills_install
     d = repo / ".claude" / "commands"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "maestro-reconcile-triaging.md").write_text("# stub\n")
+    for name in skills_install.PAYLOAD_NAMES:
+        (d / name).write_text("# stub\n")
 
 
 def test_reconciler_permissions_registered_and_never_blocks_a_spawn(home, tmp_path, monkeypatch):
@@ -1014,8 +1019,12 @@ def test_missing_reconcile_skill_checks_opencode_location_for_non_claude_runner(
     assert check["status"] == "warn"
     assert "default" in check["missing"]
 
-    (repo / ".opencode" / "command").mkdir(parents=True)
-    (repo / ".opencode" / "command" / "maestro-reconcile-implementing.md").write_text("# stub\n")
+    # T-87: the completeness rule needs the FULL PAYLOAD_NAMES set, not one file.
+    from maestro import skills_install
+    command_dir = repo / ".opencode" / "command"
+    command_dir.mkdir(parents=True)
+    for name in skills_install.PAYLOAD_NAMES:
+        (command_dir / name).write_text("# stub\n")
 
     check = health.check_missing_reconcile_skill(cfg, 1000)
     assert check["status"] == "ok"
@@ -1054,8 +1063,12 @@ def test_doctor_cli_missing_reconcile_skill_warn_then_ok_for_opencode_runner_tic
                        if c["name"] == "missing_reconcile_skill")
     assert warn_check["status"] == "warn"
 
-    (repo / ".opencode" / "command").mkdir(parents=True)
-    (repo / ".opencode" / "command" / "maestro-reconcile-implementing.md").write_text("# stub\n")
+    # T-87: the completeness rule needs the FULL PAYLOAD_NAMES set, not one file.
+    from maestro import skills_install
+    command_dir = repo / ".opencode" / "command"
+    command_dir.mkdir(parents=True)
+    for name in skills_install.PAYLOAD_NAMES:
+        (command_dir / name).write_text("# stub\n")
 
     assert cli.main(["--home", str(home), "doctor"]) == 0
     ok_check = next(c for c in json.loads(capsys.readouterr().out)["checks"]
@@ -1082,6 +1095,122 @@ def test_missing_reconcile_skill_pi_binding_always_ok_with_neither_location_pres
     check = health.check_missing_reconcile_skill(cfg, 1000)
     assert check["status"] == "ok"
     assert check["missing"] == []
+
+
+# --- T-87: per-file completeness, not any()-over-glob --------------------------
+
+def _install_partial_payload(commands_dir, *, missing=("maestro-reconcile-qa.md",)):
+    """Writes every `skills_install.PAYLOAD_NAMES` file EXCEPT *missing* into
+    *commands_dir* -- the "6 of 7" real-board-install shape this ticket is
+    named for."""
+    from maestro import skills_install
+    commands_dir.mkdir(parents=True, exist_ok=True)
+    for name in skills_install.PAYLOAD_NAMES:
+        if name in missing:
+            continue
+        (commands_dir / name).write_text("# stub\n")
+
+
+def test_missing_reconcile_skill_partial_install_warns_naming_the_missing_file(
+        home, tmp_path, monkeypatch):
+    """AC1 + AC2: 6 of the 7 phase files present (missing `qa`), user-scope
+    empty -- the check must warn and name `maestro-reconcile-qa.md` verbatim,
+    not read `ok` because SOME file exists (the any()-over-glob defect)."""
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "no-user-commands"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_partial_payload(repo / ".claude" / "commands")
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "warn"
+    assert "default" in check["missing"]
+    assert check["missing_files"]["default"] == ["maestro-reconcile-qa.md"]
+    assert "maestro-reconcile-qa.md" in check["detail"]
+    # the other 6 files being present must not leak into "missing"
+    assert "maestro-reconcile-triaging.md" not in check["detail"]
+
+
+def test_doctor_strict_gates_on_partial_reconcile_skill_install(home, tmp_path, monkeypatch, capsys):
+    """AC3: `maestro doctor --strict` exits 1 while the bound repo carries only
+    6 of the 7 phase files and 0 once the seventh is written, with every other
+    check already ok -- driven through the real CLI."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "no-user-commands"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    commands_dir = repo / ".claude" / "commands"
+    _install_partial_payload(commands_dir)
+    _write_repo_settings(repo, allow=list(disp.RECONCILER_REQUIRED_TOOLS))
+    (home / "config.toml").write_text(
+        f'[maestro]\nbackup_interval = 0\ndaily_spend_ceiling_usd = 50.0\n\n'
+        f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
+    _seed_bound_ticket(home, "T-1", "alpha")
+
+    rc = cli.main(["--home", str(home), "doctor"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    check = next(c for c in out["checks"] if c["name"] == "missing_reconcile_skill")
+    assert check["status"] == "warn"
+
+    rc_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc_strict == 1
+
+    (commands_dir / "maestro-reconcile-qa.md").write_text("# stub\n")
+
+    rc2 = cli.main(["--home", str(home), "doctor"])
+    out2 = json.loads(capsys.readouterr().out)
+    assert rc2 == 0
+    check2 = next(c for c in out2["checks"] if c["name"] == "missing_reconcile_skill")
+    assert check2["status"] == "ok"
+
+    rc2_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc2_strict == 0
+
+
+def test_missing_reconcile_skill_per_file_union_across_repo_and_user_scope(
+        home, tmp_path, monkeypatch):
+    """AC4: 6 files live in the repo's `.claude/commands/`, the 7th ONLY in the
+    user-scope dir -- the union is per-file, so this reads `ok`. Neither
+    directory alone is complete, proving "either directory is complete" is
+    NOT the rule being applied."""
+    user_dir = tmp_path / "user-commands"
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_partial_payload(repo / ".claude" / "commands")
+    user_dir.mkdir(parents=True)
+    (user_dir / "maestro-reconcile-qa.md").write_text("# stub\n")
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "ok"
+    assert check["missing"] == []
+
+
+def test_missing_reconcile_skill_stray_user_scope_file_does_not_suppress_board_wide(
+        home, tmp_path, monkeypatch):
+    """AC5: a single stray `maestro-reconcile-*.md` in the user-scope dir (not
+    the phase actually missing repo-side) must not suppress the check -- the
+    old any()-per-directory rule read a non-empty user dir as "user-scope is
+    complete" regardless of WHICH file it held."""
+    user_dir = tmp_path / "user-commands"
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_partial_payload(repo / ".claude" / "commands")  # missing qa
+    user_dir.mkdir(parents=True)
+    (user_dir / "maestro-reconcile-triaging.md").write_text("# stray, already present repo-side\n")
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "warn"
+    assert check["missing_files"]["default"] == ["maestro-reconcile-qa.md"]
 
 
 def test_reconciler_permissions_not_applicable_for_an_unregistered_runner(home, tmp_path, monkeypatch):
