@@ -158,6 +158,36 @@ def test_no_bare_origin_main():
             f'{path} should fetch "<BASE>" exactly 1 time(s)'
 
 
+# ---------------------------------------------------------------------------
+# T-82 (defect 3): step 0's data-loss fix -- fetch + `merge --ff-only` the PR
+# branch as it stands on GitHub BEFORE rebasing onto base -- was prose-only
+# and unpinned; a future edit to implementing.md could delete the block and
+# nothing would fail. Pin its presence AND its ordering (before the
+# `git rebase "origin/<BASE>"` line), so deleting or reordering it fails the
+# suite. All three skill mirrors staying byte-identical is already covered by
+# test_skill_copies_are_byte_identical_after_stripping_frontmatter.
+# ---------------------------------------------------------------------------
+
+def test_implementing_skill_fetches_and_ff_only_merges_pr_branch_before_rebasing_onto_base():
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        fetch_line = 'git -C <WT> fetch -q origin "<PREFIX>$KEY"'
+        merge_line = 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"'
+        rebase_line = 'git -C <WT> rebase "origin/<BASE>"'
+        assert fetch_line in text, \
+            f"{path}: missing the data-loss fix's fetch of origin/<PREFIX>$KEY"
+        assert merge_line in text, \
+            f"{path}: missing the data-loss fix's --ff-only merge of origin/<PREFIX>$KEY"
+        assert rebase_line in text, f"{path}: missing step 0's rebase onto origin/<BASE>"
+        fetch_pos = text.index(fetch_line)
+        merge_pos = text.index(merge_line)
+        rebase_pos = text.index(rebase_line)
+        assert fetch_pos < merge_pos < rebase_pos, \
+            (f"{path}: the PR-branch fetch + ff-only merge must both come BEFORE the "
+             f"rebase onto origin/<BASE> -- reordering silently reintroduces the data loss "
+             f"the fix exists to prevent")
+
+
 def test_gh_pr_calls_use_repo_slug_and_base():
     # gh calls only live in the implementing file (PR create/view) now. GA-12: SLUG/BASE are
     # substituted as the literal <SLUG>/<BASE> tokens the agent types, never $SLUG/$BASE.

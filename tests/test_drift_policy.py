@@ -10,6 +10,8 @@ repos and the real `maestro` config loader/dispatcher -- the only accepted
 mock is the VCS provider boundary (AC3's CONFLICTING scenario), exactly as
 test_worktree_sync_multi_repo.py already does.
 """
+import json
+
 import pytest
 
 from maestro import config as config_mod, dispatcher as disp, event_log, providers, \
@@ -27,10 +29,17 @@ def _add_worktree(repo, home, key, branch, base="main"):
     return wt
 
 
-def _seed(home, key, phase, pr=10):
+def _seed(home, key, phase, pr=10, *, repo_name=None):
+    # T-82: an optional `repo: <name>` frontmatter/payload binding, mirroring
+    # test_worktree_sync_multi_repo.py's own _seed -- needed by the per-ticket
+    # (not per-group) binding tests below (AC1-AC4).
+    front = f"repo: {repo_name}\n" if repo_name else ""
     store.atomic_write(store.spec_path(home, key),
-                       f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+                       f"# {key}\napproval_tier: 0\n{front}\n## Acceptance criteria\n- [ ] ok\n")
+    payload = {"title": key}
+    if repo_name:
+        payload["repo"] = repo_name
+    event_log.append(home, key, "TicketCreated", payload, actor="d")
     event_log.append(home, key, "PrOpened",
                      {"number": pr, "url": f"https://github.com/x/y/pull/{pr}", "draft": False},
                      actor="r")
@@ -51,6 +60,16 @@ def _merge_commits_to_origin(repo, origin, n=1, base="main"):
         _git("add", "-A", cwd=repo)
         _git("commit", "-q", "-m", f"merged change {count}", cwd=repo)
     _git("push", "-q", "origin", base, cwd=repo)
+
+
+def _ci_passing(home, key):
+    """T-82: a drift-only reroute now requires a POSITIVELY known-safe CI state
+    (never None/unobserved, never "unknown", see AC5) -- tests exercising the
+    always/daily routing mechanism itself (not the CI gate) need an observed
+    passing CI up front to still route."""
+    event_log.append(home, key, "CiObserved",
+                     {"state": "passing", "failing_checks": []}, actor="dispatcher")
+    return snap_mod.rebuild(home, key)
 
 
 def _phase_changed_reasons(home, key):
@@ -191,6 +210,7 @@ def test_daily_routes_at_most_once_per_calendar_day(home, cfg, tmp_path):
     cfg.repo_path = str(repo)
 
     _seed(home, "T-7", Phase.AWAITING_CI)
+    _ci_passing(home, "T-7")
     _add_worktree(repo, home, "T-7", "maestro/T-7")
     _merge_commits_to_origin(repo, origin, n=1)
 
@@ -224,6 +244,7 @@ def test_always_routes_unconditionally_same_as_pre_ticket_behavior(home, cfg, tm
     cfg.repo_path = str(repo)
 
     _seed(home, "T-8", Phase.AWAITING_CI)
+    _ci_passing(home, "T-8")
     _add_worktree(repo, home, "T-8", "maestro/T-8")
     _merge_commits_to_origin(repo, origin, n=1)
 
@@ -268,6 +289,7 @@ def test_set_phase_reason_names_the_policy(home, cfg, tmp_path, policy):
     cfg.repo_path = str(repo)
 
     _seed(home, "T-4", Phase.AWAITING_CI)
+    _ci_passing(home, "T-4")
     _add_worktree(repo, home, "T-4", "maestro/T-4")
     _merge_commits_to_origin(repo, origin, n=1)
 
@@ -298,9 +320,188 @@ def test_dispatch_sweep_proves_on_conflict_no_route_and_always_byte_identical(ho
     cfg_always = Config(home=home, max_concurrency=3, backoff_base=10, max_failures=3,
                         repo_path=str(repo), base_drift_policy="always")
     _seed(home, "T-AL", Phase.AWAITING_CI)
+    _ci_passing(home, "T-AL")
     _add_worktree(repo, home, "T-AL", "maestro/T-AL")
     _merge_commits_to_origin(repo, origin, n=1)
 
     report2 = disp.dispatch(cfg_always, DryRunSessions(), now=2000)
     assert snap_mod.load(home, "T-AL").phase == Phase.IMPLEMENTING.value  # routed
     assert "T-AL" in report2.spawned
+
+
+# ---------------------------------------------------------------------------
+# T-82: the drift decision reads the TICKET's own resolved binding, not the
+# GROUP's -- a group is keyed on (realpath, base_branch) only, so a per-repo
+# override sharing a checkout with the implicit default (or with another
+# [repos.*] table) used to silently inherit whichever binding created the
+# group first. AC1-AC4 below drive the reported repro (and its mirror, and
+# the two-tickets-diverge proof, and the end-to-end sweep) directly, with the
+# real config loader -- never the resolver alone (test_per_repo_..._wins_...
+# above already covers the resolver in isolation).
+# ---------------------------------------------------------------------------
+
+def test_per_ticket_binding_wins_over_groups_first_arrived_binding_suppresses(home, tmp_path):
+    """AC1: the exact reported repro (BLOCKING #2), now green. A [repos.x]
+    override sharing the SAME checkout+base as the implicit default (a path
+    collision -- [maestro] repo_path == [repos.x] path) must have its OWN
+    on_conflict policy read for a ticket bound to it, not the group's
+    (whichever binding created the (realpath, base) group first -- normally
+    the implicit default, here "always")."""
+    origin, repo = _make_origin_and_repo(tmp_path)
+    (home / "config.toml").write_text(
+        f'[maestro]\nrepo_path = "{repo}"\nbase_drift_policy = "always"\n\n'
+        f'[repos.x]\npath = "{repo}"\nbase_drift_policy = "on_conflict"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+
+    _seed(home, "T-82X", Phase.AWAITING_CI, repo_name="x")
+    _add_worktree(repo, home, "T-82X", "maestro/T-82X")
+    _merge_commits_to_origin(repo, origin, n=1)
+
+    result = disp.sync_worktrees(cfg)
+    assert result["routed"] == []
+    assert result["skipped_by_policy"] == ["T-82X"]
+    assert snap_mod.load(home, "T-82X").phase == Phase.AWAITING_CI.value  # untouched
+
+
+def test_per_ticket_binding_wins_over_groups_first_arrived_binding_routes(home, tmp_path):
+    """AC2: the mirror case -- the per-repo override says "always", the
+    board-wide default says "on_conflict". The ticket must route, proving the
+    override wins in both directions, not just the suppress direction."""
+    origin, repo = _make_origin_and_repo(tmp_path)
+    (home / "config.toml").write_text(
+        f'[maestro]\nrepo_path = "{repo}"\nbase_drift_policy = "on_conflict"\n\n'
+        f'[repos.x]\npath = "{repo}"\nbase_drift_policy = "always"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+
+    _seed(home, "T-82Y", Phase.AWAITING_CI, repo_name="x")
+    _ci_passing(home, "T-82Y")
+    _add_worktree(repo, home, "T-82Y", "maestro/T-82Y")
+    _merge_commits_to_origin(repo, origin, n=1)
+
+    result = disp.sync_worktrees(cfg)
+    assert result["routed"] == ["T-82Y"]
+    assert result["skipped_by_policy"] == []
+    assert snap_mod.load(home, "T-82Y").phase == Phase.IMPLEMENTING.value
+
+
+def test_two_tickets_same_checkout_and_base_different_repo_policies_diverge(home, tmp_path):
+    """AC3: two tickets on the SAME checkout+base, bound to two different
+    [repos.*] tables carrying different policies, get DIFFERENT outcomes from
+    the SAME sweep -- proving the decision is genuinely per-ticket, not
+    per-group (a per-group read could only ever produce one outcome for
+    both, whichever binding happened to create the group first)."""
+    origin, repo = _make_origin_and_repo(tmp_path)
+    (home / "config.toml").write_text(
+        f'[repos.x]\npath = "{repo}"\nbase_drift_policy = "on_conflict"\n\n'
+        f'[repos.y]\npath = "{repo}"\nbase_drift_policy = "always"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+
+    _seed(home, "T-82A", Phase.AWAITING_CI, repo_name="x")
+    _add_worktree(repo, home, "T-82A", "maestro/T-82A")
+    _seed(home, "T-82B", Phase.AWAITING_CI, repo_name="y")
+    _ci_passing(home, "T-82B")
+    _add_worktree(repo, home, "T-82B", "maestro/T-82B")
+    _merge_commits_to_origin(repo, origin, n=1)
+
+    result = disp.sync_worktrees(cfg)
+    assert result["routed"] == ["T-82B"]
+    assert result["skipped_by_policy"] == ["T-82A"]
+    assert snap_mod.load(home, "T-82A").phase == Phase.AWAITING_CI.value
+    assert snap_mod.load(home, "T-82B").phase == Phase.IMPLEMENTING.value
+
+
+def test_per_repo_override_proven_through_a_real_dispatch_sweep(home, tmp_path):
+    """AC4: the end-to-end path, not just the resolver or sync_worktrees
+    directly -- a real dispatch(cfg, DryRunSessions(), ...) sweep (mint/due/
+    spawn machinery all included) over the AC1 repro config must produce the
+    same suppressed outcome, asserted on the resulting events/report."""
+    origin, repo = _make_origin_and_repo(tmp_path)
+    (home / "config.toml").write_text(
+        f'[maestro]\nrepo_path = "{repo}"\nbase_drift_policy = "always"\n\n'
+        f'[repos.x]\npath = "{repo}"\nbase_drift_policy = "on_conflict"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+
+    _seed(home, "T-82Z", Phase.AWAITING_CI, repo_name="x")
+    _add_worktree(repo, home, "T-82Z", "maestro/T-82Z")
+    _merge_commits_to_origin(repo, origin, n=1)
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    # Untouched by drift routing -- phase unchanged and no IMPLEMENTING PhaseChanged
+    # landed. (Not asserting on report.spawned here: `_seed` writes spec.md without
+    # ever calling `observe-spec`, so the ticket is independently "due" on its own
+    # unrelated spec-changed hash -- orthogonal to this AC's drift-routing claim.)
+    assert snap_mod.load(home, "T-82Z").phase == Phase.AWAITING_CI.value
+    assert "T-82Z" in report.drift_skipped
+    assert report.drift_skip_reasons.get("T-82Z") == "policy"
+    assert not any(e["type"] == "PhaseChanged" and e["payload"].get("phase") == Phase.IMPLEMENTING.value
+                  for e in event_log.read(home, "T-82Z"))
+
+
+# ---------------------------------------------------------------------------
+# T-82 defect 1: the pending-CI guard trusted a stale, narrow signal -- only
+# the literal string "pending". ci_state is None before the first poll and
+# "unknown" on a gh auth failure / no checks registered yet / simply stale
+# (sync_worktrees runs before sync_vcs each sweep) -- neither is known to be
+# safe, so neither may route on drift alone.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ci_state", [None, "unknown"])
+def test_unobserved_or_unknown_ci_state_blocks_drift_route_under_always(home, cfg, tmp_path, ci_state):
+    """AC5: "not known to be safe" is treated as not safe -- an unobserved
+    (never-polled, ci_state is None) or "unknown" (gh auth failure / no
+    checks registered) CI state must block a drift-only route exactly like an
+    explicit "pending" already does (test_pending_ci_checks_block_drift_route_
+    under_every_mode, above), and the skip is reported with a reason
+    ("checks_pending") that's distinguishable from an explicit policy skip
+    ("policy")."""
+    cfg.base_drift_policy = "always"
+    origin, repo = _make_origin_and_repo(tmp_path)
+    cfg.repo_path = str(repo)
+
+    _seed(home, "T-82C", Phase.AWAITING_CI)
+    if ci_state is not None:
+        event_log.append(home, "T-82C", "CiObserved",
+                         {"state": ci_state, "failing_checks": []}, actor="dispatcher")
+        snap_mod.rebuild(home, "T-82C")
+    assert snap_mod.load(home, "T-82C").ci_state == ci_state
+    _add_worktree(repo, home, "T-82C", "maestro/T-82C")
+    _merge_commits_to_origin(repo, origin, n=1)
+
+    result = disp.sync_worktrees(cfg)
+    assert result["routed"] == []
+    assert result["skipped_by_policy"] == ["T-82C"]
+    assert result["skip_reasons"]["T-82C"] == "checks_pending"
+    assert snap_mod.load(home, "T-82C").phase == Phase.AWAITING_CI.value
+
+
+# ---------------------------------------------------------------------------
+# T-82 defect 2: skipped_by_policy was computed by sync_worktrees and thrown
+# away by dispatch() (its own hook call discarded the return value) -- no
+# operator could ever see a suppressed rebase outside a direct
+# sync_worktrees() call in a test.
+# ---------------------------------------------------------------------------
+
+def test_skipped_by_policy_reaches_the_dispatch_ledger(home, cfg, tmp_path):
+    """AC6: the sweep record dispatch() writes to derived/dispatch.jsonl (what
+    `maestro why` reads) must carry the suppressed keys and their reasons --
+    not just sync_worktrees' own, easy-to-miss, in-process return value."""
+    assert cfg.base_drift_policy == "on_conflict"  # the default -- a board that sets nothing
+    origin, repo = _make_origin_and_repo(tmp_path)
+    cfg.repo_path = str(repo)
+
+    _seed(home, "T-82L", Phase.AWAITING_CI)
+    _add_worktree(repo, home, "T-82L", "maestro/T-82L")
+    _merge_commits_to_origin(repo, origin, n=1)
+
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    ledger_path = home / "derived" / "dispatch.jsonl"
+    assert ledger_path.exists()
+    last = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["drift_skipped"] == ["T-82L"]
+    assert last["drift_skip_reasons"].get("T-82L") == "policy"

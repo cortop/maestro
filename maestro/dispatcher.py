@@ -1126,7 +1126,14 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     now behind its own repo's base, whether that drift alone routes it back
     into ``implementing`` (so the reconciler rebases, exactly as it already
     does for a GitHub-reported CONFLICTING PR -- see ``ops.route_conflict``)
-    is gated on the resolved repo binding's ``base_drift_policy`` (MTO-2):
+    is gated on THAT TICKET's own resolved repo binding's ``base_drift_policy``
+    (MTO-2; T-82: the ticket's own binding, never the group's -- a group is
+    keyed on ``(realpath, base_branch)`` only, so two tickets bound to
+    different ``[repos.*]`` tables that happen to collide on path+base
+    (a per-repo override sharing the implicit default's checkout, or two
+    ``[repos.*]`` tables aliasing one checkout) can carry different policies
+    within the same group; reading the group's binding here silently gave
+    every ticket in it whichever policy created the group first):
     ``"always"`` routes unconditionally (today's byte-identical behavior),
     ``"on_conflict"`` never routes on drift alone (only a CONFLICTING PR still
     does, via the separate ``sync_vcs`` hook), and ``"daily"`` routes at most
@@ -1135,13 +1142,20 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     (``derived/.drift_policy_cursor.json``) keyed on ``(key, day-bucket)`` --
     reusing the same "have I done this today" machinery ``run_scheduled_tasks``
     already relies on, rather than hand-rolling a timestamp comparison. Under
-    every policy, a ticket whose latest observed CI is still ``pending`` is
-    never routed on drift alone -- staleness only matters at merge time, and
-    routing while checks are still running is exactly what restarts CI and
-    livelocks a fast-moving base (see the ticket's evidence). A ticket that's
-    already ``implementing`` needs no nudge — it re-syncs with its base branch
-    on every turn on its own. Suppressed reroutes (policy gate or pending CI)
-    are reported under ``skipped_by_policy`` rather than silently absent.
+    every policy, a ticket whose latest observed CI is ``pending``, has never
+    been observed (``None``), or came back ``"unknown"`` (a ``gh`` auth
+    failure, no checks registered yet, or simply stale since this hook runs
+    before ``sync_vcs`` each sweep) is never routed on drift alone -- only a
+    CI state positively known to be ``"passing"``/``"failing"`` counts as safe;
+    "not known to be safe" is treated as not safe. Staleness only matters at
+    merge time, and routing while checks are still running (or their state is
+    simply unknown) is exactly what restarts CI and livelocks a fast-moving
+    base (see the ticket's evidence). A ticket that's already ``implementing``
+    needs no nudge — it re-syncs with its base branch on every turn on its
+    own. Suppressed reroutes (policy gate, daily dedup, or unsafe CI) are
+    reported under ``skipped_by_policy`` rather than silently absent, with the
+    reason for each (``"policy"`` vs ``"checks_pending"``) under the
+    additional ``skip_reasons`` key.
 
     Level-triggered and idempotent: a no-op when nothing is behind, and one
     repo's fetch/network failure is contained to that repo -- it never stalls
@@ -1166,6 +1180,12 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     now = now if now is not None else store.now_epoch()
     routed: list[str] = []
     skipped_by_policy: list[str] = []
+    # T-82: WHY each key in skipped_by_policy was suppressed -- "policy" (the
+    # resolved binding's own base_drift_policy said no) vs "checks_pending"
+    # (CI isn't known-safe yet: pending, unobserved, or unknown) -- so an
+    # operator reading the sweep record can tell the two apart instead of one
+    # opaque list (AC5/AC6).
+    skip_reasons: dict[str, str] = {}
     errors: dict[str, str] = {}
     blocked: dict[str, list[str]] = {}
     # Loaded/persisted lazily -- only "daily"-policy tickets that actually
@@ -1180,6 +1200,14 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     # its local base branch still tracks origin every sweep, matching
     # historical behavior.
     groups: dict[tuple[str, str], dict] = {}
+    # T-82: the group's binding is only ever used for what genuinely IS
+    # shared by every key in it -- the fetch target and the base branch (both
+    # already pinned by the group key itself). Anything that can legitimately
+    # differ per ticket even within the same (realpath, base) group --
+    # `base_drift_policy`, the one field this ticket is about -- must be read
+    # from the TICKET's own resolved binding, never the group's (whichever
+    # binding happened to create the group first). See key_bindings below.
+    key_bindings: dict[str, "repos_mod.RepoBinding"] = {}
 
     def _group_for(binding) -> dict | None:
         if not binding.path or not Path(binding.path).exists():
@@ -1207,6 +1235,7 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
         if group is None:
             continue
         group["keys"].append(key)
+        key_bindings[key] = binding
 
     fetched_default = False
     for gkey, group in groups.items():
@@ -1250,15 +1279,32 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
                 if count == 0:
                     continue
 
-                policy = binding.base_drift_policy
+                # T-82: the TICKET's own resolved binding, not the group's --
+                # two tickets can share a (realpath, base_branch) group (a
+                # path collision between the implicit default and a
+                # [repos.*] override, or two [repos.*] tables aliasing the
+                # same checkout) while carrying different base_drift_policy
+                # values. Reading `binding.base_drift_policy` here silently
+                # gave every ticket in the group whichever binding happened
+                # to create it first -- normally the implicit default -- and
+                # discarded the per-repo override this whole mechanism exists
+                # to honor.
+                policy = key_bindings[key].base_drift_policy
                 if policy == "on_conflict":
                     skipped_by_policy.append(key)
+                    skip_reasons[key] = "policy"
                     continue
                 # Staleness only matters at merge time -- never restart CI that's
                 # still running, under ANY policy (this is what actually breaks
-                # the CI-restart livelock; see the ticket's evidence).
-                if snap_mod.load(home, key).ci_state == "pending":
+                # the CI-restart livelock; see the ticket's evidence). A CI state
+                # that has never been observed (None) or came back "unknown"
+                # (gh auth failure, no checks registered yet, or simply stale by
+                # up to sync_interval since sync_worktrees runs before sync_vcs
+                # each sweep) is NOT known to be safe either -- treat "not known
+                # to be safe" as not safe, the same as an explicit "pending".
+                if snap_mod.load(home, key).ci_state in (None, "pending", "unknown"):
                     skipped_by_policy.append(key)
+                    skip_reasons[key] = "checks_pending"
                     continue
                 if policy == "daily":
                     if not daily_cursor_loaded:
@@ -1267,6 +1313,7 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
                     bucket = schedule.dedup_bucket({"every": "24h"}, now)
                     if daily_cursor.get(key) == bucket:
                         skipped_by_policy.append(key)
+                        skip_reasons[key] = "policy"
                         continue
                     if ops.route_stale(cfg, key, base_branch=base, policy=policy):
                         routed.append(key)
@@ -1284,7 +1331,8 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
         store.write_json(_drift_policy_cursor_path(home), daily_cursor)
 
     return {"fetched": fetched_default, "routed": routed,
-            "skipped_by_policy": skipped_by_policy, "errors": errors, "blocked": blocked}
+            "skipped_by_policy": skipped_by_policy, "skip_reasons": skip_reasons,
+            "errors": errors, "blocked": blocked}
 
 
 def _compact_cursor_path(home: Path) -> Path:
@@ -1948,6 +1996,8 @@ class DispatchReport:
     hook_errors: dict = field(default_factory=dict)     # hook name -> "ExcType: message"
     worktree_removal_errors: dict = field(default_factory=dict)  # key -> git worktree remove stderr
     would_mint: list[str] = field(default_factory=list)  # dry_run only: pending_new keys, unminted
+    drift_skipped: list[str] = field(default_factory=list)  # T-82: keys sync_worktrees suppressed a reroute for
+    drift_skip_reasons: dict = field(default_factory=dict)  # T-82: key -> "policy" | "checks_pending"
 
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
@@ -2251,6 +2301,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         would_mint = [] if filter_keys is not None else _would_mint_keys(home)
         scheduled_fired: list[str] = []
         worktree_removal_errors: dict = {}
+        drift_skipped: list[str] = []
+        drift_skip_reasons: dict = {}
         reaped: list[str] = []
         pruned_logs = 0
         pruned_bytes = 0
@@ -2269,7 +2321,10 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                                     cfg, now, default={"fired": []})["fired"]
         # sync_worktrees preflight-gates itself per repo group now (MR-5) -- no
         # outer repo_ok gate needed here; a blocked repo skips only its own group.
-        _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg, now)
+        drift_sync_result = _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg, now,
+                                      default={})
+        drift_skipped = (drift_sync_result or {}).get("skipped_by_policy", [])
+        drift_skip_reasons = (drift_sync_result or {}).get("skip_reasons", {})
         vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
         worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
         # RB-14: same sleeping-phase-observation shape as sync_vcs just above,
@@ -2816,6 +2871,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     _append_dispatch_ledger(home, {
         "ts": store.iso_now(), "epoch": now,
         "hook_errors": hook_errors, "decisions": decisions,
+        # T-82 (defect 2): sync_worktrees' skipped_by_policy/skip_reasons used
+        # to be computed and thrown away by the hook call above -- no operator
+        # could ever see a suppressed rebase. Surfaced here so `derived/
+        # dispatch.jsonl` (and anything reading it) carries it every sweep.
+        "drift_skipped": drift_skipped, "drift_skip_reasons": drift_skip_reasons,
     })
     return DispatchReport(
         minted=minted, due=due, claimed=claimed, spawned=spawned,
@@ -2828,6 +2888,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         hook_errors=hook_errors,
         worktree_removal_errors=worktree_removal_errors,
         would_mint=would_mint,
+        drift_skipped=drift_skipped, drift_skip_reasons=drift_skip_reasons,
     )
 
 

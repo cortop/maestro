@@ -84,6 +84,16 @@ def _seed(home, key, phase, *, repo_name=None, pr=10):
     return snap_mod.rebuild(home, key)
 
 
+def _ci_passing(home, key):
+    """T-82: a drift-only reroute now requires a POSITIVELY known-safe CI state
+    (never None/unobserved, never "unknown") -- these tests are about the
+    multi-repo drift/routing mechanism itself, not the CI gate, so give them
+    an observed passing CI up front."""
+    event_log.append(home, key, "CiObserved",
+                     {"state": "passing", "failing_checks": []}, actor="r")
+    return snap_mod.rebuild(home, key)
+
+
 class FakeVCS:
     """The only mock: the external GitHub boundary, per test_vcs_sync.py:54-57."""
 
@@ -163,6 +173,7 @@ def test_sync_worktrees_two_repo_routes_only_affected_repo(home, cfg, tmp_path):
     cfg.repos = {"alpha": _repo_table(alpha_repo), "beta": _repo_table(beta_repo)}
 
     _seed(home, "A-1", Phase.IN_REVIEW, repo_name="alpha")
+    _ci_passing(home, "A-1")
     _add_worktree(alpha_repo, home, "A-1", "maestro/A-1")
     _seed(home, "B-1", Phase.IN_REVIEW, repo_name="beta")
     _add_worktree(beta_repo, home, "B-1", "maestro/B-1")
@@ -191,6 +202,7 @@ def test_sync_worktrees_non_main_base_branch_fetched_and_ff_merged(home, cfg, tm
     cfg.repos = {"devrepo": _repo_table(dev_repo, base_branch="develop", default=True)}
 
     _seed(home, "D-1", Phase.AWAITING_CI, repo_name="devrepo")
+    _ci_passing(home, "D-1")
     _add_worktree(dev_repo, home, "D-1", "maestro/D-1", base="develop")
 
     before = subprocess.run(["git", "-C", str(dev_repo), "rev-parse", "develop"],
@@ -335,6 +347,7 @@ def test_bad_repo_fetch_failure_contained_sweep_still_progresses(home, cfg, tmp_
     cfg.repos = {"alpha": _repo_table(alpha_repo), "beta": _repo_table(beta_repo)}
 
     _seed(home, "A-1", Phase.AWAITING_CI, repo_name="alpha")
+    _ci_passing(home, "A-1")
     _add_worktree(alpha_repo, home, "A-1", "maestro/A-1")
     _seed(home, "B-1", Phase.AWAITING_CI, repo_name="beta")
     _add_worktree(beta_repo, home, "B-1", "maestro/B-1")
