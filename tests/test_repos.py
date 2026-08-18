@@ -69,12 +69,14 @@ def test_config_load_parses_repos_tables(home):
         "base_branch": "develop", "branch_prefix": "alpha/", "default": False,
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
+        "test_command": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
         "base_branch": "main", "branch_prefix": "maestro/", "default": False,
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
+        "test_command": None,
     }
 
 

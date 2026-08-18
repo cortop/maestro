@@ -65,6 +65,12 @@ class RepoBinding:
     # "on_conflict"; both values are validated at config.load (fail closed),
     # so by the time a RepoBinding exists this is always one of the three.
     base_drift_policy: str = "on_conflict"
+    # T-83: this repo's test_command override, already resolved against the
+    # board-wide [maestro] test_command default -- see resolve(),
+    # the sole reader every RB-12/RB-14/T-79 test-verification gate goes
+    # through instead of Config.test_command directly. None means the gate is
+    # fully disabled for this key (ships dark).
+    test_command: str | None = None
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -86,6 +92,8 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         prime=table.get("prime"),
         # MTO-2: this table's own override wins; unset inherits the board-wide default.
         base_drift_policy=table.get("base_drift_policy") or cfg.base_drift_policy,
+        # T-83: same precedence as base_drift_policy above.
+        test_command=table.get("test_command") or cfg.test_command,
     )
 
 
@@ -118,6 +126,7 @@ def implicit_default(cfg: Config) -> RepoBinding:
         branch_prefix=cfg.branch_prefix,
         prime=cfg.prime,
         base_drift_policy=cfg.base_drift_policy,
+        test_command=cfg.test_command,
     )
 
 
