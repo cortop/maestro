@@ -409,14 +409,34 @@ def _run_recovery_git(args: list[str], *, timeout: int, what: str) -> subprocess
             f"config.toml if this repo's git operations legitimately take longer.") from exc
 
 
-def _git_dir(wt: Path) -> Path:
+def _git_dir(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path:
     """The worktree-SPECIFIC git dir (e.g. ``<repo>/.git/worktrees/<KEY>``) --
     distinct from ``--git-common-dir``/``--git-path``, which resolve to the
     dir SHARED by every worktree of the repo. Self-cleaning: `git worktree
     remove` (dispatcher.py's merge-triggered cleanup) deletes this whole
-    directory, so anything stored under it never outlives its worktree."""
-    out = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
-                         capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True).stdout.strip()
+    directory, so anything stored under it never outlives its worktree.
+
+    *timeout* defaults to the short plumbing `_GIT_TIMEOUT` for call sites
+    that only ever run after a worktree is already known-good (marker writes
+    in `_worktree_create_or_adopt`/`_prime_worktree_extras`). Callers on
+    `worktree_ensure`'s hot path (`_worktree_witness_path`, checked on every
+    `ensure` before any recovery logic runs) pass `cfg.worktree_timeout`
+    instead, and a `TimeoutExpired`/`OSError` here is wrapped into
+    `store.MaestroError` rather than left to escape as a raw traceback --
+    T-81 AC5, round 2: this call used to be unguarded on that same hot path,
+    reintroducing the exact poison-pill-timeout bug class the rest of this
+    module's recovery path already closed via `_run_recovery_git`. A non-zero
+    exit (not a worktree at all) still raises `CalledProcessError`, unchanged
+    -- callers that treat "not a worktree" as a legitimate answer (e.g.
+    `_worktree_witness_path`) catch that themselves."""
+    try:
+        out = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                             capture_output=True, text=True, timeout=timeout, check=True).stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise store.MaestroError(
+            f"`git rev-parse --git-dir` on {wt} did not complete within {timeout}s ({exc}) -- "
+            f"raise `worktree_timeout` in config.toml if this repo's git operations legitimately "
+            f"take longer.") from exc
     p = Path(out)
     return p if p.is_absolute() else wt / p
 
@@ -705,18 +725,28 @@ def _run_prime(binding: repos_mod.RepoBinding, wt: Path, repo: str, key: str, ti
             f"prime for repo {binding.name!r} ({key}) failed (rc={result.returncode}): {detail}")
 
 
-def _worktree_witness_path(wt: Path) -> Path | None:
+def _worktree_witness_path(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path | None:
     """Path to *wt*'s completion witness (`_WORKTREE_COMPLETE_MARKER`), or
     None if *wt* isn't even a usable git worktree yet -- in which case no
-    witness could possibly exist. Never raises: a directory that exists but
-    isn't a real git worktree (no index at all, T-44/MTO-1's "no index" repro)
-    makes `_git_dir`'s `rev-parse --git-dir` fail non-zero (`check=True`,
-    `CalledProcessError`), which reads the same as "no witness" here."""
+    witness could possibly exist. A directory that exists but isn't a real
+    git worktree (no index at all, T-44/MTO-1's "no index" repro) makes
+    `_git_dir`'s `rev-parse --git-dir` fail non-zero (`check=True`,
+    `CalledProcessError`), which reads the same as "no witness" here.
+
+    *timeout* should be `cfg.worktree_timeout` -- this runs unconditionally
+    on `worktree_ensure`'s hot path, before any recovery logic, so a
+    `TimeoutExpired`/`OSError` probing it is NOT "no witness": that would
+    make `worktree_ensure` mistake "we don't know" for "creation never
+    finished" and tear down a live, witnessed worktree -- the exact failure
+    this ticket exists to close. `_git_dir` wraps that case into
+    `store.MaestroError`, which is deliberately NOT caught here and
+    propagates up as a loud, non-zero-exit failure instead (T-81 AC5,
+    round 2)."""
     if not wt.exists():
         return None
     try:
-        return _git_dir(wt) / _WORKTREE_COMPLETE_MARKER
-    except (subprocess.CalledProcessError, OSError):
+        return _git_dir(wt, timeout=timeout) / _WORKTREE_COMPLETE_MARKER
+    except subprocess.CalledProcessError:
         return None
 
 
@@ -778,7 +808,7 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     repo = binding.path
     wt = store.worktree_path(cfg.home, key)
     branch = f"{binding.branch_prefix}{key}"
-    witness = _worktree_witness_path(wt)
+    witness = _worktree_witness_path(wt, timeout=cfg.worktree_timeout)
     created = False
     if witness is None or not witness.exists():
         if wt.exists():

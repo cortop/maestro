@@ -819,6 +819,49 @@ def test_health_probe_timeout_is_an_error_not_silently_unhealthy(
     assert ops.worktree_health(wt)["healthy"] is True
 
 
+def test_witness_check_timeout_surfaces_as_maestro_error_and_uses_worktree_timeout(
+        home, tmp_path, monkeypatch, capsys):
+    """AC5, round 2 (QA fail on the first pass): `_worktree_witness_path`'s
+    own `_git_dir` probe runs unconditionally on `worktree_ensure`'s hot
+    path -- before any recovery-path logic -- so it is not exempt from AC3/
+    AC5 just because it lives outside `_cleanup_partial_worktree`. A
+    `TimeoutExpired` there must surface as `store.MaestroError` (never a raw
+    traceback escaping `cli.main`, and never silently read as "no witness"
+    and torn down -- that would reintroduce this ticket's own Finding 1) and
+    must run under `worktree_timeout`, never the short 30s `_GIT_TIMEOUT`
+    every other plumbing call in this module defaults to."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 5\n")
+    _seed_spec(home, "H-11")
+
+    ops.worktree_ensure(cfg, "H-11")
+    wt = store.worktree_path(home, "H-11")
+    (wt / "scratch.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    real_run = subprocess.run
+    seen_timeouts = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(wt), "rev-parse", "--git-dir"]:
+            seen_timeouts.append(kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-11"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "timeout" in err.lower()
+    assert seen_timeouts == [5], (
+        f"witness check must run under worktree_timeout (5), never _GIT_TIMEOUT (30): {seen_timeouts}")
+
+    monkeypatch.undo()  # lift the fault: the worktree and its uncommitted work must be untouched
+    assert (wt / "scratch.txt").read_text(encoding="utf-8") == "uncommitted\n"
+    assert ops.worktree_health(wt)["healthy"] is True
+
+
 def test_revival_from_awaiting_human_and_degraded_preserves_uncommitted_worktree_work(
         home, tmp_path):
     """The `awaiting-human -> ready` and `degraded -> ready` revival paths,
