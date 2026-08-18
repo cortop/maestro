@@ -286,6 +286,10 @@ def test_awaiting_ci_gate_on_annotated_ac_follows_per_key_arming(home):
         "goapp": {"path": "/repo/goapp", "test_command": "go test ./..."},
         "web": {"path": "/repo/web"},  # no test_command, board-wide also unset
     })
+    # T-85: off-topic for this test, which is about per-key `check:` annotation
+    # arming (T-83), not the independent spec-axis QA-verdict gate -- same fix
+    # applied to the other pre-T-85 tests it collided with (see test_context.py).
+    cfg.awaiting_ci_qa_gate = False
     for key, repo_name in (("G-1", "goapp"), ("W-1", "web")):
         store.atomic_write(
             store.spec_path(home, key),
@@ -307,8 +311,13 @@ def test_awaiting_ci_gate_on_annotated_ac_follows_per_key_arming(home):
         ops.set_phase(cfg, "G-1", Phase.AWAITING_CI, reason="pr opened")
 
     # W-1 (not armed): the SAME annotation is inert -- a bare verify-ac
-    # satisfies it, byte-identical to an unannotated AC.
+    # satisfies it, byte-identical to an unannotated AC. Still needs a passing
+    # spec-axis QA verdict to clear T-85's unconditional _refuse_if_qa_incomplete
+    # gate, same as any other ticket -- that gate is orthogonal to annotation
+    # arming, so it applies here too.
     ops.verify_ac(cfg, "W-1", 1, {"what": "eyeballed it", "where": "n/a", "result": "looks fine"})
+    ops.set_phase(cfg, "W-1", Phase.QA, reason="ready for qa")
+    ops.record_qa_verdict(cfg, "W-1", 1, "pass", "looks fine")
     ops.set_phase(cfg, "W-1", Phase.AWAITING_CI, reason="pr opened")
     assert snap_mod.load(home, "W-1").phase == Phase.AWAITING_CI.value
 

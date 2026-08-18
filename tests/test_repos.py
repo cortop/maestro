@@ -70,6 +70,7 @@ def test_config_load_parses_repos_tables(home):
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
+        "prime_timeout": None, "worktree_timeout": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
@@ -77,6 +78,7 @@ def test_config_load_parses_repos_tables(home):
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
+        "prime_timeout": None, "worktree_timeout": None,
     }
 
 
@@ -356,3 +358,65 @@ def test_repos_default_table_prime_wins_over_maestro_prime_fallback(home):
     binding = repos_mod.implicit_default(cfg)
     assert binding.name == "alpha"
     assert binding.prime == "alpha prime"
+
+
+# --- T-90: board-wide + per-repo prime_timeout/worktree_timeout ---
+
+def test_prime_timeout_defaults_to_600(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.prime_timeout == 600
+
+
+def test_prime_timeout_configurable_board_wide(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\nprime_timeout = 900\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.prime_timeout == 900
+
+
+def test_repos_table_timeouts_override_board_wide_default(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\nprime_timeout = 900\nworktree_timeout = 1800\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\nprime_timeout = 60\nworktree_timeout = 120\n\n'
+        '[repos.beta]\npath = "/repo/beta"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos["alpha"]["prime_timeout"] == 60
+    assert cfg.repos["alpha"]["worktree_timeout"] == 120
+    # unset in the table -- config.repos carries None; resolution (below) is what inherits
+    assert cfg.repos["beta"]["prime_timeout"] is None
+    assert cfg.repos["beta"]["worktree_timeout"] is None
+
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    alpha_binding = repos_mod.resolve(cfg, home, "T-1")
+    assert alpha_binding.prime_timeout == 60      # this table's own override wins
+    assert alpha_binding.worktree_timeout == 120
+
+    store.atomic_write(store.spec_path(home, "T-2"),
+                       "# T-2\napproval_tier: 1\nrepo: beta\n\n## Intent\nx\n")
+    beta_binding = repos_mod.resolve(cfg, home, "T-2")
+    assert beta_binding.prime_timeout == 900      # unset -- inherits the board-wide default
+    assert beta_binding.worktree_timeout == 1800
+
+
+def test_default_config_template_documents_prime_timeout_and_worktree_timeout():
+    from maestro.config import DEFAULT_CONFIG_TOML
+    assert "prime_timeout" in DEFAULT_CONFIG_TOML
+    assert "worktree_timeout" in DEFAULT_CONFIG_TOML
+    # both keys are documented again inside the commented-out [repos.<name>] block,
+    # beside `prime` -- not just the board-wide [maestro] block above it.
+    repos_block = DEFAULT_CONFIG_TOML[DEFAULT_CONFIG_TOML.index("# [repos.<name>]"):]
+    assert "prime_timeout" in repos_block
+    assert "worktree_timeout" in repos_block
+
+
+def test_repo_table_typo_prime_timeout_key_still_fails_closed(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\nprim_timeout = 5\n',
+        encoding="utf-8")
+    with pytest.raises(store.MaestroError):
+        config_mod.load(str(home))
