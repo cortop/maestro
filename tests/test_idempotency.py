@@ -6,6 +6,7 @@ import pytest
 
 from maestro import cli, event_log, ops, snapshot as snap_mod, store
 from maestro.idempotency import step_id
+from maestro.statemachine import Phase
 
 SPEC_TEMPLATE = """\
 # {key}: {title}
@@ -149,6 +150,7 @@ def test_step_id_guard_is_the_last_line_of_defense_via_real_cli(cfg, monkeypatch
     still refuses it, surfacing as `cli.main`'s standard non-zero exit."""
     home = cfg.home
     _create(cfg, "T-1")
+    ops.set_phase(cfg, "T-1", Phase.QA, reason="handing off")
     bad_axis = "spec\x01"
     monkeypatch.setattr(ops, "QA_AXES", {"spec", "standards", bad_axis})
     rc = cli.main(["--home", str(home), "qa-verdict", "T-1", "--ac", "1",

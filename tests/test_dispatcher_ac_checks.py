@@ -258,6 +258,9 @@ def test_bare_file_path_form_fails_when_diff_adds_no_test_in_that_file(tmp_path,
 def test_awaiting_ci_gate_requires_captured_check_not_attestation_for_annotated_ac(tmp_path, home):
     _origin, repo = make_origin_and_repo(tmp_path)
     cfg = _write_config(home, repo, test_command=_PYTEST)
+    # T-85: this test is scoped to T-79's AC-check gate, not the new
+    # QA-completeness gate -- no qa-verdict is ever recorded here.
+    cfg.awaiting_ci_qa_gate = False
     wt = _seed_to_worktree(
         cfg, "G-1",
         acs=["widget works (test: tests/test_widget.py::test_widget)", "docs updated"])
@@ -305,6 +308,9 @@ def test_awaiting_ci_gate_still_blocks_when_annotated_check_never_ran(tmp_path, 
 
 def test_ships_dark_when_test_command_unset(home):
     cfg = Config(home=home)  # no test_command at all
+    # T-85: scoped to T-79's ships-dark behavior, not the new QA-completeness
+    # gate -- no qa-verdict is ever recorded here.
+    cfg.awaiting_ci_qa_gate = False
     key = "G-1"
     store.atomic_write(store.spec_path(home, key),
                        f"# {key}: t\npriority: 2\n\n## Intent\nx\n\n"
@@ -351,6 +357,10 @@ def test_ships_dark_for_a_mode_local_ticket(tmp_path, home):
     target.mkdir()
     cfg = Config(home=home, test_command=_PYTEST,
                 repos={"vault": {"path": str(target), "mode": "local", "default": True}})
+    # T-85: a real `mode: local` ticket never reaches `set_phase(AWAITING_CI)`
+    # at all (it finalizes directly, see ops.finalize) -- this synthetic call
+    # is scoped to T-79's ships-dark behavior, not the new QA-completeness gate.
+    cfg.awaiting_ci_qa_gate = False
     key = "V-1"
     store.atomic_write(store.spec_path(home, key),
                        f"# {key}\n\n## Intent\nx\n\n## Acceptance criteria\n"

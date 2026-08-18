@@ -133,6 +133,10 @@ def test_sync_vcs_ci_observed_is_idempotent_on_unchanged_state(cfg, monkeypatch)
     }})
     _use_fake(cfg, monkeypatch, fake)
     _seed(cfg, "T-5", Phase.AWAITING_CI)
+    # T-85: `force` overrides the unverified-ACs gate but not the new
+    # QA-completeness gate; disable it here, off-topic for CI-observation
+    # idempotency.
+    cfg.awaiting_ci_qa_gate = False
 
     disp.sync_vcs(cfg, now=1000)
     n_before = len(event_log.read(cfg.home, "T-5"))

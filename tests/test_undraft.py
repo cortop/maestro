@@ -55,9 +55,13 @@ def _seed(cfg, key, phase, *, pr=42, draft=True, qa_pass=True):
     event_log.append(cfg.home, key, "PrOpened",
                      {"number": pr, "url": f"https://github.com/x/y/pull/{pr}", "draft": draft},
                      actor="r")
-    event_log.append(cfg.home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
     if qa_pass is not None:
+        # T-85: record_qa_verdict now refuses outside the qa phase, so seed the
+        # verdict there before landing on the target phase below.
+        event_log.append(cfg.home, key, "PhaseChanged", {"phase": Phase.QA.value}, actor="r")
+        snap_mod.rebuild(cfg.home, key)
         ops.record_qa_verdict(cfg, key, 1, "pass" if qa_pass else "fail", "looks right")
+    event_log.append(cfg.home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
     return snap_mod.rebuild(cfg.home, key)
 
 
