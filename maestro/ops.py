@@ -399,7 +399,10 @@ _FETCH_TIMEOUT = 60     # seconds; a hung `git fetch` must never wedge a reconci
 _GIT_TIMEOUT = 30       # seconds; fast rev-parse/status plumbing calls only -- NOT
                         # `worktree add`/adopt itself, see `worktree_timeout` (MTO-1: a
                         # ~230k-file monorepo checkout measured ~56s, well past this)
-_DEFAULT_PRIME_TIMEOUT = 600  # seconds; a hanging `npm ci` etc. must not wedge a reconciler
+# T-90: no more hard-coded prime default here -- `worktree_ensure`'s `prime_timeout`
+# kwarg now defaults to None and falls back to the resolved binding's own
+# `prime_timeout` (config-declared, board-wide + per-repo), the same shape as
+# `worktree_timeout` below.
 
 # GA-7-derived: gitignored-by-convention names a fresh `git worktree add` never
 # brings (tracked files only) that this op mirrors from the source checkout.
@@ -747,7 +750,10 @@ def _run_prime(binding: repos_mod.RepoBinding, wt: Path, repo: str, key: str, ti
                                 capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise store.MaestroError(
-            f"prime for repo {binding.name!r} ({key}) exceeded its {timeout}s timeout")
+            f"prime for repo {binding.name!r} ({key}) exceeded its {timeout}s prime_timeout -- "
+            f"raise `prime_timeout` in config.toml ([maestro] board-wide, or "
+            f"[repos.{binding.name}] to override just this repo) if this repo's cold "
+            f"dependency install legitimately takes longer.")
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise store.MaestroError(
@@ -779,7 +785,7 @@ def _worktree_witness_path(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path | N
         return None
 
 
-def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIME_TIMEOUT) -> dict:
+def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) -> dict:
     """Idempotently create-or-adopt *key*'s reconciler worktree, absorb GA-7's
     CLAUDE.local.md/.claude/settings.local.json/node_modules priming, and run
     the resolved repo binding's `prime` command exactly once inside it.
@@ -788,6 +794,14 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     prime`` or the ``[maestro] prime`` fallback) -- never a spec front-matter
     field or a ``TicketCreated`` payload, neither of which this function or
     anything it calls ever reads.
+
+    T-90: *prime_timeout* defaults to None, which resolves to the same binding's
+    ``prime_timeout`` (config-declared, ``[repos.<name>] prime_timeout`` or the
+    ``[maestro] prime_timeout`` fallback -- the same precedence as `prime` itself).
+    An explicit kwarg (as the CLI never passes, but a caller/test may) still wins
+    over that resolved value. `worktree_timeout` is resolved from the same binding
+    too, rather than read off *cfg* directly, so a per-repo override of either
+    knob actually reaches its own subprocess.
 
     Idempotence (T-81, replacing the old `worktree_health`-driven gate): a
     fresh ``git worktree add`` is skipped once *wt* carries the completion
@@ -834,20 +848,27 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     if not binding.path:
         raise store.MaestroError(f"{key}: repo binding {binding.name!r} has no path configured")
 
+    # T-90: resolved from the binding (per-repo override, else the board-wide
+    # default), NOT read off cfg directly -- so a [repos.<name>] override of
+    # either knob actually reaches its own subprocess. An explicit kwarg still
+    # wins over the resolved worktree_timeout.
+    worktree_timeout = binding.worktree_timeout
+    effective_prime_timeout = prime_timeout if prime_timeout is not None else binding.prime_timeout
+
     repo = binding.path
     wt = store.worktree_path(cfg.home, key)
     branch = f"{binding.branch_prefix}{key}"
-    witness = _worktree_witness_path(wt, timeout=cfg.worktree_timeout)
+    witness = _worktree_witness_path(wt, timeout=worktree_timeout)
     created = False
     if witness is None or not witness.exists():
         if wt.exists():
             _cleanup_partial_worktree(repo, wt, branch=branch, base=binding.base_branch,
-                                      timeout=cfg.worktree_timeout)
+                                      timeout=worktree_timeout)
         _worktree_create_or_adopt(cfg, key, repo, wt, branch, binding.base_branch,
-                                  timeout=cfg.worktree_timeout)
+                                  timeout=worktree_timeout)
         created = True
     else:
-        health = worktree_health(wt, timeout=cfg.worktree_timeout)
+        health = worktree_health(wt, timeout=worktree_timeout)
         if not health["healthy"]:
             raise store.MaestroError(
                 f"{key}: worktree at {wt} already completed creation but now fails its health "
@@ -863,7 +884,7 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int = _DEFAULT_PRIM
     if binding.prime:
         marker = _git_dir(wt) / "maestro-primed"
         if not marker.exists():
-            _run_prime(binding, wt, repo, key, prime_timeout)
+            _run_prime(binding, wt, repo, key, effective_prime_timeout)
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(store.iso_now() + "\n", encoding="utf-8")
             primed = True

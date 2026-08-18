@@ -125,6 +125,9 @@ See [`docs/state-machine.md`](docs/state-machine.md) for the maintained phase di
 [`docs/dispatch-gates.md`](docs/dispatch-gates.md) for the ordered dispatch gate table
 (AST-walked from `dispatcher.py`). Both are derived, never retyped — a drift-guard test
 (`tests/test_diagram.py`) fails `make test` if either goes stale.
+[`docs/board-as-a-resource-constrained-workflow-net.md`](docs/board-as-a-resource-constrained-workflow-net.md)
+is a dated, unmaintained companion analysis: whether the board is usefully modeled as a
+resource-constrained workflow net (a Petri net) — a lens, not a maintained artifact.
 
 `awaiting-human` and `awaiting-ci` are **sleeping** (no held process). The reconciler
 records the gate + a `next_requeue_at`, then exits. The dispatcher re-wakes the ticket

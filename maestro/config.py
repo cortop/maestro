@@ -95,6 +95,13 @@ class Config:
     # complete (directory present) but wasn't. 600s is generous headroom for that case --
     # raise it further for a larger repo still.
     worktree_timeout: int = 600
+    # T-90: bounds the config-declared `prime` command (`ops._run_prime`), separate
+    # from `worktree_timeout` above -- raising one has zero effect on the other (the
+    # trap this ticket exists to close: `worktree_timeout` raised for a slow checkout
+    # while `prime` stayed capped at the old hard-coded default). Resolved the same
+    # way as `prime` itself: a `[repos.<name>]` table's own `prime_timeout` wins,
+    # unset inherits this board-wide default -- see `repos.RepoBinding.prime_timeout`.
+    prime_timeout: int = 600
     # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
     # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
     # by `maestro doctor` and the TUI fleet panel alongside today's actual spend.
@@ -293,6 +300,9 @@ _REPO_TABLE_KEYS = frozenset({
     "path", "slug", "base_branch", "branch_prefix", "default",
     "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
     "gh_account", "token_env", "prime", "base_drift_policy", "test_command",
+    # T-90: per-repo overrides of the board-wide [maestro] defaults above --
+    # unset inherits, same resolution shape as `prime`/`base_drift_policy`.
+    "prime_timeout", "worktree_timeout",
     "language",
 })
 
@@ -396,6 +406,7 @@ def load(home_arg: str | None = None) -> Config:
         cfg.max_turn_wallclock_seconds = int(
             m.get("max_turn_wallclock_seconds", cfg.max_turn_wallclock_seconds))
         cfg.worktree_timeout = int(m.get("worktree_timeout", cfg.worktree_timeout))
+        cfg.prime_timeout = int(m.get("prime_timeout", cfg.prime_timeout))
         raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
         cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
         raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
@@ -476,6 +487,14 @@ def load(home_arg: str | None = None) -> Config:
                     # cfg.test_command, same precedence as base_drift_policy above -- see
                     # repos.RepoBinding.test_command / repos.resolve(...).
                     "test_command": table.get("test_command") or None,
+                    # T-90: None (unset) inherits cfg.prime_timeout/cfg.worktree_timeout --
+                    # see repos._binding_from_table.
+                    "prime_timeout": (
+                        int(table["prime_timeout"]) if table.get("prime_timeout") is not None else None
+                    ),
+                    "worktree_timeout": (
+                        int(table["worktree_timeout"]) if table.get("worktree_timeout") is not None else None
+                    ),
                     # T-84: this repo's test-surface language -- validated above; None
                     # (unset) means "python" (see repos.RepoBinding.language).
                     "language": raw_language,
@@ -619,6 +638,11 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
                                   # for a monorepo whose checkout legitimately takes longer --
                                   # never scale it down, a killed-mid-checkout worktree looks
                                   # complete (dir present) but isn't
+prime_timeout = 600              # T-90: bounds the `prime` command below/[repos.<name>] prime --
+                                  # a SEPARATE budget from worktree_timeout above; raising one has
+                                  # no effect on the other. Raise this for a repo whose cold
+                                  # dependency install (e.g. `yarn install` in a large web
+                                  # checkout) legitimately exceeds 10 minutes.
 daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # session spend reaches this (enforced, not advisory;
                                   # surfaced by `maestro doctor` + the TUI fleet panel).
@@ -804,6 +828,14 @@ implementer = "claude_skill"
                                      # reconciler session -- never by the dispatcher. Unset =
                                      # nothing runs (today's behavior). A non-zero exit or a
                                      # timeout fails `worktree ensure` loudly, never silently.
+# prime_timeout = 900               # T-90: this repo's override of [maestro] prime_timeout
+                                     # above -- unset inherits the board-wide default. Bounds
+                                     # ONLY the `prime` command; has no effect on
+                                     # worktree_timeout below.
+# worktree_timeout = 1800           # T-90: this repo's override of [maestro] worktree_timeout
+                                     # above -- unset inherits the board-wide default. Bounds
+                                     # ONLY `git worktree add`/adopt; has no effect on
+                                     # prime_timeout above.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see

@@ -64,39 +64,129 @@ def render_state_diagram() -> str:
     return "\n".join(lines)
 
 
+def _outcome_literals(value: ast.expr) -> list[tuple[int, str]]:
+    """(lineno, literal) for every string literal an outcome-valued
+    expression evaluates to: a plain string constant, or -- for the one
+    ``<a> if <cond> else <b>`` site in ``dispatcher.py`` (the ``dry_run``
+    branch of the missing-ACs gate) -- both arms, since either can be the
+    outcome a real sweep assigns. Each pair's lineno is the literal's own
+    (``ast.Constant.lineno``), not the enclosing assignment's -- the two can
+    differ when the dict literal that holds it spans multiple lines, and a
+    row pointing at the wrong line is worse than not generating one."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return [(value.lineno, value.value)]
+    if isinstance(value, ast.IfExp):
+        return _outcome_literals(value.body) + _outcome_literals(value.orelse)
+    return []
+
+
+def _dict_outcome_value(node: ast.Dict) -> ast.expr | None:
+    """The value expression keyed ``"outcome"`` in a dict-literal AST node,
+    or None if that dict has no such key (a plain ``decisions[key] = {...}``
+    that isn't an outcome assignment at all)."""
+    for k, v in zip(node.keys, node.values):
+        if isinstance(k, ast.Constant) and k.value == "outcome":
+            return v
+    return None
+
+
 def _outcome_assignments(source: str) -> list[tuple[int, str]]:
-    """(lineno, literal) for every ``decisions[<key>]["outcome"] = "<literal>"``
-    assignment in `source`, sorted into source order. ``ast.walk`` visits nodes
-    breadth-first, not in source order, so the sort is what actually orders
-    these -- not incidental."""
+    """(lineno, literal) for every ``decisions[<key>]`` outcome assignment in
+    `source` -- both the subscript form
+    (``decisions[<key>]["outcome"] = "<literal>"``) and the dict-literal form
+    (``decisions[<key>] = {"outcome": "<literal>", ...}``), the latter dropped
+    by this walk until T-93 widened it. Either form's value may be a plain
+    string or a conditional expression, in which case both arms are yielded
+    (see `_outcome_literals`). Sorted into source order -- ``ast.walk`` visits
+    nodes breadth-first, not in source order, so the sort is what actually
+    orders these, not incidental."""
     tree = ast.parse(source)
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
-        if not (isinstance(target, ast.Subscript)
-                and isinstance(target.slice, ast.Constant)
-                and target.slice.value == "outcome"
+        if not isinstance(target, ast.Subscript):
+            continue
+        value_expr: ast.expr | None
+        if (isinstance(target.slice, ast.Constant) and target.slice.value == "outcome"
                 and isinstance(target.value, ast.Subscript)
                 and isinstance(target.value.value, ast.Name)
                 and target.value.value.id == "decisions"):
+            # decisions[<key>]["outcome"] = <value>
+            value_expr = node.value
+        elif (isinstance(target.value, ast.Name) and target.value.id == "decisions"
+                and isinstance(node.value, ast.Dict)):
+            # decisions[<key>] = {"outcome": <value>, ...}
+            value_expr = _dict_outcome_value(node.value)
+        else:
+            value_expr = None
+        if value_expr is None:
             continue
-        if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
-            continue
-        found.append((node.lineno, node.value.value))
+        found.extend(_outcome_literals(value_expr))
     found.sort(key=lambda pair: pair[0])
     return found
 
 
+# T-93: the four sweep-level brakes that short-circuit the ENTIRE spawn phase
+# before any per-key outcome above is assigned -- fleet pause exits before
+# due-computation even runs (no `decisions[key]` entries at all that sweep);
+# the other three run after due-computation (so due/claimed/etc outcomes from
+# the loop above are still set) but skip every spawn-phase gate, so no key
+# reaches `spawned`/`would_spawn` that sweep. (name, marker, description) --
+# `marker` is matched as a literal substring of its defining source line, not
+# a hardcoded line number, so `_brake_source_lines` can't go stale the way a
+# retyped `:NNNN` would the next time `dispatch()` grows or shrinks above it.
+_BRAKES: tuple[tuple[str, str, str], ...] = (
+    ("fleet pause", "if fleet.pause_state(home, now) is not None:",
+     "the board-wide kill switch (`maestro fleet pause`) -- ahead of "
+     "everything else; mint/sync/worktrees/backup/sessions all stay "
+     "untouched and due-computation never runs, so no `decisions[key]` "
+     "entry is made at all this sweep"),
+    ("rate-limit pause", "paused_until_ts = ratelimit.paused_until(home, now)",
+     "a live 429 backoff window; while paused, nothing spawns and the spawn "
+     "ledger is left untouched"),
+    ("runaway auto-brake", "_maybe_trip_runaway_brake(cfg, home, now, health)",
+     "GA-5's no-progress circuit breaker, armed off `derived/health.json`"),
+    ("spend ceiling", "spend.over_ceiling(cfg, now)",
+     "GA-11's daily spend ceiling, a pure read so it still applies under "
+     "`dry_run`"),
+)
+
+
+def _brake_source_lines(source: str) -> list[tuple[str, int, str]]:
+    """(name, lineno, description) for each of `_BRAKES`, located by finding
+    its marker as a plain substring of a source line -- raises if a marker
+    has drifted out of `dispatcher.py` entirely, so a rename there fails
+    `make diagram`/`make test` loudly instead of silently going stale."""
+    lines = source.splitlines()
+    found = []
+    for name, marker, desc in _BRAKES:
+        lineno = next((i for i, line in enumerate(lines, start=1) if marker in line), None)
+        if lineno is None:
+            raise ValueError(f"dispatch gate brake marker not found in dispatcher.py: {marker!r}")
+        found.append((name, lineno, desc))
+    return found
+
+
 def render_dispatch_gates() -> str:
-    """The ordered dispatch gate table -- every ``decisions[key]["outcome"]``
-    a sweep can assign, AST-walked out of ``dispatcher.py`` in source order.
-    The only artifact that describes the resource layer (throttle, repo caps,
-    credentials, runner preflight, spend ceiling, ...) statically."""
-    rows = _outcome_assignments(DISPATCHER_SOURCE_PATH.read_text())
+    """The ordered dispatch gate table -- every outcome a sweep's `dispatch()`
+    can write into `decisions[key]["outcome"]`, whether the source assigns it
+    via ``decisions[key]["outcome"] = "<literal>"`` or a
+    ``decisions[key] = {"outcome": "<literal>", ...}`` dict literal (a
+    conditional-expression value contributes both its arms) -- AST-walked out
+    of ``dispatcher.py`` in source order, plus the four sweep-level brakes
+    that pre-empt the spawn phase entirely. The only artifact that describes
+    the resource layer (throttle, repo caps, credentials, runner preflight,
+    spend ceiling, ...) statically."""
+    source = DISPATCHER_SOURCE_PATH.read_text()
+    rows = _outcome_assignments(source)
+    brakes = _brake_source_lines(source)
     lines = [_HEADER, "", "# dispatch gate table", "",
-              "Every `decisions[key][\"outcome\"]` a sweep can assign, in the source "
+              "Every `decisions[key][\"outcome\"]` a sweep can assign -- via either "
+              "`decisions[key][\"outcome\"] = \"<literal>\"` or a "
+              "`decisions[key] = {\"outcome\": \"<literal>\", ...}` dict literal (a "
+              "conditional-expression value counted as both arms) -- in the source "
               "order `maestro/dispatcher.py`'s `dispatch()` sets them. Regenerate with "
               "`make diagram` after touching `dispatch()`; `tests/test_diagram.py` fails "
               "`make test` otherwise.",
@@ -104,6 +194,14 @@ def render_dispatch_gates() -> str:
               "| # | outcome | source |", "|---|---------|--------|"]
     for i, (lineno, outcome) in enumerate(rows, start=1):
         lines.append(f"| {i} | `{outcome}` | `maestro/dispatcher.py:{lineno}` |")
+    lines += ["", "## Sweep-level brakes", "",
+              "These four short-circuit the entire spawn phase before any per-key "
+              "outcome above reaches `spawned`/`would_spawn` -- a due key keeps "
+              "whatever outcome the loop above already gave it, but nothing actually "
+              "spawns this sweep.",
+              "", "| brake | source | what it guards |", "|---|---|---|"]
+    for name, lineno, desc in brakes:
+        lines.append(f"| {name} | `maestro/dispatcher.py:{lineno}` | {desc} |")
     lines.append("")
     return "\n".join(lines)
 
