@@ -678,6 +678,43 @@ def _missing_maestro_grant(allow: set, deny: set) -> list[str]:
     return [coarse]
 
 
+def _literal_covered(tool: str, allow: set, deny: set) -> bool:
+    """T-94: coverage-aware dual acceptance for one of the plain (non-maestro)
+    ``RECONCILER_REQUIRED_TOOLS``/``MAESTRO_OWN_REPO_EXTRA_TOOLS`` literals --
+    ``_missing_maestro_grant``'s own mechanism, generalized past just the
+    maestro verb: satisfied by EITHER *tool* itself, or every one of its
+    ``dispatcher.RECONCILER_LITERAL_COVERAGE`` narrower rules (a literal with
+    no entry there has no narrower equivalent -- exact-string is still the
+    only way to satisfy it, unchanged from before this ticket).
+
+    A deny on *tool* itself always wins, checked before allow is even
+    consulted (matches the direct-literal case's pre-existing ``tool in
+    deny`` precedence). Coverage matching is exact-string per narrower rule
+    (set membership, not a prefix scan), so there is no token-boundary
+    ambiguity to get wrong -- ``Bash(ghq:*)`` is simply a different string
+    than ``Bash(gh pr:*)``, never a partial match of it. A strict subset of
+    the narrower rules (e.g. only ``Bash(gh api:*)`` where ``gh pr`` is also
+    required) does NOT satisfy it -- the no-false-negative AC."""
+    if tool in deny:
+        return False
+    if tool in allow:
+        return True
+    narrow = dispatcher.RECONCILER_LITERAL_COVERAGE.get(tool, ())
+    return bool(narrow) and all(t in allow and t not in deny for t in narrow)
+
+
+def _literal_denied(tool: str, allow: set, deny: set) -> bool:
+    """Companion to ``_literal_covered`` for ``denied_by_repo``: *tool* reads
+    as denied (rather than merely ungranted) when a deny rule targets it
+    directly, or targets one of its ``RECONCILER_LITERAL_COVERAGE`` narrower
+    rules -- e.g. an allow of ``Bash(gh pr:*)`` plus a deny of that same rule,
+    or of the coarse ``Bash(gh:*)`` itself, both name ``Bash(gh:*)`` here."""
+    if tool in deny:
+        return True
+    narrow = dispatcher.RECONCILER_LITERAL_COVERAGE.get(tool, ())
+    return any(t in deny for t in narrow)
+
+
 def _opencode_permission_gap(cfg: Config, repo_path: Path) -> str | None:
     """T-64: the opencode counterpart of `_missing_maestro_grant` above -- an
     opencode-runner binding's real permission surface is the generated
@@ -756,9 +793,14 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
     that mode, so there is nothing to check.
 
     The 'maestro' requirement is dual-accepted (``_missing_maestro_grant``);
-    every other literal is matched exact-string -- an equivalent but
-    differently-spelled grant (e.g. ``Bash(gh pr:*)`` + ``Bash(gh api:*)`` in
-    place of ``Bash(gh:*)``) does NOT satisfy it, and the WARN detail says so.
+    every other literal is coverage-aware dual-accepted too (T-94,
+    ``_literal_covered``) -- satisfied by either the literal itself, or every
+    one of its ``dispatcher.RECONCILER_LITERAL_COVERAGE`` narrower rules
+    (e.g. ``Bash(gh pr:*)`` alone covers ``Bash(gh:*)``, since ``gh pr`` is
+    the only ``gh`` subcommand the reconciler skills invoke). Matching stays
+    exact-string per rule, so a differently-spelled or merely partial grant
+    (e.g. only ``Bash(gh api:*)``, or ``Bash(ghq:*)``) is still reported
+    missing, and the WARN detail says so.
     ``.venv/bin/`` is only required of the binding that resolves to maestro's
     own repo checkout (``_is_maestro_own_repo``) -- a foreign yarn/Bazel-bound
     repo is never measured against it (MTO-5).
@@ -825,13 +867,13 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
             continue
         allow, deny = _repo_permission_surface(repo_path, cfg)
         missing = _missing_maestro_grant(allow, deny)
-        missing += [tool for tool in literal_required if tool not in allow or tool in deny]
+        missing += [tool for tool in literal_required if not _literal_covered(tool, allow, deny)]
         if _is_maestro_own_repo(repo_path):
             missing += [tool for tool in dispatcher.MAESTRO_OWN_REPO_EXTRA_TOOLS
-                        if tool not in allow or tool in deny]
+                        if not _literal_covered(tool, allow, deny)]
         if missing:
             missing_by_repo[name] = missing
-        denied = [tool for tool in missing if tool in deny]
+        denied = [tool for tool in missing if _literal_denied(tool, allow, deny)]
         if denied:
             denied_by_repo[name] = denied
 
@@ -844,9 +886,10 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
                 note += f" (denied by settings: {', '.join(denied_by_repo[name])})"
             parts.append(note)
         detail = ("; ".join(parts) +
-                   ". Matching is exact-string -- an equivalent but "
-                   "differently-spelled grant (e.g. Bash(gh pr:*) in place of "
-                   "Bash(gh:*)) is still reported missing.")
+                   ". A narrower grant that concretely covers what the reconciler "
+                   "actually invokes satisfies a wider requirement (e.g. "
+                   "Bash(gh pr:*) covers Bash(gh:*)); a differently-spelled or "
+                   "merely partial grant is still reported missing.")
     else:
         detail = "all referenced repos grant the full reconciler surface"
     if not_applicable_by_repo:
