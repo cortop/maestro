@@ -683,6 +683,38 @@ def test_detail_pane_and_screen_render_title_from_spec_at_row_zero(home):
     asyncio.run(_inner())
 
 
+def test_detail_pane_surfaces_provider_marker_for_a_provider_caused_degrade(home):
+    """T-89 (AC5): a degraded ticket whose Failed/Stalled payload carries
+    kind="provider" reads as provider-caused in the detail pane rather than a
+    bare watchdog timeout -- proven by mounting the real app."""
+    seed_ticket(home, "T-1", "outage casualty", phase="implementing")
+    event_log.append(home, "T-1", "Failed",
+                     {"error": "watchdog: no output for over 600s (pid 123)",
+                      "kind": "provider", "state": "no_network"}, actor="dispatcher")
+    event_log.append(home, "T-1", "Stalled",
+                     {"reason": "1 failures: watchdog: no output for over 600s (pid 123)",
+                      "kind": "provider", "state": "no_network"}, actor="dispatcher")
+    snap_mod.rebuild(home, "T-1")
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            assert app._selected_key == "T-1"
+            content = app.query_one("#detail", Static).render().plain
+            assert "PROVIDER" in content
+            assert "no_network" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_events_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-3", "view_events", EventsScreen)
 
@@ -1023,6 +1055,61 @@ def test_fleet_screen_renders_runaway_board_differently(seeded_home):
             status = app.screen_stack[-1].query_one("#fleet-status", Static)
             content = str(status.content)
             assert "RUNAWAY" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_header_badge_shows_provider_no_network_without_opening_fleet_screen(seeded_home, monkeypatch):
+    """T-89 (AC1): a provider/network outage is visible on the header badge --
+    the ALWAYS-visible main board, no `F`/FleetScreen (``show=False``) needed.
+    Same seed shape as ``test_fleet_screen_shows_provider_no_network_distinguishably``
+    below, but never pushes FleetScreen."""
+    import json as json_mod
+    from maestro import health
+    from maestro import store as store_mod
+
+    key = "T-3"  # seed_ticket'd into `implementing` by the seeded_home fixture
+    for epoch in (100.0, 200.0, 300.0):
+        session_id = f"reconcile-{key}-{epoch:.6f}"
+        path = store_mod.session_stream_path(seeded_home, key, session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json_mod.dumps({"type": "system", "subtype": "init", "session_id": session_id}) + "\n" +
+            json_mod.dumps({"type": "result", "subtype": "error_during_execution",
+                             "is_error": True}) + "\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (False, "offline"))
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.1)  # let the threaded badge worker land
+            badge = app.query_one("#fleet-badge", Static)
+            assert "NO NETWORK" in str(badge.content)
+            assert app._exception is None
+            assert not any(isinstance(s, FleetScreen) for s in app.screen_stack)
+
+    asyncio.run(_inner())
+
+
+def test_header_badge_shows_no_provider_warning_on_a_healthy_board(seeded_home, monkeypatch):
+    """T-89 (AC2): the healthy counterpart to the test above -- no false
+    positive on a board with no error streak and a reachable probe."""
+    from maestro import health
+
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (True, "reachable"))
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.1)
+            content = str(app.query_one("#fleet-badge", Static).content)
+            assert "NO NETWORK" not in content
+            assert "ERRORING" not in content
             assert app._exception is None
 
     asyncio.run(_inner())

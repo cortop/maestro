@@ -79,10 +79,13 @@ LINEAR_SYNCED = "LinearSynced"          # {linear_updated_ts, status, last_comme
 
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket
-FAILED = "Failed"                       # {error, kind?}  increments failure_count
-STALLED = "Stalled"                     # {reason, kind?}  -> DEGRADED / dead-letter
+FAILED = "Failed"                       # {error, kind?, state?}  increments failure_count
+STALLED = "Stalled"                     # {reason, kind?, state?}  -> DEGRADED / dead-letter
                                          # kind="burn" (RB-11): parked by burn.should_park,
                                          # not a generic failure -- see snapshot.Snapshot.burning
+                                         # kind="provider" + state=<check state> (T-89): the fleet's
+                                         # provider_availability check was non-ok when this fired --
+                                         # see snapshot.Snapshot.last_error_kind/last_error_state
 NOTE = "Note"                           # {text}  free-form audit breadcrumb
 CHECKED = "Checked"                     # {}  reconciler ran to completion, correctly found
                                          # nothing due -- advances observed_seq so the

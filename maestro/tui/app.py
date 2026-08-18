@@ -10,7 +10,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, event_log, fleet as fleet_mod, inbox, ops as ops_mod, snapshot as snap_mod, store
+from .. import claims, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from ..projection import phase_predicate, ticket_rows
@@ -132,12 +132,26 @@ class MaestroTUI(App):
         self.set_interval(5.0, self._refresh_badge)
 
     def _refresh_badge(self) -> None:
-        self.run_worker(lambda: fleet_mod.status(self._home), thread=True,
-                        group="badge", exclusive=True, name="fleet-badge")
+        # T-89 (AC1): the header badge is the one always-visible surface, so
+        # this is where the provider_availability check's state rides along
+        # with fleet.status -- FleetScreen's own health.report() call is far
+        # too heavy to duplicate on a 5s timer, but check_provider_availability
+        # alone is cheap (no probe unless the primary signal already tripped
+        # or the board has no history at all, and even then rate-bounded by
+        # cfg.provider_probe_interval_s -- see health._cached_probe).
+        def _load() -> dict:
+            cfg = Config(home=self._home)
+            return {
+                "fleet": fleet_mod.status(self._home),
+                "provider": health.check_provider_availability(cfg, store.now_epoch()),
+            }
+        self.run_worker(_load, thread=True, group="badge", exclusive=True, name="fleet-badge")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
-            self.query_one("#fleet-badge", Static).update(_render_badge(event.worker.result))
+            result = event.worker.result
+            self.query_one("#fleet-badge", Static).update(
+                _render_badge(result["fleet"], result["provider"]))
         elif event.worker.name == "compact":
             if event.state == WorkerState.SUCCESS:
                 r = event.worker.result
