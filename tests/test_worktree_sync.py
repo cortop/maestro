@@ -57,6 +57,16 @@ def _seed(home, key, phase, pr=10):
     return snap_mod.rebuild(home, key)
 
 
+def _ci_passing(home, key):
+    """T-82: a drift-only reroute now requires a POSITIVELY known-safe CI state
+    (never None/unobserved, never "unknown") -- these tests are about the
+    drift/routing mechanism itself, not the CI gate, so give them an observed
+    passing CI up front."""
+    event_log.append(home, key, "CiObserved",
+                     {"state": "passing", "failing_checks": []}, actor="r")
+    return snap_mod.rebuild(home, key)
+
+
 def test_sync_worktrees_routes_stale_awaiting_ci_ticket_to_implementing(home, cfg, tmp_path):
     # MTO-2: "always" opts back into today's unconditional-on-drift behavior --
     # the new default (on_conflict) never routes on drift alone; see
@@ -66,6 +76,7 @@ def test_sync_worktrees_routes_stale_awaiting_ci_ticket_to_implementing(home, cf
     cfg.repo_path = str(repo)
 
     _seed(home, "T-5", Phase.AWAITING_CI)
+    _ci_passing(home, "T-5")
     _add_worktree(repo, home, "T-5", "maestro/T-5")
 
     _merge_new_commit_to_origin(repo, origin)  # another ticket's PR just landed on main
@@ -179,6 +190,7 @@ def test_dispatch_full_sweep_routes_and_spawns_stale_ticket(home, cfg, tmp_path)
     cfg.repo_path = str(repo)
 
     _seed(home, "T-5", Phase.AWAITING_CI)
+    _ci_passing(home, "T-5")
     _add_worktree(repo, home, "T-5", "maestro/T-5")
     _merge_new_commit_to_origin(repo, origin)
 
