@@ -35,8 +35,22 @@ def resolve_backup_dir(cfg: Config) -> Path:
     return home.parent / f"{home.name}-backups"
 
 
+_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+
 def _stamp(now: float) -> str:
-    return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.fromtimestamp(now, tz=timezone.utc).strftime(_STAMP_FORMAT)
+
+
+def _epoch_from_name(name: str) -> float | None:
+    """Inverse of ``_stamp`` -- the epoch a tarball's own filename encodes, so a
+    reader never has to trust its filesystem mtime (which survives a `cp`/restore
+    or a clock-skewed disk with an unrelated value)."""
+    stamp = name[len(_PREFIX):-len(_SUFFIX)]
+    try:
+        return datetime.strptime(stamp, _STAMP_FORMAT).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
 
 
 def list_backups(cfg: Config) -> list[Path]:
@@ -48,6 +62,17 @@ def list_backups(cfg: Config) -> list[Path]:
         p for p in d.iterdir()
         if p.name.startswith(_PREFIX) and p.name.endswith(_SUFFIX) and p.is_file()
     )
+
+
+def newest_backup_epoch(cfg: Config) -> float | None:
+    """Epoch encoded in the newest backup tarball's own filename -- the
+    grounding for ``health.check_backup_age`` (T-88): a filename-derived epoch
+    survives a `cp`/restore that would leave the tarball's mtime at the wrong
+    value, and never depends on the separate, dispatcher-only cursor file."""
+    backups = list_backups(cfg)
+    if not backups:
+        return None
+    return _epoch_from_name(backups[-1].name)
 
 
 def prune_backups(cfg: Config) -> list[Path]:

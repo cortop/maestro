@@ -308,6 +308,22 @@ class Snapshot:
                 out.append(t)
         return out
 
+    def qa_all_passing(self, spec_text: str) -> bool:
+        """True iff EVERY current AC (by content hash) carries a spec-axis QA
+        verdict of "pass" -- the positive counterpart to `qa_failing_acs`: an AC
+        with no verdict at all (never independently QA'd) does NOT count as
+        passing, only an explicit "pass" does. Used to gate T-86's undraft step.
+        Until T-85 makes `qa` phase-gated and unskippable, a ticket can in
+        principle reach `awaiting-ci`/`in-review` with an AC that was never QA'd
+        at all (`qa_failing_acs` only refuses an explicit *fail*) -- this method
+        correctly refuses to undraft that PR instead of treating "no verdict" as
+        good enough, the weaker-guarantee case the spec calls out."""
+        for t in parse_acs(spec_text):
+            v = self.qa_verdicts.get(ac_hash(t))
+            if not v or v.get("verdict") != "pass":
+                return False
+        return True
+
     def tests_passing(self, tree_key: str) -> bool:
         """True iff a TestRunCaptured record exists for *tree_key* (the exact
         current tree state) and it passed -- the whole gate, in one predicate

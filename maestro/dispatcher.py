@@ -1399,6 +1399,10 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     - failing CI -> implementing, with the failing check names in the reason
     - passing CI (from awaiting-ci) -> in-review
     - a CHANGES_REQUESTED review -> implementing, with the verbatim comment body
+    - draft state (T-86): every poll folds the observed ``isDraft`` into
+      ``snap.pr_draft`` (see ``_observe_pr_draft``); once CI is passing, no
+      review is outstanding, and every current AC has a passing spec-axis QA
+      verdict, ``gh pr ready`` undrafts the PR (see ``_maybe_undraft``)
 
     Replaces the reconciler's own ``gh pr checks`` shelling: CI/PR/review
     observation is now dispatcher-owned, pure-Python, and idempotent per
@@ -1441,7 +1445,8 @@ def sync_vcs(cfg: Config, now: float) -> dict:
             # auth-failure routing (a visible ops.fail naming the repo/PR)
             # handles this identically -- no second failure path to invent.
             status = {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
-                     "ci_state": "unknown", "failing_checks": [], "error": "auth"}
+                     "ci_state": "unknown", "failing_checks": [], "draft": None,
+                     "error": "auth"}
         else:
             status = vcs.pr_status(snap.pr_number, repo=repo_slug, env=cred.env)
 
@@ -1453,9 +1458,12 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                 ops.route_conflict(cfg, key, snap.pr_number, actor="dispatcher")
                 continue
 
+            _observe_pr_draft(cfg, key, status, snap)
             _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number)
             if cred.ok:
                 _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env)
+                _maybe_undraft(cfg, key, status, vcs, repo_slug=repo_slug,
+                               pr_number=snap.pr_number, env=cred.env)
         except event_log.StaleAppendError:
             # Lost the fencing race against a concurrent writer (a human, a
             # reconciler, or another dispatcher tick) that appended between
@@ -1560,6 +1568,61 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
                  expect=fresh.observed_seq)
 
 
+def _observe_pr_draft(cfg: Config, key: str, status: dict, snap) -> None:
+    """T-86: `pr_status` now polls `isDraft` -- fold the freshly observed value
+    into `snap.pr_draft` on every poll, instead of leaving it frozen at whatever
+    the implementer's original `PrOpened` append set (the bug this ticket
+    fixes: nothing else ever refreshed it). No-op when unobserved
+    (`status.get("draft")` is `None` -- an error poll, or a credential
+    failure's synthesized status) or unchanged from the current snapshot, so an
+    unmoved draft state produces no event on a later poll."""
+    observed = status.get("draft")
+    if observed is None or observed == snap.pr_draft:
+        return
+    ev = event_log.append(cfg.home, key, E.PR_UPDATED, {"number": snap.pr_number, "draft": observed},
+                          actor="dispatcher", step_id=f"draftobs-{key}-{snap.pr_number}-{observed}")
+    if ev is not None:
+        snap_mod.rebuild(cfg.home, key)
+
+
+def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str | None,
+                   pr_number: int, env: dict | None) -> None:
+    """T-86: undrafts a PR (`gh pr ready`) once all three gates hold -- the same
+    machine conditions the old `/orchestrate` used: CI is `passing`, no
+    outstanding `CHANGES_REQUESTED` review, and every current-hash spec AC
+    carries a passing spec-axis QA verdict (`Snapshot.qa_all_passing` -- note
+    the weaker guarantee until T-85 makes `qa` phase-gated and unskippable, per
+    the spec). Idempotent: `status["draft"]` is this exact poll's freshest
+    truth from GitHub, so a second sweep after an already-successful undraft
+    (or a PR that was never draft) no-ops immediately. A failed `gh pr ready`
+    (permissions, transient) is recorded as a Note, deduped by its error text,
+    and never routes the ticket or spends failure_count -- the next sweep
+    retries it."""
+    if not status.get("draft"):
+        return
+    if status.get("ci_state") != "passing":
+        return
+    fresh = snap_mod.rebuild(cfg.home, key)
+    if Phase(fresh.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
+        return  # routed away by a sibling observation earlier this tick
+    if fresh.unresolved_reviews:
+        return
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists() or not fresh.qa_all_passing(spec_path.read_text(encoding="utf-8")):
+        return
+    result = vcs.pr_ready(pr_number, repo=repo_slug, env=env)
+    if not result.get("ok"):
+        error = result.get("error", "unknown")
+        event_log.append(cfg.home, key, E.NOTE,
+                         {"text": f"gh pr ready failed ({error}) -- will retry"},
+                         actor="dispatcher", step_id=f"undraft-err-{key}-{pr_number}-{error}")
+        return
+    ev = event_log.append(cfg.home, key, E.PR_UPDATED, {"number": pr_number, "draft": False},
+                          actor="dispatcher", step_id=f"undraft-{key}-{pr_number}")
+    if ev is not None:
+        snap_mod.rebuild(cfg.home, key)
+
+
 # RB-14: board-wide cap on IN-FLIGHT dispatcher-owned test-run subprocesses --
 # mirrors `_RUNNER_DEFAULT_CONCURRENCY`'s shape (a small, explicit, documented
 # ceiling below), but is its own knob: a test run costs CPU/IO, never a token,
@@ -1587,10 +1650,13 @@ def _test_run_log_path(home: Path, key: str) -> Path:
 def sync_test_runs(cfg: Config, now: float) -> dict:
     """RB-14: dispatcher-owned test verification -- the `sync_vcs` pattern
     (poll/advance a sleeping phase directly, no reconciler spawn) applied to
-    `cfg.test_command` instead of a PR. For every `verifying` ticket: start its
-    test run as a tracked, detached subprocess if none is in flight yet, or
-    fold one that has already finished and route the phase on (`qa` on a pass;
-    back to `implementing`, with a bounded failure excerpt, on a fail).
+    each key's resolved `test_command` (T-83: its repo's own override, or the
+    board-wide `[maestro] test_command` default -- see
+    `repos.resolve(...).test_command`) instead of a PR. For every `verifying`
+    ticket: start its test run as a tracked, detached subprocess if none is in
+    flight yet, or fold one that has already finished and route the phase on
+    (`qa` on a pass; back to `implementing`, with a bounded failure excerpt, on
+    a fail).
 
     Never blocks: a started run is left running (`start_new_session=True`,
     exactly like `sessions.ClaudeCliSessions.spawn`) and this function returns
@@ -1601,13 +1667,18 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
     (RF-2's Notes: `claims._verdict` keys only on pid + `start_epoch`, never
     the spawned command string), not a second mechanism.
 
-    No-op (`{"checked": 0}`) when `test_command` is unset -- ships dark, same
-    posture as every other RB-12/RB-14 gate.
+    No-op (`{"checked": 0}`) when NEITHER the board-wide `test_command` NOR any
+    `[repos.<name>] test_command` is set -- ships dark, same posture as every
+    other RB-12/RB-14 gate. T-83: a board-wide unset no longer short-circuits
+    the whole sweep by itself -- a `verifying` ticket whose OWN repo binding
+    resolves a `test_command` still gets checked and its run started/folded,
+    even while `[maestro] test_command` itself is unset.
     """
     home = cfg.home
-    if not cfg.test_command:
-        return {"checked": 0}
     from . import ops, repos as repos_mod
+
+    if not cfg.test_command and not any(t.get("test_command") for t in cfg.repos.values()):
+        return {"checked": 0}
 
     checked = 0
     started: list[str] = []
@@ -1636,11 +1707,13 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
             if claim is not None:
                 continue  # some other claim still holds this key -- leave it alone
             binding = repos_mod.resolve(cfg, home, key)
-            if binding.mode == "local":
+            if binding.mode == "local" or not binding.test_command:
                 # Should never route here (the set_phase redirect excludes
-                # mode:local), but never wedge a ticket that somehow did.
-                ops.set_phase(cfg, key, Phase.QA, reason="mode:local, no suite to run",
-                              actor="dispatcher")
+                # mode:local / no-command keys), but never wedge a ticket that
+                # somehow did.
+                reason = ("mode:local, no suite to run" if binding.mode == "local"
+                         else "no test_command resolves for this key, no suite to run")
+                ops.set_phase(cfg, key, Phase.QA, reason=reason, actor="dispatcher")
                 continue
             cwd = _worker_cwd(cfg, key)
             tree_key = ops._tree_state_key(cwd)
@@ -1653,7 +1726,7 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
                 if c.get("kind") == "testrun" and claims.pid_alive(c.get("pid")))
             if in_flight >= TEST_RUN_CONCURRENCY:
                 continue  # at the board-wide cap -- retried next sweep
-            _start_test_run(home, key, cwd, cfg.test_command)
+            _start_test_run(home, key, cwd, binding.test_command)
             started.append(key)
     return {"checked": checked, "started": started, "folded": folded}
 
@@ -1708,9 +1781,13 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
     log_path = _test_run_log_path(home, key)
     claims.release(home, key)
     cwd = claim.get("cwd") or str(_worker_cwd(cfg, key))
-    from . import ops
+    from . import ops, repos as repos_mod
 
     tree_key = ops._tree_state_key(Path(cwd))
+    # T-83: the same per-key resolved command `_start_test_run` was launched
+    # with -- never `cfg.test_command` directly, so a mid-flight config change
+    # can never record a DIFFERENT command than the one that actually ran.
+    binding = repos_mod.resolve(cfg, home, key)
     try:
         exit_code = int(result_path.read_text(encoding="utf-8").strip())
         output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
@@ -1719,7 +1796,7 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
         output = "[maestro] test-run process left no result -- treated as a failure"
     result_path.unlink(missing_ok=True)
     log_path.unlink(missing_ok=True)
-    payload = ops._record_test_run(cfg, key, tree_key=tree_key, command=cfg.test_command,
+    payload = ops._record_test_run(cfg, key, tree_key=tree_key, command=binding.test_command,
                                    exit_code=exit_code, output=output, actor="dispatcher")
     _route_test_run(cfg, key, payload, actor="dispatcher", cwd=Path(cwd))
 

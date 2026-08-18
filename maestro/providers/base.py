@@ -47,7 +47,7 @@ class VCS(Protocol):
         Returns {"state": "OPEN"|"MERGED"|"CLOSED"|"unknown",
         "mergeable": "MERGEABLE"|"CONFLICTING"|"UNKNOWN", "head_sha": str|None,
         "ci_state": "passing"|"failing"|"pending"|"unknown",
-        "failing_checks": [str, ...],
+        "failing_checks": [str, ...], "draft": bool|None,
         "error": "auth"|"not_found"|"transient"|"unknown" (optional)}.
 
         ``error`` is a NEW field, absent (or ``None``) on a successful poll --
@@ -59,6 +59,12 @@ class VCS(Protocol):
         "not_found" (repo or PR doesn't resolve), "transient" (timeout/network --
         retry, don't spend failure budget), or "unknown" (unrecognized failure --
         today's behavior, unchanged).
+
+        ``draft`` (T-86) is the freshly observed ``isDraft`` state, so
+        ``dispatcher.sync_vcs`` can keep ``snap.pr_draft`` in sync rather than
+        frozen at the implementer's original ``PrOpened`` append. ``None`` on an
+        error poll (state unknown), or for an implementation/fake that predates
+        this field -- callers must read it with ``.get("draft")``.
 
         ``env`` (GA-17) is the credential overlay to run the underlying `gh`
         call under (``dispatcher.resolve_credential``); None means the
@@ -72,6 +78,16 @@ class VCS(Protocol):
         "body": str, "author": str|None}, ...]. The caller de-dupes per comment-id
         via the event log's step-id idempotency (see ``dispatcher.sync_vcs``).
         ``env`` (GA-17): see ``pr_status``."""
+        ...
+
+    def pr_ready(self, pr_number: int, repo: str | None = None,
+                env: dict | None = None) -> dict:
+        """Undraft a PR (``gh pr ready``, T-86). Returns ``{"ok": True}`` on
+        success, or ``{"ok": False, "error": "auth"|"not_found"|"transient"|
+        "unknown"}`` on a non-zero exit, classified the same way as
+        ``pr_status``'s ``error`` field. The caller (``dispatcher._maybe_undraft``)
+        never wedges the ticket on a failure here -- it records it and retries
+        on a later sweep. ``env`` (GA-17): see ``pr_status``."""
         ...
 
 
@@ -97,9 +113,12 @@ class NullVCS:
     def pr_status(self, pr_number: int, repo: str | None = None,
                   env: dict | None = None) -> dict:
         return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
-                "ci_state": "unknown", "failing_checks": []}
+                "ci_state": "unknown", "failing_checks": [], "draft": None}
     def review_feedback(self, pr_number: int, repo: str | None = None,
                         env: dict | None = None) -> list[dict]: return []
+    def pr_ready(self, pr_number: int, repo: str | None = None,
+                env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
 
 
 class NullFetcher:

@@ -130,6 +130,12 @@ class Config:
     # None (default) disables the gate entirely -- every existing home behaves
     # exactly as it does today until it opts in; this ships dark. A `mode: local`
     # binding (AD-6, no repo/suite) always no-ops regardless of this setting.
+    # T-83: this is the board-wide DEFAULT only -- a `[repos.<name>] test_command`
+    # override wins over it, same precedence as base_drift_policy (see
+    # repos.RepoBinding.test_command). Every gate resolves the per-key value
+    # through `repos.resolve(...).test_command`, never this field directly, so a home
+    # spanning more than one repo/language can give each its own correct suite
+    # command instead of leaving the whole verification tier dark.
     test_command: str | None = None
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
@@ -265,7 +271,7 @@ class Config:
 _REPO_TABLE_KEYS = frozenset({
     "path", "slug", "base_branch", "branch_prefix", "default",
     "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
-    "gh_account", "token_env", "prime", "base_drift_policy",
+    "gh_account", "token_env", "prime", "base_drift_policy", "test_command",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -434,6 +440,10 @@ def load(home_arg: str | None = None) -> Config:
                     "prime": table.get("prime"),
                     # MTO-2: None (unset) inherits cfg.base_drift_policy -- see repos.resolve.
                     "base_drift_policy": raw_repo_drift_policy,
+                    # T-83: this repo's own test_command override -- None (unset) inherits
+                    # cfg.test_command, same precedence as base_drift_policy above -- see
+                    # repos.RepoBinding.test_command / repos.resolve(...).
+                    "test_command": table.get("test_command") or None,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -711,6 +721,12 @@ implementer = "claude_skill"
                                      # inherits [maestro] base_drift_policy. e.g. a fast-moving
                                      # shared integration branch wants "on_conflict" even if the
                                      # board-wide default is "always" for its other, quieter repos.
+# test_command = "go test ./..."    # T-83: this repo's own test_command override -- default:
+                                     # unset, inherits [maestro] test_command. Lets a home
+                                     # spanning more than one repo/language (a Go repo here, a
+                                     # yarn repo elsewhere) give each its own correct suite
+                                     # command instead of leaving the whole verification tier
+                                     # (RB-12/RB-14, and T-79's `check:` annotation) dark.
 # gh_account = "work-login"         # resolve this repo's gh credential via
                                      # `gh auth token --user <login>` at spawn/poll time
                                      # (needs `gh` + an unlocked keychain on the dispatcher
