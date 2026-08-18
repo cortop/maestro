@@ -15,8 +15,11 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from maestro import dispatcher as disp, event_log, skills_install, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
+from maestro.config import Config
 from maestro.statemachine import Phase
 
 from conftest import git as _git
@@ -65,7 +68,8 @@ def test_install_repo_copies_six_files_byte_identical(home, tmp_path):
 
 def test_install_repo_also_installs_opencode_copy_with_documented_frontmatter_transform(home, tmp_path):
     repo = tmp_path / "acme"
-    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n'
+                        '[maestro]\nrunner_enabled = ["claude", "opencode"]\n')
 
     rc = cli_main(["--home", str(home), "install-commands", "--repo", "acme"])
     assert rc == 0
@@ -91,7 +95,8 @@ def test_install_repo_also_installs_opencode_copy_with_documented_frontmatter_tr
 
 def test_install_repo_opencode_copy_idempotent_no_duplication(home, tmp_path):
     repo = tmp_path / "acme"
-    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n'
+                        '[maestro]\nrunner_enabled = ["claude", "opencode"]\n')
 
     assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
     opencode_dir = repo / ".opencode" / "command"
@@ -168,7 +173,8 @@ def test_install_user_also_installs_opencode_copy(home, tmp_path, monkeypatch):
     opencode_user_dir = tmp_path / "opencode-user-commands"
     monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
     monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(opencode_user_dir))
-    _write_config(home, f'[maestro]\nrepo_path = "{repo}"\n')
+    _write_config(home, f'[maestro]\nrepo_path = "{repo}"\n'
+                        'runner_enabled = ["claude", "opencode"]\n')
 
     rc = cli_main(["--home", str(home), "install-commands", "--user"])
     assert rc == 0
@@ -257,6 +263,93 @@ def test_wheel_build_target_covers_all_six_payload_files():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     packages = data["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
     assert "maestro" in packages
+
+
+# ---------------------------------------------------------------------------
+# T-91: the opencode payload is gated on "opencode" in cfg.runner_enabled --
+# a runner nobody enabled gets no global config written for it. Default
+# runner_enabled is claude-only (config.py), so a home with no config.toml
+# `runner_enabled` line at all is exactly the gated case below.
+# ---------------------------------------------------------------------------
+
+def test_gated_install_user_creates_nothing_under_opencode_user_scope(home):
+    """AC1: over a temp home whose config has no `runner_enabled` line
+    (default claude-only), --user still installs all 7 Claude symlinks, but
+    creates NOTHING under the opencode user scope -- not even the dirs."""
+    assert cli_main(["--home", str(home), "install-commands", "--user"]) == 0
+
+    cfg = Config(home=home)
+    commands_dir = skills_install.user_commands_dir(cfg)
+    assert sorted(p.name for p in commands_dir.iterdir()) == sorted(skills_install.PAYLOAD_NAMES)
+    assert not skills_install.opencode_user_config_path(cfg).exists()
+    assert not skills_install.opencode_user_commands_dir(cfg).exists()
+    assert not skills_install.opencode_user_agent_dir(cfg).exists()
+
+
+def test_gated_install_repo_creates_nothing_under_dot_opencode(home, tmp_path):
+    """AC2: same gate, --repo target -- `<repo>/.opencode` doesn't exist
+    afterwards and `git status --porcelain` lists only `.claude/commands/`
+    additions."""
+    repo = tmp_path / "acme"
+    _init_git_repo(repo)
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+
+    assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
+
+    assert not (repo / ".opencode").exists()
+    out = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                         capture_output=True, text=True, check=True)
+    lines = [line for line in out.stdout.splitlines() if line.strip()]
+    assert lines  # the Claude-side additions are still there
+    # git reports a wholly-untracked dir as one line for the dir itself, not
+    # per-file (`?? .claude/`) -- assert on that, and that .opencode never
+    # shows up at all (it wasn't created, so git has nothing to report there).
+    assert all(".claude" in line for line in lines)
+    assert not any(".opencode" in line for line in lines)
+
+
+def test_all_runners_opt_in_installs_full_opencode_payload_on_claude_only_board(home, tmp_path):
+    """AC5: `--all-runners` forces the opencode payload even though
+    `runner_enabled` admits only claude."""
+    repo = tmp_path / "acme"
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+
+    rc = cli_main(["--home", str(home), "install-commands", "--repo", "acme", "--all-runners"])
+    assert rc == 0
+
+    opencode_dir = repo / ".opencode" / "command"
+    assert sorted(p.name for p in opencode_dir.iterdir()) == sorted(skills_install.PAYLOAD_NAMES)
+    assert (repo / ".opencode" / "opencode.jsonc").exists()
+    assert sorted(p.name for p in (repo / ".opencode" / "agent").iterdir()) == \
+        sorted(skills_install.PAYLOAD_NAMES)
+
+
+def test_all_runners_flag_documented_in_help(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli_main(["install-commands", "--help"])
+    assert exc.value.code == 0
+    assert "--all-runners" in capsys.readouterr().out
+
+
+def test_gated_failed_user_install_leaves_no_opencode_directories_behind(
+        home, tmp_path, monkeypatch):
+    """AC6: the refuse-to-clobber path (a human-owned real file at a Claude
+    payload path) leaves no opencode directories behind in the user scope on
+    a claude-only board -- they're never even `mkdir`'d when the gate is
+    closed, regardless of when the conflict is discovered."""
+    user_dir = tmp_path / "user-commands"
+    user_dir.mkdir(parents=True)
+    conflicting_name = skills_install.PAYLOAD_NAMES[0]
+    (user_dir / conflicting_name).write_text("a human wrote this, not the verb\n")
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+
+    rc = cli_main(["--home", str(home), "install-commands", "--user"])
+    assert rc != 0
+
+    cfg = Config(home=home)
+    assert not skills_install.opencode_user_commands_dir(cfg).exists()
+    assert not skills_install.opencode_user_agent_dir(cfg).exists()
+    assert not skills_install.opencode_user_config_path(cfg).exists()
 
     payload_dir = REPO_ROOT / "maestro" / "_skill_commands"
     names = sorted(p.name for p in payload_dir.iterdir())

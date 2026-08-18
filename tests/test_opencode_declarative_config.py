@@ -116,7 +116,8 @@ def test_permission_block_honors_a_phase_narrowed_verb_set(home):
 
 def test_install_repo_writes_opencode_config_and_agent_stubs(home, tmp_path):
     repo = tmp_path / "acme"
-    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n'
+                        '[maestro]\nrunner_enabled = ["claude", "opencode"]\n')
 
     assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
 
@@ -144,7 +145,8 @@ def test_agent_stub_permission_bash_is_phase_narrowed_not_the_flat_ceiling(home,
     installed opencode (`opencode debug config`) during this ticket, see
     `runner_permissions.opencode_permission_block`'s docstring."""
     repo = tmp_path / "acme"
-    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n'
+                        '[maestro]\nrunner_enabled = ["claude", "opencode"]\n')
     assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
 
     agent_dir = repo / ".opencode" / "agent"
@@ -162,7 +164,8 @@ def test_agent_stub_permission_bash_is_phase_narrowed_not_the_flat_ceiling(home,
 
 def test_install_repo_opencode_config_and_agents_idempotent(home, tmp_path):
     repo = tmp_path / "acme"
-    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n'
+                        '[maestro]\nrunner_enabled = ["claude", "opencode"]\n')
 
     assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
     config_path = repo / ".opencode" / "opencode.jsonc"
@@ -183,6 +186,7 @@ def test_install_user_writes_opencode_config_and_agent_stubs(home, tmp_path, mon
     opencode_user_dir = tmp_path / "opencode-user-commands"
     monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
     monkeypatch.setenv("MAESTRO_OPENCODE_COMMANDS_DIR", str(opencode_user_dir))
+    _write_config(home, '[maestro]\nrunner_enabled = ["claude", "opencode"]\n')
 
     assert cli_main(["--home", str(home), "install-commands", "--user"]) == 0
 
@@ -193,6 +197,69 @@ def test_install_user_writes_opencode_config_and_agent_stubs(home, tmp_path, mon
 
     agent_dir = opencode_user_dir.parent / "agent"
     assert sorted(p.name for p in agent_dir.iterdir()) == sorted(skills_install.PAYLOAD_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# T-91: the opencode payload is gated on "opencode" in cfg.runner_enabled --
+# the skip is reported explicitly in the verb's JSON output, and doctor stays
+# green either way (a gated claude-only board never needed the opencode
+# config to begin with).
+# ---------------------------------------------------------------------------
+
+def test_gated_install_names_the_skip_reason_in_json_output(home, tmp_path, capsys):
+    """AC4: parsed from real stdout, not the returned dict alone -- the
+    default claude-only board (no `runner_enabled` line) skips the opencode
+    payload and says why, mentioning `runner_enabled` by name."""
+    repo = tmp_path / "acme"
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
+
+    assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["opencode_skipped"]
+    assert "runner_enabled" in out["opencode_skipped"]
+    assert out["opencode_written"] == []
+    assert out["opencode_agent_written"] == []
+    assert out["opencode_config_written"] is False
+
+
+def test_ungated_install_reports_no_skip_in_json_output(home, tmp_path, capsys):
+    """The counterpart -- with opencode admitted, nothing is skipped."""
+    repo = tmp_path / "acme"
+    _write_config(home, f'[repos.acme]\npath = "{repo}"\n'
+                        '[maestro]\nrunner_enabled = ["claude", "opencode"]\n')
+
+    assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["opencode_skipped"] is None
+
+
+def test_doctor_reconciler_permissions_ok_on_claude_only_board_after_gated_install(
+        home, tmp_path, monkeypatch):
+    """AC7 (first direction): `reconciler_permissions` reaches `ok` for a
+    claude-runner ticket on a claude-only board exactly as it always did --
+    the gated (skipped) opencode install alongside it changes nothing about
+    that path (the check inspects Claude Code's own settings.json grants,
+    which `install-commands`'s Claude side is unaffected by this ticket's
+    gate)."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = home / "repo"
+    repo.mkdir()
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.json").write_text(json.dumps(
+        {"permissions": {"allow": disp.maestro_verb_grant() +
+                          ["Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)"]}}))
+    _write_config(home, f'[maestro]\nrepo_path = "{repo}"\nmin_spawn_interval = 0\n')
+    _seed(home, "T-1", phase=Phase.IMPLEMENTING, runner=None)
+
+    out = cli_main(["--home", str(home), "install-commands", "--repo", "default"])
+    assert out == 0
+    assert not (repo / ".opencode").exists()  # the gate held -- claude-only board
+
+    code, report = _doctor(home)
+    assert code == 0
+    check = next(c for c in report["checks"] if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+    assert check["missing_by_repo"] == {}
 
 
 # ---------------------------------------------------------------------------
