@@ -19,6 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import backup as backup_mod
 from . import claims, credentials, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, spend as spend_mod, store
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
@@ -155,16 +156,30 @@ def check_heartbeat(cfg: Config, now: float, *, plist=None) -> dict:
 
 
 def check_backup_age(cfg: Config, now: float) -> dict:
+    """Grounded in the actual tarballs `backup.list_backups` finds -- never in
+    `derived/.backup_cursor.json`, which only the dispatcher's periodic
+    `backup.maybe_backup` writes and which a manual `maestro backup` or a wiped
+    `backup_dir` leave dangerously wrong in either direction (T-88). A board
+    that has never swept (no `derived/.heartbeat.json`) and has no tarballs
+    reports its own non-warning state, mirroring `check_heartbeat`'s "no
+    heartbeat yet" -> status ok contract above; a board that HAS swept and
+    still has no tarballs is a real fault.
+    """
     if not cfg.backup_interval or cfg.backup_interval <= 0:
         return {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
-    cursor = store.read_json(cfg.home / "derived" / ".backup_cursor.json", {}) or {}
-    epoch = cursor.get("epoch")
-    age = round(now - epoch) if epoch else None
-    stale = age is None or age > cfg.backup_interval * 2
+    epoch = backup_mod.newest_backup_epoch(cfg)
+    if epoch is None:
+        swept = (cfg.home / "derived" / ".heartbeat.json").exists()
+        return {
+            "name": "backup_age", "status": "warn" if swept else "ok",
+            "detail": "no backups found in backup_dir" if swept else "no backup yet -- board never swept",
+            "age_s": None,
+        }
+    age = round(now - epoch)
+    stale = age > cfg.backup_interval * 2
     return {
         "name": "backup_age", "status": "warn" if stale else "ok",
-        "detail": f"last backup {age}s ago" if age is not None else "no backup yet",
-        "age_s": age,
+        "detail": f"last backup {age}s ago", "age_s": age,
     }
 
 
@@ -493,17 +508,32 @@ def _runners_by_binding(cfg: Config, home: Path, keys) -> dict:
 
 def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     """WARN (never blocks a spawn) when a repo bound by a current ticket is
-    missing the per-phase reconcile commands from ITS runner's own command
-    location (T-22 split the single ``maestro-reconcile.md`` into
+    missing one or more of the per-phase reconcile commands from ITS runner's
+    own command location (T-22 split the single ``maestro-reconcile.md`` into
     ``maestro-reconcile-<phase>.md`` files for progressive disclosure) -- a
     reconciler spawned into that repo's worktree would hit an undefined slash
     command every turn.
 
+    T-87: the predicate is a per-file set-diff against the full
+    ``skills_install.PAYLOAD_NAMES`` roster, not ``any(...)`` over a glob --
+    ``any()`` reads ``ok`` the moment ONE of the seven files exists, so a
+    partially-installed command set (e.g. every phase but ``qa``) silently
+    passed and a reconciler spawned into the ``qa`` phase hit an undefined
+    slash command with no preflight to have caught it (the real-board install
+    this ticket is named for). ``missing`` keeps its pre-existing shape --
+    binding names, for `test_repo_preflight.py`/`test_install_commands.py` --
+    and gains a sibling ``missing_files`` mapping each such binding to the
+    actual absent filenames, which the WARN detail also names verbatim.
+
     GA-15: a repo-local miss isn't necessarily a real gap -- ``maestro
     install-commands --user`` (the alternative to vendoring into a repo this
     board doesn't own) puts the files in the user commands directory instead,
-    which resolves from any cwd. Check there before flagging, via the same
-    injectable ``skills_install.user_commands_dir`` the doctor tests override.
+    which resolves from any cwd. The set-diff is against the UNION of the
+    repo-local and user-scope directories' file sets, per file -- a file
+    present in either location satisfies it for that file specifically, so a
+    stray unrelated file in one location can no longer suppress a genuine gap
+    in the other (unlike the old any()-per-directory check, which read the
+    two locations as independently sufficient wholes).
 
     OC-1: runner-aware -- a binding whose referencing ticket(s) resolve to a
     non-``claude`` runner (`_runners_by_binding`) is checked against
@@ -523,11 +553,13 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
     keys = dispatcher.list_keys(home)
     bindings = dispatcher.referenced_repo_bindings(cfg, home, keys)
     runners_by_binding = _runners_by_binding(cfg, home, keys)
+    payload_names = set(skills_install.PAYLOAD_NAMES)
     user_dir = skills_install.user_commands_dir(cfg)
-    user_has_skill = any(user_dir.glob("maestro-reconcile-*.md"))
+    user_files = {p.name for p in user_dir.glob("maestro-reconcile-*.md")}
     opencode_user_dir = skills_install.opencode_user_commands_dir(cfg)
-    opencode_user_has_skill = any(opencode_user_dir.glob("maestro-reconcile-*.md"))
+    opencode_user_files = {p.name for p in opencode_user_dir.glob("maestro-reconcile-*.md")}
     missing = []
+    missing_files: dict[str, list[str]] = {}
     for name, binding in bindings.items():
         if not binding.path or not Path(binding.path).exists():
             continue
@@ -536,19 +568,24 @@ def check_missing_reconcile_skill(cfg: Config, now: float) -> dict:
             continue
         if runner == "claude":
             commands_dir = Path(binding.path) / ".claude" / "commands"
-            user_has = user_has_skill
+            user_files_here = user_files
         else:
             commands_dir = skills_install.opencode_repo_commands_dir(binding.path)
-            user_has = opencode_user_has_skill
-        if any(commands_dir.glob("maestro-reconcile-*.md")):
-            continue
-        if user_has:
+            user_files_here = opencode_user_files
+        repo_files = {p.name for p in commands_dir.glob("maestro-reconcile-*.md")}
+        gap = sorted(payload_names - (repo_files | user_files_here))
+        if not gap:
             continue
         missing.append(name)
+        missing_files[name] = gap
     status = "warn" if missing else "ok"
-    detail = f"missing maestro-reconcile-*.md in: {', '.join(missing)}" if missing else "none"
+    if missing:
+        detail = "missing maestro-reconcile-*.md in: " + "; ".join(
+            f"{name} ({', '.join(missing_files[name])})" for name in missing)
+    else:
+        detail = "none"
     return {"name": "missing_reconcile_skill", "status": status, "detail": detail,
-            "missing": missing}
+            "missing": missing, "missing_files": missing_files}
 
 
 def user_settings_path(cfg: Config | None = None) -> Path:

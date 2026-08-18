@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 
-from maestro import cli, claims, dispatcher as disp, health, ops, store
+from maestro import backup, cli, claims, dispatcher as disp, health, ops, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
@@ -226,19 +226,97 @@ def test_check_backup_age_ok_when_disabled(home, cfg):
     assert result == {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
 
 
-def test_check_backup_age_warns_when_stale(home, cfg):
+def test_check_backup_age_never_swept_is_ok_not_warn(home, cfg):
+    """T-88 AC3: a freshly-initialized home with no backups and no dispatcher
+    sweep (no derived/.heartbeat.json) reports its own non-warning state,
+    mirroring check_heartbeat's "no heartbeat yet" -> status ok contract --
+    not the noisy `warn` a never-swept board used to get."""
+    cfg.backup_interval = 100
+    assert not (home / "derived" / ".heartbeat.json").exists()
+    result = health.check_backup_age(cfg, store.now_epoch())
+    assert result["status"] == "ok"
+    assert result["age_s"] is None
+    assert "never swept" in result["detail"]
+
+
+def test_check_backup_age_warns_when_swept_and_no_backups_exist(home, cfg):
+    """A board that HAS swept (has a heartbeat) but has no tarballs at all is a
+    real fault, distinct from the never-swept case above."""
+    cfg.backup_interval = 100
+    store.write_json(home / "derived" / ".heartbeat.json",
+                     {"ts": "x", "epoch": store.now_epoch(), "spawned": 0})
+    result = health.check_backup_age(cfg, store.now_epoch())
+    assert result["status"] == "warn"
+    assert result["age_s"] is None
+
+
+def test_check_backup_age_ignores_a_stale_cursor_over_an_emptied_backup_dir(home, cfg):
+    """T-88 AC2: grounded in the tarballs, not the cursor -- a fresh cursor
+    epoch over an empty backup_dir must NOT read as ok."""
     cfg.backup_interval = 100
     now = store.now_epoch()
-    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now - 1000})
+    store.write_json(home / "derived" / ".heartbeat.json", {"ts": "x", "epoch": now, "spawned": 0})
+    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now})
+    assert not backup.resolve_backup_dir(cfg).exists()
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] != "ok"
+
+
+def test_check_backup_age_warns_when_newest_tarball_is_stale(home, cfg):
+    cfg.backup_interval = 100
+    now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
+    backup.create_backup(cfg, now - 1000)
     result = health.check_backup_age(cfg, now)
     assert result["status"] == "warn"
     assert result["age_s"] == 1000
 
 
-def test_check_backup_age_ok_when_fresh(home, cfg):
+def test_check_backup_age_ok_when_newest_tarball_is_fresh(home, cfg):
     cfg.backup_interval = 3600
+    now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
+    backup.create_backup(cfg, now - 10)
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] == "ok"
+    assert result["age_s"] == 10
+
+
+def test_check_backup_age_uses_the_newest_of_several_tarballs(home, cfg):
+    """A stale cursor (or none at all) must not shadow a newer tarball that a
+    manual `maestro backup` created after the dispatcher's last sweep."""
+    cfg.backup_interval = 3600
+    now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
+    backup.create_backup(cfg, now - 5000)
+    backup.create_backup(cfg, now - 5)
+    result = health.check_backup_age(cfg, now)
+    assert result["status"] == "ok"
+    assert result["age_s"] == 5
+
+
+def test_check_backup_age_ok_via_real_cli_init_backup_doctor_strict(tmp_path, capsys):
+    """T-88 AC1: `init` -> `backup` -> `doctor --strict` over a temp home, driven
+    entirely through the real CLI (never a hand-written cursor) -- and exits 0
+    with `backup_age` reporting `status == "ok"`, matching the spec's own
+    reproduction (a fresh backup_interval-armed home used to WARN "no backup
+    yet" here despite the tarball `backup` just wrote)."""
+    home = tmp_path / "home"
+    assert cli.main(["--home", str(home), "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["--home", str(home), "backup"]) == 0
+    capsys.readouterr()
+    rc = cli.main(["--home", str(home), "doctor", "--strict"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    check = next(c for c in out["checks"] if c["name"] == "backup_age")
+    assert check["status"] == "ok"
+
+
+def test_check_backup_age_ok_after_dispatcher_sweep_runs_maybe_backup(home, cfg):
+    """T-88 AC6: the existing dispatcher-timer path (`backup.maybe_backup`) is
+    not regressed -- a real sweep still leaves `backup_age` at status "ok"."""
+    _seed(home, "T-1", Phase.READY)
     now = store.now_epoch()
-    store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now - 10})
+    disp.dispatch(cfg, DryRunSessions(), now=now)
+    assert backup.list_backups(cfg)  # maybe_backup actually ran
     result = health.check_backup_age(cfg, now)
     assert result["status"] == "ok"
 
@@ -713,10 +791,15 @@ def _write_repo_settings(repo, *, allow=None, deny=None, local=False):
 
 def _install_dummy_reconcile_skill(repo):
     """Satisfies the unrelated missing_reconcile_skill check so a --strict
-    assertion below is about reconciler_permissions specifically."""
+    assertion below is about reconciler_permissions specifically -- T-87's
+    per-file completeness rule needs the FULL PAYLOAD_NAMES set installed, not
+    just one file, or this check itself would warn and confound the --strict
+    assertion this helper exists to isolate."""
+    from maestro import skills_install
     d = repo / ".claude" / "commands"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "maestro-reconcile-triaging.md").write_text("# stub\n")
+    for name in skills_install.PAYLOAD_NAMES:
+        (d / name).write_text("# stub\n")
 
 
 def test_reconciler_permissions_registered_and_never_blocks_a_spawn(home, tmp_path, monkeypatch):
@@ -924,8 +1007,12 @@ def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypa
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
     _install_dummy_reconcile_skill(repo)
+    # T-88: backup_interval is left at its default (3600, armed) rather than
+    # disabled -- the never-swept board (no derived/.heartbeat.json here) reads
+    # as backup_age status "ok" on its own now, so this exercises --strict with
+    # backups actually armed instead of sidestepping that check entirely.
     (home / "config.toml").write_text(
-        f'[maestro]\nbackup_interval = 0\ndaily_spend_ceiling_usd = 50.0\n\n'
+        f'[maestro]\ndaily_spend_ceiling_usd = 50.0\n\n'
         f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
     _seed_bound_ticket(home, "T-1", "alpha")
 
@@ -1014,8 +1101,12 @@ def test_missing_reconcile_skill_checks_opencode_location_for_non_claude_runner(
     assert check["status"] == "warn"
     assert "default" in check["missing"]
 
-    (repo / ".opencode" / "command").mkdir(parents=True)
-    (repo / ".opencode" / "command" / "maestro-reconcile-implementing.md").write_text("# stub\n")
+    # T-87: the completeness rule needs the FULL PAYLOAD_NAMES set, not one file.
+    from maestro import skills_install
+    command_dir = repo / ".opencode" / "command"
+    command_dir.mkdir(parents=True)
+    for name in skills_install.PAYLOAD_NAMES:
+        (command_dir / name).write_text("# stub\n")
 
     check = health.check_missing_reconcile_skill(cfg, 1000)
     assert check["status"] == "ok"
@@ -1054,8 +1145,12 @@ def test_doctor_cli_missing_reconcile_skill_warn_then_ok_for_opencode_runner_tic
                        if c["name"] == "missing_reconcile_skill")
     assert warn_check["status"] == "warn"
 
-    (repo / ".opencode" / "command").mkdir(parents=True)
-    (repo / ".opencode" / "command" / "maestro-reconcile-implementing.md").write_text("# stub\n")
+    # T-87: the completeness rule needs the FULL PAYLOAD_NAMES set, not one file.
+    from maestro import skills_install
+    command_dir = repo / ".opencode" / "command"
+    command_dir.mkdir(parents=True)
+    for name in skills_install.PAYLOAD_NAMES:
+        (command_dir / name).write_text("# stub\n")
 
     assert cli.main(["--home", str(home), "doctor"]) == 0
     ok_check = next(c for c in json.loads(capsys.readouterr().out)["checks"]
@@ -1082,6 +1177,122 @@ def test_missing_reconcile_skill_pi_binding_always_ok_with_neither_location_pres
     check = health.check_missing_reconcile_skill(cfg, 1000)
     assert check["status"] == "ok"
     assert check["missing"] == []
+
+
+# --- T-87: per-file completeness, not any()-over-glob --------------------------
+
+def _install_partial_payload(commands_dir, *, missing=("maestro-reconcile-qa.md",)):
+    """Writes every `skills_install.PAYLOAD_NAMES` file EXCEPT *missing* into
+    *commands_dir* -- the "6 of 7" real-board-install shape this ticket is
+    named for."""
+    from maestro import skills_install
+    commands_dir.mkdir(parents=True, exist_ok=True)
+    for name in skills_install.PAYLOAD_NAMES:
+        if name in missing:
+            continue
+        (commands_dir / name).write_text("# stub\n")
+
+
+def test_missing_reconcile_skill_partial_install_warns_naming_the_missing_file(
+        home, tmp_path, monkeypatch):
+    """AC1 + AC2: 6 of the 7 phase files present (missing `qa`), user-scope
+    empty -- the check must warn and name `maestro-reconcile-qa.md` verbatim,
+    not read `ok` because SOME file exists (the any()-over-glob defect)."""
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "no-user-commands"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_partial_payload(repo / ".claude" / "commands")
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "warn"
+    assert "default" in check["missing"]
+    assert check["missing_files"]["default"] == ["maestro-reconcile-qa.md"]
+    assert "maestro-reconcile-qa.md" in check["detail"]
+    # the other 6 files being present must not leak into "missing"
+    assert "maestro-reconcile-triaging.md" not in check["detail"]
+
+
+def test_doctor_strict_gates_on_partial_reconcile_skill_install(home, tmp_path, monkeypatch, capsys):
+    """AC3: `maestro doctor --strict` exits 1 while the bound repo carries only
+    6 of the 7 phase files and 0 once the seventh is written, with every other
+    check already ok -- driven through the real CLI."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(tmp_path / "no-user-commands"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    commands_dir = repo / ".claude" / "commands"
+    _install_partial_payload(commands_dir)
+    _write_repo_settings(repo, allow=list(disp.RECONCILER_REQUIRED_TOOLS))
+    (home / "config.toml").write_text(
+        f'[maestro]\nbackup_interval = 0\ndaily_spend_ceiling_usd = 50.0\n\n'
+        f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
+    _seed_bound_ticket(home, "T-1", "alpha")
+
+    rc = cli.main(["--home", str(home), "doctor"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    check = next(c for c in out["checks"] if c["name"] == "missing_reconcile_skill")
+    assert check["status"] == "warn"
+
+    rc_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc_strict == 1
+
+    (commands_dir / "maestro-reconcile-qa.md").write_text("# stub\n")
+
+    rc2 = cli.main(["--home", str(home), "doctor"])
+    out2 = json.loads(capsys.readouterr().out)
+    assert rc2 == 0
+    check2 = next(c for c in out2["checks"] if c["name"] == "missing_reconcile_skill")
+    assert check2["status"] == "ok"
+
+    rc2_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc2_strict == 0
+
+
+def test_missing_reconcile_skill_per_file_union_across_repo_and_user_scope(
+        home, tmp_path, monkeypatch):
+    """AC4: 6 files live in the repo's `.claude/commands/`, the 7th ONLY in the
+    user-scope dir -- the union is per-file, so this reads `ok`. Neither
+    directory alone is complete, proving "either directory is complete" is
+    NOT the rule being applied."""
+    user_dir = tmp_path / "user-commands"
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_partial_payload(repo / ".claude" / "commands")
+    user_dir.mkdir(parents=True)
+    (user_dir / "maestro-reconcile-qa.md").write_text("# stub\n")
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "ok"
+    assert check["missing"] == []
+
+
+def test_missing_reconcile_skill_stray_user_scope_file_does_not_suppress_board_wide(
+        home, tmp_path, monkeypatch):
+    """AC5: a single stray `maestro-reconcile-*.md` in the user-scope dir (not
+    the phase actually missing repo-side) must not suppress the check -- the
+    old any()-per-directory rule read a non-empty user dir as "user-scope is
+    complete" regardless of WHICH file it held."""
+    user_dir = tmp_path / "user-commands"
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_partial_payload(repo / ".claude" / "commands")  # missing qa
+    user_dir.mkdir(parents=True)
+    (user_dir / "maestro-reconcile-triaging.md").write_text("# stray, already present repo-side\n")
+    cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
+    _seed(home, "T-1", Phase.IMPLEMENTING)
+
+    check = health.check_missing_reconcile_skill(cfg, 1000)
+    assert check["status"] == "warn"
+    assert check["missing_files"]["default"] == ["maestro-reconcile-qa.md"]
 
 
 def test_reconciler_permissions_not_applicable_for_an_unregistered_runner(home, tmp_path, monkeypatch):

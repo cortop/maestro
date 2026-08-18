@@ -122,13 +122,13 @@ class GitHubCliVCS:
                   env: dict | None = None) -> dict:
         repo = repo or (self.repos[0] if self.repos else None)
         cmd = ["gh", "pr", "view", str(pr_number), "--json",
-               "state,mergeable,headRefOid,statusCheckRollup"]
+               "state,mergeable,headRefOid,statusCheckRollup,isDraft"]
         if repo:
             cmd += ["--repo", repo]
         rc, out, err = _run(cmd, env=env)
         if rc != 0 or not out.strip():
             return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
-                    "ci_state": "unknown", "failing_checks": [],
+                    "ci_state": "unknown", "failing_checks": [], "draft": None,
                     "error": classify_gh_failure(rc, out, err)}
         data = json.loads(out)
         checks = data.get("statusCheckRollup") or []
@@ -157,6 +157,7 @@ class GitHubCliVCS:
             "head_sha": data.get("headRefOid"),
             "ci_state": ci_state,
             "failing_checks": failing,
+            "draft": bool(data.get("isDraft", False)),
         }
 
     def review_feedback(self, pr_number: int, repo: str | None = None,
@@ -181,6 +182,17 @@ class GitHubCliVCS:
                 "author": (r.get("author") or {}).get("login"),
             })
         return result
+
+    def pr_ready(self, pr_number: int, repo: str | None = None,
+                env: dict | None = None) -> dict:
+        repo = repo or (self.repos[0] if self.repos else None)
+        cmd = ["gh", "pr", "ready", str(pr_number)]
+        if repo:
+            cmd += ["--repo", repo]
+        rc, out, err = _run(cmd, env=env)
+        if rc != 0:
+            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+        return {"ok": True}
 
 
 class CommandFetcher:

@@ -34,7 +34,7 @@ def test_pr_status_passes_explicit_repo_regardless_of_repos_ordering(monkeypatch
     vcs = GitHubCliVCS({"repos": ["owner/other1", "owner/other2"]})
     vcs.pr_status(7, repo="acme/beta")
     assert calls == [["gh", "pr", "view", "7", "--json",
-                      "state,mergeable,headRefOid,statusCheckRollup", "--repo", "acme/beta"]]
+                      "state,mergeable,headRefOid,statusCheckRollup,isDraft", "--repo", "acme/beta"]]
 
 
 def test_pr_status_repo_none_is_byte_identical_to_todays_repos0_behavior(monkeypatch):
@@ -42,7 +42,7 @@ def test_pr_status_repo_none_is_byte_identical_to_todays_repos0_behavior(monkeyp
     vcs = GitHubCliVCS({"repos": ["owner/first", "owner/second"]})
     vcs.pr_status(7)
     assert calls == [["gh", "pr", "view", "7", "--json",
-                      "state,mergeable,headRefOid,statusCheckRollup", "--repo", "owner/first"]]
+                      "state,mergeable,headRefOid,statusCheckRollup,isDraft", "--repo", "owner/first"]]
 
 
 def test_pr_status_repo_none_no_repos_configured_omits_the_flag(monkeypatch):
@@ -50,7 +50,7 @@ def test_pr_status_repo_none_no_repos_configured_omits_the_flag(monkeypatch):
     vcs = GitHubCliVCS({})
     vcs.pr_status(7)
     assert calls == [["gh", "pr", "view", "7", "--json",
-                      "state,mergeable,headRefOid,statusCheckRollup"]]
+                      "state,mergeable,headRefOid,statusCheckRollup,isDraft"]]
 
 
 def test_review_feedback_passes_explicit_repo_regardless_of_repos_ordering(monkeypatch):

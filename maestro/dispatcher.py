@@ -1399,6 +1399,10 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     - failing CI -> implementing, with the failing check names in the reason
     - passing CI (from awaiting-ci) -> in-review
     - a CHANGES_REQUESTED review -> implementing, with the verbatim comment body
+    - draft state (T-86): every poll folds the observed ``isDraft`` into
+      ``snap.pr_draft`` (see ``_observe_pr_draft``); once CI is passing, no
+      review is outstanding, and every current AC has a passing spec-axis QA
+      verdict, ``gh pr ready`` undrafts the PR (see ``_maybe_undraft``)
 
     Replaces the reconciler's own ``gh pr checks`` shelling: CI/PR/review
     observation is now dispatcher-owned, pure-Python, and idempotent per
@@ -1441,7 +1445,8 @@ def sync_vcs(cfg: Config, now: float) -> dict:
             # auth-failure routing (a visible ops.fail naming the repo/PR)
             # handles this identically -- no second failure path to invent.
             status = {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
-                     "ci_state": "unknown", "failing_checks": [], "error": "auth"}
+                     "ci_state": "unknown", "failing_checks": [], "draft": None,
+                     "error": "auth"}
         else:
             status = vcs.pr_status(snap.pr_number, repo=repo_slug, env=cred.env)
 
@@ -1453,9 +1458,12 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                 ops.route_conflict(cfg, key, snap.pr_number, actor="dispatcher")
                 continue
 
+            _observe_pr_draft(cfg, key, status, snap)
             _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number)
             if cred.ok:
                 _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env)
+                _maybe_undraft(cfg, key, status, vcs, repo_slug=repo_slug,
+                               pr_number=snap.pr_number, env=cred.env)
         except event_log.StaleAppendError:
             # Lost the fencing race against a concurrent writer (a human, a
             # reconciler, or another dispatcher tick) that appended between
@@ -1558,6 +1566,61 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
     ops.set_phase(cfg, key, Phase.IMPLEMENTING,
                  reason=f"changes requested: {changes_requested_body}", actor="dispatcher",
                  expect=fresh.observed_seq)
+
+
+def _observe_pr_draft(cfg: Config, key: str, status: dict, snap) -> None:
+    """T-86: `pr_status` now polls `isDraft` -- fold the freshly observed value
+    into `snap.pr_draft` on every poll, instead of leaving it frozen at whatever
+    the implementer's original `PrOpened` append set (the bug this ticket
+    fixes: nothing else ever refreshed it). No-op when unobserved
+    (`status.get("draft")` is `None` -- an error poll, or a credential
+    failure's synthesized status) or unchanged from the current snapshot, so an
+    unmoved draft state produces no event on a later poll."""
+    observed = status.get("draft")
+    if observed is None or observed == snap.pr_draft:
+        return
+    ev = event_log.append(cfg.home, key, E.PR_UPDATED, {"number": snap.pr_number, "draft": observed},
+                          actor="dispatcher", step_id=f"draftobs-{key}-{snap.pr_number}-{observed}")
+    if ev is not None:
+        snap_mod.rebuild(cfg.home, key)
+
+
+def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str | None,
+                   pr_number: int, env: dict | None) -> None:
+    """T-86: undrafts a PR (`gh pr ready`) once all three gates hold -- the same
+    machine conditions the old `/orchestrate` used: CI is `passing`, no
+    outstanding `CHANGES_REQUESTED` review, and every current-hash spec AC
+    carries a passing spec-axis QA verdict (`Snapshot.qa_all_passing` -- note
+    the weaker guarantee until T-85 makes `qa` phase-gated and unskippable, per
+    the spec). Idempotent: `status["draft"]` is this exact poll's freshest
+    truth from GitHub, so a second sweep after an already-successful undraft
+    (or a PR that was never draft) no-ops immediately. A failed `gh pr ready`
+    (permissions, transient) is recorded as a Note, deduped by its error text,
+    and never routes the ticket or spends failure_count -- the next sweep
+    retries it."""
+    if not status.get("draft"):
+        return
+    if status.get("ci_state") != "passing":
+        return
+    fresh = snap_mod.rebuild(cfg.home, key)
+    if Phase(fresh.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
+        return  # routed away by a sibling observation earlier this tick
+    if fresh.unresolved_reviews:
+        return
+    spec_path = store.spec_path(cfg.home, key)
+    if not spec_path.exists() or not fresh.qa_all_passing(spec_path.read_text(encoding="utf-8")):
+        return
+    result = vcs.pr_ready(pr_number, repo=repo_slug, env=env)
+    if not result.get("ok"):
+        error = result.get("error", "unknown")
+        event_log.append(cfg.home, key, E.NOTE,
+                         {"text": f"gh pr ready failed ({error}) -- will retry"},
+                         actor="dispatcher", step_id=f"undraft-err-{key}-{pr_number}-{error}")
+        return
+    ev = event_log.append(cfg.home, key, E.PR_UPDATED, {"number": pr_number, "draft": False},
+                          actor="dispatcher", step_id=f"undraft-{key}-{pr_number}")
+    if ev is not None:
+        snap_mod.rebuild(cfg.home, key)
 
 
 # RB-14: board-wide cap on IN-FLIGHT dispatcher-owned test-run subprocesses --
