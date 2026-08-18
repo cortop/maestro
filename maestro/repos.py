@@ -71,6 +71,11 @@ class RepoBinding:
     # through instead of Config.test_command directly. None means the gate is
     # fully disabled for this key (ships dark).
     test_command: str | None = None
+    # T-90: this repo's timeout overrides, already resolved against the board-wide
+    # [maestro] prime_timeout/worktree_timeout defaults -- same resolution shape as
+    # base_drift_policy above (table value wins, unset inherits the board-wide one).
+    prime_timeout: int = 600
+    worktree_timeout: int = 600
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -78,6 +83,8 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
     if mode not in _MODES:
         mode = "git"
     raw_tools = table.get("reconcile_allowed_tools", [])
+    raw_prime_timeout = table.get("prime_timeout")
+    raw_worktree_timeout = table.get("worktree_timeout")
     return RepoBinding(
         name=name,
         path=table.get("path"),
@@ -94,6 +101,12 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         base_drift_policy=table.get("base_drift_policy") or cfg.base_drift_policy,
         # T-83: same precedence as base_drift_policy above.
         test_command=table.get("test_command") or cfg.test_command,
+        # T-90: same "table wins, unset inherits" shape, int-valued so `or` (which
+        # would treat a configured 0 as unset) isn't the right check.
+        prime_timeout=raw_prime_timeout if raw_prime_timeout is not None else cfg.prime_timeout,
+        worktree_timeout=(
+            raw_worktree_timeout if raw_worktree_timeout is not None else cfg.worktree_timeout
+        ),
     )
 
 
@@ -127,6 +140,8 @@ def implicit_default(cfg: Config) -> RepoBinding:
         prime=cfg.prime,
         base_drift_policy=cfg.base_drift_policy,
         test_command=cfg.test_command,
+        prime_timeout=cfg.prime_timeout,
+        worktree_timeout=cfg.worktree_timeout,
     )
 
 

@@ -212,6 +212,80 @@ def test_ensure_prime_timeout_fails_loudly(home, tmp_path):
         assert "default" in str(e)
 
 
+# ---------------------------------------------------------------------------
+# T-90: prime_timeout -- config-declared, no more unreachable hard-coded default
+# ---------------------------------------------------------------------------
+
+def test_ensure_with_no_kwarg_bounds_prime_by_resolved_config_prime_timeout_fail(home, tmp_path):
+    """AC3: `worktree_ensure(cfg, key)` called with NO explicit `prime_timeout`
+    kwarg is bounded by the config-declared `prime_timeout` -- not an
+    unreachable Python default -- and names the knob (AC6) in the error."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, prime="sleep 3", extra="prime_timeout = 1\n")
+    _seed_spec(home, "PT-1")
+
+    try:
+        ops.worktree_ensure(cfg, "PT-1")
+        assert False, "expected a MaestroError on prime timeout"
+    except store.MaestroError as e:
+        msg = str(e)
+        assert "prime_timeout" in msg  # AC6: names the knob to raise
+        assert "default" in msg        # repo name, matching the worktree_timeout error's posture
+
+
+def test_ensure_with_no_kwarg_bounds_prime_by_resolved_config_prime_timeout_succeed(home, tmp_path):
+    """AC3's succeed path: the same config, with enough headroom, primes cleanly."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, prime="sleep 3", extra="prime_timeout = 10\n")
+    _seed_spec(home, "PT-2")
+
+    result = ops.worktree_ensure(cfg, "PT-2")
+    assert result == {"created": True, "primed": True}
+
+
+def test_cli_worktree_ensure_honors_configured_prime_timeout(home, tmp_path, capsys):
+    """AC4: the real CLI path -- a configured prime_timeout the prime command
+    exceeds exits non-zero, writes the repo name + timeout to stderr, and
+    appends no event."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, prime="sleep 3", extra="prime_timeout = 1\n")
+    _seed_spec(home, "PT-3")
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "PT-3"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "default" in err  # repo name
+    assert "1" in err        # the configured prime_timeout
+
+    assert event_log.read(home, "PT-3") == []
+
+
+def test_worktree_add_uses_per_repo_worktree_timeout_override(home, tmp_path, monkeypatch):
+    """AC5: a [repos.<name>] worktree_timeout override actually reaches `git
+    worktree add` -- not the board-wide [maestro] value and not _GIT_TIMEOUT."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/should-not-be-used"\nworktree_timeout = 600\n\n'
+        f'[repos.alpha]\npath = "{repo}"\ndefault = true\nworktree_timeout = 7\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    _seed_spec(home, "PT-4")
+
+    seen_timeouts = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(repo), "worktree", "add"]:
+            seen_timeouts.append(kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    ops.worktree_ensure(cfg, "PT-4")
+
+    assert seen_timeouts == [7]  # the per-repo override, not 600 (board-wide) or 30 (_GIT_TIMEOUT)
+
+
 def test_ensure_reruns_cleanly_after_a_fixed_prime(home, tmp_path):
     """A failed prime doesn't wedge the ticket: fix config.toml and re-run --
     the worktree (already created) is adopted, and prime now runs and marks
