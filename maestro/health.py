@@ -1213,15 +1213,29 @@ def _recent_fleet_outcomes(home: Path, keys: list[str], scan: int) -> list[dict]
     resolvable provider host and must never occupy a scan slot or be folded
     into this streak. A ``running`` (still-active claim) entry carries no
     verdict either and is skipped rather than counted or treated as breaking
-    a streak."""
+    a streak.
+
+    T-89 (Gap 3): threads each key's live claim pid through to
+    ``steplog.session_outcome`` when the candidate IS that claim's own log
+    (``claim["log_path"]`` matches the candidate path exactly) -- the one case
+    where a dead pid is actually known -- so a session that crashed before
+    writing a single JSON record classifies as ``crashed`` (see that
+    function's own docstring) instead of ``running`` forever, and so gets a
+    verdict here at all. ``crashed`` counts toward the streak the same as
+    ``error`` (below)."""
     candidates: list[dict] = []
     for key in keys:
-        candidates.extend(sessions_mod.list_sessions(home, key))
+        for entry in sessions_mod.list_sessions(home, key):
+            candidates.append({**entry, "key": key})
     candidates = [c for c in candidates if c["format"] in ("stream-json", "pi")]
     candidates.sort(key=lambda d: d["epoch"], reverse=True)
+    claim_by_key = claims.all_claims(home)
     outcomes = []
     for entry in candidates[:scan]:
-        verdict = steplog.session_outcome(Path(entry["path"]))
+        claim = claim_by_key.get(entry["key"])
+        pid = (claim.get("pid") if claim and claim.get("log_path") == entry["path"]
+               else None)
+        verdict = steplog.session_outcome(Path(entry["path"]), pid=pid)
         outcome = verdict["outcome"]
         if outcome in ("running", "unknown"):
             continue
@@ -1240,6 +1254,33 @@ def _provider_probe_host(fmt: str | None, provider: str | None) -> str:
     if fmt == "pi" and provider in _PI_PROVIDER_HOSTS:
         return _PI_PROVIDER_HOSTS[provider]
     return _PROVIDER_PROBE_HOST
+
+
+def _provider_probe_cache_path(home: Path) -> Path:
+    return home / "derived" / ".provider_probe_cache.json"
+
+
+def _cached_probe(home: Path, host: str, now: float, interval: int, probe) -> tuple[bool, str]:
+    """Run *probe* against *host*, reusing the last real result (persisted under
+    ``derived/``, since a doctor sweep is a fresh process each time -- an
+    in-memory cache would never survive between them) if one was taken against
+    the SAME host within *interval* seconds (AC3: bounds the confirmation
+    probe's network cost so a frequent doctor sweep / TUI badge refresh can't
+    turn this into a probe storm). ``interval <= 0`` disables caching -- every
+    call probes fresh, same convention as ``no_output_timeout``/
+    ``backup_interval``. A host change always misses the cache (a stale
+    Anthropic result must never be served as a Google verdict, or vice versa)."""
+    path = _provider_probe_cache_path(home)
+    if interval > 0:
+        cached = store.read_json(path, {}) or {}
+        ts = cached.get("ts")
+        if (cached.get("host") == host and isinstance(ts, (int, float))
+                and 0 <= now - ts < interval):
+            return bool(cached.get("reachable")), str(cached.get("reason", ""))
+    reachable, reason = probe(host)
+    if interval > 0:
+        store.write_json(path, {"host": host, "ts": now, "reachable": reachable, "reason": reason})
+    return reachable, reason
 
 
 def _default_provider_probe(host: str = _PROVIDER_PROBE_HOST) -> tuple[bool, str]:
@@ -1274,26 +1315,41 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
 
     PRIMARY signal, no network call: the fleet's most recent terminal session
     outcomes (``_recent_fleet_outcomes``, bounded scan) -- if the most recent
-    ``_PROVIDER_ERROR_STREAK`` of them are ALL plain ``error``, this reports a
-    provider problem OBSERVED, not probed. A ``rate_limited`` (429) outcome
-    breaks the streak rather than counting toward it -- rate limiting is
-    already handled by ``ratelimit.py``'s own gate and must never be
-    conflated with unreachability (the operator's next action differs: wait
-    vs. investigate). Fewer than the threshold, or any success/rate_limited
-    among the scanned window: ``ok``, no probe -- this is also how a fresh
-    home with no session logs at all fails open, matching
-    ``check_gh_credential_reachability``.
+    ``_PROVIDER_ERROR_STREAK`` of them are ALL ``error``/``crashed`` (T-89
+    Gap 3: a dead-pid session whose log never wrote a single JSON record
+    counts the same as a parsed error result), this reports a provider
+    problem OBSERVED, not probed. A ``rate_limited`` (429) outcome breaks the
+    streak rather than counting toward it -- rate limiting is already handled
+    by ``ratelimit.py``'s own gate and must never be conflated with
+    unreachability (the operator's next action differs: wait vs. investigate).
+    Fewer than the threshold with at least SOME session history in the
+    scanned window: ``ok``, no probe.
 
-    CONFIRMATION probe, reached ONLY once the primary signal has already
-    tripped: a bare TCP connect to a host resolved per runner/provider (AC7:
-    ``_provider_probe_host`` -- Anthropic for a Claude streak, the erroring pi
-    sessions' own recorded provider for a pi streak, see
-    ``_PI_PROVIDER_HOSTS``) via ``_default_provider_probe``. Connects ->
-    ``erroring`` (network is up, the provider itself is degraded); fails ->
-    ``no_network`` (this box is offline). Injectable ``probe`` (now called
-    with that resolved host, same shape as ``check_gh_credential_reachability``'s
-    ``run``/``check_ollama_models``'s ``transport``, so tests never open a
-    real socket).
+    T-89 (Gap 2, AC3): a board with ZERO terminal session outcomes at all
+    (``outcomes`` empty -- a fresh home, or one whose recent claims are all
+    still ``running``/unrecognized) used to fail open here too, returning
+    ``ok`` with a "provider reachable" detail it never measured. That is
+    exactly the silent fail-open this ticket's Notes call out -- a bare
+    ``ok`` should never claim reachability nothing observed. Instead this now
+    runs the SAME confirmation probe (cost-bounded by ``_cached_probe`` /
+    ``cfg.provider_probe_interval_s``, so a frequent sweep on an idle board
+    can't turn into a probe storm) against the historical Anthropic default
+    host (no streak evidence exists yet to resolve a runner-specific one) and
+    reports ``ok`` (probe reached it) or ``no_network`` (probe failed) --
+    either way an HONEST, measured verdict, with ``error_streak: 0`` and a
+    detail that never contains "provider reachable" on the failing branch.
+
+    CONFIRMATION probe, reached once the primary signal has tripped OR the
+    board has no history at all: a bare TCP connect to a host resolved per
+    runner/provider (AC7: ``_provider_probe_host`` -- Anthropic for a Claude
+    streak, the erroring pi sessions' own recorded provider for a pi streak,
+    see ``_PI_PROVIDER_HOSTS``) via ``_default_provider_probe``. Connects ->
+    ``erroring`` (network is up, the provider itself is degraded) when a
+    streak tripped, ``ok`` when there was no streak to confirm; fails ->
+    ``no_network`` either way (this box is offline). Injectable ``probe``
+    (now called with that resolved host, same shape as
+    ``check_gh_credential_reachability``'s ``run``/``check_ollama_models``'s
+    ``transport``, so tests never open a real socket).
     """
     home = cfg.home
     keys = dispatcher.list_keys(home)
@@ -1302,7 +1358,7 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
     streak_fmt: str | None = None
     streak_provider: str | None = None
     for entry in outcomes:
-        if entry["outcome"] != "error":
+        if entry["outcome"] not in ("error", "crashed"):
             break
         if streak == 0:
             streak_fmt, streak_provider = entry["format"], entry["provider"]
@@ -1310,12 +1366,27 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
         if streak >= _PROVIDER_ERROR_STREAK:
             break
     if streak < _PROVIDER_ERROR_STREAK:
-        return {"name": "provider_availability", "status": "ok", "state": "ok",
-                "detail": "provider reachable, no recent error streak",
-                "error_streak": streak}
+        if outcomes:
+            return {"name": "provider_availability", "status": "ok", "state": "ok",
+                    "detail": "provider reachable, no recent error streak",
+                    "error_streak": streak}
+        # AC3: no terminal session outcomes to measure from at all -- probe
+        # rather than assert reachability nothing observed.
+        reachable, reason = _cached_probe(
+            home, _PROVIDER_PROBE_HOST, now, cfg.provider_probe_interval_s,
+            probe or _default_provider_probe)
+        if reachable:
+            return {"name": "provider_availability", "status": "ok", "state": "ok",
+                    "detail": f"no session history to measure from; network probe reachable ({reason})",
+                    "error_streak": 0}
+        return {"name": "provider_availability", "status": "fail", "state": "no_network",
+                "detail": (f"no session history to measure from; network probe unreachable "
+                           f"({reason}) -- this machine appears offline"),
+                "error_streak": 0}
 
     host = _provider_probe_host(streak_fmt, streak_provider)
-    reachable, reason = (probe or _default_provider_probe)(host)
+    reachable, reason = _cached_probe(
+        home, host, now, cfg.provider_probe_interval_s, probe or _default_provider_probe)
     if reachable:
         return {
             "name": "provider_availability", "status": "warn", "state": "erroring",

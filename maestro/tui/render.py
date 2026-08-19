@@ -51,8 +51,16 @@ def _fmt_epoch(ts: float | None) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
 
-def _render_badge(status: dict) -> str:
-    """Compact fleet state for the header: on/off, interval, heartbeat age."""
+def _render_badge(status: dict, provider: dict | None = None) -> str:
+    """Compact fleet state for the header: on/off, interval, heartbeat age.
+
+    T-89 (AC1): *provider* -- ``health.check_provider_availability``'s own
+    result -- rides along here so a provider/network outage is visible on the
+    ALWAYS-visible main board, not only behind the `F` FleetScreen panel
+    (``show=False``). ``None`` (no result yet, e.g. the very first render
+    before the badge worker's first tick lands) renders exactly as before --
+    no provider segment at all, never a false "ok".
+    """
     dot = "[green]●[/green] up" if status.get("loaded") else "[red]○[/red] down"
     interval = status.get("interval")
     interval_str = f"{interval}s" if interval else "—"
@@ -60,6 +68,11 @@ def _render_badge(status: dict) -> str:
     badge = f"{dot}  [dim]int[/dim] {interval_str}  [dim]hb[/dim] {hb} "
     if status.get("paused"):
         badge = f"[yellow bold]⏸ PAUSED[/yellow bold]  {badge}"
+    state = (provider or {}).get("state")
+    if state == "no_network":
+        badge = f"[red bold]NO NETWORK[/red bold]  {badge}"
+    elif state == "erroring":
+        badge = f"[yellow bold]ERRORING[/yellow bold]  {badge}"
     return badge
 
 

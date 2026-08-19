@@ -184,6 +184,13 @@ class Snapshot:
     # lets human-facing surfaces (status/NEEDS-YOU.md) distinguish "burning" from
     # "parked, waiting for you". Reset on every PhaseChanged, same as failure_count.
     burning: bool = False
+    # T-89 (AC5): the `kind`/`state` markers off the CURRENT DEGRADED park's Failed/
+    # Stalled payload -- e.g. kind="provider", state="no_network" when the fleet's
+    # provider_availability check was non-ok at fail time, so the TUI detail pane can
+    # read a degraded ticket as provider-caused rather than a bare watchdog timeout.
+    # None for a generic failure. Reset on every PhaseChanged, same as burning.
+    last_error_kind: str | None = None
+    last_error_state: str | None = None
     next_requeue_at: float | None = None
     open_questions: dict[str, str] = field(default_factory=dict)
     # qid → answer text for questions answered since the last phase change.
@@ -456,6 +463,8 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 s.phase = new_phase
                 s.failure_count = 0
                 s.burning = False
+                s.last_error_kind = None
+                s.last_error_state = None
                 s.next_requeue_at = None
                 s.answered_questions = {}
                 s.unresolved_reviews = 0
@@ -545,6 +554,8 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.FAILED:
             s.failure_count += 1
             s.last_error = p.get("error", s.last_error)
+            s.last_error_kind = p.get("kind")
+            s.last_error_state = p.get("state")
         elif t == E.STALLED:
             if s.phase == Phase.DONE.value:
                 # (e) DONE is absorbing: a Stalled after Finalized cannot
@@ -554,6 +565,8 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 s.phase = Phase.DEGRADED.value
                 s.last_error = p.get("reason", s.last_error)
                 s.burning = p.get("kind") == "burn"
+                s.last_error_kind = p.get("kind")
+                s.last_error_state = p.get("state")
         elif t == E.FINALIZED:
             s.phase = Phase.DONE.value
             s.next_requeue_at = None

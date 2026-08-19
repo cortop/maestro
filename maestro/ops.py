@@ -1747,7 +1747,8 @@ def record_impl_turn(cfg: Config, key: str, *, role: str = "implementer",
 
 
 def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler",
-         dead_letter: bool = False, kind: str | None = None) -> str:
+         dead_letter: bool = False, kind: str | None = None,
+         provider_state: str | None = None) -> str:
     """Record a failure; back off, or dead-letter if over the threshold.
 
     ``dead_letter=True`` (T-45) skips the failure-count threshold and
@@ -1762,15 +1763,27 @@ def fail(cfg: Config, key: str, error: str, *, actor: str = "reconciler",
     surfaces (``maestro status``, ``NEEDS-YOU.md``) can tell "parked, waiting
     for you" apart from "burning" (spec AC5). Omitted (``None``) for every
     other caller; never itself changes whether this call dead-letters.
+
+    ``provider_state`` (T-89, AC5) tags the payload with ``kind: "provider"``
+    plus the observed ``health.check_provider_availability`` state ("erroring"
+    / "no_network") for a caller that knows the fleet's provider check was
+    non-ok when this failure fired -- e.g. the watchdog reaping a wedged
+    session during an outage, so it reads as provider-caused rather than a
+    bare timeout (folded into ``Snapshot.last_error_kind``/
+    ``last_error_state``, rendered in the TUI detail pane). Mutually
+    exclusive with ``kind`` in practice (a burn park and a provider outage are
+    different failure classes); if both are given, ``provider_state`` wins --
+    it is the more specific, evidence-backed marker.
     """
     snap = snap_mod.load(cfg.home, key)
-    failed_payload = {"error": error, **({"kind": kind} if kind else {})}
+    marker = ({"kind": "provider", "state": provider_state} if provider_state
+              else ({"kind": kind} if kind else {}))
+    failed_payload = {"error": error, **marker}
     _append(cfg, key, E.FAILED, failed_payload, actor=actor,
             sid=step_id(key, snap.phase, snap.observed_seq, "fail"))
     snap = snap_mod.load(cfg.home, key)
     if dead_letter or snap.failure_count >= cfg.max_failures:
-        stalled_payload = {"reason": f"{snap.failure_count} failures: {error}",
-                            **({"kind": kind} if kind else {})}
+        stalled_payload = {"reason": f"{snap.failure_count} failures: {error}", **marker}
         _append(cfg, key, E.STALLED, stalled_payload,
                 actor=actor, sid=f"deadletter-{key}-{snap.observed_seq}")
         _write_deadletter(cfg, key, error)

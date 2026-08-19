@@ -290,6 +290,11 @@ class Config:
     # seconds (the ticket's "within the hour" bar). spend_warn_fractions is the one
     # exception -- those fire at most once per UTC date regardless of this knob.
     alarm_cooldown_s: int = 3600
+    # T-89: bounds health.check_provider_availability's confirmation TCP probe --
+    # a real result is reused for this many seconds (per probed host) instead of
+    # re-probing on every doctor sweep/badge refresh. 0 disables caching (always
+    # probes fresh), same convention as no_output_timeout/backup_interval.
+    provider_probe_interval_s: int = 300
     raw: dict = field(default_factory=dict)
 
 
@@ -554,6 +559,8 @@ def load(home_arg: str | None = None) -> Config:
             [float(x) for x in raw_fracs] if isinstance(raw_fracs, list)
             else cfg.alarm_spend_warn_fractions)
         cfg.alarm_cooldown_s = int(al.get("cooldown_s", cfg.alarm_cooldown_s))
+        cfg.provider_probe_interval_s = int(
+            m.get("provider_probe_interval_s", cfg.provider_probe_interval_s))
         if "providers" in data:
             cfg.providers.update(data["providers"])
         # OC-4: [runner.opencode] is the one provider_config table this module
@@ -682,6 +689,8 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # reconcile_allowed_tools (default [] -- no extra grant)
 # unverified_claim_max_age = 86400  # ceiling (s) for honoring an unverifiable ("unknown"
                                     # identity) claim by raw pid liveness before releasing it
+# provider_probe_interval_s = 300  # reuse check_provider_availability's TCP probe result for this
+                                  # many seconds per host instead of re-probing every sweep (0 disables caching)
 # backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
 # backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
 # backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
