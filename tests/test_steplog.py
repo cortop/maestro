@@ -270,6 +270,64 @@ def test_session_outcome_running_when_no_terminal_result(tmp_path):
     assert session_outcome(p)["outcome"] == "running"
 
 
+def test_session_outcome_still_running_with_no_result_and_no_pid_given(tmp_path):
+    """Backward compat: omitting `pid` (the default) never classifies as
+    crashed, even with only garbage output -- unchanged behavior for every
+    existing caller that doesn't know a pid."""
+    p = tmp_path / "reconcile-T-1-2.stream.jsonl"
+    p.write_text("zsh: command not found: claude\n", encoding="utf-8")
+    assert session_outcome(p)["outcome"] == "running"
+
+
+def test_session_outcome_still_running_with_no_result_and_a_live_pid(tmp_path):
+    """A pid that's alive (this test process itself) means the session could
+    still be mid-flight -- garbage-only output alone is not enough."""
+    import os
+    p = tmp_path / "reconcile-T-1-3.stream.jsonl"
+    p.write_text("zsh: command not found: claude\n", encoding="utf-8")
+    assert session_outcome(p, pid=os.getpid())["outcome"] == "running"
+
+
+def test_session_outcome_crashed_when_only_garbage_output_and_pid_is_dead(tmp_path):
+    """T-89 (Gap 3, AC4): a session whose log holds only non-JSON runner
+    output (the stderr-splat shape `sessions.py` Popens stdout+stderr into)
+    and whose pid is provably dead classifies as `crashed`, not `running`
+    forever -- carrying a bounded tail of the log."""
+    p = tmp_path / "reconcile-T-1-4.stream.jsonl"
+    p.write_text("zsh: command not found: claude\nno network\n", encoding="utf-8")
+    result = session_outcome(p, pid=_dead_pid())
+    assert result["outcome"] == "crashed"
+    assert "no network" in result["result"]["tail"]
+
+
+def test_session_outcome_crashed_tail_is_bounded(tmp_path):
+    p = tmp_path / "reconcile-T-1-5.stream.jsonl"
+    p.write_text("\n".join(f"garbage line {i}" for i in range(200)) + "\n", encoding="utf-8")
+    result = session_outcome(p, pid=_dead_pid())
+    assert result["outcome"] == "crashed"
+    tail_lines = result["result"]["tail"].splitlines()
+    assert len(tail_lines) <= 20
+    assert tail_lines[-1] == "garbage line 199"
+
+
+def test_session_outcome_a_valid_json_line_among_garbage_never_crashes(tmp_path):
+    """Some real JSON was written (just no terminal `result` yet) -- this is
+    genuinely still running, not crashed, regardless of pid liveness."""
+    p = tmp_path / "reconcile-T-1-6.stream.jsonl"
+    p.write_text(
+        json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}) + "\n"
+        "some stray stderr text\n",
+        encoding="utf-8",
+    )
+    assert session_outcome(p, pid=_dead_pid())["outcome"] == "running"
+
+
+def _dead_pid() -> int:
+    """A pid `claims.pid_alive` reliably reports dead without shelling out or
+    touching a real process -- see its own `pid <= 0` guard."""
+    return -1
+
+
 def test_session_outcome_unknown_for_plain_text_log(tmp_path):
     p = tmp_path / "reconcile-T-1-1.log"
     p.write_text("plain text output\n", encoding="utf-8")

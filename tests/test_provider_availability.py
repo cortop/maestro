@@ -8,7 +8,7 @@ import io
 import json
 import sys
 
-from maestro import alarm, cli, health, store
+from maestro import alarm, claims, cli, health, store
 from maestro.config import Config
 
 from conftest import seed_ticket
@@ -75,13 +75,28 @@ def _boom_probe(host=None):
     raise AssertionError("must not call the probe when the primary signal hasn't tripped")
 
 
-# --- fail open when nothing configured / no evidence of a problem --------------
+# --- AC3: no terminal session outcomes at all -- measure, don't fail open -----
 
 
-def test_ok_and_no_probe_call_on_a_fresh_home_with_no_sessions(cfg, home):
-    result = health.check_provider_availability(cfg, 1000, probe=_boom_probe)
+def test_ok_on_a_fresh_home_with_no_sessions_and_a_reachable_probe(cfg, home):
+    """A fresh home has no session history to derive a streak from, but T-89
+    (AC3) no longer skips the probe here -- reachability is now MEASURED, not
+    asserted. A reachable probe still reports ok."""
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (True, "reachable"))
     assert result["status"] == "ok"
     assert result["state"] == "ok"
+    assert result["error_streak"] == 0
+
+
+def test_no_network_on_a_fresh_home_with_no_sessions_and_an_unreachable_probe(cfg, home):
+    """AC3: the fresh-home fail-open this test used to pin (a bare `ok` with
+    a "provider reachable" detail it never measured) is gone -- an
+    unreachable probe now reports a distinguishable non-ok state and the
+    detail no longer claims reachability."""
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (False, "unreachable"))
+    assert result["status"] != "ok"
+    assert result["state"] != "ok"
+    assert "provider reachable" not in result["detail"]
     assert result["error_streak"] == 0
 
 
@@ -156,12 +171,16 @@ def test_streak_is_computed_fleet_wide_across_tickets(cfg, home):
 def test_opencode_runner_errors_never_count_toward_the_anthropic_streak(cfg, home):
     """OC-5: now that `steplog.session_outcome` can classify an opencode log's
     own success/error (it used to always report 'unknown' here), this check
-    must still never fold it in -- it probes api.anthropic.com, not ollama."""
+    must still never fold it in -- it probes api.anthropic.com, not ollama.
+    Every session here is opencode, so `_recent_fleet_outcomes` sees NO
+    stream-json/pi outcomes at all -- same "no terminal session outcomes"
+    shape AC3 covers, hence the probe (unlike the other below-threshold
+    tests above) IS reached here; a reachable one still reports ok."""
     seed_ticket(home, "T-1", "x", phase="implementing")
     _write_opencode_session(home, "T-1", 100.0, "error")
     _write_opencode_session(home, "T-1", 200.0, "error")
     _write_opencode_session(home, "T-1", 300.0, "error")
-    result = health.check_provider_availability(cfg, 1000, probe=_boom_probe)
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (True, "reachable"))
     assert result["status"] == "ok"
     assert result["error_streak"] == 0
 
@@ -213,6 +232,62 @@ def test_claude_streak_still_probes_the_hardcoded_anthropic_host(cfg, home):
     assert captured == [health._PROVIDER_PROBE_HOST]
 
 
+def test_probe_bounded_to_once_per_configured_interval_across_report_calls(cfg, home):
+    """AC3's cost bound: a fresh home's confirmation probe is real network I/O
+    -- report() run repeatedly (a doctor sweep, a TUI badge refresh) must not
+    turn that into a probe storm. Two `report()` calls a few seconds apart,
+    well inside `provider_probe_interval_s`, hit the probe once; a third call
+    past the interval probes again."""
+    calls = []
+
+    def _probe(host):
+        calls.append(host)
+        return True, "reachable"
+
+    cfg.provider_probe_interval_s = 300
+    r1 = health.check_provider_availability(cfg, 1000, probe=_probe)
+    r2 = health.check_provider_availability(cfg, 1050, probe=_probe)
+    assert len(calls) == 1
+    assert r1["state"] == r2["state"] == "ok"
+
+    r3 = health.check_provider_availability(cfg, 1000 + 301, probe=_probe)
+    assert len(calls) == 2
+    assert r3["state"] == "ok"
+
+
+def test_probe_interval_zero_disables_caching(cfg, home):
+    calls = []
+
+    def _probe(host):
+        calls.append(host)
+        return True, "reachable"
+
+    cfg.provider_probe_interval_s = 0
+    health.check_provider_availability(cfg, 1000, probe=_probe)
+    health.check_provider_availability(cfg, 1000, probe=_probe)
+    assert len(calls) == 2
+
+
+def test_crashed_session_with_a_live_claim_and_dead_pid_counts_toward_the_streak(cfg, home):
+    """T-89 (Gap 3, AC4): a session log holding only non-JSON runner output
+    (a stderr splat) whose claim's pid is dead is classified `crashed` by
+    `steplog.session_outcome` (threaded through via the claim's own
+    `log_path`, see `_recent_fleet_outcomes`) and counts toward the streak
+    the same as a parsed `error` result."""
+    seed_ticket(home, "T-1", "x", phase="implementing")
+    session_id = f"reconcile-T-1-{100.0:.6f}"
+    crashed_log = store.session_stream_path(home, "T-1", session_id)
+    crashed_log.parent.mkdir(parents=True, exist_ok=True)
+    crashed_log.write_text("zsh: command not found: claude\n", encoding="utf-8")
+    claims.write_claim(home, "T-1", -1, "reconcile-T-1", log_path=str(crashed_log))
+    _write_session(home, "T-1", 200.0, "error")
+    _write_session(home, "T-1", 300.0, "error")
+
+    result = health.check_provider_availability(cfg, 1000, probe=lambda host: (True, "reachable"))
+    assert result["error_streak"] == 3
+    assert result["state"] == "erroring"
+
+
 def test_a_running_session_in_the_window_is_skipped_not_counted(cfg, home):
     seed_ticket(home, "T-1", "x", phase="implementing")
     _write_session(home, "T-1", 100.0, "error")
@@ -246,7 +321,9 @@ def _sweep(home):
 
 
 def test_real_doctor_json_ok_on_a_fresh_home(home, monkeypatch):
-    monkeypatch.setattr(health, "_default_provider_probe", _boom_probe)
+    """AC3: a fresh home now genuinely probes (no session history to fail
+    open on) -- a reachable probe still reports ok."""
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (True, "reachable"))
     code, out = _sweep(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "provider_availability")
@@ -262,6 +339,28 @@ def test_real_doctor_json_reports_no_network(home, monkeypatch):
     assert code == 0  # WARN/FAIL-only, never blocks a spawn (report-only, MTO-8)
     check = next(c for c in out["checks"] if c["name"] == "provider_availability")
     assert check["status"] == "fail"
+    assert check["state"] == "no_network"
+
+
+def test_real_doctor_strict_exits_nonzero_on_no_network(home, monkeypatch):
+    """AC6: `maestro doctor --strict` exits non-zero when the provider check's
+    state is no_network -- report-only never blocks a plain sweep, but
+    --strict is the opt-in gate a human/CI runs to demand a fully green
+    board."""
+    seed_ticket(home, "T-1", "x", phase="implementing")
+    for epoch in (100.0, 200.0, 300.0):
+        _write_session(home, "T-1", epoch, "error")
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (False, "no route to host"))
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        code = cli.main(["--home", str(home), "doctor", "--strict"])
+    finally:
+        sys.stdout = old
+    assert code != 0
+    out = json.loads(buf.getvalue())
+    check = next(c for c in out["checks"] if c["name"] == "provider_availability")
     assert check["state"] == "no_network"
 
 
@@ -290,8 +389,12 @@ def test_alarm_fires_once_on_a_fresh_no_network_episode(home, tmp_path, monkeypa
 
 
 def test_alarm_never_fires_on_a_healthy_board_and_never_probes(home, tmp_path, monkeypatch):
+    """AC3 changed a fresh board from 'never probes' to 'probes, rate-bounded'
+    -- a genuinely healthy (reachable) board must still never alarm, which is
+    this test's real intent; only the probe's own reachability, not whether
+    it fires at all, is what changed."""
     log_path = tmp_path / "alarm.log"
-    monkeypatch.setattr(health, "_default_provider_probe", _boom_probe)
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (True, "reachable"))
     cfg = Config(home=home,
                  notify_command=f'printf "%s|%s\\n" "$KEY" "$PHASE" >> {log_path}')
 

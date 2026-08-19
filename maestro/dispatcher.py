@@ -1919,6 +1919,11 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
     if not max_seconds and not no_output_timeout and not turn_wallclock:
         return []
     reaped: list[str] = []
+    # T-89 (AC5): computed lazily, at most once per sweep -- only once a reap
+    # actually happens (most sweeps reap nothing) -- and reused across every
+    # key reaped in this same call, since it's the same `now`. `_sentinel`
+    # distinguishes "not computed yet" from a real `None` (provider check ok).
+    provider_state: str | None = "_sentinel"
     for key, claim in claims.all_claims(home).items():
         reason = None
         log_path = claim.get("log_path")
@@ -1949,8 +1954,12 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
         pid = claim.get("pid")
         kill(pid)
         claims.release(home, key)
-        from . import ops
-        ops.fail(cfg, key, f"watchdog: {reason} (pid {pid})", actor="dispatcher")
+        from . import health, ops
+        if provider_state == "_sentinel":
+            provider = health.check_provider_availability(cfg, now)
+            provider_state = provider["state"] if provider["status"] != "ok" else None
+        ops.fail(cfg, key, f"watchdog: {reason} (pid {pid})", actor="dispatcher",
+                 provider_state=provider_state)
         reaped.append(key)
     return reaped
 
