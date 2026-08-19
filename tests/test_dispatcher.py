@@ -1696,6 +1696,41 @@ def _age_claim(home, key, epoch):
     store.write_json(claims.claim_path(home, key), data)
 
 
+def test_watchdog_reap_during_outage_tags_failed_event_with_provider_marker(home, cfg, monkeypatch):
+    """T-89 (AC5): when the dispatcher fails a ticket (here, the watchdog
+    reaping a wedged claim) while health.check_provider_availability is
+    non-ok, the appended Failed event's payload carries a provider marker
+    (kind="provider") plus the observed state -- proven over a REAL
+    dispatch(cfg, DryRunSessions(), ...) sweep, not a direct ops.fail call."""
+    from maestro import health, store as store_mod
+    import json as json_mod
+
+    cfg.max_session_seconds = 100
+    _seed(home, "T-1", Phase.IMPLEMENTING)  # this is the one the watchdog reaps
+    _seed(home, "T-2", Phase.IMPLEMENTING)  # this is the one whose logs trip the streak
+    for epoch in (100.0, 200.0, 300.0):
+        session_id = f"reconcile-T-2-{epoch:.6f}"
+        path = store_mod.session_stream_path(home, "T-2", session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json_mod.dumps({"type": "result", "subtype": "error_during_execution",
+                            "is_error": True}) + "\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(health, "_default_provider_probe", lambda host: (False, "offline"))
+
+    dead_pid = 2_000_000_000
+    claims.write_claim(home, "T-1", dead_pid, "reconcile-T-1")
+    _age_claim(home, "T-1", store.now_epoch() - 10_000)
+
+    disp.dispatch(cfg, DryRunSessions(), now=store.now_epoch())
+
+    events = event_log.read(home, "T-1")
+    failed = next(e for e in events if e["type"] == "Failed")
+    assert failed["payload"]["kind"] == "provider"
+    assert failed["payload"]["state"] == "no_network"
+
+
 def test_config_parses_watchdog_knobs(home):
     from maestro import config as config_mod
 

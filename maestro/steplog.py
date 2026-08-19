@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-from . import event_log, store
+from . import claims, event_log, store
 from . import events as E
 
 # Tools we consider "notable" and want to surface in the timeline
@@ -25,6 +25,15 @@ _EDIT_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 _COMMAND_TOOLS = frozenset({"Bash"})
 _SUBAGENT_TOOLS = frozenset({"Agent"})
 _NOTABLE_TOOLS = _EDIT_TOOLS | _COMMAND_TOOLS | _SUBAGENT_TOOLS
+
+# T-89 (Gap 3): a session log holding only non-JSON runner output (a stderr
+# splat -- ``ClaudeSessions.spawn`` Popens stdout AND stderr into the same
+# log file with no JSON framing of its own, e.g. a `claude` CLI network error
+# printed before any stream-json record could be written) is bounded to this
+# many trailing lines when classified as "crashed" below, so a huge garbage
+# log can't bloat the outcome dict or whatever later stores it (a Failed
+# payload, a rendered detail pane).
+_CRASH_TAIL_LINES = 20
 
 
 def _kind(tool_name: str, inp: dict) -> str:
@@ -467,20 +476,33 @@ def _opencode_session_outcome(path: Path) -> dict:
     return {"outcome": outcome, "result": {"reason": reason}, "rate_limit_info": None}
 
 
-def session_outcome(stream_path: Path) -> dict:
+def session_outcome(stream_path: Path, *, pid: int | None = None) -> dict:
     """Tail-scan *stream_path* for its terminal ``result`` and any ``rate_limit_event``.
 
     Returns ``{"outcome": ..., "result": <result obj or None>, "rate_limit_info": ...}``.
     ``outcome`` is one of ``success`` / ``error`` / ``rate_limited`` (terminal result seen),
-    ``running`` (no terminal record yet), or ``unknown`` (none of ``.stream.jsonl``,
-    ``.opencode.jsonl``, or ``.pi.jsonl`` — e.g. a plain-text session). An opencode
-    ``.opencode.jsonl`` log (OC-5) is dispatched to ``_opencode_session_outcome``, and a
-    pi ``.pi.jsonl`` log (T-58) to ``_pi_session_outcome``, instead of the Claude-shaped
-    parse below. A rejected ``rate_limit_event`` only escalates an already-errored result
-    to ``rate_limited``; it never overrides an otherwise-``success`` result — the event is
-    context, not the verdict. A pi log's dict also carries ``provider`` (T-58,
-    ``_pi_session_outcome``'s own docstring) -- ``None`` for a Claude/opencode log,
-    where the provider is either implicit (Claude) or not surfaced (opencode).
+    ``crashed`` (T-89, Claude logs only -- see below), ``running`` (no terminal record yet),
+    or ``unknown`` (none of ``.stream.jsonl``, ``.opencode.jsonl``, or ``.pi.jsonl`` — e.g. a
+    plain-text session). An opencode ``.opencode.jsonl`` log (OC-5) is dispatched to
+    ``_opencode_session_outcome``, and a pi ``.pi.jsonl`` log (T-58) to
+    ``_pi_session_outcome``, instead of the Claude-shaped parse below. A rejected
+    ``rate_limit_event`` only escalates an already-errored result to ``rate_limited``; it
+    never overrides an otherwise-``success`` result — the event is context, not the verdict.
+    A pi log's dict also carries ``provider`` (T-58, ``_pi_session_outcome``'s own
+    docstring) -- ``None`` for a Claude/opencode log, where the provider is either implicit
+    (Claude) or not surfaced (opencode).
+
+    ``pid`` (T-89, Gap 3) is the OPTIONAL known pid of the process that wrote this Claude
+    stream log -- passed only by a caller that already has one (e.g. a claim record). When
+    the log holds SOME raw output but not one single parseable JSON line (a stderr splat --
+    ``ClaudeSessions.spawn`` Popens stdout+stderr into the same file with no framing of its
+    own, so a `claude` CLI error printed before it could write its first stream-json record
+    looks identical to "still running" otherwise) and *pid* is given and no longer alive,
+    this reports ``crashed`` instead of ``running`` -- the process is provably gone, so
+    "running" is simply wrong, not just incomplete. ``result`` for that outcome is
+    ``{"tail": <last _CRASH_TAIL_LINES lines of the log>}``. Without a *pid* (the default),
+    behavior is unchanged -- a log with no parseable result always reads as ``running``,
+    exactly as before.
     """
     if stream_path.name.endswith(".opencode.jsonl"):
         return _opencode_session_outcome(stream_path)
@@ -491,15 +513,22 @@ def session_outcome(stream_path: Path) -> dict:
 
     result_obj: dict | None = None
     rate_limit_info: dict | None = None
+    saw_json = False
+    saw_raw = False
+    tail: list[str] = []
     with stream_path.open(encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             raw = raw.strip()
             if not raw:
                 continue
+            saw_raw = True
             try:
                 obj = json.loads(raw)
             except json.JSONDecodeError:
+                tail.append(raw)
+                del tail[:-_CRASH_TAIL_LINES]
                 continue
+            saw_json = True
             t = obj.get("type")
             if t == "result":
                 result_obj = obj
@@ -507,6 +536,10 @@ def session_outcome(stream_path: Path) -> dict:
                 rate_limit_info = obj.get("rate_limit_info")
 
     if result_obj is None:
+        if (not saw_json and saw_raw and pid is not None
+                and not claims.pid_alive(pid)):
+            return {"outcome": "crashed", "result": {"tail": "\n".join(tail)},
+                    "rate_limit_info": rate_limit_info}
         return {"outcome": "running", "result": None, "rate_limit_info": rate_limit_info}
 
     classified = classify_result(result_obj)

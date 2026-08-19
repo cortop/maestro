@@ -55,6 +55,15 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
     if runner_model:
         runner_info += f" [dim]({_esc(runner_model)})[/dim]"
 
+    # T-89 (AC5): a Failed/Stalled that fired while the provider check was
+    # non-ok carries kind="provider" + the observed state -- surface that
+    # here so a degraded ticket reads as provider-caused, not a bare
+    # watchdog timeout, without having to open the raw event log.
+    last_error_line = v(snap.last_error)
+    if snap.last_error_kind == "provider":
+        state = _esc(snap.last_error_state or "unknown")
+        last_error_line = f"[red bold]PROVIDER[/red bold] ({state}) {last_error_line}"
+
     return (
         f"[bold]{v(title if title is not None else snap.title)}[/bold]\n\n"
         f"[dim]Key[/dim]           {v(snap.key)}\n"
@@ -64,7 +73,7 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
         f"[dim]PR[/dim]            {pr_info}\n"
         f"[dim]CI[/dim]            {v(snap.ci_state)}\n"
         f"[dim]Failures[/dim]      {snap.failure_count}\n"
-        f"[dim]Last error[/dim]    {v(snap.last_error)}\n"
+        f"[dim]Last error[/dim]    {last_error_line}\n"
         f"[dim]Open questions[/dim] {questions}\n"
         f"[dim]Updated[/dim]       {v(snap.updated_ts)}\n"
     )
