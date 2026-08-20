@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from maestro import backup, cli, claims, dispatcher as disp, health, ops, store
 from maestro.config import Config
@@ -227,24 +228,49 @@ def test_check_backup_age_ok_when_disabled(home, cfg):
 
 
 def test_check_backup_age_never_swept_is_ok_not_warn(home, cfg):
-    """T-88 AC3: a freshly-initialized home with no backups and no dispatcher
-    sweep (no derived/.heartbeat.json) reports its own non-warning state,
-    mirroring check_heartbeat's "no heartbeat yet" -> status ok contract --
-    not the noisy `warn` a never-swept board used to get."""
+    """T-101: pinned name kept, contract rewritten. Old (non-monotonic)
+    contract: this exact home -- no backups, no dispatcher sweep, no
+    `derived/.heartbeat.json` -- read `ok` only because it had never swept;
+    the SAME empty home with a stale tarball added (see
+    test_check_backup_age_warns_when_newest_tarball_is_stale below, pre-T-101)
+    used to flip to `warn`, i.e. deleting your only backup improved the grade.
+    New contract: an empty home (no `events/`/`tickets/` -- nothing
+    irreplaceable yet, per `_holds_state`) is `ok` regardless of sweep
+    history or tarball presence -- there is nothing to protect."""
     cfg.backup_interval = 100
     assert not (home / "derived" / ".heartbeat.json").exists()
     result = health.check_backup_age(cfg, store.now_epoch())
     assert result["status"] == "ok"
     assert result["age_s"] is None
-    assert "never swept" in result["detail"]
+    assert "nothing to back up" in result["detail"]
+
+
+def test_check_backup_age_never_swept_with_stale_tarball_is_never_worse_than_no_tarball(home, cfg):
+    """T-101 AC1, the spec's own reproduction A: a never-swept home (no
+    `derived/.heartbeat.json`) whose only tarball is older than
+    `2 * backup_interval` must never grade worse than the same home with that
+    tarball deleted. Old contract: `warn` with the stale tarball, `ok` once it
+    was deleted -- removing your only backup improved the grade. New
+    contract: this home holds no state (no seeded ticket) either way, so both
+    reads are `ok`."""
+    cfg.backup_interval = 100
+    assert not (home / "derived" / ".heartbeat.json").exists()
+    now = float(int(store.now_epoch()))
+    backup.create_backup(cfg, now - 1000)  # a stale tarball, still no ticket state
+    with_tarball = health.check_backup_age(cfg, now)
+    for f in backup.list_backups(cfg):
+        f.unlink()
+    without_tarball = health.check_backup_age(cfg, now)
+    assert with_tarball["status"] == "ok"
+    assert without_tarball["status"] == "ok"
 
 
 def test_check_backup_age_warns_when_swept_and_no_backups_exist(home, cfg):
-    """A board that HAS swept (has a heartbeat) but has no tarballs at all is a
-    real fault, distinct from the never-swept case above."""
+    """A board that holds real state but has no tarballs at all is a real
+    fault, distinct from the no-state case above. (T-101: gated on
+    `_holds_state`, no longer on a heartbeat write.)"""
     cfg.backup_interval = 100
-    store.write_json(home / "derived" / ".heartbeat.json",
-                     {"ts": "x", "epoch": store.now_epoch(), "spawned": 0})
+    _seed(home, "T-1", Phase.READY)
     result = health.check_backup_age(cfg, store.now_epoch())
     assert result["status"] == "warn"
     assert result["age_s"] is None
@@ -252,10 +278,11 @@ def test_check_backup_age_warns_when_swept_and_no_backups_exist(home, cfg):
 
 def test_check_backup_age_ignores_a_stale_cursor_over_an_emptied_backup_dir(home, cfg):
     """T-88 AC2: grounded in the tarballs, not the cursor -- a fresh cursor
-    epoch over an empty backup_dir must NOT read as ok."""
+    epoch over an empty backup_dir must NOT read as ok, for a board that
+    holds real state (T-101: `_holds_state`, not a heartbeat write)."""
     cfg.backup_interval = 100
     now = store.now_epoch()
-    store.write_json(home / "derived" / ".heartbeat.json", {"ts": "x", "epoch": now, "spawned": 0})
+    _seed(home, "T-1", Phase.READY)
     store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now})
     assert not backup.resolve_backup_dir(cfg).exists()
     result = health.check_backup_age(cfg, now)
@@ -263,7 +290,16 @@ def test_check_backup_age_ignores_a_stale_cursor_over_an_emptied_backup_dir(home
 
 
 def test_check_backup_age_warns_when_newest_tarball_is_stale(home, cfg):
+    """T-101: pinned name kept, contract rewritten. Old (non-monotonic)
+    contract: this test ran with NO seeded state -- an empty home -- and
+    still asserted `warn` for a stale tarball, while the sibling
+    zero-tarball test above (same empty home) asserted `ok`; deleting the
+    only backup silently improved the grade. New contract: `_holds_state`
+    gates first, so a stale tarball only warns when the home actually holds
+    something irreplaceable -- this test now seeds a real ticket to reach
+    that branch honestly."""
     cfg.backup_interval = 100
+    _seed(home, "T-1", Phase.READY)
     now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
     backup.create_backup(cfg, now - 1000)
     result = health.check_backup_age(cfg, now)
@@ -273,6 +309,7 @@ def test_check_backup_age_warns_when_newest_tarball_is_stale(home, cfg):
 
 def test_check_backup_age_ok_when_newest_tarball_is_fresh(home, cfg):
     cfg.backup_interval = 3600
+    _seed(home, "T-1", Phase.READY)
     now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
     backup.create_backup(cfg, now - 10)
     result = health.check_backup_age(cfg, now)
@@ -284,6 +321,7 @@ def test_check_backup_age_uses_the_newest_of_several_tarballs(home, cfg):
     """A stale cursor (or none at all) must not shadow a newer tarball that a
     manual `maestro backup` created after the dispatcher's last sweep."""
     cfg.backup_interval = 3600
+    _seed(home, "T-1", Phase.READY)
     now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
     backup.create_backup(cfg, now - 5000)
     backup.create_backup(cfg, now - 5)
@@ -308,6 +346,62 @@ def test_check_backup_age_ok_via_real_cli_init_backup_doctor_strict(tmp_path, ca
     assert rc == 0
     check = next(c for c in out["checks"] if c["name"] == "backup_age")
     assert check["status"] == "ok"
+
+
+def test_check_backup_age_ok_when_freshly_initialized_with_nothing_at_all(tmp_path, capsys):
+    """T-101 AC3: a freshly `init`-ed home with no tickets, no events and no
+    tarballs still reports `backup_age` ok -- no fresh-install noise -- with
+    no dependence on `.heartbeat.json` (never written here either)."""
+    home = tmp_path / "home"
+    assert cli.main(["--home", str(home), "init"]) == 0
+    capsys.readouterr()
+    assert not (home / "derived" / ".heartbeat.json").exists()
+    rc = cli.main(["--home", str(home), "doctor", "--strict"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    check = next(c for c in out["checks"] if c["name"] == "backup_age")
+    assert check["status"] == "ok"
+
+
+def test_check_backup_age_non_ok_after_restore_into_a_backupless_home(tmp_path, capsys):
+    """T-101 AC2 (spec reproduction B, the false-negative class): a home
+    restored elsewhere from a backup -- real event log present, `backup_dir`
+    freshly created and EMPTY, no heartbeat -- must not read as ok. Driven
+    end to end through the real CLI: init -> create --no-nudge -> dispatch ->
+    backup -> move the tarball outside `backup_dir` -> restore into a second
+    home -> doctor shows `backup_age` != ok."""
+    src = tmp_path / "src"
+    assert cli.main(["--home", str(src), "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["--home", str(src), "create", "First ticket", "--no-nudge"]) == 0
+    capsys.readouterr()
+    src_cfg = Config(home=src)
+    disp.dispatch(src_cfg, DryRunSessions(), now=store.now_epoch())  # mints T-1
+    assert (src / "events" / "T-1.jsonl").exists()
+
+    assert cli.main(["--home", str(src), "backup"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    tarball = vault / Path(created["created"]).name
+    Path(created["created"]).rename(tarball)
+    assert not backup.list_backups(src_cfg)  # backup_dir is empty again
+
+    dst = tmp_path / "dst"
+    assert cli.main(["--home", str(dst), "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["--home", str(dst), "restore", str(tarball), "--force"]) == 0
+    restored = json.loads(capsys.readouterr().out)
+    assert restored["keys"] == ["T-1"]
+    assert not (dst / "derived" / ".heartbeat.json").exists()
+    dst_cfg = Config(home=dst)
+    assert not backup.list_backups(dst_cfg)  # restore does not itself write a tarball
+
+    rc = cli.main(["--home", str(dst), "doctor"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0  # non-strict doctor never trips on check status alone
+    check = next(c for c in out["checks"] if c["name"] == "backup_age")
+    assert check["status"] != "ok"
 
 
 def test_check_backup_age_ok_after_dispatcher_sweep_runs_maybe_backup(home, cfg):
@@ -1112,14 +1206,17 @@ def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypa
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
     _install_dummy_reconcile_skill(repo)
-    # T-88: backup_interval is left at its default (3600, armed) rather than
-    # disabled -- the never-swept board (no derived/.heartbeat.json here) reads
-    # as backup_age status "ok" on its own now, so this exercises --strict with
-    # backups actually armed instead of sidestepping that check entirely.
+    # T-88/T-101: backup_interval is left at its default (3600, armed) rather
+    # than disabled, to exercise --strict with backups actually armed instead
+    # of sidestepping that check entirely -- so a real `backup` is taken right
+    # after seeding the ticket, since T-101 now grades a board that holds real
+    # state (this seeded ticket) and has no tarball as `warn`, not `ok`.
     (home / "config.toml").write_text(
         f'[maestro]\ndaily_spend_ceiling_usd = 50.0\n\n'
         f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
     _seed_bound_ticket(home, "T-1", "alpha")
+    assert cli.main(["--home", str(home), "backup"]) == 0
+    capsys.readouterr()
 
     rc = cli.main(["--home", str(home), "doctor"])
     assert rc == 0
@@ -1176,6 +1273,11 @@ def test_doctor_strict_exits_0_with_narrower_gh_pr_style_grant(home, tmp_path, m
         f'[maestro]\ndaily_spend_ceiling_usd = 50.0\n\n'
         f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
     _seed_bound_ticket(home, "T-1", "alpha")
+    # T-101: this seeded ticket holds real state, so backup_age now needs a
+    # real tarball to read `ok` -- take one so this test stays isolated to
+    # reconciler_permissions, the thing it's actually exercising.
+    assert cli.main(["--home", str(home), "backup"]) == 0
+    capsys.readouterr()
 
     allow = [t for t in disp.RECONCILER_REQUIRED_TOOLS if t != "Bash(gh:*)"] + ["Bash(gh pr:*)"]
     _write_repo_settings(repo, allow=allow)

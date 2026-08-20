@@ -144,3 +144,24 @@ def test_retention_prunes_oldest(tmp_path, capsys):
     kept = backup.list_backups(cfg)
     assert len(kept) == 2
     assert kept == sorted(made)[-2:]  # the two most recent survive
+
+
+def test_newest_backup_epoch_falls_back_to_newest_parseable_name(tmp_path, capsys):
+    """T-101: if only the NEWEST tarball's filename fails to parse, fall back
+    to the next-newest parseable one instead of reporting no backups found at
+    all -- an older but honest tarball beats treating the whole directory as
+    empty."""
+    home = tmp_path / "myhome"
+    _populate(home, capsys)
+    cfg = load(str(home))
+    _reset_backups(cfg)
+
+    good = backup.create_backup(cfg, now=2_000_000_000.0)
+    bad = good.with_name("maestro-backup-not-a-real-stamp.tar.gz")
+    good.rename(bad)  # simulate a hand-renamed / corrupt-stamp tarball, sorts newest by name
+    assert bad.name > good.name
+
+    assert backup.newest_backup_epoch(cfg) is None  # only tarball, unparseable -- no fallback left
+
+    older = backup.create_backup(cfg, now=1_000_000_000.0)
+    assert backup.newest_backup_epoch(cfg) == 1_000_000_000.0  # falls back past the bad name

@@ -68,11 +68,19 @@ def newest_backup_epoch(cfg: Config) -> float | None:
     """Epoch encoded in the newest backup tarball's own filename -- the
     grounding for ``health.check_backup_age`` (T-88): a filename-derived epoch
     survives a `cp`/restore that would leave the tarball's mtime at the wrong
-    value, and never depends on the separate, dispatcher-only cursor file."""
-    backups = list_backups(cfg)
-    if not backups:
-        return None
-    return _epoch_from_name(backups[-1].name)
+    value, and never depends on the separate, dispatcher-only cursor file.
+
+    T-101: falls back to the newest *parseable* name instead of reporting "no
+    backups found" the moment only the single newest filename fails to parse
+    (e.g. hand-renamed, or written by a future/older format) -- an older but
+    still-honest tarball is more useful than treating the whole directory as
+    empty.
+    """
+    for candidate in reversed(list_backups(cfg)):
+        epoch = _epoch_from_name(candidate.name)
+        if epoch is not None:
+            return epoch
+    return None
 
 
 def prune_backups(cfg: Config) -> list[Path]:
