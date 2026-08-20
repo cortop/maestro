@@ -449,6 +449,46 @@ def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
             "unknown": unknown}
 
 
+def check_language_binding(cfg: Config, now: float) -> dict:
+    """T-96 AC3: WARN for any repo binding that resolves a `test_command`
+    while `language` is unset AND the repo's test surface doesn't look
+    python -- a `go.mod`/`package.json` at the repo root (`testlang.
+    guess_from_repo_root`), or no `tests/` directory at all. This is the
+    fail-OPEN, human-facing counterpart to the fail-CLOSED runtime gate
+    (`testlang.resolve_strict`, read by `ops.run_ac_checks`'s `test:`
+    presence check and the H4 deletion scan): those only fire once a
+    ticket's `test:`-annotated AC or a net-deletion diff actually exercises
+    the mismatch; this surfaces the same misconfiguration board-wide, before
+    any ticket ever hits it. Never blocks a spawn."""
+    from . import testlang
+
+    keys = dispatcher.list_keys(cfg.home)
+    bindings = dispatcher.referenced_repo_bindings(cfg, cfg.home, keys)
+    flagged = []
+    for name, binding in bindings.items():
+        if not binding.test_command or binding.language or binding.mode == "local":
+            continue
+        if not binding.path:
+            continue
+        root = Path(binding.path)
+        if not root.is_dir():
+            continue
+        guessed = testlang.guess_from_repo_root(root)
+        no_tests_dir = not (root / "tests").is_dir()
+        if guessed or no_tests_dir:
+            reason = f"looks like {guessed}" if guessed else "has no tests/ directory"
+            flagged.append({"repo": name, "reason": reason})
+    status = "warn" if flagged else "ok"
+    if flagged:
+        detail = "; ".join(
+            f"[repos.{f['repo']}] test_command is set, language is unset, and the "
+            f"repo {f['reason']} -- set language in [repos.{f['repo']}] (or "
+            f"board-wide [maestro] language)" for f in flagged)
+    else:
+        detail = "none"
+    return {"name": "language_binding", "status": status, "detail": detail, "flagged": flagged}
+
+
 def _runner_for_key(cfg: Config, key: str) -> str:
     """T-54: "the runner for key K" -- the decision this predicate encodes --
     for the two doctor checks below.
@@ -1526,7 +1566,8 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
 # the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_phantom_keys, check_missing_acs, check_watchdog_loops,
-          check_depends_on, check_repo_preflight, check_unknown_repo_bindings, check_missing_reconcile_skill,
+          check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
+          check_language_binding, check_missing_reconcile_skill,
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
           check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
           check_runner_binary, check_pi_version, check_worktree_health, check_provider_availability)
