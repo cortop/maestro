@@ -278,7 +278,11 @@ def test_sync_test_runs_arms_per_key_when_board_wide_unset_but_repo_set(tmp_path
 # ---------------------------------------------------------------------------
 
 def test_awaiting_ci_gate_on_annotated_ac_follows_per_key_arming(home):
-    cfg = Config(home=home, test_command=None, repos={
+    # T-85's independent spec-axis QA-verdict gate (_refuse_if_qa_incomplete) is
+    # orthogonal to what this test exercises (T-83's per-repo test_command AC-check
+    # arming) -- disabled here so a bare verify-ac still reaches awaiting-ci on the
+    # not-armed leg below, isolating this test to its own concern.
+    cfg = Config(home=home, test_command=None, awaiting_ci_qa_gate=False, repos={
         "goapp": {"path": "/repo/goapp", "test_command": "go test ./..."},
         "web": {"path": "/repo/web"},  # no test_command, board-wide also unset
     })

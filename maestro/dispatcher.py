@@ -362,8 +362,9 @@ def verbs_from_allowed_tools(allowed_tools: Iterable[str] | None) -> tuple[str, 
 #       literal form the spawner actually emits) -- so the requirement is
 #       satisfiable by what GA-3 really emits, not only by a pattern the
 #       spawner is forbidden to emit. The remaining entries below are plain
-#       literals, matched exact-string (see ``check_reconciler_permissions``'s
-#       detail message).
+#       literals with the same kind of dual acceptance (T-94,
+#       ``RECONCILER_LITERAL_COVERAGE`` below / ``health._literal_covered``):
+#       the literal itself, or every one of its own narrower coverage rules.
 #   (2) the git/gh/test-runner commands
 #       ``skills/maestro-reconcile-implementing.md`` runs post-GA-12 --
 #       fetch/rebase, add/commit/push, ``gh pr create``/``gh pr view``.
@@ -401,6 +402,51 @@ assert RECONCILER_REQUIRED_TOOLS[0] == MAESTRO_COARSE_GRANT == "Bash(maestro:*)"
 MAESTRO_OWN_REPO_EXTRA_TOOLS = (
     "Bash(.venv/bin/:*)",
 )
+
+# T-94: the coverage-aware dual-accept for the four non-maestro literals above
+# (``_missing_maestro_grant``'s own mechanism, generalized past just the
+# maestro verb): a repo whose allow list carries EVERY one of a literal's
+# narrower rules here, instead of the coarse literal itself, still satisfies
+# it -- e.g. ``Bash(gh pr:*)`` alone covers ``Bash(gh:*)``. Each value is the
+# minimal set of narrower rules that, together, cover every concrete
+# invocation ANY reconciler skill actually makes of that command (never a
+# blanket "any narrower rule accepted" -- a strict subset, e.g. only
+# ``Bash(gh api:*)``, must still warn, T-94's own no-false-negative AC).
+# Matching stays exact-string per entry (``health._literal_covered``), so
+# there is no prefix ambiguity to get token boundaries wrong on -- e.g.
+# ``Bash(ghq:*)`` can never collide with ``Bash(gh pr:*)``.
+#   - gh: only ``gh pr`` (create/view, both in
+#     skills/maestro-reconcile-implementing.md -- the only reconciler skill
+#     that invokes ``gh`` at all).
+#   - git: fetch/merge/rebase/log/add/commit/push (same skill's rebase +
+#     commit flow) plus diff (skills/maestro-reconcile-qa.md's read-only
+#     ``git diff --no-index``, T-94's rewritten test grants only the 7
+#     implementing-side subcommands and confirms it still WARNs on the
+#     missing ``diff`` one). test_dispatcher.py's
+#     test_reconciler_literal_coverage_matches_skills keeps this whole table
+#     honest against a fresh grep of every skills/maestro-reconcile-*.md, so
+#     a future skill invoking e.g. ``gh run view`` or ``git stash`` doesn't
+#     silently stay "covered" by a narrower grant that predates it.
+#   - python3: not invoked bare by name in any reconciler skill today
+#     (``prime``/``test_command`` run as a dispatcher-owned subprocess, never
+#     the agent's own Bash tool -- see ``ops._run_prime``/``ops.run_test``);
+#     it exists for an agent-run test/lint surface with no ``.venv/bin/``
+#     (a ``mode: local`` target, MODE == local's own "prove it" step).
+#     Every documented python3 invocation in this repo (config.py's own
+#     ``prime`` template, DOGFOOD.md) uses the ``-m <module>`` form, so
+#     that's the one narrower rule accepted in its place.
+#   - .venv/bin/: only ``.venv/bin/python`` -- the implementing skill's own
+#     ``.venv/bin/python -m pytest``.
+RECONCILER_LITERAL_COVERAGE: dict[str, tuple[str, ...]] = {
+    "Bash(gh:*)": ("Bash(gh pr:*)",),
+    "Bash(git:*)": (
+        "Bash(git add:*)", "Bash(git commit:*)", "Bash(git diff:*)",
+        "Bash(git fetch:*)", "Bash(git log:*)", "Bash(git merge:*)",
+        "Bash(git push:*)", "Bash(git rebase:*)",
+    ),
+    "Bash(python3:*)": ("Bash(python3 -m:*)",),
+    "Bash(.venv/bin/:*)": ("Bash(.venv/bin/python:*)",),
+}
 
 
 def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool,
