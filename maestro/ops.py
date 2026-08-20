@@ -94,15 +94,25 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     `qa` handoff itself is the point, independent of whether it would have
     been redirected.
 
-    Entering `awaiting-ci` is gated three ways: a ticket with unattested ACs
-    refuses (raises `MaestroError`, non-zero exit, NO event appended) unless
-    `force=True`; one with a failing independent QA verdict on a current AC
-    refuses unconditionally (`force` does not override QA — that gate is fixed
-    by re-running `maestro qa-verdict`, not by a human override); and (T-85,
-    `cfg.awaiting_ci_qa_gate`, default ON) one where any current AC has no
-    *passing* spec-axis QA verdict at all -- not merely no failing one -- also
-    refuses unconditionally, same posture as the QA-failing gate (see
-    `_refuse_if_qa_incomplete`).
+    Entering `awaiting-ci`, `in-review`, or `done` FROM `implementing` or `qa` is
+    gated three ways (T-97: previously this fired only when the DESTINATION was
+    `awaiting-ci`, so the `in-review` and `done` edges out of `implementing` --
+    both already granted verbs there -- skipped it entirely; see `qa_gate_applies`
+    below): a ticket with unattested ACs refuses (raises `MaestroError`, non-zero
+    exit, NO event appended) unless `force=True`; one with a failing independent QA
+    verdict on a current AC refuses unconditionally (`force` does not override QA —
+    that gate is fixed by re-running `maestro qa-verdict`, not by a human
+    override); and (T-85, `cfg.awaiting_ci_qa_gate`, default ON) one where any
+    current AC has no *passing* spec-axis QA verdict at all -- not merely no
+    failing one -- also refuses unconditionally, same posture as the QA-failing
+    gate (see `_refuse_if_qa_incomplete`). Scoped to the SOURCE phase being
+    `implementing`/`qa` so a resume that isn't skipping anything -- e.g. a
+    stranded `awaiting-human` ticket's own `set-phase awaiting-ci` recovery
+    (T-97 bypass 3), or the dispatcher's own `awaiting-ci -> in-review` once CI
+    goes green -- is exempt. `in-review`/`done` are additionally covered
+    end-to-end by `cfg.awaiting_ci_qa_gate` (off reverts them to HEAD's
+    pass-through, since HEAD gated neither); `awaiting-ci` itself keeps its
+    pre-T-97 posture, where only `_refuse_if_qa_incomplete` consults the knob.
 
     Entering `qa` from `implementing` is handled a third way (RB-14, replacing
     RB-12's earlier raise-or-force gate): if a `test_command` resolves for
@@ -142,24 +152,40 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     snap = snap_mod.load(cfg.home, key)
     if phase in (Phase.QA, Phase.AWAITING_CI):
         _refuse_if_missing_acs(cfg, key, phase)
-    unverified = _acs_unverified_count(cfg, key, snap) if phase == Phase.AWAITING_CI else 0
-    if unverified > 0 and not force:
-        raise store.MaestroError(
-            f"{key}: refusing awaiting-ci — {unverified} acceptance criteria unverified; "
-            f"run `maestro verify-ac` for each, or pass --force to override")
-    forced_acs = unverified > 0 and force
+    src = Phase(snap.phase)
 
-    # RB-14: transparent redirect, never a refusal and never forceable -- see
-    # this function's docstring. `force` is deliberately not consulted here.
-    if phase == Phase.QA and Phase(snap.phase) == Phase.IMPLEMENTING:
-        if _tests_stale_reason(cfg, key, snap) is not None:
-            phase = Phase.VERIFYING
+    # T-97: (source, destination) jointly define the gate now, not destination
+    # alone -- see this function's docstring. `awaiting-ci` keeps its pre-T-97,
+    # knob-independent posture (only `_refuse_if_qa_incomplete` consults
+    # `awaiting_ci_qa_gate`, below); the two NEW destinations this closes,
+    # `in-review` and `done`, are additionally gated end-to-end by the knob so
+    # `awaiting_ci_qa_gate = false` reverts them to HEAD's pass-through.
+    qa_gate_applies = (src in (Phase.IMPLEMENTING, Phase.QA)
+                       and phase in (Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DONE))
+    if phase in (Phase.IN_REVIEW, Phase.DONE) and not cfg.awaiting_ci_qa_gate:
+        qa_gate_applies = False
 
-    if phase == Phase.AWAITING_CI:
+    unverified = 0
+    forced_acs = False
+    if qa_gate_applies:
+        unverified = _acs_unverified_count(cfg, key, snap)
+        if unverified > 0 and not force:
+            raise store.MaestroError(
+                f"{key}: refusing {phase.value} — {unverified} acceptance criteria unverified; "
+                f"run `maestro verify-ac` for each, or pass --force to override")
+        forced_acs = unverified > 0 and force
         _refuse_if_qa_failing(cfg, key, snap)
         _refuse_if_qa_incomplete(cfg, key, snap)
 
-    src = Phase(snap.phase)
+    # RB-14: transparent redirect, never a refusal and never forceable -- see
+    # this function's docstring. `force` is deliberately not consulted here.
+    # Mutually exclusive with `qa_gate_applies` above (that requires `phase` in
+    # {AWAITING_CI, IN_REVIEW, DONE}; this requires `phase == QA`), so the
+    # redirect can never invalidate a gate decision already made.
+    if phase == Phase.QA and src == Phase.IMPLEMENTING:
+        if _tests_stale_reason(cfg, key, snap) is not None:
+            phase = Phase.VERIFYING
+
     if src != phase and not can_transition(src, phase):
         # Not fatal — log it, but the engine trusts the agent's judgment.
         _append(cfg, key, E.NOTE, {"text": f"unusual transition {src.value}->{phase.value}"},
@@ -1905,6 +1931,31 @@ def fold_inbox(cfg: Config, key: str) -> list[dict]:
 
 
 def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
+    """T-97: `finalize` used to append `Finalized` unconditionally regardless of
+    phase -- a second, one-word bypass of the QA/AC gate `set_phase` enforces on
+    `implementing -> awaiting-ci`/`in-review`/`done` (bypass 2: `finalize` is
+    granted to the `implementing` phase, and `implementing -> done` needs no
+    `set_phase` call at all). Mirrors `set_phase`'s own (source, destination)
+    gate exactly (`Phase.DONE` as the destination): active only when the
+    ticket's CURRENT phase is `implementing`/`qa` -- a `terminating` teardown
+    after a human rejection, an `awaiting-human` research-ticket handoff, or a
+    `passive`-phase finalize after CI/review already passed, is not skipping
+    anything and stays ungated, same as `set_phase`. Scoped to non-`mode: local`
+    bindings only (AD-6: local mode has no QA phase to skip in the first place --
+    byte-identical to before this ticket); `awaiting_ci_qa_gate = false` reverts
+    this precondition entirely, same knob `set_phase` uses for the same two new
+    destinations."""
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode != "local" and cfg.awaiting_ci_qa_gate:
+        snap = snap_mod.load(cfg.home, key)
+        if Phase(snap.phase) in (Phase.IMPLEMENTING, Phase.QA):
+            unverified = _acs_unverified_count(cfg, key, snap)
+            if unverified > 0:
+                raise store.MaestroError(
+                    f"{key}: refusing done — {unverified} acceptance criteria unverified; "
+                    f"run `maestro verify-ac` for each")
+            _refuse_if_qa_failing(cfg, key, snap)
+            _refuse_if_qa_incomplete(cfg, key, snap)
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
 
 
