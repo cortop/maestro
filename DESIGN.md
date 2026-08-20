@@ -114,13 +114,30 @@ text, rather than silently matching by index. Three gates stand between an AC an
   one. Paired with `qa_phase_gate` (also default on), which refuses to record a verdict
   at all unless the ticket's folded phase is `qa`. Neither is `--force`-able.
 
-  T-84: `test:`'s added-test extraction and selector syntax (pytest `path::id`, `go
-  test -run`, jest `-t`) are looked up per the ticket's repo binding `language`
-  (`[repos.<name>] language`; `maestro/testlang.py` — unset means `"python"`, byte-
-  identical to before this table existed). An unrecognized `language` fails
-  `config.load()` closed, so a `test:` annotation can never fail-closed forever the way
-  an unhandled language once could. `check:` performs no added-by-diff verification on
-  any language, so it does not close the false-attestation class the way `test:` does.
+  T-84: `test:`'s added-test extraction and DEFAULT selector syntax (pytest
+  `path::id`, `go test -run`, jest `-t`) are looked up per the ticket's repo binding
+  `language` (`[repos.<name>] language`; `maestro/testlang.py` — unset means
+  `"python"`, byte-identical to before this table existed). An unrecognized `language`
+  fails `config.load()` closed, so a `test:` annotation can never fail-closed forever
+  the way an unhandled language once could. `check:` performs no added-by-diff
+  verification on any language, so it does not close the false-attestation class the
+  way `test:` does.
+
+  T-98: `language` is the EXTRACTION axis only — where a test name lives in a diff,
+  and (via `test_file_globs`) which files count as "a test file" for the H4 gate
+  below. `[repos.<name>] test_selector` is the orthogonal INVOCATION axis: an
+  optional, per-repo format-string template (over `{test_command}`, `{path}`,
+  `{dir}`, `{name}`, `{names}` — `testlang.SELECTOR_PLACEHOLDERS`) that overrides
+  ONLY how a named test is run, letting a board say "extract like Go, invoke like
+  Bazel" for a Go/TypeScript package wrapped in a build system none of the three
+  built-in formatters can express (every one of them is `test_command`-prefix +
+  appended args). Unset keeps the language profile's own `format_selector` verbatim
+  (ships dark); a malformed template or a placeholder outside the closed set fails
+  `config.load()` closed, same posture as `language`. A test name substituted into a
+  custom template is refused outright (never interpolated raw) if it contains a
+  character unsafe for `_run_shell`'s `shell=True` command line — go/python names are
+  `\w+` and always pass; a free-text TypeScript `it("...")` name is the real
+  injection surface.
 
   A green suite is a weak oracle for REMOVAL, not just addition: the `verifying` stage
   also diffs test NAMES (in each language's own test-file scope) against base once the

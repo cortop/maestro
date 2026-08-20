@@ -318,7 +318,7 @@ _REPO_TABLE_KEYS = frozenset({
     # T-90: per-repo overrides of the board-wide [maestro] defaults above --
     # unset inherits, same resolution shape as `prime`/`base_drift_policy`.
     "prime_timeout", "worktree_timeout",
-    "language",
+    "language", "test_selector",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -487,6 +487,17 @@ def load(home_arg: str | None = None) -> Config:
                     raise store.MaestroError(
                         f"config.toml: [repos.{name}] language must be one of "
                         f"{sorted(testlang.SUPPORTED)} (or unset), got {raw_language!r}")
+                # T-98: fail closed on a malformed/unrecognized-placeholder test_selector
+                # too -- unset (None) is valid (RepoBinding.test_selector's own
+                # None-means-the-language-profile's-format_selector fallback), a set-but-
+                # invalid template is a config error the human should fix at load time,
+                # not a `test:` check that fails closed forever later.
+                raw_test_selector = table.get("test_selector") or None
+                if raw_test_selector is not None:
+                    try:
+                        testlang.validate_selector_template(raw_test_selector)
+                    except ValueError as exc:
+                        raise store.MaestroError(f"config.toml: [repos.{name}] {exc}") from exc
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -522,6 +533,10 @@ def load(home_arg: str | None = None) -> Config:
                     # T-84: this repo's test-surface language -- validated above; None
                     # (unset) means "python" (see repos.RepoBinding.language).
                     "language": raw_language,
+                    # T-98: this repo's test-invocation template -- validated above; None
+                    # (unset) means the language profile's own format_selector (see
+                    # repos.RepoBinding.test_selector).
+                    "test_selector": raw_test_selector,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -848,7 +863,7 @@ implementer = "claude_skill"
                                      # (default: unset, inherits board-wide [maestro] language
                                      # above; unset there too means "python"), "go", or
                                      # "typescript". Selects the added/deleted test-name extractor
-                                     # and the `test:` annotation's selector syntax (pytest
+                                     # and the `test:` annotation's DEFAULT selector syntax (pytest
                                      # `path::id`, `go test -run`, jest `-t`) and the H4
                                      # test-deletion gate's test-file scope (see
                                      # maestro/testlang.py) -- unset keeps every existing
@@ -858,6 +873,17 @@ implementer = "claude_skill"
                                      # non-python repo fails a test:-annotated AC closed too, once,
                                      # legibly, instead of bouncing implementing<->verifying
                                      # forever -- set this key to fix.
+# test_selector = "bzl test //{dir}/... --test_filter='^({names})$'"
+                                     # T-98: this repo's test-INVOCATION template, orthogonal to
+                                     # `language` above (which stays the extraction axis --
+                                     # where a test name lives in a diff, and H4's file scope).
+                                     # Overrides ONLY how a named test is run, e.g. "extract like
+                                     # go, invoke like Bazel" for a Go package wrapped in a Bazel
+                                     # build. A format string over {test_command}, {path}, {dir},
+                                     # {name}, {names} (testlang.SELECTOR_PLACEHOLDERS) -- default:
+                                     # unset, keeps the language profile's own format_selector
+                                     # byte-identical. An unknown placeholder or malformed braces
+                                     # fails config load closed, same posture as `language`.
 # gh_account = "work-login"         # resolve this repo's gh credential via
                                      # `gh auth token --user <login>` at spawn/poll time
                                      # (needs `gh` + an unlocked keychain on the dispatcher

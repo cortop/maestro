@@ -12,10 +12,23 @@ every existing regex/selector/pathspec byte-identical to before this module
 existed (the spec's ships-dark requirement). A `language` set to anything
 NOT in `SUPPORTED` is a configuration error the caller must surface legibly
 (`UnsupportedLanguage`) rather than let a `test:` check fail closed forever.
+
+T-98: `language` is the EXTRACTION axis only -- where a test name lives in a
+diff, and (via `test_file_globs`) which files count as "a test file" for H4.
+A `LanguageProfile.format_selector` conflated that with a second, orthogonal
+axis -- how to INVOKE one named test -- and every one of the three formatters
+below is `test_command`-prefix + appended args, so a repo that builds through
+something else (Bazel wrapping Go/TypeScript, say) can never compose a valid
+command even though its `language` extraction is perfectly correct.
+`[repos.<name>] test_selector` (see `render_selector`/`selector_for` below)
+is that second axis: an optional, per-repo format-string invocation template
+that overrides a profile's `format_selector` without touching extraction at
+all -- "extract like Go, invoke like Bazel".
 """
 from __future__ import annotations
 
 import re
+import string
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -117,6 +130,90 @@ def resolve(language: str | None) -> LanguageProfile:
         raise UnsupportedLanguage(
             f"unsupported language {language!r} -- supported: {', '.join(SUPPORTED)}")
     return profile
+
+
+# ---------------------------------------------------------------------------
+# T-98: `[repos.<name>] test_selector` -- an optional, per-repo invocation
+# template, orthogonal to `language`'s extraction axis. A closed placeholder
+# set over (test_command, path, names) -- the exact three values every
+# built-in `format_selector` above already composes from.
+# ---------------------------------------------------------------------------
+
+SELECTOR_PLACEHOLDERS = frozenset({"test_command", "path", "dir", "name", "names"})
+
+# go/python test names are `\w+` by construction (their own `added_re`s only
+# ever capture identifier characters) and always pass; a free-text TypeScript
+# `it("...")` name is the real injection surface into `_run_shell`'s
+# `shell=True` command line. Permit the charset a reasonable test name needs
+# (word chars, path/namespace separators, spaces) and refuse everything else
+# outright -- "reject" rather than guess at the surrounding template's own
+# quoting convention (which this module has no visibility into).
+_UNSAFE_NAME_RE = re.compile(r"[^\w./: -]")
+
+
+class UnsafeTestName(ValueError):
+    """A test name contains a character unsafe to interpolate into a
+    `test_selector` template's `shell=True` command line (T-98). Callers must
+    turn this into a check failure -- never run the composed command anyway."""
+
+
+def validate_selector_template(template: str) -> None:
+    """Raise ``ValueError`` if *template* is malformed (unbalanced/misplaced
+    braces) or references a placeholder outside `SELECTOR_PLACEHOLDERS` --
+    called at `config.load()` (T-98) so a typo'd `[repos.<name>]
+    test_selector` fails closed at load time, exactly like an unrecognized
+    `language`, never a `test:` check that silently fails closed forever."""
+    try:
+        fields = [name for _, name, _, _ in string.Formatter().parse(template)
+                 if name is not None]
+    except ValueError as exc:
+        raise ValueError(f"test_selector {template!r} is malformed: {exc}") from exc
+    unknown = sorted(set(fields) - SELECTOR_PLACEHOLDERS)
+    if unknown:
+        raise ValueError(
+            f"test_selector {template!r} has unrecognized placeholder(s): "
+            f"{', '.join(unknown)} -- supported: {', '.join(sorted(SELECTOR_PLACEHOLDERS))}")
+
+
+def _quote_name(name: str) -> str:
+    if _UNSAFE_NAME_RE.search(name):
+        raise UnsafeTestName(name)
+    return name
+
+
+def _selector_dir(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
+def render_selector(template: str, test_command: str, path: str, names: Sequence[str]) -> str:
+    """Render a `[repos.<name>] test_selector` *template* against one
+    `test:` annotation's already-resolved ``(test_command, path, names)`` --
+    the per-repo invocation-axis counterpart to a `LanguageProfile`'s own
+    `format_selector`, same call shape. Raises `UnsafeTestName` (never
+    interpolates it raw) if any name in *names* contains a character unsafe
+    for `_run_shell`'s `shell=True` command line."""
+    safe_names = [_quote_name(n) for n in names]
+    return template.format(
+        test_command=test_command,
+        path=path,
+        dir=_selector_dir(path),
+        name=safe_names[0] if safe_names else "",
+        names="|".join(safe_names),
+    )
+
+
+def selector_for(profile: LanguageProfile,
+                 test_selector: str | None) -> Callable[[str, str, Sequence[str]], str]:
+    """The selector-formatting callable `ops._run_named_test` should compose
+    a `test:` command through: *profile*'s own `format_selector` when
+    *test_selector* is unset (byte-identical to before this function
+    existed), else *test_selector* rendered via `render_selector` -- the
+    invocation axis overriding the language profile's built-in one without
+    touching extraction (`added_re`/`line_re`/`test_file_globs`) at all."""
+    if not test_selector:
+        return profile.format_selector
+    return lambda test_command, path, names: render_selector(
+        test_selector, test_command, path, names)
 
 
 # T-96: an UNSET `language` silently resolves to PYTHON above (T-84's

@@ -164,8 +164,8 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   with no such trailing parenthetical, a repo binding with no resolved `test_command`,
   or a `mode: local` ticket all behave byte-identically to before this annotation
   grammar existed — zero bulk rewrite of the ~130 existing specs.
-  `test:`'s added/deleted-test extraction and selector syntax are selected per the
-  ticket's repo binding's `language` (T-84, `maestro/testlang.py`; `[repos.<name>]
+  `test:`'s added/deleted-test extraction and DEFAULT selector syntax are selected per
+  the ticket's repo binding's `language` (T-84, `maestro/testlang.py`; `[repos.<name>]
   language = "python" | "go" | "typescript"`, unset = `"python"`) — pytest `path::id`,
   `go test -run`, or jest `-t`, and the H4 test-deletion gate's own test-file scope
   (see below), all keyed off the same field. An unrecognized `language` fails
@@ -173,6 +173,18 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   NO added-by-diff verification on any language — it is satisfied by a pre-existing
   green suite the branch never touched, so it does not close the T-55 seq-130 class the
   way `test:` does; treat it as a stopgap, not a substitute.
+  `language` is the EXTRACTION axis only — `[repos.<name>] test_selector` (T-98) is
+  the orthogonal INVOCATION axis: an optional per-repo format-string template (over
+  `{test_command}`/`{path}`/`{dir}`/`{name}`/`{names}` —
+  `testlang.SELECTOR_PLACEHOLDERS`) that overrides ONLY how a named test is run —
+  e.g. "extract like go, invoke like Bazel" for a repo none of the three built-in
+  `format_selector`s (each just `test_command`-prefix + appended args) can express.
+  Unset keeps the language profile's own `format_selector` verbatim (ships dark); a
+  malformed template or an unrecognized placeholder fails `config.load()` closed, the
+  same posture as `language`. A test name substituted into a custom template is
+  refused (never interpolated raw) if it contains a character unsafe for
+  `_run_shell`'s `shell=True` line — go/python names are `\w+` and always pass; a
+  free-text TypeScript `it("...")` name is the real injection surface.
 - H4 (T-84, `dispatcher._route_test_run`/`_diff_deleted_test_names`): once the suite is
   green, the `verifying` stage also diffs test names (per the repo binding's `language`
   test-file scope — `tests/` for python, co-located `*_test.go` for go, or

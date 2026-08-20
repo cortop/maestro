@@ -348,6 +348,39 @@ def check_missing_acs(cfg: Config, now: float) -> dict:
     return {"name": "missing_acs", "status": status, "detail": detail, "keys": flagged}
 
 
+# T-98: a bare substring check -- deliberately looser than
+# `snapshot._AC_ANNOTATION_START_RE` -- so this catches every line that LOOKS
+# like an author meant it to be machine-checkable (an unbalanced paren in a
+# `check:` command, a stray second trailing parenthetical swallowing the
+# annotation) even if `parse_ac_annotation` legitimately declines to parse it.
+_LOOKS_LIKE_AC_ANNOTATION_RE = re.compile(r"\((test|check):")
+
+
+def check_ac_annotation_parse(cfg: Config, now: float) -> dict:
+    """WARN naming each non-terminal ticket + AC line that LOOKS like a T-79
+    `(test: ...)`/`(check: ...)` annotation but `snapshot.parse_ac_annotation`
+    declines to parse it -- the `maestro doctor` backstop for T-98 AC6: an AC
+    author's `check:` command containing its own parens (or any other
+    edge case) must never silently degrade to the unenforced prose tier with
+    zero feedback. Skips a DONE/terminal ticket, same posture as
+    `check_missing_acs`."""
+    home = cfg.home
+    flagged = []
+    for key in dispatcher.list_keys(home):
+        if Phase(snap_mod.load(home, key).phase) in TERMINAL_PHASES:
+            continue
+        spec_file = store.spec_path(home, key)
+        if not spec_file.exists():
+            continue
+        for ac in snap_mod.parse_acs(spec_file.read_text(encoding="utf-8")):
+            if _LOOKS_LIKE_AC_ANNOTATION_RE.search(ac) and snap_mod.parse_ac_annotation(ac) is None:
+                flagged.append({"key": key, "line": ac})
+    status = "warn" if flagged else "ok"
+    detail = (f"{len(flagged)} AC line(s) look annotated but failed to parse: "
+              + "; ".join(f"{f['key']}: {f['line']}" for f in flagged)) if flagged else "none"
+    return {"name": "ac_annotation_parse", "status": status, "detail": detail, "flagged": flagged}
+
+
 # 2+ already means the exact same automated no-progress path tripped for the
 # same key more than once -- the shape of the 2026-08-14 degraded-respawn-
 # forever incident (OC-7, T-65), where it happened dozens of times per key.
@@ -1622,7 +1655,8 @@ def check_worktree_witness(cfg: Config, now: float) -> dict:
 # check_heartbeat's plist override is special-cased, by identity, since it's
 # the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
-          check_dead_letters, check_phantom_keys, check_missing_acs, check_watchdog_loops,
+          check_dead_letters, check_phantom_keys, check_missing_acs, check_ac_annotation_parse,
+          check_watchdog_loops,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_language_binding, check_missing_reconcile_skill,
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
