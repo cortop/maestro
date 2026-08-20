@@ -15,7 +15,9 @@ The governing principle: **deterministic plumbing in Python, intelligence in Cla
 `maestro` package owns everything correctness-critical (fencing-gated log, atomic writes,
 fold, idempotent step-ids, dispatcher, leases, projections, dead-letter). Agents mutate
 state **only** through the `maestro` CLI, so they can never write a torn log or clobber a
-file. Read `DESIGN.md` for the full rationale, `README.md` for the quickstart.
+file. Read `DESIGN.md` for the full rationale, `README.md` for the quickstart, and
+`docs/board-as-a-resource-constrained-workflow-net.md` for a dated companion analysis of
+the board as a Petri net.
 
 ## Build / test / run
 
@@ -146,20 +148,22 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   line (AD-7 removed the tier gate it drove) — tolerated as an unrecognized front-matter key,
   never rewritten in bulk.
 - An AC checkbox line may end with an OPT-IN, machine-checkable annotation (T-79):
-  `(test: <path>)`, `(test: <path>::<id>)`, or `(check: <shell command>)`. With
-  `test_command` configured (and the ticket not `mode: local`), the `verifying` stage
-  (T-74) runs each annotated AC's own check at the same tree state as the suite and
-  records it (`snapshot.parse_ac_annotation`, `ops.run_ac_checks`,
-  `events.AC_CHECK_CAPTURED`) — a current-tree passing capture is what the `awaiting-ci`
-  gate then requires for that AC instead of a `verify-ac` self-attestation
-  (`ops._acs_unverified_count`); `verify-ac` still records narrative evidence for it, it
-  just stops being load-bearing there. `test:` requires the named test (or, for a bare
-  file path, some test in that file) to actually be ADDED by the branch's diff against
-  base and pass — a green suite whose diff never added it does not satisfy the gate
-  (the T-55 seq-130 false-attestation class). `check:` requires the command to exit 0.
-  Ships dark by construction: an AC with no such trailing parenthetical, a spec with
-  `test_command` unset, or a `mode: local` ticket all behave byte-identically to before
-  this annotation grammar existed — zero bulk rewrite of the ~130 existing specs.
+  `(test: <path>)`, `(test: <path>::<id>)`, or `(check: <shell command>)`. With a
+  resolved `test_command` (the board-wide default, or a `[repos.<name>]` override that
+  arms the gate per-repo even when the board-wide key is unset — T-83) configured (and
+  the ticket not `mode: local`), the `verifying` stage (T-74) runs each annotated AC's
+  own check at the same tree state as the suite and records it
+  (`snapshot.parse_ac_annotation`, `ops.run_ac_checks`, `events.AC_CHECK_CAPTURED`) — a
+  current-tree passing capture is what the `awaiting-ci` gate then requires for that AC
+  instead of a `verify-ac` self-attestation (`ops._acs_unverified_count`); `verify-ac`
+  still records narrative evidence for it, it just stops being load-bearing there.
+  `test:` requires the named test (or, for a bare file path, some test in that file) to
+  actually be ADDED by the branch's diff against base and pass — a green suite whose
+  diff never added it does not satisfy the gate (the T-55 seq-130 false-attestation
+  class). `check:` requires the command to exit 0. Ships dark by construction: an AC
+  with no such trailing parenthetical, a repo binding with no resolved `test_command`,
+  or a `mode: local` ticket all behave byte-identically to before this annotation
+  grammar existed — zero bulk rewrite of the ~130 existing specs.
   `test:`'s added/deleted-test extraction and selector syntax are selected per the
   ticket's repo binding's `language` (T-84, `maestro/testlang.py`; `[repos.<name>]
   language = "python" | "go" | "typescript"`, unset = `"python"`) — pytest `path::id`,
@@ -171,13 +175,26 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   way `test:` does; treat it as a stopgap, not a substitute.
 - H4 (T-84, `dispatcher._route_test_run`/`_diff_deleted_test_names`): once the suite is
   green, the `verifying` stage also diffs test names (per the repo binding's `language`
-  test-file scope — `tests/` for python, co-located `*_test.go` for go, `*.spec.ts` /
-  `__tests__/` for typescript) against base. A net deletion (not a rename — the same
+  test-file scope — `tests/` for python, co-located `*_test.go` for go, or
+  `*.spec.ts`/`*.test.ts`/`*.spec.tsx`/`*.test.tsx`/`__tests__/` for typescript) against
+  base. A net deletion (not a rename — the same
   name deleted and re-added in scope never counts) routes to `awaiting-human` for a
   human sign-off instead of admitting `qa` — "a passing suite is a weak oracle for
   removal." The qid encodes the tree state, so an answered sign-off for that EXACT tree
   passes straight through; any new tree re-evaluates from scratch. `test_deletion_gate
   = false` disables.
+- T-85's two default-ON write-path QA gates, neither `--force`-able: `ops.record_qa_verdict`
+  refuses a verdict unless the ticket's folded phase is `qa` (`cfg.qa_phase_gate`); and
+  `ops._refuse_if_qa_incomplete` refuses `set-phase awaiting-ci` unless EVERY current-hash
+  AC already has a PASSING spec-axis QA verdict, not merely no failing one
+  (`cfg.awaiting_ci_qa_gate`). T-86: once a PR's CI is `passing`, no `CHANGES_REQUESTED`
+  review is outstanding, and every AC's QA verdict is passing, `dispatcher._maybe_undraft`
+  runs `gh pr ready` on its own — no config knob, idempotent off the freshly polled
+  `status["draft"]`.
+- T-90: `worktree_timeout` (`git worktree add`/adopt's own timeout) and `prime_timeout`
+  (bounds the repo's `prime` command) are separate, board-wide-default budgets; either
+  can be overridden per `[repos.<name>]` for a repo whose checkout or dependency install
+  legitimately runs longer.
 
 ## Git
 

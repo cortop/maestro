@@ -27,8 +27,9 @@ Single-repo homes (the out-of-box default, and everything above this line descri
 ```
 you write a spec  ─▶  dispatcher mints + spawns a reconciler  ─▶  it triages
       ▲                                                              │
-      │                                                       tier≥1: asks you
-   merge PR ◀── reconciler opens PR ◀── implements in worktree ◀── you answer
+      │                                                     open question: asks you
+   you merge  ◀──  dispatcher undrafts the PR  ◀──  opens a draft PR,  ◀──  you answer
+   the PR          (CI green + QA passing)          implements in worktree
 ```
 
 A reconciler takes **one step per run** and exits; the dispatcher re-wakes each ticket as
@@ -104,7 +105,7 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
    `/maestro-reconcile-<phase>` command (the dispatcher routes to the one matching the ticket's
    current phase — see `dispatcher.resolve_reconcile_command`) only resolves from a checkout
    that has it under `.claude/commands/`, or from the user commands directory (resolves from any
-   cwd). `maestro install-commands --repo <name>` copies the six files into that
+   cwd). `maestro install-commands --repo <name>` copies the seven files into that
    `[repos.<name>]` checkout — prefer this when you own the repo and can commit them into it.
    `maestro install-commands --user` symlinks them into the user commands directory instead —
    prefer this for a repo the board does not own (e.g. a shared monorepo), since it leaves that

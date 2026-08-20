@@ -1,4 +1,4 @@
-"""GA-15: `maestro install-commands` — automated distribution of the six
+"""GA-15: `maestro install-commands` — automated distribution of the seven
 per-phase `.claude/commands/maestro-reconcile-*.md` files, replacing the
 "vendor them by hand" step DOGFOOD.md used to document. Two targets
 (`--repo <name>` copy, `--user` symlink), both idempotent; the payload ships
@@ -43,7 +43,7 @@ def _init_git_repo(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC1/AC3: --repo copies all six, idempotently, no duplication
+# AC1/AC3: --repo copies all seven, idempotently, no duplication
 # ---------------------------------------------------------------------------
 
 def test_install_repo_copies_six_files_byte_identical(home, tmp_path):
@@ -135,7 +135,7 @@ def test_install_repo_default_name_uses_legacy_repo_path(home, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# AC2/AC3: --user symlinks all six, repo untouched, idempotent
+# AC2/AC3: --user symlinks all seven, repo untouched, idempotent
 # ---------------------------------------------------------------------------
 
 def test_install_user_symlinks_six_and_repo_working_tree_untouched(home, tmp_path, monkeypatch):
@@ -362,7 +362,7 @@ def test_gated_failed_user_install_leaves_no_opencode_directories_behind(
 
 def test_payload_resolves_from_installed_package_directory_alone(tmp_path):
     """Copy ONLY the installed package directory (no repo root, no `.claude/`)
-    into a tmp dir and confirm payload resolution still finds all six there --
+    into a tmp dir and confirm payload resolution still finds all seven there --
     proves resolution doesn't depend on a repo-root-relative path."""
     pkg_dir = Path(importlib.resources.files("maestro"))
 

@@ -35,10 +35,12 @@ bug that made v1 unsafe to touch **cannot occur**. Dashboards (`derived/WORKSTAT
 
 See [`docs/state-machine.md`](docs/state-machine.md) for the maintained phase diagram —
 generated straight from `maestro/statemachine.py` (`make diagram`; a drift-guard test keeps
-it honest), never hand-drawn.
+it honest), never hand-drawn. See
+[`docs/board-as-a-resource-constrained-workflow-net.md`](docs/board-as-a-resource-constrained-workflow-net.md)
+for a dated companion analysis of the board as a Petri net.
 
-`awaiting-human` and `awaiting-ci` are **sleeping** states — no process is held. The
-reconciler records the gate and exits; the dispatcher re-wakes the ticket on a signal
+`docs/state-machine.md` also lists every **sleeping** phase — no process is held there.
+The reconciler records the gate and exits; the dispatcher re-wakes the ticket on a signal
 (an inbox command, a requeue timer, or a spec edit) and a fresh reconciler resumes by
 replaying the event log.
 
@@ -47,7 +49,7 @@ replaying the event log.
 | Component | What | Runs as |
 |-----------|------|---------|
 | **dispatcher** (`maestro dispatch`) | level-triggered sweep: mint → find due → spawn → exit. The only fan-out point. No LLM. | launchd `StartInterval` (5 min) |
-| **reconciler** (`/maestro-reconcile <KEY>`) | one idempotent step per ticket, then exit | `claude --bg` session (top-level, so it can spawn the Impl/QA subagents) |
+| **reconciler** (one of seven per-phase `/maestro-reconcile-<phase>` skills) | one idempotent step per ticket, then exit. Implementing and QA are separate dispatcher spawns, not subagents of one session (see `DESIGN.md`). | `claude --bg` session |
 | **maestro CLI** | correct-by-construction state verbs the agent calls | Python (this package) |
 | **projector** | snapshots → dashboards, atomic | a phase of `maestro dispatch` |
 | **providers** | Jira / GitHub / custom import, pluggable | `config.toml` |
@@ -100,7 +102,7 @@ maestro ans T-1 "yes, go ahead"    # non-interactive: answer by key+text directl
 - **Bounded reads:** a decision reads a ~1-2KB snapshot, never the history.
 
 ```bash
-pip install -e ".[dev]" && pytest -q     # 22 passing
+pip install -e ".[dev]" && pytest -q     # full suite, all green
 ```
 
 ## Project-agnostic
@@ -112,7 +114,7 @@ fetch script) via the `command` fetcher.
 
 ## Status
 
-Core engine + dispatcher + CLI + tests are complete and green. The reconciler skill
-(`skills/maestro-reconcile.md`) is the integration point with your existing
-Implementer↔QA implementation loop. See the design doc for the full migration path from a
-wave orchestrator.
+Core engine + dispatcher + CLI + tests are complete and green. The per-phase reconciler
+skills (`skills/maestro-reconcile-<phase>.md`) are the integration point with your
+existing Implementer↔QA implementation loop. See the design doc for the full migration
+path from a wave orchestrator.
