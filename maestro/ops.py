@@ -680,18 +680,32 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
     witness.write_text(store.iso_now() + "\n", encoding="utf-8")
 
 
-def _prime_worktree_extras(repo: str, wt: Path) -> None:
+def _prime_worktree_extras(repo: str, wt: Path, *, timeout: int = _GIT_TIMEOUT) -> None:
     """GA-7, absorbed: exclude the mirrored names from `git add` via the
     git-COMMON `info/exclude` (idempotent -- shared across every worktree of
     the repo), then mirror CLAUDE.local.md / .claude/settings.local.json /
     node_modules from the source checkout into *wt*. A real, write-isolated
     copy (never a symlink or hardlink -- see the `cp` ladder below), so an
     install run inside *wt* never writes through into *repo* or a sibling
-    worktree. Every step is a no-op when the source doesn't have it."""
-    exclude = subprocess.run(
+    worktree. Every step is a no-op when the source doesn't have it.
+
+    T-95: *timeout* should be the caller's `worktree_timeout`, not the
+    default short `_GIT_TIMEOUT` -- `worktree_ensure` passes it explicitly.
+    The leading `git rev-parse --git-path info/exclude` used to run
+    unguarded (short-timeout `subprocess.run(..., check=True)`) on
+    `worktree_ensure`'s hot path, so a hung or failing git there escaped as a
+    raw `subprocess.CalledProcessError` traceback instead of a loud
+    `store.MaestroError` -- `cli.main` only catches the latter (T-81's own
+    finding, missed here). Routed through `_run_recovery_git` like the rest
+    of the recovery path."""
+    result = _run_recovery_git(
         ["git", "-C", str(wt), "rev-parse", "--git-path", "info/exclude"],
-        capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True).stdout.strip()
-    exclude_path = Path(exclude)
+        timeout=timeout, what=f"`git rev-parse --git-path info/exclude` on {wt}")
+    if result.returncode != 0:
+        raise store.MaestroError(
+            f"`git rev-parse --git-path info/exclude` on {wt} failed (rc={result.returncode}): "
+            f"{result.stderr.strip()}")
+    exclude_path = Path(result.stdout.strip())
     if not exclude_path.is_absolute():
         exclude_path = wt / exclude_path
     existing = (exclude_path.read_text(encoding="utf-8").splitlines()
@@ -785,6 +799,36 @@ def _worktree_witness_path(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path | N
         return None
 
 
+def worktree_witness_status(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
+    """T-95: the one predicate that decides whether a witness-less *wt* is a
+    pre-T-81 worktree (backfill and treat as complete) or an interrupted
+    checkout (still torn down) -- shared by `worktree_ensure`'s write path and
+    `health.check_worktree_witness`'s read-only doctor report, so the two
+    never drift apart.
+
+    Returns ``{"witnessed": bool, "backfillable": bool, "witness_path": Path | None}``:
+      - `witnessed` True: the completion witness already exists on disk --
+        nothing to do.
+      - `witnessed` False, `backfillable` True: *wt* IS a registered git
+        worktree with a real index (`_worktree_has_index`) but has never
+        carried a witness -- it predates T-81 (nothing ever wrote one for it),
+        not an interrupted `worktree add`. Safe to backfill.
+      - `witnessed` False, `backfillable` False: either *wt* isn't a usable
+        git worktree at all (`_worktree_witness_path` returned None) or it is
+        one but has no index -- MTO-1's interrupted-checkout signature. Must
+        still be torn down and rebuilt, never backfilled.
+    `witness_path` is the path a witness would live at (or already does),
+    None when *wt* isn't even a usable git worktree yet.
+    """
+    witness = _worktree_witness_path(wt, timeout=timeout)
+    if witness is None:
+        return {"witnessed": False, "backfillable": False, "witness_path": None}
+    if witness.exists():
+        return {"witnessed": True, "backfillable": False, "witness_path": witness}
+    backfillable = _worktree_has_index(wt, timeout=timeout)
+    return {"witnessed": False, "backfillable": backfillable, "witness_path": witness}
+
+
 def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) -> dict:
     """Idempotently create-or-adopt *key*'s reconciler worktree, absorb GA-7's
     CLAUDE.local.md/.claude/settings.local.json/node_modules priming, and run
@@ -813,18 +857,29 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
     apart from "this is a live worktree in a state the heuristic dislikes" --
     conflating the two used to mean a live worktree holding uncommitted work
     got silently `--force` removed and reported `{"created": True}` on exit 0
-    (T-81 finding 1). So:
-      - NO witness -> creation never finished (or *wt* doesn't exist at all) --
-        torn down (`_cleanup_partial_worktree`, safe: there is nothing
-        completed to lose) and recreated.
-      - Witness present, `worktree_health` healthy -> real no-op, as before.
-      - Witness present, `worktree_health` UNHEALTHY -> creation genuinely
-        finished but the worktree now looks wrong (mass deletion, no index
-        anymore, ...) -- likely carrying uncommitted work. Ensure REFUSES
-        (`store.MaestroError`, no event appended, non-zero CLI exit) naming
-        the worktree and the remedy, rather than guessing and possibly
-        discarding it; a human inspects and either fixes it in place or
-        removes it themselves before re-running `ensure`.
+    (T-81 finding 1). So (`worktree_witness_status`):
+      - Witnessed already -> real no-op path below, as before.
+      - Witness-less but `backfillable` (a registered worktree with a real
+        index that has simply never carried a witness -- T-95: every
+        worktree created before T-81 shipped looks like this, since nothing
+        ever backfilled one) -> the witness is written right here, and
+        *wt* falls through to the SAME witnessed/health-checked branch
+        below as if it had always had one -- never torn down just for
+        predating the marker.
+      - Witness-less and NOT backfillable (`_worktree_witness_path` found no
+        usable git worktree at *wt* at all, or one with no index) -- creation
+        genuinely never finished (or *wt* doesn't exist) -- torn down
+        (`_cleanup_partial_worktree`, safe: there is nothing completed to
+        lose) and recreated.
+      - Witnessed (or just backfilled), `worktree_health` healthy -> real
+        no-op.
+      - Witnessed (or just backfilled), `worktree_health` UNHEALTHY ->
+        creation genuinely finished but the worktree now looks wrong (mass
+        deletion, no index anymore, ...) -- likely carrying uncommitted work.
+        Ensure REFUSES (`store.MaestroError`, no event appended, non-zero CLI
+        exit) naming the worktree and the remedy, rather than guessing and
+        possibly discarding it; a human inspects and either fixes it in place
+        or removes it themselves before re-running `ensure`.
     `prime` is skipped once its own worktree-local marker (under the
     worktree's OWN git dir -- see `_git_dir` -- so it self-cleans when the
     worktree is removed) is present. If a fresh branch can't be created (it
@@ -858,9 +913,19 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
     repo = binding.path
     wt = store.worktree_path(cfg.home, key)
     branch = f"{binding.branch_prefix}{key}"
-    witness = _worktree_witness_path(wt, timeout=worktree_timeout)
+    status = worktree_witness_status(wt, timeout=worktree_timeout)
+    if status["backfillable"]:
+        # T-95: a registered git worktree with a real index but no witness --
+        # this worktree's creation genuinely finished, it simply predates
+        # T-81 (nothing ever wrote one for it). Backfill and fall through to
+        # the witnessed/health-checked branch below instead of destroying it.
+        witness = status["witness_path"]
+        witness.parent.mkdir(parents=True, exist_ok=True)
+        witness.write_text(store.iso_now() + "\n", encoding="utf-8")
+        status = {**status, "witnessed": True}
+
     created = False
-    if witness is None or not witness.exists():
+    if not status["witnessed"]:
         if wt.exists():
             _cleanup_partial_worktree(repo, wt, branch=branch, base=binding.base_branch,
                                       timeout=worktree_timeout)
@@ -878,7 +943,7 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
                 f"(`git -C {repo} worktree remove --force {wt}`) and re-run "
                 f"`maestro worktree ensure {key}`.")
 
-    _prime_worktree_extras(repo, wt)
+    _prime_worktree_extras(repo, wt, timeout=worktree_timeout)
 
     primed = False
     if binding.prime:

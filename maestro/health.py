@@ -1556,6 +1556,42 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
     return {"name": "worktree_health", "status": status, "detail": detail, "broken": broken}
 
 
+def check_worktree_witness(cfg: Config, now: float) -> dict:
+    """T-95: WARN (report-only, never writes -- doctor checks must not mutate
+    state) on any EXISTING worktree under ``<home>/worktrees`` that is a real,
+    usable git worktree (a valid index) but has never carried the T-81
+    completion witness -- i.e. `ops.worktree_witness_status(...)`
+    ``backfillable``. Every worktree created before T-81 shipped looks like
+    this: nothing ever backfilled a witness for it, so the exposure is
+    invisible until the next `maestro worktree ensure` on that key happens to
+    hit the (now safe, T-95) backfill branch itself. This check surfaces it
+    ahead of that, without waiting for a reconcile step.
+
+    A witness-less worktree that ISN'T a usable git worktree at all, or has
+    no index, is `check_worktree_health`'s "no index" warn instead (it's
+    genuinely unusable, not merely pre-T-81) -- never double-counted here.
+
+    Lazy `ops` import, same reason as `check_worktree_health` beside it."""
+    from . import ops
+
+    worktrees_dir = cfg.home / "worktrees"
+    witness_less = []
+    if worktrees_dir.is_dir():
+        for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
+            try:
+                status = ops.worktree_witness_status(wt, timeout=cfg.worktree_timeout)
+            except store.MaestroError as exc:
+                witness_less.append({"key": wt.name, "reason": f"witness probe error: {exc}"})
+                continue
+            if status["backfillable"]:
+                witness_less.append({"key": wt.name, "reason": "no witness (predates T-81)"})
+    status_ = "warn" if witness_less else "ok"
+    detail = (", ".join(f"{w['key']}: {w['reason']}" for w in witness_less)
+              if witness_less else "every registered worktree either carries a witness or is new")
+    return {"name": "worktree_witness", "status": status_, "detail": detail,
+            "witness_less": witness_less}
+
+
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
@@ -1570,7 +1606,8 @@ CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_out
           check_language_binding, check_missing_reconcile_skill,
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
           check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
-          check_runner_binary, check_pi_version, check_worktree_health, check_provider_availability)
+          check_runner_binary, check_pi_version, check_worktree_health, check_worktree_witness,
+          check_provider_availability)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
