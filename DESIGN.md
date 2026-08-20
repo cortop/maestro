@@ -191,6 +191,22 @@ failures (one poison ticket can't wedge the fleet) · per-ticket circuit breaker
 (`max_impl_turns`) · advisory token ceiling · finalizer teardown · append-only audit via
 the event logs themselves · `dependsOn` gating to serialize coupled tickets.
 
+## Known limitations
+
+- **PR undraft has no independent review verdict (T-102).** `dispatcher._maybe_undraft`
+  undrafts a PR once CI is `passing` and every current-hash spec AC carries a passing
+  spec-axis QA verdict — that's QA + CI, full stop; there is no `review_status` concept and
+  maestro cannot acquire one without a new mechanism. `Phase.IN_REVIEW` is a **sleeping**
+  phase mapped to the `"passive"` reconcile command (`statemachine.py`, `dispatcher.py`), so
+  no internal agent ever reviews a PR or produces a verdict — human review is the only
+  review that happens. This is acceptable because `MERGE_DENYLIST` (`dispatcher.py`,
+  `["Bash(gh pr merge:*)"]`) denies `gh pr merge` to every reconciler unconditionally, for
+  every ticket and phase: undraft only ever hands a PR to a human, it can never itself land
+  code. See `dispatcher._maybe_undraft`'s docstring and `tests/test_undraft.py` for the
+  narrower, related point — a fresh `CHANGES_REQUESTED` review is caught by the phase guard
+  (`_observe_reviews` routes it to `implementing` first), not by an independent review-verdict
+  check that doesn't exist.
+
 ## Migration from a wave orchestrator (strangler-fig)
 
 Each step is independently shippable and reversible because the append-only logs are never

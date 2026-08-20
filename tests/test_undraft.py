@@ -1,10 +1,15 @@
-"""T-86: dispatcher-owned PR undrafting. `sync_vcs`'s per-poll `pr_status` now
-observes `isDraft` (folded into `snap.pr_draft` on every poll, see
-`test_pr_status_observes_draft_...` below) and, once CI is passing, no review
-is outstanding, and every current-hash AC carries a passing spec-axis QA
-verdict, issues `gh pr ready` exactly once and appends `PrUpdated
-{"draft": false}`. Each condition gates independently; a failed `gh pr ready`
-never wedges the ticket; a second sweep after success is a true no-op.
+"""T-86/T-102: dispatcher-owned PR undrafting. `sync_vcs`'s per-poll
+`pr_status` now observes `isDraft` (folded into `snap.pr_draft` on every
+poll, see `test_pr_status_observes_draft_...` below) and, once CI is
+passing, the ticket is still in a reviewable phase, and every current-hash AC
+carries a passing spec-axis QA verdict, issues `gh pr ready` exactly once and
+appends `PrUpdated {"draft": false}`. A fresh `CHANGES_REQUESTED` review does
+NOT gate this independently: `_observe_reviews` runs first in the same tick
+and routes it to `implementing`, whose `PhaseChanged` blocks undraft via the
+phase guard, not the `unresolved_reviews` conjunct (which only ever fires on
+a lost fencing CAS -- see `test_undraft_blocked_by_lost_cas_review_remnant`
+below). A failed `gh pr ready` never wedges the ticket; a second sweep after
+success is a true no-op.
 """
 from maestro import dispatcher as disp
 from maestro import event_log, ops, providers, snapshot as snap_mod, store
@@ -112,7 +117,15 @@ def test_undraft_gated_by_ac_lacking_passing_spec_qa_verdict(cfg, monkeypatch):
     assert snap_mod.load(cfg.home, "T-5").pr_draft is True
 
 
-def test_undraft_gated_by_outstanding_changes_requested_review(cfg, monkeypatch):
+def test_fresh_changes_requested_routes_to_implementing_before_undraft_runs(cfg, monkeypatch):
+    """T-102: a fresh CHANGES_REQUESTED is NOT what blocks undraft here -- it
+    never reaches the `unresolved_reviews` conjunct at all. `_observe_reviews`
+    runs first in the same tick, appends the review, and routes the ticket to
+    `implementing`; `_maybe_undraft`'s own phase guard (AWAITING_CI/IN_REVIEW
+    only) is what then blocks `pr_ready`, on a phase that is no longer either
+    of those. Proof: line-tracing the real `sync_vcs` over this exact scenario
+    shows the phase guard return taken and the review conjunct never
+    evaluated (see T-102's spec `Notes`)."""
     fake = FakeVCS(PASSING, reviews=[{"id": "rc-1", "state": "CHANGES_REQUESTED",
                                       "body": "nit", "author": "reviewer1"}])
     _use_fake(cfg, monkeypatch, fake)
@@ -123,7 +136,72 @@ def test_undraft_gated_by_outstanding_changes_requested_review(cfg, monkeypatch)
     assert fake.ready_calls == []
     snap = snap_mod.load(cfg.home, "T-5")
     assert snap.pr_draft is True
-    assert snap.phase == Phase.IMPLEMENTING.value  # the review routing still fires
+    assert snap.phase == Phase.IMPLEMENTING.value  # the review routing is what actually blocked this
+    assert snap.unresolved_reviews == 0  # PhaseChanged already zeroed it -- the conjunct never saw it set
+
+
+def test_undraft_blocked_by_lost_cas_review_remnant(cfg, monkeypatch):
+    """T-102: the ONE reachable path to the `unresolved_reviews` conjunct --
+    a lost fencing CAS in `_observe_reviews`' `set_phase` call leaves a
+    ReviewFeedbackReceived event on the log with no following PhaseChanged,
+    so the ticket is still AWAITING_CI/IN_REVIEW on the next sweep with the
+    counter set. Seed that remnant directly on the event log (bypassing
+    `_observe_reviews`, which we can't make race deterministically) and
+    assert a real `sync_vcs` sweep still refuses to undraft -- this test
+    fails if the conjunct is ever deleted."""
+    fake = FakeVCS(PASSING)  # review_feedback() empty -- _observe_reviews itself is a no-op this sweep
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+    event_log.append(cfg.home, "T-5", "ReviewFeedbackReceived",
+                     {"comment_id": "rc-1", "state": "CHANGES_REQUESTED", "body": "nit",
+                      "author": "reviewer1"},
+                     actor="dispatcher", step_id="review-T-5-rc-1")
+    snap = snap_mod.rebuild(cfg.home, "T-5")
+    assert snap.unresolved_reviews == 1
+    assert snap.phase == Phase.IN_REVIEW.value
+
+    disp.sync_vcs(cfg, now=1000)
+
+    assert fake.ready_calls == []
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.pr_draft is True
+    assert snap.unresolved_reviews == 1  # still stuck -- exactly the "unroutable" remnant the docstring names
+
+
+def test_undraft_round_trip_ignores_stale_undismissed_review(cfg, monkeypatch):
+    """T-102: pins the deliberate round-trip behaviour so a future change that
+    tries to block on ANY undismissed review (not just a lost-CAS remnant)
+    fails loudly. `review_feedback()` returns the same undismissed
+    CHANGES_REQUESTED across two real `sync_vcs` sweeps; between them the
+    ticket is fixed and re-QA'd through implementing -> qa -> awaiting-ci via
+    real ops verbs (a fresh review comment id would also work, but reusing
+    `rc-1` is what proves GitHub's own non-dismissal, not a dedupe artifact,
+    is the reason this doesn't re-block). The second sweep -- CI passing,
+    phase back in a reviewable state, QA re-passed -- DOES undraft."""
+    reviews = [{"id": "rc-1", "state": "CHANGES_REQUESTED", "body": "nit",
+               "author": "reviewer1"}]
+    fake = FakeVCS(PASSING, reviews=reviews)
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+
+    disp.sync_vcs(cfg, now=1000)  # sweep 1: routes to implementing, does not undraft
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert fake.ready_calls == []
+    assert snap.phase == Phase.IMPLEMENTING.value
+
+    # Fix + re-QA through real ops verbs, same as the implementer/qa phases would.
+    ops.verify_ac(cfg, "T-5", 1, {"what": "fixed", "where": "test_undraft.py", "result": "ok"})
+    snap = snap_mod.rebuild(cfg.home, "T-5")
+    ops.set_phase(cfg, "T-5", Phase.QA, reason="fixed", expect=snap.observed_seq)
+    snap = snap_mod.rebuild(cfg.home, "T-5")
+    ops.record_qa_verdict(cfg, "T-5", 1, "pass", "fixed and re-verified")
+    ops.set_phase(cfg, "T-5", Phase.AWAITING_CI, reason="re-qa'd", expect=snap.observed_seq + 1)
+
+    disp.sync_vcs(cfg, now=2000)  # sweep 2: same undismissed rc-1 review, but this time it undrafts
+
+    assert fake.ready_calls == [("x/y", 42)]
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.pr_draft is False
 
 
 def test_undraft_idempotent_on_a_second_sweep(cfg, monkeypatch):
