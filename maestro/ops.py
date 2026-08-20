@@ -1337,37 +1337,60 @@ def _diff_added_test_names(cwd: Path, base: str, rel_path: str,
 
 
 def _run_named_test(profile: "testlang.LanguageProfile", test_command: str, cwd: Path,
-                    base: str, ann: "snap_mod.AcAnnotation") -> tuple[str, int, str]:
+                    base: str, ann: "snap_mod.AcAnnotation",
+                    test_selector: str | None = None) -> tuple[str, int, str]:
     """Run (or refuse to run) a `test:` annotation's check -- returns
     ``(command, exit_code, output)``, mirroring `_run_shell`'s shape so
     `run_ac_checks` can record either uniformly. *test_command* is the
     caller's already-resolved per-key command (T-83: `binding.test_command`),
     never `cfg.test_command` directly. *profile* (T-84) is the caller's
-    already-resolved language table entry -- selector syntax (pytest
-    `path::id`, `go test -run`, jest `-t`) comes from `profile.format_selector`,
-    never hardcoded here.
+    already-resolved language table entry -- extraction (`added_re`) always
+    comes from it. *test_selector* (T-98, `binding.test_selector`) is the
+    caller's already-resolved, optional per-repo invocation OVERRIDE --
+    selector syntax (pytest `path::id`, `go test -run`, jest `-t`, or a
+    custom template) comes from `testlang.selector_for(profile,
+    test_selector)`, never hardcoded here.
 
     Presence in the diff is checked FIRST, before anything is ever run: a
     named test (`::<id>` form -- for python, matched by its leaf name to
     allow a class-scoped `Class::test_method`) or, for a bare file-path
     form, ANY added test in that file, must actually be part of this diff --
     a suite that happens to pass with an untouched, pre-existing test of the
-    same name satisfies nothing (T-79 AC4 / the T-55 class)."""
+    same name satisfies nothing (T-79 AC4 / the T-55 class). The presence
+    check is entirely name-based (unaffected by shell-quoting), so it always
+    runs before the selector is ever composed."""
     added = _diff_added_test_names(cwd, base, ann.path, profile)
+    formatter = testlang.selector_for(profile, test_selector)
     if ann.test_id:
+        names = [ann.test_id]
         leaf = ann.test_id.rsplit("::", 1)[-1]
-        command = profile.format_selector(test_command, ann.path, [ann.test_id])
-        if leaf not in added:
-            return command, 1, (
-                f"[maestro] {ann.path}::{ann.test_id} not found among tests added by "
-                f"this diff in {ann.path} -- a passing suite alone does not satisfy a "
-                "test: annotation")
+        not_found = leaf not in added
+        not_found_msg = (
+            f"[maestro] {ann.path}::{ann.test_id} not found among tests added by "
+            f"this diff in {ann.path} -- a passing suite alone does not satisfy a "
+            "test: annotation")
     else:
-        if not added:
-            return (f"{test_command} {ann.path}", 1,
-                    f"[maestro] no test added by this diff in {ann.path} -- a passing "
-                    f"suite alone does not satisfy a test: annotation")
-        command = profile.format_selector(test_command, ann.path, sorted(added))
+        names = sorted(added)
+        not_found = not added
+        not_found_msg = (
+            f"[maestro] no test added by this diff in {ann.path} -- a passing "
+            f"suite alone does not satisfy a test: annotation")
+
+    # T-98: composed through the resolved selector even in the "nothing to run"
+    # cases below (never the hardcoded `f"{test_command} {ann.path}"` pytest
+    # shape) -- this is display-only (the command recorded on a failing check
+    # and shown to the implementer), never executed when not_found is True.
+    try:
+        command = formatter(test_command, ann.path, names)
+    except testlang.UnsafeTestName as exc:
+        return (f"{test_command} {ann.path}", 1,
+                f"[maestro] refusing to run -- test name {exc.args[0]!r} contains "
+                "character(s) unsafe to interpolate into this repo's test_selector "
+                "shell command")
+
+    if not_found:
+        return command, 1, not_found_msg
+
     exit_code, output = _run_shell(command, cwd)
     return command, exit_code, output
 
@@ -1401,6 +1424,13 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
     the caller (`_route_test_run`) turns a non-empty `"unsupported"` into one
     clear, one-time `ops.fail(..., dead_letter=True)` rather than a bounce
     back to `implementing`.
+
+    T-98: `binding.language` stays the EXTRACTION axis only. `binding.
+    test_selector` (also fail-closed at `config.load()`) is the orthogonal
+    INVOCATION axis -- unset, `_run_named_test` composes through the
+    resolved profile's own `format_selector` exactly as before this ticket;
+    set, it overrides only how a named test is run, never which names are
+    extracted from the diff.
     """
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
@@ -1443,7 +1473,8 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
                                         "language": binding.language, "error": str(exc)})
                     continue
                 command, exit_code, output = _run_named_test(profile, binding.test_command,
-                                                              cwd, base, ann)
+                                                              cwd, base, ann,
+                                                              test_selector=binding.test_selector)
             rec = _record_ac_check(cfg, key, tree_key=tree_key, h=h, ac_index=i, ac_text=t,
                                    kind=ann.kind, command=command, exit_code=exit_code,
                                    output=output, actor=actor)

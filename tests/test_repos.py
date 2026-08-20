@@ -71,6 +71,7 @@ def test_config_load_parses_repos_tables(home):
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
         "prime_timeout": None, "worktree_timeout": None, "language": None,
+        "test_selector": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
@@ -79,6 +80,7 @@ def test_config_load_parses_repos_tables(home):
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
         "prime_timeout": None, "worktree_timeout": None, "language": None,
+        "test_selector": None,
     }
 
 
@@ -464,6 +466,62 @@ def test_repos_table_language_unsupported_fails_config_load_closed(home):
         '[repos.alpha]\npath = "/repo/alpha"\nlanguage = "rust"\n',
         encoding="utf-8")
     with pytest.raises(store.MaestroError, match="language must be one of"):
+        config_mod.load(str(home))
+
+
+# --- T-98: per-repo `test_selector` -- orthogonal to `language`, overrides
+# ONLY the testlang profile's format_selector; fails closed at config.load()
+# on an unknown placeholder/malformed template, unset stays byte-identical.
+
+def test_repos_table_test_selector_parses_and_resolves(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\nlanguage = "go"\n'
+        "test_selector = \"bzl test //{dir}/... --test_filter='^({names})$'\"\n",
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos["alpha"]["test_selector"] == "bzl test //{dir}/... --test_filter='^({names})$'"
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.test_selector == "bzl test //{dir}/... --test_filter='^({names})$'"
+
+
+def test_repos_table_test_selector_unset_resolves_to_none(home):
+    """AC1/AC5: unset `test_selector` resolves to `None` on the binding, so
+    `testlang.selector_for` falls all the way back to the language profile's
+    own `format_selector` -- every existing board stays byte-identical."""
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n[repos.alpha]\npath = "/repo/alpha"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos["alpha"]["test_selector"] is None
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.test_selector is None
+
+
+def test_repos_table_test_selector_unknown_placeholder_fails_config_load_closed(home):
+    """AC2: a typo'd/unrecognized placeholder is caught here, at config.load(),
+    naming the supported set -- exactly like `language`'s own fail-closed
+    posture -- never a `test:` check that fails closed forever later."""
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\ntest_selector = "{test_command} {bogus}"\n',
+        encoding="utf-8")
+    with pytest.raises(store.MaestroError, match="unrecognized placeholder"):
+        config_mod.load(str(home))
+
+
+def test_repos_table_test_selector_malformed_braces_fails_config_load_closed(home):
+    """AC2: malformed braces (an unbalanced `{`) fail exactly like an unknown
+    placeholder -- both are caught at load, never deferred to a `test:` check."""
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\ntest_selector = "{test_command} {names"\n',
+        encoding="utf-8")
+    with pytest.raises(store.MaestroError, match="test_selector"):
         config_mod.load(str(home))
 
 

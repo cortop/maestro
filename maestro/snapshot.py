@@ -46,12 +46,16 @@ _TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 
 # T-79: an opt-in, machine-checkable annotation trailing an AC line --
 # `(test: <path>)`, `(test: <path>::<id>)`, or `(check: <shell command>)`.
-# Anchored at end-of-line and disallows embedded parens in the body (so a
-# SECOND trailing parenthetical, e.g. "(test: a.py) (see #123)", is never
-# swallowed into the annotation) -- any other trailing parenthetical (e.g.
-# "(checked manually)") simply doesn't match and the AC stays plain text,
-# exactly as before this ticket.
-_AC_ANNOTATION_RE = re.compile(r"\((test|check):\s*([^()]+?)\)\s*$")
+# Finds the LAST `(test:`/`(check:` in the line -- `parse_ac_annotation`
+# below then hand-scans forward for the PAREN-BALANCED close, so a `check:`
+# body may itself contain parens (T-98: e.g. a Bazel `--test_filter=` regex,
+# `--test_filter='^(A|B)$'`) without truncating early. Anchored at
+# end-of-line (nothing but whitespace may follow the balanced close) is what
+# keeps a SECOND trailing parenthetical, e.g. "(test: a.py) (see #123)",
+# from ever being swallowed into the annotation -- any other trailing
+# parenthetical (e.g. "(checked manually)") simply doesn't match this start
+# pattern and the AC stays plain text, exactly as before T-79.
+_AC_ANNOTATION_START_RE = re.compile(r"\((test|check):\s*")
 
 
 @dataclass(frozen=True)
@@ -75,11 +79,35 @@ def parse_ac_annotation(ac_text: str) -> AcAnnotation | None:
     text, or ``None`` if the line carries no such annotation (or a different,
     ordinary trailing parenthetical) -- nothing downstream treats an AC as
     machine-checkable unless this returns non-``None``, which is what makes
-    the feature ship dark by construction."""
-    m = _AC_ANNOTATION_RE.search(ac_text)
-    if not m:
+    the feature ship dark by construction.
+
+    T-98: the body is found by a paren-BALANCED scan (never a `[^()]` ban),
+    so a `check:` command containing its own parens (a Bazel `--test_filter`
+    regex, say) parses correctly instead of silently degrading to the prose
+    tier -- the balanced close must still be the very last non-whitespace
+    character on the line, which is what keeps a genuine second trailing
+    parenthetical from being swallowed (see `_AC_ANNOTATION_START_RE`)."""
+    start = None
+    for m in _AC_ANNOTATION_START_RE.finditer(ac_text):
+        start = m  # the LAST candidate start -- closest to end-of-line wins
+    if start is None:
         return None
-    kind, body = m.group(1), m.group(2).strip()
+    kind = start.group(1)
+    body_start = start.end()
+    depth = 1  # the opening '(' the start pattern itself consumed
+    close_idx = None
+    for i in range(body_start, len(ac_text)):
+        c = ac_text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                close_idx = i
+                break
+    if close_idx is None or ac_text[close_idx + 1:].strip():
+        return None  # unbalanced, or non-whitespace trails the close
+    body = ac_text[body_start:close_idx].strip()
     if not body:
         return None
     if kind == "check":
