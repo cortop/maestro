@@ -170,7 +170,10 @@ def test_env_key_prints_resolved_binding(home, capsys):
                         "runner": "claude", "runner_model": None,
                         # MTO-6: served here so awaiting-human.md's KIND lookup needs no
                         # interpreter -- reused from GA-10's per-key env seam.
-                        "kind": "implementation"}
+                        "kind": "implementation",
+                        # T-96 AC4: the resolved test-verification knobs a `test:`
+                        # annotation's presence gate actually uses.
+                        "language": None, "test_command": None}
 
 
 def test_env_key_unknown_repo_exits_nonzero(home, capsys):
@@ -519,4 +522,50 @@ def test_repos_table_test_selector_malformed_braces_fails_config_load_closed(hom
         '[repos.alpha]\npath = "/repo/alpha"\ntest_selector = "{test_command} {names"\n',
         encoding="utf-8")
     with pytest.raises(store.MaestroError, match="test_selector"):
+        config_mod.load(str(home))
+
+
+# --- T-96 AC5: board-wide `[maestro] language` -- honored (inherited by
+# repos.implicit_default and any [repos.<name>] table with no language of its
+# own, same precedence as test_command), never silently ignored as it was
+# before this ticket.
+
+def test_board_wide_language_inherited_by_implicit_default(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\nlanguage = "go"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.language == "go"
+    binding = repos_mod.implicit_default(cfg)
+    assert binding.language == "go"
+
+
+def test_board_wide_language_inherited_by_a_repo_table_with_no_language_of_its_own(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\nlanguage = "typescript"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.language == "typescript"
+
+
+def test_a_repo_tables_own_language_wins_over_the_board_wide_default(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\nlanguage = "go"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\nlanguage = "python"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.language == "python"
+
+
+def test_board_wide_language_unsupported_fails_config_load_closed(home):
+    """The other half of AC5 -- an unrecognized `[maestro] language` is
+    rejected at load, never silently ignored the way it was before this
+    field existed."""
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\nlanguage = "cobol"\n', encoding="utf-8")
+    with pytest.raises(store.MaestroError, match="language must be one of"):
         config_mod.load(str(home))

@@ -1916,7 +1916,12 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
     never actually happen (T-84: `config.load` already fails closed on an
     unrecognized `language`) but is handled here as defense in depth: one
     clear, one-time `ops.fail(..., dead_letter=True)` rather than a bounce
-    back to `implementing` that could never converge.
+    back to `implementing` that could never converge. T-96: the same
+    dead-letter also covers an UNSET `language` whose guess (repo-root marker
+    files, here -- `testlang.resolve_strict`) contradicts the silent python
+    default, so a `test_command`-set Go/TypeScript repo with no `language`
+    configured fails closed once instead of bouncing forever or silently
+    scanning with the wrong regex.
     """
     from . import ops, repos as repos_mod, testlang
 
@@ -1933,12 +1938,19 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
     binding = repos_mod.resolve(cfg, cfg.home, key)
     if cfg.test_deletion_gate and binding.mode != "local":
         try:
-            profile = testlang.resolve(binding.language)
-        except testlang.UnsupportedLanguage as exc:
+            # T-96: resolve_strict, not resolve -- H4 has no single
+            # annotation path to guess from, so it falls back to repo_root's
+            # own marker files (go.mod/package.json); an UNSET language that
+            # contradicts them must fail closed here too, same as
+            # `run_ac_checks`'s presence gate -- AC6, "the same guard ...
+            # also covers the H4 scan" -- rather than silently scanning a
+            # Go/TypeScript diff with the python regex and never firing.
+            profile = testlang.resolve_strict(binding.language, repo_root=cwd)
+        except (testlang.UnsupportedLanguage, testlang.MismatchedLanguage) as exc:
             # Same defense-in-depth as `run_ac_checks`'s own catch below --
             # caught here too since H4 resolves the profile BEFORE any
             # `test:` AC's own check would.
-            ops.fail(cfg, key, f"unsupported language for this repo binding -- {exc}",
+            ops.fail(cfg, key, f"language check failed for this repo binding -- {exc}",
                     actor=actor, dead_letter=True)
             return
         deleted = _diff_deleted_test_names(cwd, binding.base_branch or "main", profile)

@@ -79,8 +79,9 @@ class RepoBinding:
     # T-84: this repo's test surface language, selecting the added/deleted
     # test-name extractor + selector formatter every T-79 `test:` annotation
     # and the H4 test-deletion gate resolve through (`testlang.resolve`).
-    # None (unset -- no board-wide fallback; unlike test_command/prime this
-    # has no [maestro]-level default) resolves to "python", byte-identical to
+    # T-96: unset now inherits the board-wide `[maestro] language` default
+    # (Config.language), same precedence as test_command/base_drift_policy --
+    # None (neither set) still resolves to "python", byte-identical to
     # before this field existed (ships dark). Any other value must be one of
     # `testlang.SUPPORTED` -- config.load fails closed on anything else, the
     # same posture as base_drift_policy.
@@ -124,9 +125,12 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         worktree_timeout=(
             raw_worktree_timeout if raw_worktree_timeout is not None else cfg.worktree_timeout
         ),
-        # T-84: no board-wide fallback -- unset means "python" (see RepoBinding.language).
-        language=table.get("language") or None,
-        # T-98: no board-wide fallback either -- unset means the language profile's
+        # T-96: same "table wins, unset inherits" precedence as test_command
+        # above -- a board-wide [maestro] language default (cfg.language) is
+        # now honored, not silently ignored; still None (-> "python") when
+        # neither is set (see RepoBinding.language).
+        language=table.get("language") or cfg.language,
+        # T-98: no board-wide fallback -- unset means the language profile's
         # own format_selector (see RepoBinding.test_selector).
         test_selector=table.get("test_selector") or None,
     )
@@ -164,6 +168,8 @@ def implicit_default(cfg: Config) -> RepoBinding:
         test_command=cfg.test_command,
         prime_timeout=cfg.prime_timeout,
         worktree_timeout=cfg.worktree_timeout,
+        # T-96: same board-wide-default precedence as test_command above.
+        language=cfg.language,
     )
 
 
