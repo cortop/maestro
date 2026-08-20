@@ -630,7 +630,8 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "unknown_repo_bindings", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
-                      "pi_version", "worktree_health", "provider_availability", "missing_acs"}
+                      "pi_version", "worktree_health", "worktree_witness", "provider_availability",
+                      "missing_acs"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -688,13 +689,14 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     `pi_version` -- same treatment. T-61 (PI-9) grew it by one more still --
     `pi_models` -- same treatment. T-77 (RB-17) grew it by one more still --
     `phantom_keys` -- same treatment. T-80 grew it by one more still --
-    `missing_acs` -- same treatment.)"""
+    `missing_acs` -- same treatment. T-95 grew it by one more still --
+    `worktree_witness` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
-        "pi_models", "runner_binary", "pi_version", "worktree_health",
+        "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_witness",
         "provider_availability", "burn", "missing_acs",
     }
     code, out = _sweep(home)
@@ -1727,4 +1729,70 @@ def test_check_worktree_health_registered_in_doctor(home):
     assert health.check_worktree_health in health.CHECKS
     code, out = _sweep(home)
     assert code == 0
+
+
+# --- T-95: `maestro doctor` surfaces existing witness-less worktrees --------
+
+
+def test_check_worktree_witness_ok_with_no_worktrees_dir(home):
+    cfg = Config(home=home)
+    check = health.check_worktree_witness(cfg, store.now_epoch())
+    assert check == {
+        "name": "worktree_witness", "status": "ok",
+        "detail": "every registered worktree either carries a witness or is new",
+        "witness_less": [],
+    }
+
+
+def test_check_worktree_witness_warns_on_a_pre_t81_worktree(home, tmp_path):
+    """T-95 AC6: a real, registered git worktree with a valid index but no
+    completion witness -- exactly what every worktree created before T-81
+    shipped looks like -- is surfaced by name, without waiting for a
+    reconcile step to hit the (now safe) backfill branch itself."""
+    from maestro import config as config_mod
+
+    from conftest import make_origin_and_repo as _make_origin_and_repo
+
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    (home / "config.toml").write_text(f'[maestro]\nrepo_path = "{repo}"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    store.atomic_write(store.spec_path(home, "W-1"), "# W-1\napproval_tier: 1\n\n## Intent\nx\n")
+
+    ops.worktree_ensure(cfg, "W-1")
+    wt = store.worktree_path(home, "W-1")
+    (ops._git_dir(wt) / ops._WORKTREE_COMPLETE_MARKER).unlink()
+
+    check = health.check_worktree_witness(cfg, store.now_epoch())
+    assert check["status"] == "warn"
+    assert check["witness_less"] == [{"key": "W-1", "reason": "no witness (predates T-81)"}]
+    assert "W-1" in check["detail"]
+
+    # Read-only: a doctor check must never write.
+    assert not (ops._git_dir(wt) / ops._WORKTREE_COMPLETE_MARKER).exists()
+
+
+def test_check_worktree_witness_does_not_flag_a_no_index_directory(home):
+    """A directory that isn't a usable git worktree at all is
+    `check_worktree_health`'s "no index" warn, not this check's -- it's
+    genuinely unusable (MTO-1's interrupted-checkout shape), never merely
+    pre-T-81, so `check_worktree_witness` must not double-count it."""
+    wt_dir = home / "worktrees" / "B-1"
+    wt_dir.mkdir(parents=True)
+    (wt_dir / "stray.txt").write_text("not a real worktree\n")
+
+    cfg = Config(home=home)
+    check = health.check_worktree_witness(cfg, store.now_epoch())
+    assert check == {
+        "name": "worktree_witness", "status": "ok",
+        "detail": "every registered worktree either carries a witness or is new",
+        "witness_less": [],
+    }
+
+
+def test_check_worktree_witness_registered_in_doctor(home):
+    assert health.check_worktree_witness in health.CHECKS
+    code, out = _sweep(home)
+    assert code == 0
+    names = [c["name"] for c in out["checks"]]
+    assert "worktree_witness" in names
     assert next(c for c in out["checks"] if c["name"] == "worktree_health")["status"] == "ok"

@@ -595,40 +595,137 @@ def test_ensure_never_discards_uncommitted_work_on_a_completed_worktree(home, tm
 
 
 def test_ensure_still_tears_down_and_rebuilds_when_creation_never_witnessed(home, tmp_path):
-    """T-81 AC2 (the other half) + AC7 -- the same `git status` mass-deletion
-    signature as the test above, but this time creation genuinely never
-    finished (simulated honestly by deleting the completion witness itself,
-    the only way `ensure` could tell -- a real crash between the checkout
-    finishing and the witness being written would leave exactly this state):
-    the worktree carries no completion witness at all, so `ensure` tears it
-    down and rebuilds it, exactly as the pre-T-81 `worktree_health`-driven
-    fix did for this MTO-1 reproduction (229,695 staged deletions on a real
-    ~230k-file repo, scaled down here to stay in-tree)."""
+    """T-81 AC2 (the other half) + AC7, retargeted by T-95: witness-absence
+    ALONE no longer means "creation never finished" -- a witness-less
+    worktree that's still a real, registered git worktree with a valid index
+    now gets its witness backfilled and is preserved (T-95's whole point;
+    see the backfill test below), so the OLD version of this test -- which
+    merely deleted the witness off an otherwise-healthy worktree and asserted
+    it got torn down and rebuilt -- was itself locking in the exact
+    destructive behaviour this ticket exists to close. Retargeted at what
+    genuinely STILL means "creation never finished": a registered worktree
+    whose INDEX is also gone (`_worktree_has_index` False, the true MTO-1
+    interrupted-`worktree add` signature) -- that one is still torn down and
+    rebuilt, unchanged. And, the counterpart T-95 AC5 also calls for: an
+    untracked file inside a witness-less-but-VALID worktree is never
+    removed."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+
+    # -- Genuinely unusable (no index at all): still torn down and rebuilt.
+    _seed_spec(home, "H-2b")
+    ops.worktree_ensure(cfg, "H-2b")
+    wt = store.worktree_path(home, "H-2b")
+    git_dir = ops._git_dir(wt)
+    witness = git_dir / ops._WORKTREE_COMPLETE_MARKER
+    assert witness.exists()
+    witness.unlink()
+    (git_dir / "index").unlink()
+    assert ops.worktree_health(wt) == {"healthy": False, "reason": "no index"}
+    (wt / "should-not-survive.txt").write_text("torn down\n", encoding="utf-8")
+
+    result = ops.worktree_ensure(cfg, "H-2b")
+    assert result["created"] is True
+    assert ops.worktree_health(wt) == {"healthy": True, "reason": None}
+    assert not (wt / "should-not-survive.txt").exists()
+
+    # -- Witness-less but VALID (a real registered worktree with a real
+    # index): never torn down, and an untracked file inside it survives.
+    _seed_spec(home, "H-2c")
+    ops.worktree_ensure(cfg, "H-2c")
+    wt2 = store.worktree_path(home, "H-2c")
+    (ops._git_dir(wt2) / ops._WORKTREE_COMPLETE_MARKER).unlink()
+    (wt2 / "untracked.txt").write_text("keep me\n", encoding="utf-8")
+
+    result2 = ops.worktree_ensure(cfg, "H-2c")
+    assert result2["created"] is False
+    assert (wt2 / "untracked.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_ensure_backfills_witness_and_preserves_uncommitted_work_for_pre_t81_worktree(
+        home, tmp_path, monkeypatch, capsys):
+    """T-95 AC1 + AC2: a worktree created by the pre-T-81 code path (simulated
+    by deleting the completion witness from a worktree the CURRENT code
+    created -- the same honest simulation the sibling T-81 tests already use
+    for "creation never witnessed") that holds an untracked new file and an
+    uncommitted edit to a tracked file survives `maestro worktree ensure`
+    completely: exit 0, `{"created": false}`, both files byte-identical
+    afterwards. That first ensure backfills the witness, so a second ensure
+    is a plain no-op with no further probing of the recovery path --
+    monkeypatched here to raise if `_cleanup_partial_worktree` or
+    `_worktree_create_or_adopt` are ever called on that second pass."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "H-3")
+
+    ops.worktree_ensure(cfg, "H-3")
+    wt = store.worktree_path(home, "H-3")
+    witness = ops._git_dir(wt) / ops._WORKTREE_COMPLETE_MARKER
+    assert witness.exists()
+    witness.unlink()
+
+    (wt / "brand-new-module.py").write_text("# untracked, mid-refactor\n", encoding="utf-8")
+    (wt / "README.md").write_text("edited content\n", encoding="utf-8")
+
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-3"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"created": false' in out
+
+    assert witness.exists(), "the first ensure must have backfilled the witness"
+    assert (wt / "brand-new-module.py").read_text(encoding="utf-8") == "# untracked, mid-refactor\n"
+    assert (wt / "README.md").read_text(encoding="utf-8") == "edited content\n"
+
+    def _refuse_to_be_called(*args, **kwargs):
+        raise AssertionError("recovery path must not run once the witness is backfilled")
+
+    monkeypatch.setattr(ops, "_cleanup_partial_worktree", _refuse_to_be_called)
+    monkeypatch.setattr(ops, "_worktree_create_or_adopt", _refuse_to_be_called)
+
+    result2 = ops.worktree_ensure(cfg, "H-3")
+    assert result2["created"] is False
+    assert (wt / "brand-new-module.py").read_text(encoding="utf-8") == "# untracked, mid-refactor\n"
+    assert (wt / "README.md").read_text(encoding="utf-8") == "edited content\n"
+
+
+def test_ensure_refuses_witness_less_worktree_that_trips_mass_deletion_heuristic(home, tmp_path):
+    """T-95 AC4: a witness-less worktree that IS a real registered worktree
+    with a valid index (`backfillable`) but ALSO trips the mass-deletion
+    heuristic is NOT torn down: `ensure` backfills the witness, falls through
+    to the same witnessed-but-unhealthy branch
+    `test_ensure_never_discards_uncommitted_work_on_a_completed_worktree`
+    above exercises, and refuses loudly (`store.MaestroError`, non-zero CLI
+    exit, no event appended) -- every uncommitted artifact survives. Before
+    T-95, this exact combination (witness absent + mass deletion) silently
+    tore the worktree down and rebuilt it (the old version of the sibling
+    test above asserted exactly that); this is the regression test for that."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
     _seed_many_tracked_files(repo, 60)
     cfg = _write_config(home, repo)
-    _seed_spec(home, "H-2b")
+    _seed_spec(home, "H-2d")
 
-    ops.worktree_ensure(cfg, "H-2b")
-    wt = store.worktree_path(home, "H-2b")
+    ops.worktree_ensure(cfg, "H-2d")
+    wt = store.worktree_path(home, "H-2d")
     assert ops.worktree_health(wt)["healthy"] is True
 
     witness = ops._git_dir(wt) / ops._WORKTREE_COMPLETE_MARKER
     assert witness.exists()
     witness.unlink()
 
+    (wt / "scratch-notes.md").write_text("work in progress\n", encoding="utf-8")
     for i in range(55):
         (wt / f"file{i}.txt").unlink()
     assert ops.worktree_health(wt) == {"healthy": False, "reason": "mass deletion in git status"}
 
-    result = ops.worktree_ensure(cfg, "H-2b")
-    assert result["created"] is True
-    assert ops.worktree_health(wt) == {"healthy": True, "reason": None}
-    for i in range(60):
+    with pytest.raises(store.MaestroError):
+        ops.worktree_ensure(cfg, "H-2d")
+
+    assert witness.exists(), "the witness is backfilled even on the refusal path"
+    assert (wt / "scratch-notes.md").read_text(encoding="utf-8") == "work in progress\n"
+    for i in range(55, 60):
         assert (wt / f"file{i}.txt").exists()
-    status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"],
-                            capture_output=True, text=True, check=True)
-    assert status.stdout == ""
+    assert event_log.read(home, "H-2d") == []
 
 
 def test_ensure_timeout_on_worktree_add_raises_loudly_and_leaves_no_partial_dir(
@@ -1019,3 +1116,85 @@ def test_ensure_fetch_timeout_surfaces_as_maestro_error_not_a_poison_pill(
     assert "timeout" in err.lower()
     assert not wt.exists()
     assert event_log.read(home, "H-10") == []
+
+
+def test_prime_extras_info_exclude_timeout_surfaces_as_maestro_error_not_a_poison_pill(
+        home, tmp_path, monkeypatch, capsys):
+    """T-95: `_prime_worktree_extras`' leading `git rev-parse --git-path
+    info/exclude` runs under `worktree_timeout` through `_run_recovery_git`,
+    same as every other call on `worktree_ensure`'s hot path -- a hang or
+    failure there surfaces as `store.MaestroError` from the real CLI (never a
+    raw traceback) and leaves no poison-pill state: with the fault lifted,
+    the very next ensure (now witnessed from the first attempt's successful
+    create) completes cleanly."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _seed_spec(home, "H-12")
+    wt = store.worktree_path(home, "H-12")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:5] == ["git", "-C", str(wt), "rev-parse", "--git-path"] and "info/exclude" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capsys.readouterr()
+    rc = cli_main(["--home", str(home), "worktree", "ensure", "H-12"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "timeout" in err.lower()
+
+    monkeypatch.undo()  # lift the fault: the earlier failed attempt already created+witnessed wt
+    capsys.readouterr()
+    rc2 = cli_main(["--home", str(home), "worktree", "ensure", "H-12"])
+    assert rc2 == 0
+    out = capsys.readouterr().out
+    assert '"created": false' in out
+
+
+def test_revival_from_awaiting_human_preserves_uncommitted_work_in_a_witness_less_worktree(
+        home, tmp_path):
+    """T-95 AC8: the revival path end to end, but for a witness-LESS (rather
+    than witnessed-but-unhealthy, which the sibling test above already
+    covers) worktree -- a pre-T-81-shaped worktree carrying uncommitted work,
+    parked in `awaiting-human`, revived to `ready`. A real `dispatch(cfg,
+    DryRunSessions(), ...)` sweep routes it to the ready reconciler command,
+    and that reconciler's own next step -- `ops.worktree_ensure` -- backfills
+    the witness and preserves the uncommitted work instead of destroying it,
+    exactly as it would if the reconciler itself had made this call."""
+    from maestro.dispatcher import dispatch
+
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    key = "P-3"
+
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: 1\n\n## Intent\nx\n\n"
+                       f"## Acceptance criteria\n- [ ] ok\n")
+    assert cli_main(["--home", str(home), "set-phase", key, "ready", "--reason", "test: seed"]) == 0
+
+    ops.worktree_ensure(cfg, key)
+    wt = store.worktree_path(home, key)
+    (ops._git_dir(wt) / ops._WORKTREE_COMPLETE_MARKER).unlink()  # simulate pre-T-81
+    (wt / "uncommitted.txt").write_text(f"{key} work in progress\n", encoding="utf-8")
+
+    assert cli_main(["--home", str(home), "set-phase", key, "awaiting-human",
+                     "--reason", "test: park"]) == 0
+    assert cli_main(["--home", str(home), "set-phase", key, "ready",
+                     "--reason", "test: revive"]) == 0
+
+    sessions = DryRunSessions()
+    dispatch(cfg, sessions, now=5000)
+    spawned = {k: p for k, p, *_ in sessions.spawned}
+    assert spawned.get(key) == f"/maestro-reconcile-ready {key}"
+
+    # dispatch() itself never touches worktree files...
+    assert (wt / "uncommitted.txt").read_text(encoding="utf-8") == f"{key} work in progress\n"
+    # ...and the ready reconciler's own `worktree ensure` call preserves it too.
+    result = ops.worktree_ensure(cfg, key)
+    assert result["created"] is False
+    assert (wt / "uncommitted.txt").read_text(encoding="utf-8") == f"{key} work in progress\n"
+    assert (ops._git_dir(wt) / ops._WORKTREE_COMPLETE_MARKER).exists()
