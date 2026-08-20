@@ -1292,7 +1292,12 @@ def cmd_env(args) -> int:
                 "disallowed_tools": disallowed_tools,
                 "model": model, "effort": effort,
                 "runner": runner, "runner_model": runner_model,
-                "kind": snap.kind})
+                "kind": snap.kind,
+                # T-96 AC4: surface the resolved test-verification knobs a
+                # `test:` annotation's presence gate actually uses, so a
+                # human/agent can see what the language guard is checking
+                # against without reading config.toml directly.
+                "language": binding.language, "test_command": binding.test_command})
         return 0
     _print({"home": str(cfg.home), "board": store.board_state(cfg.home),
             "repo_path": cfg.repo_path,

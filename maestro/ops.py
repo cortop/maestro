@@ -94,15 +94,25 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     `qa` handoff itself is the point, independent of whether it would have
     been redirected.
 
-    Entering `awaiting-ci` is gated three ways: a ticket with unattested ACs
-    refuses (raises `MaestroError`, non-zero exit, NO event appended) unless
-    `force=True`; one with a failing independent QA verdict on a current AC
-    refuses unconditionally (`force` does not override QA — that gate is fixed
-    by re-running `maestro qa-verdict`, not by a human override); and (T-85,
-    `cfg.awaiting_ci_qa_gate`, default ON) one where any current AC has no
-    *passing* spec-axis QA verdict at all -- not merely no failing one -- also
-    refuses unconditionally, same posture as the QA-failing gate (see
-    `_refuse_if_qa_incomplete`).
+    Entering `awaiting-ci`, `in-review`, or `done` FROM `implementing` or `qa` is
+    gated three ways (T-97: previously this fired only when the DESTINATION was
+    `awaiting-ci`, so the `in-review` and `done` edges out of `implementing` --
+    both already granted verbs there -- skipped it entirely; see `qa_gate_applies`
+    below): a ticket with unattested ACs refuses (raises `MaestroError`, non-zero
+    exit, NO event appended) unless `force=True`; one with a failing independent QA
+    verdict on a current AC refuses unconditionally (`force` does not override QA —
+    that gate is fixed by re-running `maestro qa-verdict`, not by a human
+    override); and (T-85, `cfg.awaiting_ci_qa_gate`, default ON) one where any
+    current AC has no *passing* spec-axis QA verdict at all -- not merely no
+    failing one -- also refuses unconditionally, same posture as the QA-failing
+    gate (see `_refuse_if_qa_incomplete`). Scoped to the SOURCE phase being
+    `implementing`/`qa` so a resume that isn't skipping anything -- e.g. a
+    stranded `awaiting-human` ticket's own `set-phase awaiting-ci` recovery
+    (T-97 bypass 3), or the dispatcher's own `awaiting-ci -> in-review` once CI
+    goes green -- is exempt. `in-review`/`done` are additionally covered
+    end-to-end by `cfg.awaiting_ci_qa_gate` (off reverts them to HEAD's
+    pass-through, since HEAD gated neither); `awaiting-ci` itself keeps its
+    pre-T-97 posture, where only `_refuse_if_qa_incomplete` consults the knob.
 
     Entering `qa` from `implementing` is handled a third way (RB-14, replacing
     RB-12's earlier raise-or-force gate): if a `test_command` resolves for
@@ -142,24 +152,40 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
     snap = snap_mod.load(cfg.home, key)
     if phase in (Phase.QA, Phase.AWAITING_CI):
         _refuse_if_missing_acs(cfg, key, phase)
-    unverified = _acs_unverified_count(cfg, key, snap) if phase == Phase.AWAITING_CI else 0
-    if unverified > 0 and not force:
-        raise store.MaestroError(
-            f"{key}: refusing awaiting-ci — {unverified} acceptance criteria unverified; "
-            f"run `maestro verify-ac` for each, or pass --force to override")
-    forced_acs = unverified > 0 and force
+    src = Phase(snap.phase)
 
-    # RB-14: transparent redirect, never a refusal and never forceable -- see
-    # this function's docstring. `force` is deliberately not consulted here.
-    if phase == Phase.QA and Phase(snap.phase) == Phase.IMPLEMENTING:
-        if _tests_stale_reason(cfg, key, snap) is not None:
-            phase = Phase.VERIFYING
+    # T-97: (source, destination) jointly define the gate now, not destination
+    # alone -- see this function's docstring. `awaiting-ci` keeps its pre-T-97,
+    # knob-independent posture (only `_refuse_if_qa_incomplete` consults
+    # `awaiting_ci_qa_gate`, below); the two NEW destinations this closes,
+    # `in-review` and `done`, are additionally gated end-to-end by the knob so
+    # `awaiting_ci_qa_gate = false` reverts them to HEAD's pass-through.
+    qa_gate_applies = (src in (Phase.IMPLEMENTING, Phase.QA)
+                       and phase in (Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DONE))
+    if phase in (Phase.IN_REVIEW, Phase.DONE) and not cfg.awaiting_ci_qa_gate:
+        qa_gate_applies = False
 
-    if phase == Phase.AWAITING_CI:
+    unverified = 0
+    forced_acs = False
+    if qa_gate_applies:
+        unverified = _acs_unverified_count(cfg, key, snap)
+        if unverified > 0 and not force:
+            raise store.MaestroError(
+                f"{key}: refusing {phase.value} — {unverified} acceptance criteria unverified; "
+                f"run `maestro verify-ac` for each, or pass --force to override")
+        forced_acs = unverified > 0 and force
         _refuse_if_qa_failing(cfg, key, snap)
         _refuse_if_qa_incomplete(cfg, key, snap)
 
-    src = Phase(snap.phase)
+    # RB-14: transparent redirect, never a refusal and never forceable -- see
+    # this function's docstring. `force` is deliberately not consulted here.
+    # Mutually exclusive with `qa_gate_applies` above (that requires `phase` in
+    # {AWAITING_CI, IN_REVIEW, DONE}; this requires `phase == QA`), so the
+    # redirect can never invalidate a gate decision already made.
+    if phase == Phase.QA and src == Phase.IMPLEMENTING:
+        if _tests_stale_reason(cfg, key, snap) is not None:
+            phase = Phase.VERIFYING
+
     if src != phase and not can_transition(src, phase):
         # Not fatal — log it, but the engine trusts the agent's judgment.
         _append(cfg, key, E.NOTE, {"text": f"unusual transition {src.value}->{phase.value}"},
@@ -680,18 +706,32 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
     witness.write_text(store.iso_now() + "\n", encoding="utf-8")
 
 
-def _prime_worktree_extras(repo: str, wt: Path) -> None:
+def _prime_worktree_extras(repo: str, wt: Path, *, timeout: int = _GIT_TIMEOUT) -> None:
     """GA-7, absorbed: exclude the mirrored names from `git add` via the
     git-COMMON `info/exclude` (idempotent -- shared across every worktree of
     the repo), then mirror CLAUDE.local.md / .claude/settings.local.json /
     node_modules from the source checkout into *wt*. A real, write-isolated
     copy (never a symlink or hardlink -- see the `cp` ladder below), so an
     install run inside *wt* never writes through into *repo* or a sibling
-    worktree. Every step is a no-op when the source doesn't have it."""
-    exclude = subprocess.run(
+    worktree. Every step is a no-op when the source doesn't have it.
+
+    T-95: *timeout* should be the caller's `worktree_timeout`, not the
+    default short `_GIT_TIMEOUT` -- `worktree_ensure` passes it explicitly.
+    The leading `git rev-parse --git-path info/exclude` used to run
+    unguarded (short-timeout `subprocess.run(..., check=True)`) on
+    `worktree_ensure`'s hot path, so a hung or failing git there escaped as a
+    raw `subprocess.CalledProcessError` traceback instead of a loud
+    `store.MaestroError` -- `cli.main` only catches the latter (T-81's own
+    finding, missed here). Routed through `_run_recovery_git` like the rest
+    of the recovery path."""
+    result = _run_recovery_git(
         ["git", "-C", str(wt), "rev-parse", "--git-path", "info/exclude"],
-        capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True).stdout.strip()
-    exclude_path = Path(exclude)
+        timeout=timeout, what=f"`git rev-parse --git-path info/exclude` on {wt}")
+    if result.returncode != 0:
+        raise store.MaestroError(
+            f"`git rev-parse --git-path info/exclude` on {wt} failed (rc={result.returncode}): "
+            f"{result.stderr.strip()}")
+    exclude_path = Path(result.stdout.strip())
     if not exclude_path.is_absolute():
         exclude_path = wt / exclude_path
     existing = (exclude_path.read_text(encoding="utf-8").splitlines()
@@ -785,6 +825,36 @@ def _worktree_witness_path(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path | N
         return None
 
 
+def worktree_witness_status(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
+    """T-95: the one predicate that decides whether a witness-less *wt* is a
+    pre-T-81 worktree (backfill and treat as complete) or an interrupted
+    checkout (still torn down) -- shared by `worktree_ensure`'s write path and
+    `health.check_worktree_witness`'s read-only doctor report, so the two
+    never drift apart.
+
+    Returns ``{"witnessed": bool, "backfillable": bool, "witness_path": Path | None}``:
+      - `witnessed` True: the completion witness already exists on disk --
+        nothing to do.
+      - `witnessed` False, `backfillable` True: *wt* IS a registered git
+        worktree with a real index (`_worktree_has_index`) but has never
+        carried a witness -- it predates T-81 (nothing ever wrote one for it),
+        not an interrupted `worktree add`. Safe to backfill.
+      - `witnessed` False, `backfillable` False: either *wt* isn't a usable
+        git worktree at all (`_worktree_witness_path` returned None) or it is
+        one but has no index -- MTO-1's interrupted-checkout signature. Must
+        still be torn down and rebuilt, never backfilled.
+    `witness_path` is the path a witness would live at (or already does),
+    None when *wt* isn't even a usable git worktree yet.
+    """
+    witness = _worktree_witness_path(wt, timeout=timeout)
+    if witness is None:
+        return {"witnessed": False, "backfillable": False, "witness_path": None}
+    if witness.exists():
+        return {"witnessed": True, "backfillable": False, "witness_path": witness}
+    backfillable = _worktree_has_index(wt, timeout=timeout)
+    return {"witnessed": False, "backfillable": backfillable, "witness_path": witness}
+
+
 def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) -> dict:
     """Idempotently create-or-adopt *key*'s reconciler worktree, absorb GA-7's
     CLAUDE.local.md/.claude/settings.local.json/node_modules priming, and run
@@ -813,18 +883,29 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
     apart from "this is a live worktree in a state the heuristic dislikes" --
     conflating the two used to mean a live worktree holding uncommitted work
     got silently `--force` removed and reported `{"created": True}` on exit 0
-    (T-81 finding 1). So:
-      - NO witness -> creation never finished (or *wt* doesn't exist at all) --
-        torn down (`_cleanup_partial_worktree`, safe: there is nothing
-        completed to lose) and recreated.
-      - Witness present, `worktree_health` healthy -> real no-op, as before.
-      - Witness present, `worktree_health` UNHEALTHY -> creation genuinely
-        finished but the worktree now looks wrong (mass deletion, no index
-        anymore, ...) -- likely carrying uncommitted work. Ensure REFUSES
-        (`store.MaestroError`, no event appended, non-zero CLI exit) naming
-        the worktree and the remedy, rather than guessing and possibly
-        discarding it; a human inspects and either fixes it in place or
-        removes it themselves before re-running `ensure`.
+    (T-81 finding 1). So (`worktree_witness_status`):
+      - Witnessed already -> real no-op path below, as before.
+      - Witness-less but `backfillable` (a registered worktree with a real
+        index that has simply never carried a witness -- T-95: every
+        worktree created before T-81 shipped looks like this, since nothing
+        ever backfilled one) -> the witness is written right here, and
+        *wt* falls through to the SAME witnessed/health-checked branch
+        below as if it had always had one -- never torn down just for
+        predating the marker.
+      - Witness-less and NOT backfillable (`_worktree_witness_path` found no
+        usable git worktree at *wt* at all, or one with no index) -- creation
+        genuinely never finished (or *wt* doesn't exist) -- torn down
+        (`_cleanup_partial_worktree`, safe: there is nothing completed to
+        lose) and recreated.
+      - Witnessed (or just backfilled), `worktree_health` healthy -> real
+        no-op.
+      - Witnessed (or just backfilled), `worktree_health` UNHEALTHY ->
+        creation genuinely finished but the worktree now looks wrong (mass
+        deletion, no index anymore, ...) -- likely carrying uncommitted work.
+        Ensure REFUSES (`store.MaestroError`, no event appended, non-zero CLI
+        exit) naming the worktree and the remedy, rather than guessing and
+        possibly discarding it; a human inspects and either fixes it in place
+        or removes it themselves before re-running `ensure`.
     `prime` is skipped once its own worktree-local marker (under the
     worktree's OWN git dir -- see `_git_dir` -- so it self-cleans when the
     worktree is removed) is present. If a fresh branch can't be created (it
@@ -858,9 +939,19 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
     repo = binding.path
     wt = store.worktree_path(cfg.home, key)
     branch = f"{binding.branch_prefix}{key}"
-    witness = _worktree_witness_path(wt, timeout=worktree_timeout)
+    status = worktree_witness_status(wt, timeout=worktree_timeout)
+    if status["backfillable"]:
+        # T-95: a registered git worktree with a real index but no witness --
+        # this worktree's creation genuinely finished, it simply predates
+        # T-81 (nothing ever wrote one for it). Backfill and fall through to
+        # the witnessed/health-checked branch below instead of destroying it.
+        witness = status["witness_path"]
+        witness.parent.mkdir(parents=True, exist_ok=True)
+        witness.write_text(store.iso_now() + "\n", encoding="utf-8")
+        status = {**status, "witnessed": True}
+
     created = False
-    if witness is None or not witness.exists():
+    if not status["witnessed"]:
         if wt.exists():
             _cleanup_partial_worktree(repo, wt, branch=branch, base=binding.base_branch,
                                       timeout=worktree_timeout)
@@ -878,7 +969,7 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
                 f"(`git -C {repo} worktree remove --force {wt}`) and re-run "
                 f"`maestro worktree ensure {key}`.")
 
-    _prime_worktree_extras(repo, wt)
+    _prime_worktree_extras(repo, wt, timeout=worktree_timeout)
 
     primed = False
     if binding.prime:
@@ -1295,17 +1386,21 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
     has no acs section at all or no ACs carry an annotation.
 
     T-84: a `test:` annotation's added/deleted-name extraction and selector
-    syntax are selected per `binding.language` (`testlang.resolve`) -- never
-    hardcoded pytest here. `binding.language` is already fail-closed at
+    syntax are selected per `binding.language` (`testlang.resolve_strict`) --
+    never hardcoded pytest here. `binding.language` is already fail-closed at
     `config.load()` time (an unrecognized value refuses to load the home at
-    all -- see `config._REPO_TABLE_KEYS`'s validation), so `testlang.resolve`
+    all -- see `config._REPO_TABLE_KEYS`'s validation), so `resolve_strict`
     raising `UnsupportedLanguage` here should never actually happen; it is
     caught anyway (defense in depth against a binding constructed by some
-    other path) and surfaced via the `"unsupported"` key instead of ever
-    running (and thus ever failing-closed forever) a check that cannot mean
-    anything for that language -- the caller (`_route_test_run`) turns a
-    non-empty `"unsupported"` into one clear, one-time `ops.fail(...,
-    dead_letter=True)` rather than a bounce back to `implementing`.
+    other path). T-96: an UNSET `language` whose guess (this annotation's own
+    path extension, checked by `resolve_strict`) contradicts the silent
+    python default raises `MismatchedLanguage` instead -- caught alongside
+    `UnsupportedLanguage`, same treatment. Either way this is surfaced via
+    the `"unsupported"` key instead of ever running (and thus ever
+    failing-closed forever) a check against the wrong language's regex --
+    the caller (`_route_test_run`) turns a non-empty `"unsupported"` into one
+    clear, one-time `ops.fail(..., dead_letter=True)` rather than a bounce
+    back to `implementing`.
     """
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
@@ -1336,8 +1431,14 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
                 exit_code, output = _run_shell(ann.command, cwd)
             else:
                 try:
-                    profile = testlang.resolve(binding.language)
-                except testlang.UnsupportedLanguage as exc:
+                    # T-96: resolve_strict, not resolve -- an UNSET language
+                    # whose guess (this annotation's own path extension, or
+                    # the repo root's marker files) contradicts the silent
+                    # python default must fail closed here too, not just an
+                    # explicitly-set-but-unrecognized value.
+                    profile = testlang.resolve_strict(binding.language, ann_path=ann.path,
+                                                      repo_root=cwd)
+                except (testlang.UnsupportedLanguage, testlang.MismatchedLanguage) as exc:
                     unsupported.append({"ac_index": i, "ac_hash": h,
                                         "language": binding.language, "error": str(exc)})
                     continue
@@ -1830,6 +1931,31 @@ def fold_inbox(cfg: Config, key: str) -> list[dict]:
 
 
 def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
+    """T-97: `finalize` used to append `Finalized` unconditionally regardless of
+    phase -- a second, one-word bypass of the QA/AC gate `set_phase` enforces on
+    `implementing -> awaiting-ci`/`in-review`/`done` (bypass 2: `finalize` is
+    granted to the `implementing` phase, and `implementing -> done` needs no
+    `set_phase` call at all). Mirrors `set_phase`'s own (source, destination)
+    gate exactly (`Phase.DONE` as the destination): active only when the
+    ticket's CURRENT phase is `implementing`/`qa` -- a `terminating` teardown
+    after a human rejection, an `awaiting-human` research-ticket handoff, or a
+    `passive`-phase finalize after CI/review already passed, is not skipping
+    anything and stays ungated, same as `set_phase`. Scoped to non-`mode: local`
+    bindings only (AD-6: local mode has no QA phase to skip in the first place --
+    byte-identical to before this ticket); `awaiting_ci_qa_gate = false` reverts
+    this precondition entirely, same knob `set_phase` uses for the same two new
+    destinations."""
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode != "local" and cfg.awaiting_ci_qa_gate:
+        snap = snap_mod.load(cfg.home, key)
+        if Phase(snap.phase) in (Phase.IMPLEMENTING, Phase.QA):
+            unverified = _acs_unverified_count(cfg, key, snap)
+            if unverified > 0:
+                raise store.MaestroError(
+                    f"{key}: refusing done — {unverified} acceptance criteria unverified; "
+                    f"run `maestro verify-ac` for each")
+            _refuse_if_qa_failing(cfg, key, snap)
+            _refuse_if_qa_incomplete(cfg, key, snap)
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
 
 SUPPORTED = ("python", "go", "typescript")
@@ -116,3 +117,76 @@ def resolve(language: str | None) -> LanguageProfile:
         raise UnsupportedLanguage(
             f"unsupported language {language!r} -- supported: {', '.join(SUPPORTED)}")
     return profile
+
+
+# T-96: an UNSET `language` silently resolves to PYTHON above (T-84's
+# deliberate ships-dark default) -- but that default is simply wrong when the
+# repo's actual test surface is Go or TypeScript, and nothing catches it: a
+# `test:` annotation's presence check runs the PYTHON regex against a
+# `*_test.go` diff, never matches, and reports "not added by this diff"
+# forever, even though the suite is green. The two guess functions below are
+# the single shared oracle every T-96 caller (`ops.run_ac_checks`'s presence
+# gate, the H4 deletion scan, `maestro doctor`) reads from, so "language
+# unset + non-python surface" is detected identically everywhere instead of
+# three divergent heuristics.
+
+_EXTENSION_LANGUAGE: dict[str, str] = {
+    ".go": "go",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+}
+
+
+def guess_from_path(path: str) -> str | None:
+    """A `test:` annotation's own path extension, when it unambiguously names
+    a non-python test surface (.go / .ts / .tsx). None for .py or any other
+    extension -- inconclusive, never a false positive."""
+    for ext, lang in _EXTENSION_LANGUAGE.items():
+        if path.endswith(ext):
+            return lang
+    return None
+
+
+def guess_from_repo_root(repo_root: Path) -> str | None:
+    """A repo root's own marker files, used when no annotation path is
+    available (the H4 scan, `maestro doctor`): a `go.mod` or `package.json`
+    at the root names Go/TypeScript. None (inconclusive) never overrides the
+    python default on its own -- this must never false-positive on a real
+    python repo that just organizes its tests differently."""
+    if (repo_root / "go.mod").is_file():
+        return "go"
+    if (repo_root / "package.json").is_file():
+        return "typescript"
+    return None
+
+
+class MismatchedLanguage(ValueError):
+    """*language* is unset (silently defaults to PYTHON, T-84's ships-dark
+    rule) but the actual test surface being checked -- an annotation's path
+    extension, or the repo root's own marker files -- contradicts that
+    default (e.g. `test_command` set on a Go repo with no `[repos.<name>]
+    language`). Callers must surface this the same way as
+    `UnsupportedLanguage` (T-96: one legible, one-time dead-letter naming
+    `language` and the repo table to set) rather than let a `test:` check run
+    the wrong regex and fail closed forever."""
+
+
+def resolve_strict(language: str | None, *, ann_path: str | None = None,
+                   repo_root: Path | None = None) -> LanguageProfile:
+    """Like `resolve()`, but when *language* is unset (would default to
+    PYTHON) AND a guess from *ann_path* (a `test:` annotation's own path) or
+    *repo_root* (marker files, checked only when *ann_path* gave no verdict)
+    names a different language, raises `MismatchedLanguage` instead of
+    silently defaulting -- the T-96 fail-closed gate. An explicitly SET
+    *language* is unaffected here; a bad explicit value is still `resolve()`'s
+    own `UnsupportedLanguage`."""
+    if not language:
+        guessed = guess_from_path(ann_path) if ann_path else None
+        if guessed is None and repo_root is not None:
+            guessed = guess_from_repo_root(repo_root)
+        if guessed and guessed != "python":
+            raise MismatchedLanguage(
+                f"language is unset (defaults to python) but this repo's test "
+                f"surface looks like {guessed!r} -- set language = {guessed!r} "
+                f"in [repos.<name>] (or board-wide [maestro] language) to fix")
+    return resolve(language)
