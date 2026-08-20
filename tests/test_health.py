@@ -979,22 +979,124 @@ def test_reconciler_permissions_venv_required_only_for_own_repo(home, tmp_path, 
     assert check2["status"] == "ok"
 
 
-def test_reconciler_permissions_detail_states_exact_string_matching(home, tmp_path, monkeypatch):
-    """MTO-5 AC4: the WARN detail states that matching is exact-string, so an
-    operator who granted an equivalent but differently-spelled rule (e.g.
-    Bash(gh pr:*) instead of Bash(gh:*)) understands why it still reports
+def test_reconciler_permissions_narrower_gh_grant_reaches_ok(home, tmp_path, monkeypatch):
+    """T-94 AC1: Bash(gh pr:*) (covering every gh invocation the reconciler
+    skills make -- gh pr view / gh pr create) in place of the coarse
+    Bash(gh:*), plus the other required literals unchanged, reaches ok --
+    the exact false positive from this ticket's own repro."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    allow = [t for t in disp.RECONCILER_REQUIRED_TOOLS if t != "Bash(gh:*)"] + ["Bash(gh pr:*)"]
+    _write_repo_settings(repo, allow=allow)
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+    assert check["missing_by_repo"] == {}
+
+
+def test_reconciler_permissions_narrower_git_python_venv_grants_reach_ok(home, tmp_path, monkeypatch):
+    """T-94 AC2: the same coverage-aware acceptance holds for Bash(git:*),
+    Bash(python3:*), and (on the binding _is_maestro_own_repo matches)
+    Bash(.venv/bin/:*) -- each satisfied by its own narrower rule set
+    instead of the coarse literal."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    monkeypatch.setattr(health, "_maestro_self_root", lambda: repo.resolve())
+    allow = (["Bash(maestro:*)", "Bash(gh pr:*)", "Bash(python3 -m:*)", "Bash(.venv/bin/python:*)"] +
+             list(disp.RECONCILER_LITERAL_COVERAGE["Bash(git:*)"]))
+    _write_repo_settings(repo, allow=allow)
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+    assert check["missing_by_repo"] == {}
+
+
+def test_reconciler_permissions_token_boundary_safety(home, tmp_path, monkeypatch):
+    """T-94 AC3: a differently-spelled grant that merely shares a prefix --
+    Bash(ghq:*) or Bash(github:*) in place of Bash(gh:*) -- does NOT satisfy
+    the requirement; the check still WARNs and still names Bash(gh:*)
     missing."""
     monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
-    _write_repo_settings(repo, allow=["Bash(gh pr:*)", "Bash(gh api:*)"])
+    allow = ([t for t in disp.RECONCILER_REQUIRED_TOOLS if t != "Bash(gh:*)"] +
+             ["Bash(ghq:*)", "Bash(github:*)"])
+    _write_repo_settings(repo, allow=allow)
     cfg = Config(home=home, repo_path=str(repo))
 
     checks = health.run_checks(cfg, 1000)
     check = next(c for c in checks if c["name"] == "reconciler_permissions")
     assert check["status"] == "warn"
     assert "Bash(gh:*)" in check["missing_by_repo"]["default"]
-    assert "exact-string" in check["detail"]
+
+
+def test_reconciler_permissions_partial_gh_subset_still_warns(home, tmp_path, monkeypatch):
+    """T-94 AC4 (no false negative): a strict subset of the gh coverage --
+    only Bash(gh api:*), with no Bash(gh pr:*) -- still WARNs and still
+    names Bash(gh:*) missing, exactly like before this ticket."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    allow = [t for t in disp.RECONCILER_REQUIRED_TOOLS if t != "Bash(gh:*)"] + ["Bash(gh api:*)"]
+    _write_repo_settings(repo, allow=allow)
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "Bash(gh:*)" in check["missing_by_repo"]["default"]
+
+
+def _assert_deny_defeats_narrower_gh_coverage(home, tmp_path, monkeypatch, deny):
+    """Shared body for T-94 AC5's two deny variants below."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    allow = [t for t in disp.RECONCILER_REQUIRED_TOOLS if t != "Bash(gh:*)"] + ["Bash(gh pr:*)"]
+    _write_repo_settings(repo, allow=allow, deny=deny)
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "Bash(gh:*)" in check["missing_by_repo"]["default"]
+    assert "denied by settings: Bash(gh:*)" in check["detail"]
+
+
+def test_reconciler_permissions_deny_of_narrower_grant_defeats_coverage(home, tmp_path, monkeypatch):
+    """T-94 AC5: deny still wins over the coverage-aware acceptance -- an
+    allow of Bash(gh pr:*) together with a deny of that same narrower rule
+    still reports Bash(gh:*) missing and lists it under denied_by_repo."""
+    _assert_deny_defeats_narrower_gh_coverage(home, tmp_path, monkeypatch, ["Bash(gh pr:*)"])
+
+
+def test_reconciler_permissions_deny_of_coarse_literal_defeats_coverage(home, tmp_path, monkeypatch):
+    """T-94 AC5: same, but the deny targets the coarse Bash(gh:*) the
+    narrower Bash(gh pr:*) grant would otherwise cover."""
+    _assert_deny_defeats_narrower_gh_coverage(home, tmp_path, monkeypatch, ["Bash(gh:*)"])
+
+
+def test_reconciler_permissions_detail_no_longer_claims_exact_string(home, tmp_path, monkeypatch):
+    """T-94 AC6: the WARN detail no longer claims exact-string matching --
+    that sentence is gone, replaced by wording that describes the new
+    coverage-aware acceptance."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _write_repo_settings(repo, allow=["Bash(maestro:*)"])
+    cfg = Config(home=home, repo_path=str(repo))
+
+    checks = health.run_checks(cfg, 1000)
+    check = next(c for c in checks if c["name"] == "reconciler_permissions")
+    assert check["status"] == "warn"
+    assert "exact-string" not in check["detail"]
+    assert "narrower grant" in check["detail"]
 
 
 def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypatch, capsys):
@@ -1055,6 +1157,47 @@ def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypa
     rc3_strict = cli.main(["--home", str(home), "doctor", "--strict"])
     capsys.readouterr()
     assert rc3_strict == 0
+
+
+def test_doctor_strict_exits_0_with_narrower_gh_pr_style_grant(home, tmp_path, monkeypatch, capsys):
+    """T-94 AC7: `maestro doctor --strict` exits 0 over a temp MAESTRO_HOME
+    whose bound repo grants the maestro verb set plus only the narrower
+    Bash(gh pr:*)-style rules (never the coarse Bash(gh:*)) -- driven through
+    the real CLI -- and still exits 1 while a genuine gap (no gh coverage at
+    all) remains."""
+    monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
+    repo = tmp_path / "repo"
+    _init_plain_repo(repo)
+    _install_dummy_reconcile_skill(repo)
+    (home / "config.toml").write_text(
+        f'[maestro]\ndaily_spend_ceiling_usd = 50.0\n\n'
+        f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
+    _seed_bound_ticket(home, "T-1", "alpha")
+
+    allow = [t for t in disp.RECONCILER_REQUIRED_TOOLS if t != "Bash(gh:*)"] + ["Bash(gh pr:*)"]
+    _write_repo_settings(repo, allow=allow)
+
+    rc = cli.main(["--home", str(home), "doctor"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    check = next(c for c in out["checks"] if c["name"] == "reconciler_permissions")
+    assert check["status"] == "ok"
+
+    rc_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc_strict == 0
+
+    # a genuine gap -- no gh coverage of any kind -- still exits 1.
+    _write_repo_settings(repo, allow=[t for t in disp.RECONCILER_REQUIRED_TOOLS if t != "Bash(gh:*)"])
+    rc2 = cli.main(["--home", str(home), "doctor"])
+    out2 = json.loads(capsys.readouterr().out)
+    assert rc2 == 0
+    check2 = next(c for c in out2["checks"] if c["name"] == "reconciler_permissions")
+    assert check2["status"] == "warn"
+
+    rc2_strict = cli.main(["--home", str(home), "doctor", "--strict"])
+    capsys.readouterr()
+    assert rc2_strict == 1
 
 
 def test_user_settings_path_injectable_never_reads_real_home(tmp_path, monkeypatch):

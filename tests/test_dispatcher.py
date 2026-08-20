@@ -2618,3 +2618,37 @@ def test_maintenance_knobs_documented_in_sample_config():
     from maestro.config import DEFAULT_CONFIG_TOML
     assert "compact_interval" in DEFAULT_CONFIG_TOML
     assert "archive_after" in DEFAULT_CONFIG_TOML
+
+
+# --- T-94: reconciler literal coverage table stays honest against the skills --
+
+
+def test_reconciler_literal_coverage_matches_skills():
+    """T-94: ``RECONCILER_LITERAL_COVERAGE``'s git/gh entries must be derived
+    from -- and kept honest against -- what the reconciler skills actually
+    invoke, not hand-maintained silently (the ticket's own Notes). Re-derive
+    the real ``gh``/``git`` subcommand set from a fresh grep of every
+    skills/maestro-reconcile-*.md and assert it matches the hardcoded table
+    exactly, so a future skill invoking e.g. ``gh run view`` or ``git stash``
+    fails this test instead of silently staying "covered" by a stale grant."""
+    import re
+
+    repo_root = Path(__file__).resolve().parents[1]
+    git_subcommands: set[str] = set()
+    gh_subcommands: set[str] = set()
+    git_re = re.compile(r"(?:^\s*|`)git (?:-C \S+ )?([a-z]+)", re.MULTILINE)
+    gh_re = re.compile(r"(?:^\s*|`)gh (\w+)", re.MULTILINE)
+    for path in sorted((repo_root / "skills").glob("maestro-reconcile-*.md")):
+        text = path.read_text()
+        git_subcommands.update(m.group(1) for m in git_re.finditer(text))
+        gh_subcommands.update(m.group(1) for m in gh_re.finditer(text))
+
+    assert gh_subcommands == {"pr"}
+    assert git_subcommands == {"add", "commit", "diff", "fetch", "log", "merge", "push", "rebase"}
+
+    git_covered = {t.removeprefix("Bash(git ").removesuffix(":*)")
+                   for t in disp.RECONCILER_LITERAL_COVERAGE["Bash(git:*)"]}
+    gh_covered = {t.removeprefix("Bash(gh ").removesuffix(":*)")
+                  for t in disp.RECONCILER_LITERAL_COVERAGE["Bash(gh:*)"]}
+    assert git_covered == git_subcommands
+    assert gh_covered == gh_subcommands

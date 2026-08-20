@@ -127,8 +127,10 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
    such path never needs it — or set `permission_mode = "bypassPermissions"` in `config.toml`
    (the escape hatch above) to skip the settings-file check for the whole home. Verify with
    `maestro doctor` (the `reconciler_permissions` check names any repo and pattern still missing
-   — matching is exact-string, so an equivalent but differently-spelled grant still reports
-   missing; `maestro doctor --strict` exits 1 while any check, including this one, isn't `ok`).
+   — a narrower grant that concretely covers what the reconciler actually invokes (e.g.
+   `Bash(gh pr:*)` in place of `Bash(gh:*)`) still satisfies it, but a differently-spelled or
+   merely partial grant does not; `maestro doctor --strict` exits 1 while any check, including
+   this one, isn't `ok`).
 5. If the new repo is owned by a *different* `gh` account than the one already bound elsewhere on
    this board, bind its credential explicitly: `gh_account = "<login>"` (resolved via `gh auth
    token --user <login>` at spawn/poll time) or `token_env = "GH_TOKEN_..."` (read from that env
