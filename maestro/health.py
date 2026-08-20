@@ -155,25 +155,46 @@ def check_heartbeat(cfg: Config, now: float, *, plist=None) -> dict:
     }
 
 
+def _holds_state(home: Path) -> bool:
+    """True once the home holds anything irreplaceable to protect -- a real
+    event log or a ticket spec -- as opposed to the empty directories a fresh
+    `init` leaves behind. Scoped to `events/`+`tickets/` only (T-101), matching
+    `backup.maybe_backup`'s own existence-check gate (`backup.py:141`):
+    `inbox/` is transient work-queue state, not irreplaceable history."""
+    for member in ("events", "tickets"):
+        d = home / member
+        if d.exists() and any(d.iterdir()):
+            return True
+    return False
+
+
 def check_backup_age(cfg: Config, now: float) -> dict:
     """Grounded in the actual tarballs `backup.list_backups` finds -- never in
     `derived/.backup_cursor.json`, which only the dispatcher's periodic
     `backup.maybe_backup` writes and which a manual `maestro backup` or a wiped
-    `backup_dir` leave dangerously wrong in either direction (T-88). A board
-    that has never swept (no `derived/.heartbeat.json`) and has no tarballs
-    reports its own non-warning state, mirroring `check_heartbeat`'s "no
-    heartbeat yet" -> status ok contract above; a board that HAS swept and
-    still has no tarballs is a real fault.
+    `backup_dir` leave dangerously wrong in either direction (T-88).
+
+    T-101: the never-warn exemption is gated on whether the home actually
+    holds irreplaceable state (`_holds_state` -- non-empty `events/` or
+    `tickets/`), not on whether a dispatcher sweep has ever run. The old
+    `derived/.heartbeat.json`-presence proxy graded a never-swept board with
+    one old tarball WORSE than the same board with that tarball deleted (a
+    tarball present with no heartbeat used to warn; no tarball at all read as
+    ok), and separately reported "ok" for a home restored from a backup kept
+    elsewhere -- real event logs, empty `backup_dir`, no heartbeat -- i.e. it
+    certified protection that did not exist. `check_backup_age` never reads
+    `.heartbeat.json` at all now; that file stays the grounding for
+    `check_heartbeat` only.
     """
     if not cfg.backup_interval or cfg.backup_interval <= 0:
         return {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
+    if not _holds_state(cfg.home):
+        return {"name": "backup_age", "status": "ok", "detail": "nothing to back up yet", "age_s": None}
     epoch = backup_mod.newest_backup_epoch(cfg)
     if epoch is None:
-        swept = (cfg.home / "derived" / ".heartbeat.json").exists()
         return {
-            "name": "backup_age", "status": "warn" if swept else "ok",
-            "detail": "no backups found in backup_dir" if swept else "no backup yet -- board never swept",
-            "age_s": None,
+            "name": "backup_age", "status": "warn",
+            "detail": "no backups found in backup_dir", "age_s": None,
         }
     age = round(now - epoch)
     stale = age > cfg.backup_interval * 2
