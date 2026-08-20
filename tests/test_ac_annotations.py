@@ -60,6 +60,32 @@ def test_empty_annotation_body_is_not_an_annotation():
 
 
 # ---------------------------------------------------------------------------
+# T-98 AC6: the body is found by a paren-BALANCED scan, not a `[^()]` ban --
+# a `check:` command containing its own parens (a Bazel `--test_filter`
+# regex) parses correctly instead of silently degrading to the prose tier.
+# ---------------------------------------------------------------------------
+
+def test_check_annotation_with_balanced_parens_in_the_body_parses():
+    ann = parse_ac_annotation(
+        "widget adds (check: bzl test //src/widget:widget_test --test_filter='^(TestA|TestB)$')")
+    assert ann.kind == "check"
+    assert ann.command == "bzl test //src/widget:widget_test --test_filter='^(TestA|TestB)$'"
+
+
+def test_check_annotation_with_nested_balanced_parens_parses():
+    ann = parse_ac_annotation("docs regenerate (check: (cd sub && make check))")
+    assert ann.kind == "check"
+    assert ann.command == "(cd sub && make check)"
+
+
+def test_check_annotation_with_unbalanced_parens_does_not_parse():
+    """An unbalanced body never has a well-defined end -- this must decline to
+    parse (never silently truncate at the first stray `)`), and is exactly
+    the shape `health.check_ac_annotation_parse` (T-98) flags."""
+    assert parse_ac_annotation("widget adds (check: bzl test --test_filter='^(TestA')") is None
+
+
+# ---------------------------------------------------------------------------
 # AC1 (continued): parse_acs stays byte-identical to before this ticket, on a
 # copy of a REAL existing spec (T-55's -- no annotations at all).
 # ---------------------------------------------------------------------------

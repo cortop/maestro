@@ -725,7 +725,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
                       "pi_version", "worktree_health", "worktree_witness", "provider_availability",
-                      "missing_acs"}
+                      "missing_acs", "ac_annotation_parse"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -785,14 +785,15 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     `phantom_keys` -- same treatment. T-80 grew it by one more still --
     `missing_acs` -- same treatment. T-95 grew it by one more still --
     `worktree_witness` -- same treatment. T-96 grew it by one more still --
-    `language_binding` -- same treatment.)"""
+    `language_binding` -- same treatment. T-98 grew it by one more still --
+    `ac_annotation_parse` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "language_binding", "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
         "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_witness",
-        "provider_availability", "burn", "missing_acs",
+        "provider_availability", "burn", "missing_acs", "ac_annotation_parse",
     }
     code, out = _sweep(home)
     assert code == 0

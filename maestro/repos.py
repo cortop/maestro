@@ -86,6 +86,14 @@ class RepoBinding:
     # `testlang.SUPPORTED` -- config.load fails closed on anything else, the
     # same posture as base_drift_policy.
     language: str | None = None
+    # T-98: this repo's test-INVOCATION template, orthogonal to `language`'s
+    # extraction axis -- see `testlang.render_selector`/`selector_for`, the
+    # sole readers. None (unset -- no [maestro]-level default, same posture
+    # as `language`) keeps `testlang.resolve(language).format_selector`
+    # verbatim (ships dark). A format string over `testlang.
+    # SELECTOR_PLACEHOLDERS`, validated fail-closed at `config.load()` the
+    # same way `language` is -- see `testlang.validate_selector_template`.
+    test_selector: str | None = None
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -122,6 +130,9 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         # now honored, not silently ignored; still None (-> "python") when
         # neither is set (see RepoBinding.language).
         language=table.get("language") or cfg.language,
+        # T-98: no board-wide fallback -- unset means the language profile's
+        # own format_selector (see RepoBinding.test_selector).
+        test_selector=table.get("test_selector") or None,
     )
 
 
