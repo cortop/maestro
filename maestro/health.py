@@ -1516,6 +1516,34 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
     return {"name": "worktree_health", "status": status, "detail": detail, "broken": broken}
 
 
+def check_home_structure(cfg: Config, now: float) -> dict:
+    """FIRST entry in ``CHECKS`` (T-99): ``fail`` when *home* is
+    missing/uninitialized (nothing else here can mean anything -- ``report``
+    short-circuits before even reaching this check's siblings in that case,
+    see its own docstring), ``warn`` when *home* is partial -- naming the
+    missing core path(s), calling out the ``events/``-without-``tickets/``
+    shape specifically (RB-17's phantom-ticket trap: a fold with no
+    ``tickets/`` dir at all still manufactures ``triaging`` rows from bare
+    event-log/snapshot history) -- and ``ok`` otherwise. Read-only:
+    ``store.board_state`` only stats paths, never creates them."""
+    board = store.board_state(cfg.home)
+    state = board["state"]
+    if state in ("missing", "uninitialized"):
+        status = "fail"
+        detail = f"{cfg.home} is not a maestro board ({state}) -- run `maestro init`"
+    elif state == "partial":
+        status = "warn"
+        detail = "missing core path(s): " + ", ".join(board["missing_paths"])
+        if "events/" not in board["missing_paths"] and "tickets/" in board["missing_paths"]:
+            detail += (" -- events/ with no tickets/ dir: dispatcher.list_keys can "
+                       "manufacture phantom tickets from event-log/snapshot history alone")
+    else:
+        status = "ok"
+        detail = "home structure intact"
+    return {"name": "home_structure", "status": status, "detail": detail,
+            "state": state, "missing_paths": board["missing_paths"]}
+
+
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
@@ -1524,7 +1552,7 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
 # appending, or reordering an entry here is enough to include it; only
 # check_heartbeat's plist override is special-cased, by identity, since it's
 # the one check with a caller-supplied kwarg to thread through.
-CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
+CHECKS = (check_home_structure, check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_phantom_keys, check_missing_acs, check_watchdog_loops,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings, check_missing_reconcile_skill,
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
@@ -1541,8 +1569,40 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
     """The full doctor payload. ``cmd_doctor`` and the TUI fleet view both render
     this exact dict, so there is only one implementation of "is this too much".
     ``plist`` overrides the LaunchAgent plist path read for the heartbeat-stale
-    threshold -- production always resolves the real one; tests inject a fake."""
+    threshold -- production always resolves the real one; tests inject a fake.
+
+    T-99 AC8: short-circuits to JUST ``check_home_structure`` when *home* is
+    missing/uninitialized -- every other check either reads paths that can't
+    exist yet (harmless) or, for ``check_provider_availability`` specifically,
+    falls through to `_cached_probe`'s real network call + disk write the
+    moment there is zero session history to measure from (exactly a fresh or
+    nonexistent home). Diagnosing a typo'd/nonexistent home must never itself
+    create the very directory it's reporting missing (the old repro:
+    `derived/.provider_probe_cache.json` appearing under a home that "does not
+    exist").
+    """
     home = cfg.home
+    board = store.board_state(home)
+    if board["state"] in ("missing", "uninitialized"):
+        return {
+            "home": str(home), "board": board,
+            "heartbeat": {}, "heartbeat_age_s": None,
+            "dead_letters": [], "stale": False,
+            "spawns_last_hour": {"total": 0, "by_key": {}},
+            "spawn_rate_unit": SPAWN_RATE_UNIT,
+            "throttled_last_sweep": 0,
+            "spawn_budget_per_hour": spawn_budget(cfg),
+            "spawn_floor_s": dispatcher.spawn_floor(cfg),
+            "runaway": False,
+            "spend_today_usd": None,
+            "spend_ceiling_usd": cfg.daily_spend_ceiling_usd,
+            "spend_unavailable": True,
+            "spend_unattributed_sessions": 0,
+            "spend_usd_by_key": {},
+            "burning_keys": [],
+            "paused": False,
+            "checks": [check_home_structure(cfg, now)],
+        }
     hb = store.read_json(home / "derived" / ".heartbeat.json", {})
     age = round(now - hb["epoch"]) if hb.get("epoch") else None
     dl_dir = home / "tickets" / "_deadletter"
@@ -1554,6 +1614,7 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
     spend_status = spend_mod.status(cfg, now)
     burn_check = next(c for c in checks if c["name"] == "burn")
     return {
+        "home": str(home), "board": board,
         "heartbeat": hb,
         "heartbeat_age_s": age,
         "dead_letters": [p.stem for p in dead],

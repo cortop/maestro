@@ -198,6 +198,7 @@ def test_cli_schedule_add_through_symlinked_config_toml(home):
     real_config = real_dir / "config.toml"
     real_config.write_text("[maestro]\nmax_concurrency = 5\n")
     cfg_path = home / "config.toml"
+    cfg_path.unlink()  # the `home` fixture (T-99) pre-seeds a plain config.toml
     cfg_path.symlink_to(real_config)
 
     assert cli_main(["--home", str(home), "schedule", "add", "digest",
@@ -220,6 +221,7 @@ def test_init_does_not_clobber_symlinked_config_toml(home):
     real_config = real_dir / "config.toml"
     real_config.write_text("[maestro]\nrepo_path = \"/somewhere\"\n")
     cfg_path = home / "config.toml"
+    cfg_path.unlink()  # the `home` fixture (T-99) pre-seeds a plain config.toml
     cfg_path.symlink_to(real_config)
 
     assert cli_main(["--home", str(home), "init"]) == 0

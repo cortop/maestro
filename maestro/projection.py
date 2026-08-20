@@ -108,6 +108,17 @@ def render(home: Path) -> dict[str, str]:
 
     # ---- WORKSTATE.md -------------------------------------------------------
     lines = [_BANNER, f"# Workstate\n\n*Generated: {store.iso_now()}*\n"]
+    # T-99 AC10: a missing/partial/uninitialized home can still fold phantom
+    # rows below (RB-17's events/-with-no-tickets/ shape) -- stamp a banner
+    # naming the gap instead of presenting them as authoritative.
+    board = store.board_state(home)
+    if board["state"] != "ok":
+        lines.append(
+            f"\n> ⚠️ **Board state: {board['state']}** — missing "
+            f"{', '.join(board['missing_paths']) or '(nothing)'}. The rows below may be "
+            "incomplete or phantom (`maestro status` / `maestro doctor` for detail; "
+            "`maestro init` to repair).\n"
+        )
     pause = fleet.pause_state(home, store.now_epoch())
     if pause is not None:
         reason = f" — {pause['reason']}" if pause.get("reason") else ""
