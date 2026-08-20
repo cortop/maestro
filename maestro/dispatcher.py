@@ -1633,17 +1633,27 @@ def _observe_pr_draft(cfg: Config, key: str, status: dict, snap) -> None:
 
 def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str | None,
                    pr_number: int, env: dict | None) -> None:
-    """T-86: undrafts a PR (`gh pr ready`) once all three gates hold -- the same
-    machine conditions the old `/orchestrate` used: CI is `passing`, no
-    outstanding `CHANGES_REQUESTED` review, and every current-hash spec AC
+    """T-86/T-102: undrafts a PR (`gh pr ready`) once CI is `passing`, the
+    ticket is still in a reviewable phase, and every current-hash spec AC
     carries a passing spec-axis QA verdict (`Snapshot.qa_all_passing` -- note
-    the weaker guarantee until T-85 makes `qa` phase-gated and unskippable, per
-    the spec). Idempotent: `status["draft"]` is this exact poll's freshest
-    truth from GitHub, so a second sweep after an already-successful undraft
-    (or a PR that was never draft) no-ops immediately. A failed `gh pr ready`
-    (permissions, transient) is recorded as a Note, deduped by its error text,
-    and never routes the ticket or spends failure_count -- the next sweep
-    retries it."""
+    the weaker guarantee until T-85 made `qa` phase-gated and unskippable, per
+    the spec). What actually blocks a *fresh* `CHANGES_REQUESTED` is the phase
+    guard below, not the `unresolved_reviews` conjunct that follows it:
+    `_observe_reviews` runs immediately before this call in the same tick and
+    routes a fresh `CHANGES_REQUESTED` straight to `Phase.IMPLEMENTING`, and
+    that `PhaseChanged` zeroes `unresolved_reviews` in the fold -- so by the
+    time this function would read the counter, the phase guard has already
+    returned. The `unresolved_reviews` conjunct also deliberately does NOT
+    re-block on an already-observed, still-undismissed review on a later
+    sweep: GitHub never auto-dismisses a review, so blocking on any
+    undismissed `CHANGES_REQUESTED` would wedge a ticket whose objection was
+    fixed and re-QA'd until a human manually dismissed the stale review --
+    see the round-trip test in `tests/test_undraft.py`. Idempotent:
+    `status["draft"]` is this exact poll's freshest truth from GitHub, so a
+    second sweep after an already-successful undraft (or a PR that was never
+    draft) no-ops immediately. A failed `gh pr ready` (permissions, transient)
+    is recorded as a Note, deduped by its error text, and never routes the
+    ticket or spends failure_count -- the next sweep retries it."""
     if not status.get("draft"):
         return
     if status.get("ci_state") != "passing":
@@ -1651,6 +1661,13 @@ def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str |
     fresh = snap_mod.rebuild(cfg.home, key)
     if Phase(fresh.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
         return  # routed away by a sibling observation earlier this tick
+    # Practically unreachable on the normal path (see docstring): the ONLY way
+    # this still reads nonzero is a lost fencing CAS in `_observe_reviews`'
+    # `set_phase` call -- the ReviewFeedbackReceived event lands but
+    # StaleAppendError aborts the following PhaseChanged, leaving the counter
+    # set with phase still AWAITING_CI/IN_REVIEW (this also leaves the ticket
+    # unroutable, since the review event itself dedupes by comment id on
+    # retry). Kept as a narrow safety net for that race rather than deleted.
     if fresh.unresolved_reviews:
         return
     spec_path = store.spec_path(cfg.home, key)

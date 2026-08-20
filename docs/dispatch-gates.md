@@ -8,31 +8,31 @@ Every `decisions[key]["outcome"]` a sweep can assign -- via either `decisions[ke
 
 | # | outcome | source |
 |---|---------|--------|
-| 1 | `phantom` | `maestro/dispatcher.py:2636` |
-| 2 | `fold_error` | `maestro/dispatcher.py:2646` |
-| 3 | `not_due` | `maestro/dispatcher.py:2660` |
-| 4 | `would_park_missing_acs` | `maestro/dispatcher.py:2674` |
-| 5 | `missing_acs` | `maestro/dispatcher.py:2674` |
-| 6 | `claimed` | `maestro/dispatcher.py:2688` |
-| 7 | `due` | `maestro/dispatcher.py:2691` |
-| 8 | `throttled` | `maestro/dispatcher.py:2776` |
-| 9 | `repo_blocked` | `maestro/dispatcher.py:2791` |
-| 10 | `capacity_skipped` | `maestro/dispatcher.py:2815` |
-| 11 | `repo_capped` | `maestro/dispatcher.py:2841` |
-| 12 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2844` |
-| 13 | `would_spawn` | `maestro/dispatcher.py:2847` |
-| 14 | `burn_parked` | `maestro/dispatcher.py:2900` |
-| 15 | `repo_capped` | `maestro/dispatcher.py:2905` |
-| 16 | `backend_interlocked` | `maestro/dispatcher.py:2913` |
-| 17 | `credential_unresolvable` | `maestro/dispatcher.py:2925` |
-| 18 | `runner_unregistered` | `maestro/dispatcher.py:2939` |
-| 19 | `runner_disabled` | `maestro/dispatcher.py:2973` |
-| 20 | `runner_binary_missing` | `maestro/dispatcher.py:2987` |
-| 21 | `runner_daemon_unreachable` | `maestro/dispatcher.py:2991` |
-| 22 | `runner_model_unavailable` | `maestro/dispatcher.py:3003` |
-| 23 | `runner_capped` | `maestro/dispatcher.py:3029` |
-| 24 | `attempts_exhausted` | `maestro/dispatcher.py:3035` |
-| 25 | `spawned` | `maestro/dispatcher.py:3058` |
+| 1 | `phantom` | `maestro/dispatcher.py:2653` |
+| 2 | `fold_error` | `maestro/dispatcher.py:2663` |
+| 3 | `not_due` | `maestro/dispatcher.py:2677` |
+| 4 | `would_park_missing_acs` | `maestro/dispatcher.py:2691` |
+| 5 | `missing_acs` | `maestro/dispatcher.py:2691` |
+| 6 | `claimed` | `maestro/dispatcher.py:2705` |
+| 7 | `due` | `maestro/dispatcher.py:2708` |
+| 8 | `throttled` | `maestro/dispatcher.py:2793` |
+| 9 | `repo_blocked` | `maestro/dispatcher.py:2808` |
+| 10 | `capacity_skipped` | `maestro/dispatcher.py:2832` |
+| 11 | `repo_capped` | `maestro/dispatcher.py:2858` |
+| 12 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:2861` |
+| 13 | `would_spawn` | `maestro/dispatcher.py:2864` |
+| 14 | `burn_parked` | `maestro/dispatcher.py:2917` |
+| 15 | `repo_capped` | `maestro/dispatcher.py:2922` |
+| 16 | `backend_interlocked` | `maestro/dispatcher.py:2930` |
+| 17 | `credential_unresolvable` | `maestro/dispatcher.py:2942` |
+| 18 | `runner_unregistered` | `maestro/dispatcher.py:2956` |
+| 19 | `runner_disabled` | `maestro/dispatcher.py:2990` |
+| 20 | `runner_binary_missing` | `maestro/dispatcher.py:3004` |
+| 21 | `runner_daemon_unreachable` | `maestro/dispatcher.py:3008` |
+| 22 | `runner_model_unavailable` | `maestro/dispatcher.py:3020` |
+| 23 | `runner_capped` | `maestro/dispatcher.py:3046` |
+| 24 | `attempts_exhausted` | `maestro/dispatcher.py:3052` |
+| 25 | `spawned` | `maestro/dispatcher.py:3075` |
 
 ## Sweep-level brakes
 
@@ -40,7 +40,7 @@ These four short-circuit the entire spawn phase before any per-key outcome above
 
 | brake | source | what it guards |
 |---|---|---|
-| fleet pause | `maestro/dispatcher.py:2507` | the board-wide kill switch (`maestro fleet pause`) -- ahead of everything else; mint/sync/worktrees/backup/sessions all stay untouched and due-computation never runs, so no `decisions[key]` entry is made at all this sweep |
-| rate-limit pause | `maestro/dispatcher.py:2732` | a live 429 backoff window; while paused, nothing spawns and the spawn ledger is left untouched |
-| runaway auto-brake | `maestro/dispatcher.py:2739` | GA-5's no-progress circuit breaker, armed off `derived/health.json` |
-| spend ceiling | `maestro/dispatcher.py:2745` | GA-11's daily spend ceiling, a pure read so it still applies under `dry_run` |
+| fleet pause | `maestro/dispatcher.py:2524` | the board-wide kill switch (`maestro fleet pause`) -- ahead of everything else; mint/sync/worktrees/backup/sessions all stay untouched and due-computation never runs, so no `decisions[key]` entry is made at all this sweep |
+| rate-limit pause | `maestro/dispatcher.py:2749` | a live 429 backoff window; while paused, nothing spawns and the spawn ledger is left untouched |
+| runaway auto-brake | `maestro/dispatcher.py:2756` | GA-5's no-progress circuit breaker, armed off `derived/health.json` |
+| spend ceiling | `maestro/dispatcher.py:2762` | GA-11's daily spend ceiling, a pure read so it still applies under `dry_run` |
