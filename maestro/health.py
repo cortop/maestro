@@ -155,25 +155,46 @@ def check_heartbeat(cfg: Config, now: float, *, plist=None) -> dict:
     }
 
 
+def _holds_state(home: Path) -> bool:
+    """True once the home holds anything irreplaceable to protect -- a real
+    event log or a ticket spec -- as opposed to the empty directories a fresh
+    `init` leaves behind. Scoped to `events/`+`tickets/` only (T-101), matching
+    `backup.maybe_backup`'s own existence-check gate (`backup.py:141`):
+    `inbox/` is transient work-queue state, not irreplaceable history."""
+    for member in ("events", "tickets"):
+        d = home / member
+        if d.exists() and any(d.iterdir()):
+            return True
+    return False
+
+
 def check_backup_age(cfg: Config, now: float) -> dict:
     """Grounded in the actual tarballs `backup.list_backups` finds -- never in
     `derived/.backup_cursor.json`, which only the dispatcher's periodic
     `backup.maybe_backup` writes and which a manual `maestro backup` or a wiped
-    `backup_dir` leave dangerously wrong in either direction (T-88). A board
-    that has never swept (no `derived/.heartbeat.json`) and has no tarballs
-    reports its own non-warning state, mirroring `check_heartbeat`'s "no
-    heartbeat yet" -> status ok contract above; a board that HAS swept and
-    still has no tarballs is a real fault.
+    `backup_dir` leave dangerously wrong in either direction (T-88).
+
+    T-101: the never-warn exemption is gated on whether the home actually
+    holds irreplaceable state (`_holds_state` -- non-empty `events/` or
+    `tickets/`), not on whether a dispatcher sweep has ever run. The old
+    `derived/.heartbeat.json`-presence proxy graded a never-swept board with
+    one old tarball WORSE than the same board with that tarball deleted (a
+    tarball present with no heartbeat used to warn; no tarball at all read as
+    ok), and separately reported "ok" for a home restored from a backup kept
+    elsewhere -- real event logs, empty `backup_dir`, no heartbeat -- i.e. it
+    certified protection that did not exist. `check_backup_age` never reads
+    `.heartbeat.json` at all now; that file stays the grounding for
+    `check_heartbeat` only.
     """
     if not cfg.backup_interval or cfg.backup_interval <= 0:
         return {"name": "backup_age", "status": "ok", "detail": "backups disabled", "age_s": None}
+    if not _holds_state(cfg.home):
+        return {"name": "backup_age", "status": "ok", "detail": "nothing to back up yet", "age_s": None}
     epoch = backup_mod.newest_backup_epoch(cfg)
     if epoch is None:
-        swept = (cfg.home / "derived" / ".heartbeat.json").exists()
         return {
-            "name": "backup_age", "status": "warn" if swept else "ok",
-            "detail": "no backups found in backup_dir" if swept else "no backup yet -- board never swept",
-            "age_s": None,
+            "name": "backup_age", "status": "warn",
+            "detail": "no backups found in backup_dir", "age_s": None,
         }
     age = round(now - epoch)
     stale = age > cfg.backup_interval * 2
@@ -447,6 +468,46 @@ def check_unknown_repo_bindings(cfg: Config, now: float) -> dict:
               if unknown else "none")
     return {"name": "unknown_repo_bindings", "status": status, "detail": detail,
             "unknown": unknown}
+
+
+def check_language_binding(cfg: Config, now: float) -> dict:
+    """T-96 AC3: WARN for any repo binding that resolves a `test_command`
+    while `language` is unset AND the repo's test surface doesn't look
+    python -- a `go.mod`/`package.json` at the repo root (`testlang.
+    guess_from_repo_root`), or no `tests/` directory at all. This is the
+    fail-OPEN, human-facing counterpart to the fail-CLOSED runtime gate
+    (`testlang.resolve_strict`, read by `ops.run_ac_checks`'s `test:`
+    presence check and the H4 deletion scan): those only fire once a
+    ticket's `test:`-annotated AC or a net-deletion diff actually exercises
+    the mismatch; this surfaces the same misconfiguration board-wide, before
+    any ticket ever hits it. Never blocks a spawn."""
+    from . import testlang
+
+    keys = dispatcher.list_keys(cfg.home)
+    bindings = dispatcher.referenced_repo_bindings(cfg, cfg.home, keys)
+    flagged = []
+    for name, binding in bindings.items():
+        if not binding.test_command or binding.language or binding.mode == "local":
+            continue
+        if not binding.path:
+            continue
+        root = Path(binding.path)
+        if not root.is_dir():
+            continue
+        guessed = testlang.guess_from_repo_root(root)
+        no_tests_dir = not (root / "tests").is_dir()
+        if guessed or no_tests_dir:
+            reason = f"looks like {guessed}" if guessed else "has no tests/ directory"
+            flagged.append({"repo": name, "reason": reason})
+    status = "warn" if flagged else "ok"
+    if flagged:
+        detail = "; ".join(
+            f"[repos.{f['repo']}] test_command is set, language is unset, and the "
+            f"repo {f['reason']} -- set language in [repos.{f['repo']}] (or "
+            f"board-wide [maestro] language)" for f in flagged)
+    else:
+        detail = "none"
+    return {"name": "language_binding", "status": status, "detail": detail, "flagged": flagged}
 
 
 def _runner_for_key(cfg: Config, key: str) -> str:
@@ -1516,6 +1577,42 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
     return {"name": "worktree_health", "status": status, "detail": detail, "broken": broken}
 
 
+def check_worktree_witness(cfg: Config, now: float) -> dict:
+    """T-95: WARN (report-only, never writes -- doctor checks must not mutate
+    state) on any EXISTING worktree under ``<home>/worktrees`` that is a real,
+    usable git worktree (a valid index) but has never carried the T-81
+    completion witness -- i.e. `ops.worktree_witness_status(...)`
+    ``backfillable``. Every worktree created before T-81 shipped looks like
+    this: nothing ever backfilled a witness for it, so the exposure is
+    invisible until the next `maestro worktree ensure` on that key happens to
+    hit the (now safe, T-95) backfill branch itself. This check surfaces it
+    ahead of that, without waiting for a reconcile step.
+
+    A witness-less worktree that ISN'T a usable git worktree at all, or has
+    no index, is `check_worktree_health`'s "no index" warn instead (it's
+    genuinely unusable, not merely pre-T-81) -- never double-counted here.
+
+    Lazy `ops` import, same reason as `check_worktree_health` beside it."""
+    from . import ops
+
+    worktrees_dir = cfg.home / "worktrees"
+    witness_less = []
+    if worktrees_dir.is_dir():
+        for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
+            try:
+                status = ops.worktree_witness_status(wt, timeout=cfg.worktree_timeout)
+            except store.MaestroError as exc:
+                witness_less.append({"key": wt.name, "reason": f"witness probe error: {exc}"})
+                continue
+            if status["backfillable"]:
+                witness_less.append({"key": wt.name, "reason": "no witness (predates T-81)"})
+    status_ = "warn" if witness_less else "ok"
+    detail = (", ".join(f"{w['key']}: {w['reason']}" for w in witness_less)
+              if witness_less else "every registered worktree either carries a witness or is new")
+    return {"name": "worktree_witness", "status": status_, "detail": detail,
+            "witness_less": witness_less}
+
+
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
@@ -1526,10 +1623,12 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
 # the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_phantom_keys, check_missing_acs, check_watchdog_loops,
-          check_depends_on, check_repo_preflight, check_unknown_repo_bindings, check_missing_reconcile_skill,
+          check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
+          check_language_binding, check_missing_reconcile_skill,
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
           check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
-          check_runner_binary, check_pi_version, check_worktree_health, check_provider_availability)
+          check_runner_binary, check_pi_version, check_worktree_health, check_worktree_witness,
+          check_provider_availability)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:

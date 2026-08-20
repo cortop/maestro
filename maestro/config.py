@@ -153,6 +153,15 @@ class Config:
     # name deleted and re-added within that language's test-file scope)
     # never counts. False disables.
     test_deletion_gate: bool = True
+    # T-96: the board-wide DEFAULT for `[repos.<name>] language`, same
+    # precedence as test_command above (a table's own `language` wins; unset
+    # inherits this). Before this field existed, `[maestro] language` was
+    # accepted by `load()` (top-level `[maestro]` keys aren't fail-closed
+    # against an allowlist) but silently never read anywhere -- a board-wide
+    # setting that looked honored but wasn't. None (default, unchanged) means
+    # no board-wide override; a repo table with no `language` of its own
+    # still resolves to "python" exactly as before this field existed.
+    language: str | None = None
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -427,6 +436,15 @@ def load(home_arg: str | None = None) -> Config:
         cfg.prime = m.get("prime", cfg.prime) or None
         cfg.test_command = m.get("test_command", cfg.test_command) or None
         cfg.test_deletion_gate = bool(m.get("test_deletion_gate", cfg.test_deletion_gate))
+        # T-96: fail closed on a typo'd board-wide language, same posture as
+        # a [repos.<name>] table's own `language` below -- unset (None) is
+        # valid (Config.language's own None-means-no-override fallback).
+        raw_board_language = m.get("language", cfg.language) or None
+        if raw_board_language is not None and raw_board_language not in testlang.SUPPORTED:
+            raise store.MaestroError(
+                f"config.toml: [maestro] language must be one of "
+                f"{sorted(testlang.SUPPORTED)} (or unset), got {raw_board_language!r}")
+        cfg.language = raw_board_language
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.opencode_user_commands_dir = m.get(
             "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
@@ -736,6 +754,15 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # route to awaiting-human for sign-off instead of QA (renames
                                   # never count; an answered sign-off for the same tree state
                                   # passes). false disables.
+# language = "go"                  # T-96: board-wide DEFAULT for [repos.<name>] language (below) --
+                                  # same "table wins, unset inherits" precedence as test_command
+                                  # above. Only needed for a single-repo home with no [repos.*]
+                                  # table at all; a multi-repo home sets language per table
+                                  # instead. Unset (default) means every repo binding with no
+                                  # language of its own resolves to "python", unchanged. Setting
+                                  # test_command on a non-python repo with language left unset
+                                  # (here AND per-table) fails a test:-annotated AC closed, once,
+                                  # legibly -- see [repos.<name>] language below.
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
@@ -818,15 +845,19 @@ implementer = "claude_skill"
                                      # command instead of leaving the whole verification tier
                                      # (RB-12/RB-14, and T-79's `check:` annotation) dark.
 # language = "go"                   # T-84: this repo's test surface language -- "python"
-                                     # (default: unset), "go", or "typescript". Per-repo only:
-                                     # there is no [maestro] language. A home with no
-                                     # [repos.<name>] table always resolves python. Selects the
-                                     # added/deleted test-name extractor and the `test:`
-                                     # annotation's selector syntax (pytest `path::id`, `go test
-                                     # -run`, jest `-t`) and the H4 test-deletion gate's test-file
-                                     # scope (see maestro/testlang.py) -- unset keeps every
-                                     # existing pytest-only home byte-identical. An unrecognized
-                                     # value fails config load closed (see testlang.SUPPORTED).
+                                     # (default: unset, inherits board-wide [maestro] language
+                                     # above; unset there too means "python"), "go", or
+                                     # "typescript". Selects the added/deleted test-name extractor
+                                     # and the `test:` annotation's selector syntax (pytest
+                                     # `path::id`, `go test -run`, jest `-t`) and the H4
+                                     # test-deletion gate's test-file scope (see
+                                     # maestro/testlang.py) -- unset keeps every existing
+                                     # pytest-only home byte-identical. An unrecognized value
+                                     # fails config load closed (see testlang.SUPPORTED); T-96:
+                                     # leaving this unset while test_command is set on a
+                                     # non-python repo fails a test:-annotated AC closed too, once,
+                                     # legibly, instead of bouncing implementing<->verifying
+                                     # forever -- set this key to fix.
 # gh_account = "work-login"         # resolve this repo's gh credential via
                                      # `gh auth token --user <login>` at spawn/poll time
                                      # (needs `gh` + an unlocked keychain on the dispatcher

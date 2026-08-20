@@ -271,6 +271,9 @@ def test_set_phase_awaiting_ci_refuses_when_acs_unverified(cfg):
     PhaseChanged event — no longer a soft Note, an enforced gate."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget", "document it"))
+    # T-97: the gate is now scoped to leaving implementing/qa -- route there first
+    # so this test still exercises it (a real ticket never jumps triaging->awaiting-ci).
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
     seq_before = snap_mod.load(home, "T-1").observed_seq
 
     with pytest.raises(store.MaestroError, match="2 acceptance criteria unverified"):
@@ -284,17 +287,21 @@ def test_set_phase_awaiting_ci_refuses_when_acs_unverified(cfg):
 def test_set_phase_awaiting_ci_refuses_via_real_cli_with_nonzero_exit(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    # T-97: gate is scoped to leaving implementing/qa -- see the sibling test above.
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
+    seq_before = snap_mod.load(home, "T-1").observed_seq
 
     rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci", "--reason", "tests green"])
     assert rc != 0
 
     assert snap_mod.load(home, "T-1").phase != Phase.AWAITING_CI.value
-    assert not [e for e in event_log.read(home, "T-1") if e["type"] == "PhaseChanged"]
+    assert not [e for e in event_log.read(home, "T-1", since=seq_before) if e["type"] == "PhaseChanged"]
 
 
 def test_set_phase_awaiting_ci_succeeds_once_all_acs_verified(cfg):
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
     ops.verify_ac(cfg, "T-1", 1, _evidence())
     # T-85: this test is scoped to AD-3's unverified-AC gate, not the new
     # QA-completeness gate -- no qa-verdict is recorded here.
@@ -313,6 +320,7 @@ def test_set_phase_force_overrides_gate_and_records_actor(cfg):
     the event log records who did it."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget", "document it"))
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
     # T-85: `force` overrides the unverified-ACs gate this test targets, but
     # NOT the new QA-completeness gate (same unconditional posture as the
     # QA-failing gate) -- disable it here, off-topic for this test.
@@ -339,6 +347,7 @@ def test_set_phase_force_not_needed_and_inert_when_all_acs_verified(cfg):
     """--force is a no-op marker when there was nothing to override."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
     ops.verify_ac(cfg, "T-1", 1, _evidence())
     cfg.awaiting_ci_qa_gate = False  # T-85: off-topic for this test, see above
 
@@ -354,15 +363,17 @@ def test_set_phase_force_via_real_cli(cfg):
     temp home, driving the actual `maestro` verbs."""
     home = cfg.home
     _create(cfg, "T-1", acs=("build the widget",))
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING, reason="worktree ready")
     # T-85: `--force` overrides the unverified-ACs gate this test targets, but
     # NOT the new QA-completeness gate -- disable it via config.toml, since
     # the CLI loads its own Config fresh from disk rather than reusing `cfg`.
     (home / "config.toml").write_text("[maestro]\nawaiting_ci_qa_gate = false\n")
+    seq_before = snap_mod.load(home, "T-1").observed_seq
 
     # Refusal first: no --force, unattested AC -> non-zero exit, no event.
     rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci", "--reason", "tests green"])
     assert rc != 0
-    assert not [e for e in event_log.read(home, "T-1") if e["type"] == "PhaseChanged"]
+    assert not [e for e in event_log.read(home, "T-1", since=seq_before) if e["type"] == "PhaseChanged"]
 
     # The forced path: --force pushes it through and records the actor.
     rc = cli.main(["--home", str(home), "set-phase", "T-1", "awaiting-ci",
