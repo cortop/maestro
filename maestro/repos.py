@@ -76,6 +76,15 @@ class RepoBinding:
     # base_drift_policy above (table value wins, unset inherits the board-wide one).
     prime_timeout: int = 600
     worktree_timeout: int = 600
+    # T-84: this repo's test surface language, selecting the added/deleted
+    # test-name extractor + selector formatter every T-79 `test:` annotation
+    # and the H4 test-deletion gate resolve through (`testlang.resolve`).
+    # None (unset -- no board-wide fallback; unlike test_command/prime this
+    # has no [maestro]-level default) resolves to "python", byte-identical to
+    # before this field existed (ships dark). Any other value must be one of
+    # `testlang.SUPPORTED` -- config.load fails closed on anything else, the
+    # same posture as base_drift_policy.
+    language: str | None = None
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -107,6 +116,8 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         worktree_timeout=(
             raw_worktree_timeout if raw_worktree_timeout is not None else cfg.worktree_timeout
         ),
+        # T-84: no board-wide fallback -- unset means "python" (see RepoBinding.language).
+        language=table.get("language") or None,
     )
 
 

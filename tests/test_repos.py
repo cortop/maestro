@@ -70,7 +70,7 @@ def test_config_load_parses_repos_tables(home):
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
-        "prime_timeout": None, "worktree_timeout": None,
+        "prime_timeout": None, "worktree_timeout": None, "language": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
@@ -78,7 +78,7 @@ def test_config_load_parses_repos_tables(home):
         "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
-        "prime_timeout": None, "worktree_timeout": None,
+        "prime_timeout": None, "worktree_timeout": None, "language": None,
     }
 
 
@@ -419,4 +419,46 @@ def test_repo_table_typo_prime_timeout_key_still_fails_closed(home):
         '[repos.alpha]\npath = "/repo/alpha"\nprim_timeout = 5\n',
         encoding="utf-8")
     with pytest.raises(store.MaestroError):
+        config_mod.load(str(home))
+
+
+# --- T-84: per-repo `language` -- selects the testlang table entry, fails
+# closed at config.load() on an unrecognized value, unset means "python".
+
+def test_repos_table_language_parses_and_resolves(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\nlanguage = "go"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos["alpha"]["language"] == "go"
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.language == "go"
+
+
+def test_repos_table_language_unset_resolves_to_none_ie_python(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n[repos.alpha]\npath = "/repo/alpha"\n',
+        encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.repos["alpha"]["language"] is None
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.language is None
+
+
+def test_repos_table_language_unsupported_fails_config_load_closed(home):
+    """T-84 AC6: an unsupported/unconfigured language must fail legibly, never
+    silently no-op into a `test:` check that fails closed forever. A typo'd
+    value is caught here, at config.load(), before any ticket ever reaches
+    `verifying` -- the most legible failure of all: the whole home refuses to
+    load until the human fixes the typo."""
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\nlanguage = "rust"\n',
+        encoding="utf-8")
+    with pytest.raises(store.MaestroError, match="language must be one of"):
         config_mod.load(str(home))
