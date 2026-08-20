@@ -627,7 +627,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     names = {c["name"] for c in out["checks"]}
     assert names == {"heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
                       "phantom_keys", "watchdog_loops", "depends_on", "launchctl", "repo_preflight",
-                      "unknown_repo_bindings", "missing_reconcile_skill",
+                      "unknown_repo_bindings", "language_binding", "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
                       "pi_version", "worktree_health", "worktree_witness", "provider_availability",
@@ -690,11 +690,12 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     `pi_models` -- same treatment. T-77 (RB-17) grew it by one more still --
     `phantom_keys` -- same treatment. T-80 grew it by one more still --
     `missing_acs` -- same treatment. T-95 grew it by one more still --
-    `worktree_witness` -- same treatment.)"""
+    `worktree_witness` -- same treatment. T-96 grew it by one more still --
+    `language_binding` -- same treatment.)"""
     baseline_names = {
         "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
-        "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
+        "language_binding", "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
         "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_witness",
         "provider_availability", "burn", "missing_acs",
@@ -1796,3 +1797,74 @@ def test_check_worktree_witness_registered_in_doctor(home):
     names = [c["name"] for c in out["checks"]]
     assert "worktree_witness" in names
     assert next(c for c in out["checks"] if c["name"] == "worktree_health")["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# T-96 AC3: `check_language_binding` -- WARN for a repo binding whose
+# `test_command` is set, `language` is unset, and the repo's own test surface
+# doesn't look python (a `go.mod`/`package.json` at its root, or no `tests/`
+# directory at all).
+# ---------------------------------------------------------------------------
+
+def test_check_language_binding_warns_on_a_go_repo_with_no_language_set(home, tmp_path):
+    from conftest import make_origin_and_repo as _make_origin_and_repo
+
+    _origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    (repo / "go.mod").write_text("module widget\n\ngo 1.21\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "go.mod", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    cfg = Config(home=home, repos={
+        "default": {"path": str(repo), "default": True, "test_command": "go test ./..."},
+    })
+    result = health.check_language_binding(cfg, now=1_000_000)
+    assert result["status"] == "warn"
+    assert result["flagged"] == [{"repo": "default", "reason": "looks like go"}]
+    assert "language" in result["detail"]
+    assert "[repos.default]" in result["detail"]
+
+
+def test_check_language_binding_ok_when_language_is_set(home, tmp_path):
+    from conftest import make_origin_and_repo as _make_origin_and_repo
+
+    _origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    (repo / "go.mod").write_text("module widget\n\ngo 1.21\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "go.mod", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    cfg = Config(home=home, repos={
+        "default": {"path": str(repo), "default": True, "test_command": "go test ./...",
+                   "language": "go"},
+    })
+    result = health.check_language_binding(cfg, now=1_000_000)
+    assert result["status"] == "ok"
+    assert result["flagged"] == []
+
+
+def test_check_language_binding_ok_for_a_python_board(home, tmp_path):
+    """AC7: a plain python repo (a `tests/` dir, no go.mod/package.json)
+    never flags -- no false positive from the new check."""
+    from conftest import make_origin_and_repo as _make_origin_and_repo
+
+    _origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("def test_x():\n    assert True\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "tests/", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    cfg = Config(home=home, repos={
+        "default": {"path": str(repo), "default": True, "test_command": "pytest -q"},
+    })
+    result = health.check_language_binding(cfg, now=1_000_000)
+    assert result["status"] == "ok"
+    assert result["flagged"] == []
+
+
+def test_check_language_binding_registered_in_doctor(home):
+    assert health.check_language_binding in health.CHECKS
+    code, out = _sweep(home)
+    assert code == 0
+    assert next(c for c in out["checks"] if c["name"] == "language_binding")["status"] == "ok"

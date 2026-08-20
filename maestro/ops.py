@@ -1360,17 +1360,21 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
     has no acs section at all or no ACs carry an annotation.
 
     T-84: a `test:` annotation's added/deleted-name extraction and selector
-    syntax are selected per `binding.language` (`testlang.resolve`) -- never
-    hardcoded pytest here. `binding.language` is already fail-closed at
+    syntax are selected per `binding.language` (`testlang.resolve_strict`) --
+    never hardcoded pytest here. `binding.language` is already fail-closed at
     `config.load()` time (an unrecognized value refuses to load the home at
-    all -- see `config._REPO_TABLE_KEYS`'s validation), so `testlang.resolve`
+    all -- see `config._REPO_TABLE_KEYS`'s validation), so `resolve_strict`
     raising `UnsupportedLanguage` here should never actually happen; it is
     caught anyway (defense in depth against a binding constructed by some
-    other path) and surfaced via the `"unsupported"` key instead of ever
-    running (and thus ever failing-closed forever) a check that cannot mean
-    anything for that language -- the caller (`_route_test_run`) turns a
-    non-empty `"unsupported"` into one clear, one-time `ops.fail(...,
-    dead_letter=True)` rather than a bounce back to `implementing`.
+    other path). T-96: an UNSET `language` whose guess (this annotation's own
+    path extension, checked by `resolve_strict`) contradicts the silent
+    python default raises `MismatchedLanguage` instead -- caught alongside
+    `UnsupportedLanguage`, same treatment. Either way this is surfaced via
+    the `"unsupported"` key instead of ever running (and thus ever
+    failing-closed forever) a check against the wrong language's regex --
+    the caller (`_route_test_run`) turns a non-empty `"unsupported"` into one
+    clear, one-time `ops.fail(..., dead_letter=True)` rather than a bounce
+    back to `implementing`.
     """
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
@@ -1401,8 +1405,14 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
                 exit_code, output = _run_shell(ann.command, cwd)
             else:
                 try:
-                    profile = testlang.resolve(binding.language)
-                except testlang.UnsupportedLanguage as exc:
+                    # T-96: resolve_strict, not resolve -- an UNSET language
+                    # whose guess (this annotation's own path extension, or
+                    # the repo root's marker files) contradicts the silent
+                    # python default must fail closed here too, not just an
+                    # explicitly-set-but-unrecognized value.
+                    profile = testlang.resolve_strict(binding.language, ann_path=ann.path,
+                                                      repo_root=cwd)
+                except (testlang.UnsupportedLanguage, testlang.MismatchedLanguage) as exc:
                     unsupported.append({"ac_index": i, "ac_hash": h,
                                         "language": binding.language, "error": str(exc)})
                     continue

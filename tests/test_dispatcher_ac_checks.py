@@ -341,6 +341,96 @@ def test_unsupported_language_dead_letters_instead_of_bouncing(tmp_path, home):
 
 
 # ---------------------------------------------------------------------------
+# T-96: `language` UNSET but `test_command` set on a non-python repo -- the
+# composition T-84 didn't guard. Before this ticket, `testlang.resolve(None)`
+# silently defaulted to PYTHON, so a `test:` AC naming a `*.go` path bounced
+# `verifying -> implementing` forever on a green suite (spec.md's
+# reproduction). Now `testlang.resolve_strict` catches the contradiction the
+# same way an explicitly-unsupported `language` already does: one legible,
+# one-time dead-letter, never a bounce.
+# ---------------------------------------------------------------------------
+
+def test_unset_language_with_contradicting_ac_path_dead_letters_not_bounces(tmp_path, home):
+    _origin, repo = make_origin_and_repo(tmp_path)
+    cfg = Config(home=home, repos={
+        "default": {"path": str(repo), "default": True, "test_command": _PASS_CMD},
+        # no "language" key -- the exact shape spec.md's repro describes.
+    })
+    wt = _seed_to_worktree(
+        cfg, "G-1",
+        acs=["widget adds (test: internal/widget/widget_test.go::TestWidget)"])
+    _commit_test_file(wt, "internal/widget/widget_test.go",
+                      "func TestWidget(t *testing.T) {}\n")
+    _advance_to_verifying(cfg, "G-1")
+
+    sessions = DryRunSessions()
+    _run_verifying_to_completion(cfg, "G-1", sessions)
+
+    snap = snap_mod.load(home, "G-1")
+    assert snap.phase == Phase.DEGRADED.value
+    events = event_log.read(home, "G-1")
+    assert any(e["type"] == "Stalled" for e in events)
+    failed = [e for e in events if e["type"] == "Failed"][-1]
+    # AC1: legible, names `language` and what to set it to.
+    assert "language" in failed["payload"]["error"]
+    assert "go" in failed["payload"]["error"]
+    # AC2: dead-lettered straight from `verifying` -- never a
+    # `verifying -> implementing` bounce first (the reported loop).
+    verifying_seq = next(e["seq"] for e in events if e["type"] == "PhaseChanged"
+                         and e["payload"]["phase"] == "verifying")
+    assert [e for e in events if e["seq"] > verifying_seq and e["type"] == "PhaseChanged"
+           and e["payload"]["phase"] == "implementing"] == []
+    assert all("qa" not in p for _k, p, *_r in sessions.spawned)
+
+
+def test_unset_language_with_python_ac_path_is_unaffected(tmp_path, home):
+    """AC7: a python board (or any repo whose annotated path is `.py`) is
+    byte-identical to before this ticket -- no false positive from the new
+    guard."""
+    _origin, repo = make_origin_and_repo(tmp_path)
+    cfg = _write_config(home, repo, test_command=_PYTEST)  # no "language" set
+    wt = _seed_to_worktree(
+        cfg, "G-1", acs=["widget works (test: tests/test_widget.py::test_widget)"])
+    _commit_test_file(wt, "tests/test_widget.py",
+                      "def test_widget():\n    assert True\n")
+    _advance_to_verifying(cfg, "G-1")
+
+    sessions = DryRunSessions()
+    _run_verifying_to_completion(cfg, "G-1", sessions)
+
+    assert snap_mod.load(home, "G-1").phase == Phase.QA.value
+
+
+def test_language_mismatch_covers_h4_deletion_scan_too(tmp_path, home):
+    """AC6: the H4 net-deletion gate shares the same guard -- it must not
+    silently no-op (scan with the wrong, python-only regex and never fire)
+    on a repo whose language is unset but looks non-python; it dead-letters
+    the same way the `test:` presence check does, before ever reaching the
+    deletion scan."""
+    _origin, repo = make_origin_and_repo(tmp_path)
+    # go.mod at the repo root -- the H4 gate has no single AC path to guess
+    # from, so it falls back to this repo-root marker (testlang.guess_from_repo_root).
+    (repo / "go.mod").write_text("module widget\n\ngo 1.21\n")
+    git("add", "-A", cwd=repo); git("commit", "-q", "-m", "go.mod", cwd=repo)
+    git("push", "-q", "origin", "main", cwd=repo)
+    cfg = Config(home=home, repos={
+        "default": {"path": str(repo), "default": True, "test_command": _PASS_CMD},
+    })
+    wt = _seed_to_worktree(cfg, "G-1", acs=["do the thing"])  # no annotation at all
+    _commit_test_file(wt, "README.md", "placeholder\n")
+    _advance_to_verifying(cfg, "G-1")
+
+    sessions = DryRunSessions()
+    _run_verifying_to_completion(cfg, "G-1", sessions)
+
+    snap = snap_mod.load(home, "G-1")
+    assert snap.phase == Phase.DEGRADED.value
+    failed = [e for e in event_log.read(home, "G-1") if e["type"] == "Failed"][-1]
+    assert "language" in failed["payload"]["error"]
+    assert "go" in failed["payload"]["error"]
+
+
+# ---------------------------------------------------------------------------
 # Ships dark: `test_command` unset, and separately `mode: local`, make
 # annotated ACs behave byte-identically to plain prose ACs.
 # ---------------------------------------------------------------------------
