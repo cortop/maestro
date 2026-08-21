@@ -2516,6 +2516,45 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             active_sessions=0, paused=True,
         )
 
+    if filter_keys is None:
+        # T-99 AC9: `tickets/` entirely absent while `events/`/snapshots still
+        # carry per-key history is RB-17's phantom-ticket shape -- `list_keys`
+        # (union of ticket dirs + event logs + snapshots) and `snapshot.load`
+        # manufacture `triaging` rows from bare event-log history alone, and
+        # `_never_minted` deliberately returns False for any key with real
+        # event-log history (so `maestro cmd <KEY> discard` keeps working --
+        # RB-17 AC4). Left unguarded, an unrestricted sweep over a board in
+        # this shape would due-check -- and could spawn a reconciler for -- a
+        # key with no `spec.md` to read. Refuse the WHOLE sweep instead of
+        # only warning: a `--key` sweep (`filter_keys is not None`) skips this
+        # guard entirely, so per-key `discard` still works end to end.
+        board = store.board_state(home)
+        if "tickets/" in board["missing_paths"] and list_keys(home):
+            # A dict-literal `decisions[<key>] = {"outcome": ..., ...}`
+            # assignment (not an inline argument) -- `diagram._outcome_assignments`
+            # AST-walks `dispatcher.py` for exactly this shape to keep
+            # `docs/dispatch-gates.md` a total derivation of every outcome a
+            # sweep can record; a bare inline dict passed straight to
+            # `_append_dispatch_ledger` would silently escape that walk.
+            decisions: dict[str, dict] = {}
+            decisions["_board"] = {
+                "outcome": "board_refused",
+                "reason": ("tickets/ directory missing while events/ or derived "
+                           "snapshots hold ticket data -- refusing an unrestricted "
+                           "sweep (see `maestro doctor` / `maestro status`); a "
+                           "`dispatch --key <KEY>` sweep is unaffected"),
+            }
+            _write_heartbeat(home, now, 0, 0)
+            _append_dispatch_ledger(home, {
+                "ts": store.iso_now(), "epoch": now, "hook_errors": {},
+                "decisions": decisions,
+                "drift_skipped": [], "drift_skip_reasons": {},
+            })
+            return DispatchReport(
+                minted=[], due=[], claimed=[], spawned=[], capacity_skipped=[],
+                active_sessions=0,
+            )
+
     from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
     from . import health  # lazy: health -> dispatcher would cycle at import time
 

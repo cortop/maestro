@@ -56,6 +56,76 @@ def resolve_home(explicit: str | os.PathLike | None = None) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Board-state classifier (T-99)
+# ---------------------------------------------------------------------------
+# The structural fingerprint `cli.cmd_init` already writes, narrowed to the
+# subset `backup.restore_backup` also mkdirs+extracts (see its own docstring)
+# -- an all-of-`cli.HOME_DIRS` rule would flag every restored board as merely
+# "partial", since restore never recreates `worktrees/`, `agent-logs/`, etc.
+CORE_HOME_PATHS: tuple[str, ...] = ("events", "tickets", "inbox", "config.toml")
+
+
+def _core_display(name: str) -> str:
+    return name if name == "config.toml" else f"{name}/"
+
+
+def board_state(home: Path) -> dict:
+    """Classify *home* on the structural fingerprint alone -- NEVER a ticket
+    count, so a fresh `init` with zero tickets still classifies "ok" and a
+    board with 153 real tickets is never mistaken for empty (T-99's incident:
+    an auditing agent read a bare `~/.maestro` -- 2 phantom `triaging`
+    tickets, no `tickets/` dir -- as authoritative and wrote into a human's
+    notes that a live 153-ticket board "has never existed").
+
+    Returns ``{"state": ..., "missing_paths": [...]}``:
+      - "missing" -- *home* itself does not exist on disk.
+      - "uninitialized" -- *home* exists but NONE of `CORE_HOME_PATHS` do
+        (an empty directory, or one that was never `init`ed).
+      - "partial" -- *home* exists and SOME but not all of `CORE_HOME_PATHS`
+        exist (e.g. `events/` with no `tickets/` -- RB-17's phantom-ticket
+        shape).
+      - "ok" -- every `CORE_HOME_PATHS` entry exists.
+    ``missing_paths`` names exactly which core paths are absent (empty for
+    "ok"), display-formatted (`"events/"`, `"config.toml"`).
+    """
+    if not home.exists():
+        return {"state": "missing",
+                "missing_paths": [_core_display(p) for p in CORE_HOME_PATHS]}
+    missing = [_core_display(p) for p in CORE_HOME_PATHS if not (home / p).exists()]
+    if not missing:
+        state = "ok"
+    elif len(missing) == len(CORE_HOME_PATHS):
+        state = "uninitialized"
+    else:
+        state = "partial"
+    return {"state": state, "missing_paths": missing}
+
+
+def find_did_you_mean(home: Path) -> Path | None:
+    """When *home* is missing/uninitialized, look one level down (children of
+    *home*, if it exists at all) and one level over (siblings -- children of
+    *home*'s parent) for a directory that itself classifies "ok" -- the
+    `~/.maestro` vs `~/.maestro/maestro-dev` trap (T-99): the real board sits
+    one directory below the default home. Depth-1 only, never a recursive
+    crawl -- this is a hint for a stderr message, not a filesystem search.
+    Children are preferred over siblings, each in alphabetical order, so the
+    same broken *home* always suggests the same path.
+    """
+    candidates: list[Path] = []
+    if home.exists() and home.is_dir():
+        candidates.extend(sorted(p for p in home.iterdir()
+                                  if p.is_dir() and not p.name.startswith(".")))
+    parent = home.parent
+    if parent.exists() and parent.is_dir():
+        candidates.extend(sorted(p for p in parent.iterdir()
+                                  if p.is_dir() and not p.name.startswith(".") and p != home))
+    for cand in candidates:
+        if board_state(cand)["state"] == "ok":
+            return cand
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Path layout (the whole state model lives under home)
 # ---------------------------------------------------------------------------
 def events_path(home: Path, key: str) -> Path:

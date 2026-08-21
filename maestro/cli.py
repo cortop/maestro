@@ -278,6 +278,17 @@ def _warn_runner_model(home, runner, runner_model) -> None:
 
 def cmd_create(args) -> int:
     cfg = _cfg(args)
+    # T-99 AC6: a missing/uninitialized home used to silently materialize a
+    # partial one (`inbox.append_new`'s own `store.append_line` mkdir's just
+    # enough for the queued create to sit in limbo -- Repro 3). Checked before
+    # any prompt or write below; `store.board_state` itself is read-only, so
+    # this refusal creates no files or directories either.
+    board = store.board_state(cfg.home)
+    if board["state"] in ("missing", "uninitialized"):
+        print(f"error: {cfg.home} is not a maestro board ({board['state']}) -- "
+              f"run `maestro --home {cfg.home} init` before creating a ticket",
+              file=sys.stderr)
+        return 2
     title_flag = getattr(args, "title_flag", None)
     if title_flag is not None and args.title is not None:
         print("error: pass the title either positionally or via --title, not both",
@@ -472,6 +483,7 @@ def cmd_cmd(args) -> int:
 
 def cmd_status(args) -> int:
     cfg = _cfg(args)
+    board = store.board_state(cfg.home)
     keys = disp.list_keys(cfg.home)
     counts: dict[str, int] = {}
     waiting = []
@@ -487,7 +499,22 @@ def cmd_status(args) -> int:
             waiting.append((k, "burning", [s.last_error or ""]))
         elif s.phase in {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value}:
             waiting.append((k, s.phase, list(s.open_questions.values())))
-    _print({"tickets": len(keys), "by_phase": counts, "needs_you": waiting})
+    # T-99: `home`/`board` lead every payload -- a nonexistent or half-built
+    # home used to print byte-identical JSON to a healthy empty board (the
+    # 2026-08-20 incident). `board["missing_paths"]` is already populated by
+    # `store.board_state` for a non-"ok" state, so it needs no repeating here.
+    _print({"home": str(cfg.home), "board": board,
+            "tickets": len(keys), "by_phase": counts, "needs_you": waiting})
+    if board["state"] in ("missing", "uninitialized"):
+        hint = store.find_did_you_mean(cfg.home)
+        msg = (f"error: {cfg.home} is not a maestro board ({board['state']}) -- "
+               f"run `maestro --home {cfg.home} init` to create one")
+        if hint is not None:
+            msg += f" (did you mean --home {hint}?)"
+        print(msg, file=sys.stderr)
+        return 2
+    if board["state"] == "partial":
+        return 1
     return 0
 
 
@@ -510,7 +537,18 @@ def cmd_doctor(args) -> int:
     _print(rpt)
     if getattr(args, "strict", False) and any(c["status"] != "ok" for c in rpt["checks"]):
         return 1
-    return 1 if rpt["runaway"] else 0
+    # T-99 AC5: `check_home_structure` failing (a missing/uninitialized home)
+    # is fatal by default, not gated behind --strict the way every OTHER
+    # check's "fail"/"warn" status still is (`check_heartbeat`'s stale-board
+    # "fail", `check_provider_availability`'s no-network "fail",
+    # `check_repo_preflight`'s blocked-repo "fail" all deliberately stay
+    # report-only outside --strict, per their own pre-existing contracts) --
+    # previously only `runaway` ever flipped the non-strict exit code, so a
+    # nonexistent home reported healthy and exited 0.
+    home_check = next((c for c in rpt["checks"] if c["name"] == "home_structure"), None)
+    if rpt["runaway"] or (home_check is not None and home_check["status"] == "fail"):
+        return 1
+    return 0
 
 
 def cmd_runners(args) -> int:
@@ -1261,7 +1299,8 @@ def cmd_env(args) -> int:
                 # against without reading config.toml directly.
                 "language": binding.language, "test_command": binding.test_command})
         return 0
-    _print({"home": str(cfg.home), "repo_path": cfg.repo_path,
+    _print({"home": str(cfg.home), "board": store.board_state(cfg.home),
+            "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
             "max_concurrency": cfg.max_concurrency, "max_impl_turns": cfg.max_impl_turns,
             "qa_standards_axis": cfg.qa_standards_axis, "providers": cfg.providers,

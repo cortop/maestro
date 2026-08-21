@@ -1458,6 +1458,7 @@ def test_render_env_shows_config_toml_path(home):
 
 def test_render_env_marks_missing_config_toml(home):
     """_render_env marks config.toml as not found when it doesn't exist."""
+    (home / "config.toml").unlink()  # the `home` fixture (T-99) pre-seeds a plain config.toml
     cfg = _make_cfg(home)
     out = _render_env(cfg)
     assert "not found" in out

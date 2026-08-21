@@ -42,6 +42,14 @@ def make_origin_and_repo(tmp_path, name="repo", base_branch="main"):
 def home(tmp_path):
     for d in ("events", "inbox", "tickets", "worktrees", "derived/snapshots", "derived/cursors"):
         (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    # T-99: `store.board_state`'s CORE fingerprint also requires `config.toml`
+    # -- write a bare one so every existing test's `home` still classifies
+    # "ok" (this fixture stands in for a real, live board everywhere else in
+    # the suite; only the T-99 tests themselves construct a deliberately
+    # broken home).
+    config_path = tmp_path / "config.toml"
+    if not config_path.exists():
+        config_path.write_text("[maestro]\n", encoding="utf-8")
     return tmp_path
 
 

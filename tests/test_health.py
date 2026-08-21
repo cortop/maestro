@@ -719,9 +719,10 @@ def test_doctor_cli_includes_check_registry(home, cfg):
     code, out = _sweep(home)
     assert code == 0
     names = {c["name"] for c in out["checks"]}
-    assert names == {"heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
-                      "phantom_keys", "watchdog_loops", "depends_on", "launchctl", "repo_preflight",
-                      "unknown_repo_bindings", "language_binding", "missing_reconcile_skill",
+    assert names == {"home_structure", "heartbeat", "backup_age", "claim_age", "claim_no_output",
+                      "dead_letters", "phantom_keys", "watchdog_loops", "depends_on", "launchctl",
+                      "repo_preflight", "unknown_repo_bindings", "language_binding",
+                      "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
                       "pi_version", "worktree_health", "worktree_witness", "provider_availability",
@@ -786,9 +787,10 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     `missing_acs` -- same treatment. T-95 grew it by one more still --
     `worktree_witness` -- same treatment. T-96 grew it by one more still --
     `language_binding` -- same treatment. T-98 grew it by one more still --
-    `ac_annotation_parse` -- same treatment.)"""
+    `ac_annotation_parse` -- same treatment. T-99 grew it by one more still --
+    `home_structure` -- same treatment.)"""
     baseline_names = {
-        "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
+        "home_structure", "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "language_binding", "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
