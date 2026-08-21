@@ -50,7 +50,13 @@ Synthesise what you know into a structured spec:
 - **title**: a short imperative phrase (≤ 70 chars)
 - **intent**: 2–5 sentences — what problem this solves and what "done" looks like
 - **notes** (optional): relevant context, surface areas, constraints
-- **acceptance criteria**: each one starts with `- [ ]` and is observable/verifiable
+- **acceptance criteria**: each one starts with `- [ ]` and is observable/verifiable. An AC
+  MAY end with an opt-in, machine-checkable annotation (T-79): `(test: <path>)`,
+  `(test: <path>::<id>)`, or `(check: <shell command>)` — when the repo binding has a
+  resolved `test_command`, this makes that one AC provable by a subprocess (the added test
+  must actually land in the branch's diff) instead of a self-attestation. `check:`'s command
+  just needs to exit 0 — it does NOT verify the check was added by this branch, so prefer
+  `test:` whenever the AC is "add a test for X".
 - **priority**: default `2` unless the user said otherwise
 - **dependsOn**: omit unless the user named a dependency
 

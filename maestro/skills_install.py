@@ -67,7 +67,7 @@ PAYLOAD_NAMES = tuple(f"maestro-reconcile-{phase}.md" for phase in PHASE_FILES)
 
 
 def payload_dir() -> Path:
-    """The installed package's copy of the six command files."""
+    """The installed package's copy of the seven command files."""
     return Path(importlib.resources.files("maestro")) / "_skill_commands"
 
 
@@ -375,7 +375,7 @@ def _write_if_changed(target: Path, content: str) -> bool:
 
 
 def install_repo(cfg: Config, name: str, *, force_opencode: bool = False) -> dict:
-    """Copy the six payload files into ``<repo>/.claude/commands/`` as real,
+    """Copy the seven payload files into ``<repo>/.claude/commands/`` as real,
     byte-identical files — the target repo may not be this one, and needs to
     be able to commit + review them like any other change.
 
@@ -437,7 +437,7 @@ def install_repo(cfg: Config, name: str, *, force_opencode: bool = False) -> dic
 
 
 def install_user(cfg: Config, *, force_opencode: bool = False) -> dict:
-    """Symlink the six payload files into the user commands directory.
+    """Symlink the seven payload files into the user commands directory.
 
     Idempotent: a symlink already pointing at the payload is left alone; a
     symlink pointing anywhere else (a stale install after a package upgrade

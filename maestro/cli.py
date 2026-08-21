@@ -1195,7 +1195,7 @@ def cmd_worktree(args) -> int:
 
 
 def cmd_install_commands(args) -> int:
-    """GA-15: idempotently install the six per-phase reconcile command files —
+    """GA-15: idempotently install the seven per-phase reconcile command files —
     ``--repo <name>`` copies them into a configured repo's checkout,
     ``--user`` symlinks them into the user commands directory instead (for a
     repo the board doesn't own). Replaces DOGFOOD.md's old "vendor by hand"
@@ -1420,7 +1420,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("action", choices=["ensure"])
     sp.add_argument("key")
     sp = add("install-commands", cmd_install_commands,
-             "install the six per-phase maestro-reconcile-*.md commands into a repo or user dir")
+             "install the seven per-phase maestro-reconcile-*.md commands into a repo or user dir")
     sp.add_argument("--repo", default=None,
                     help="[repos.<name>] (or 'default' for the legacy repo_path) to copy into")
     sp.add_argument("--user", action="store_true",

@@ -81,27 +81,38 @@ rule is honored because fan-out lives only at two top-level layers (dispatcher�
 A ticket's `## Acceptance criteria` are `- [ ]` checkbox lines in `spec.md`, each
 identified by a content hash of its own line text (`snapshot.ac_hash`) — so a human's
 edit to an AC's wording invalidates whatever was attested or checked against the old
-text, rather than silently matching by index. Two evidence tiers gate `awaiting-ci`:
+text, rather than silently matching by index. Three gates stand between an AC and
+`awaiting-ci`: two per-AC evidence tiers, plus a QA verdict gate spanning all of them.
 
 - **Self-attestation** (`maestro verify-ac`) — the implementer's own structured claim
   (what/where/result), independently re-checked by the `qa` phase's verdict. This is
-  the default for prose ACs, and stays the only tier for a home with no `test_command`.
+  the default for prose ACs, and stays the only tier for a repo binding whose resolved
+  `test_command` (the board-wide default, or a `[repos.<name>]` override that arms the
+  gate even when the board-wide key is unset — T-83) is unset.
 - **Machine-checked** (T-79, opt-in per AC) — a trailing annotation on the checkbox
   line, `(test: <path>[::<id>])` or `(check: <shell command>)`, makes that ONE AC
-  provable by a subprocess instead of an attestation. With `test_command` configured
-  (and the ticket not `mode: local`), the `verifying` stage (below) runs each
-  annotated AC's own check at the same tree state as the suite and records it as an
-  `AcCheckCaptured` event; a current-tree passing capture is what `awaiting-ci` then
-  requires for that AC — `verify-ac` still records narrative evidence, it just stops
-  being load-bearing. `test:` requires the named test (or, for a bare file path, some
-  test in that file) to actually be part of the branch's diff against base and pass —
-  the primitive that catches a green suite whose diff never added the test it claims
-  to (the false-attestation failure mode this exists to close). Nothing here weakens
+  provable by a subprocess instead of an attestation. With a resolved `test_command`
+  (and the ticket not `mode: local`), the `verifying` phase — a sleeping, dispatcher-
+  owned stage between `implementing` and `qa` where `dispatch()` itself runs the suite
+  as a tracked subprocess, never a reconciler — runs each annotated AC's own check at
+  the same tree state as the suite and records it as an `AcCheckCaptured` event; a
+  current-tree passing capture is what `awaiting-ci` then requires for that AC —
+  `verify-ac` still records narrative evidence, it just stops being load-bearing.
+  `test:` requires the named test (or, for a bare file path, some test in that file)
+  to actually be part of the branch's diff against base and pass — the primitive that
+  catches a green suite whose diff never added the test it claims to (the
+  false-attestation failure mode this exists to close). Nothing here weakens
   independent QA: it still judges every AC, prose or annotated, and for an annotated
   one its job sharpens to auditing whether the named test's assertions actually match
-  the AC's words. Unannotated ACs, a `test_command`-unset home, and a `mode: local`
-  ticket are all unaffected — the annotation ships dark by construction, so the ~130
-  pre-existing prose-only specs keep working untouched.
+  the AC's words. Unannotated ACs, a repo binding with no resolved `test_command`, and
+  a `mode: local` ticket are all unaffected — the annotation ships dark by
+  construction, so the ~130 pre-existing prose-only specs keep working untouched.
+- **QA verdict completeness** (T-85, `awaiting_ci_qa_gate`, default on) — regardless of
+  which evidence tier an AC used, `set-phase awaiting-ci` itself refuses
+  (`ops._refuse_if_qa_incomplete`) unless EVERY current-hash AC already carries a
+  PASSING spec-axis QA verdict recorded from the `qa` phase — not merely no *failing*
+  one. Paired with `qa_phase_gate` (also default on), which refuses to record a verdict
+  at all unless the ticket's folded phase is `qa`. Neither is `--force`-able.
 
   T-84: `test:`'s added-test extraction and DEFAULT selector syntax (pytest
   `path::id`, `go test -run`, jest `-t`) are looked up per the ticket's repo binding
@@ -146,9 +157,12 @@ See [`docs/state-machine.md`](docs/state-machine.md) for the maintained phase di
 is a dated, unmaintained companion analysis: whether the board is usefully modeled as a
 resource-constrained workflow net (a Petri net) — a lens, not a maintained artifact.
 
-`awaiting-human` and `awaiting-ci` are **sleeping** (no held process). The reconciler
-records the gate + a `next_requeue_at`, then exits. The dispatcher re-wakes the ticket
-when: the inbox has a new command, the requeue timer elapses, or the spec hash changed.
+`docs/state-machine.md` lists every **sleeping** phase (no held process) — currently
+`awaiting-human`, `verifying`, `awaiting-ci`, `in-review`, and `degraded`
+(`statemachine.SLEEPING_PHASES`; `in-review`'s sleeping-ness is a 2026-07-19 postmortem
+control). The reconciler records the gate + a `next_requeue_at`, then exits. The
+dispatcher re-wakes the ticket when: the inbox has a new command, the requeue timer
+elapses, or the spec hash changed.
 A fresh reconciler resumes by replaying the log — resumability comes from the event log we
 already have, not a separate journal.
 

@@ -254,13 +254,14 @@ class Config:
     # unrecognized value fails closed at config load (refuse to start), never silently
     # falls back -- see _BASE_DRIFT_POLICIES.
     base_drift_policy: str = "on_conflict"
-    # T-23: gate a second, parallel QA sub-agent in the `implementing` reconcile step that
-    # checks CLAUDE.md conventions + a Fowler-smell baseline (the "standards" axis) alongside
-    # the existing AD-4 "spec" axis (does the diff satisfy the AC?). Default OFF -- it roughly
-    # doubles sub-agent spend per implementing step, and per the T-23 spec a mandatory second
-    # axis is explicitly not approved scope. A standards-axis fail is recorded (`maestro
-    # qa-verdict --axis standards`) but is advisory only: unlike a spec-axis fail, it does NOT
-    # block `set-phase awaiting-ci` (see ops._refuse_if_qa_failing).
+    # T-23: gate a second, parallel QA sub-agent in the `qa` reconcile step that checks
+    # CLAUDE.md conventions + a Fowler-smell baseline (the "standards" axis) alongside the
+    # existing AD-4 "spec" axis (does the diff satisfy the AC?) -- RF-7 moved this axis here
+    # from `implementing`. Default OFF -- it roughly doubles sub-agent spend per qa step, and
+    # per the T-23 spec a mandatory second axis is explicitly not approved scope. A
+    # standards-axis fail is recorded (`maestro qa-verdict --axis standards`) but is advisory
+    # only: unlike a spec-axis fail, it does NOT block `set-phase awaiting-ci` (see
+    # ops._refuse_if_qa_failing).
     qa_standards_axis: bool = False
     # T-85: `maestro qa-verdict` refuses (raises, no event appended) unless the ticket's
     # folded phase is `qa` -- the write-path counterpart to the runner-level spawn denylist
@@ -677,12 +678,14 @@ max_impl_turns = 20
 worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1); raise this
                                   # for a monorepo whose checkout legitimately takes longer --
                                   # never scale it down, a killed-mid-checkout worktree looks
-                                  # complete (dir present) but isn't
+                                  # complete (dir present) but isn't. Per-[repos.<name>] override
+                                  # wins (T-90).
 prime_timeout = 600              # T-90: bounds the `prime` command below/[repos.<name>] prime --
                                   # a SEPARATE budget from worktree_timeout above; raising one has
                                   # no effect on the other. Raise this for a repo whose cold
                                   # dependency install (e.g. `yarn install` in a large web
-                                  # checkout) legitimately exceeds 10 minutes.
+                                  # checkout) legitimately exceeds 10 minutes. Per-[repos.<name>]
+                                  # override wins (T-90).
 daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # session spend reaches this (enforced, not advisory;
                                   # surfaced by `maestro doctor` + the TUI fleet panel).
@@ -745,18 +748,21 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # for the multi-repo equivalent). Run ONCE per fresh worktree by
                                   # `maestro worktree ensure`, cwd=worktree, with $WT/$REPO/$KEY
                                   # in its environment -- never by the dispatcher.
-# test_command = ".venv/bin/python -m pytest -q"   # RB-12: unset (default) disables the gate --
-                                  # every existing home behaves exactly as today. Set this and
-                                  # `implementing -> qa` refuses (`maestro set-phase ... qa`,
-                                  # non-zero exit, no event) unless `maestro capture-tests <key>`
-                                  # has a passing record captured by MAESTRO ITSELF (a real
-                                  # subprocess, its own exit code) at the CURRENT tree state
-                                  # (commit sha + a hash of the dirty tree) -- a self-reported
-                                  # "tests pass" note never satisfies this. A matching record is
-                                  # reused, never re-run, so a 60s sweep never re-runs a 115s
-                                  # suite for nothing. `--force` on `set-phase` overrides, same
-                                  # as the unverified-ACs gate. No-ops for a `mode = "local"`
-                                  # binding (no suite to run).
+# test_command = ".venv/bin/python -m pytest -q"   # RB-12: this is the BOARD-WIDE DEFAULT --
+                                  # unset (default) leaves every existing home behaving exactly
+                                  # as today. [repos.<name>] test_command below overrides this
+                                  # per repo, and a repo-level command arms the gate even while
+                                  # this board-wide key stays unset. Once armed (by either key)
+                                  # for a repo, `implementing -> qa` refuses (`maestro set-phase
+                                  # ... qa`, non-zero exit, no event) unless `maestro
+                                  # capture-tests <key>` has a passing record captured by MAESTRO
+                                  # ITSELF (a real subprocess, its own exit code) at the CURRENT
+                                  # tree state (commit sha + a hash of the dirty tree) -- a
+                                  # self-reported "tests pass" note never satisfies this. A
+                                  # matching record is reused, never re-run, so a 60s sweep never
+                                  # re-runs a 115s suite for nothing. `--force` on `set-phase`
+                                  # overrides, same as the unverified-ACs gate. No-ops for a
+                                  # `mode = "local"` binding (no suite to run).
 # test_deletion_gate = true        # T-84 (H4): a green suite is a weak oracle for REMOVAL. The
                                   # verifying stage diffs test names (per-language, see
                                   # [repos.<name>] language below) against base; net deletions
@@ -775,12 +781,14 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
-# qa_phase_gate = false            # T-85: default ON refuses `maestro qa-verdict` (no event
-                                  # appended) unless the ticket's folded phase is `qa` -- set
-                                  # false to revert to HEAD (a verdict honored from any phase)
-# awaiting_ci_qa_gate = false      # T-85: default ON refuses `set-phase awaiting-ci` unless every
-                                  # current-hash AC has a PASSING spec-axis QA verdict, not merely
-                                  # no failing one -- set false to revert to HEAD's weaker check
+# qa_phase_gate = true             # T-85: default ON (shown here) refuses `maestro qa-verdict`
+                                  # (no event appended) unless the ticket's folded phase is `qa`
+                                  # -- set false to revert to pre-T-85 behavior (a verdict
+                                  # honored from any phase)
+# awaiting_ci_qa_gate = true       # T-85: default ON (shown here) refuses `set-phase awaiting-ci`
+                                  # unless every current-hash AC has a PASSING spec-axis QA
+                                  # verdict, not merely no failing one -- set false to revert to
+                                  # pre-T-85's weaker check
 # compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
                                   # (0 disables; a manual `maestro compact <key>` always works)
 # compact_min_events = 200        # skip compacting a key until its folded log reaches this size

@@ -245,7 +245,7 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
     "triaging": ("ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
     "awaiting-human": ("append", "create", "env", "finalize", "fold-inbox", "inbox-ack",
                         "observe-spec", "release", "set-phase", "snapshot"),
-    "ready": ("env", "fold-inbox", "observe-spec", "release", "requeue", "set-phase",
+    "ready": ("ask", "env", "fold-inbox", "observe-spec", "release", "requeue", "set-phase",
               "snapshot", "worktree"),
     "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
     "implementing": ("append", "ask", "env", "fail", "finalize", "fold-inbox", "impl-turn",

@@ -69,8 +69,16 @@ maestro set-phase "$KEY" researching --reason "research ticket: beginning explor
   maestro worktree ensure "$KEY"
   maestro set-phase "$KEY" implementing --reason "worktree ready"
   ```
+  `ensure` can instead REFUSE (T-81): a witness worktree that already completed creation but
+  now fails its health check (non-zero exit, no event) — its error text names a force-remove
+  command, but do **not** run it or otherwise remove the worktree yourself; it may hold
+  uncommitted work. Escalate instead and exit:
+  ```bash
+  maestro ask "$KEY" "worktree ensure refused: <detail>" --qid "wt-$KEY"
+  ```
 
 **Done when:** either you slept via `maestro requeue "$KEY" 300` (an unmet dependency — nothing
-else runs this step), or you appended exactly one `set-phase` event (`researching`, or
-`implementing` once local mode needs no setup or the git worktree/branch exists), and
-`maestro release "$KEY"` has run.
+else runs this step), you asked via `maestro ask ... --qid "wt-$KEY"` (`worktree ensure`
+refused — nothing else runs this step), or you appended exactly one `set-phase` event
+(`researching`, or `implementing` once local mode needs no setup or the git worktree/branch
+exists), and `maestro release "$KEY"` has run.
