@@ -163,6 +163,50 @@ def test_row_highlight_renders_every_seeded_phase(seeded_home):
     asyncio.run(_inner())
 
 
+def test_detail_panel_resize_bindings_grow_shrink_and_clamp(seeded_home):
+    """T-107: '[' / ']' resize the #tickets/#right split live, clamp at both
+    ends instead of hiding either panel or crashing, and the chosen ratio
+    survives a periodic _populate() refresh within the session."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            assert table.styles.width.value == 2.0
+
+            # ']' widens the detail column (shrinks #tickets), clamped at MIN.
+            await pilot.press("]")
+            await pilot.pause()
+            assert table.styles.width.value == 1.5
+            for _ in range(5):
+                await pilot.press("]")
+                await pilot.pause()
+            assert app._tickets_fr == app._TICKETS_FR_MIN
+            assert table.styles.width.value == app._TICKETS_FR_MIN
+            assert table.region.width > 0, "tickets panel vanished"
+            assert app._exception is None
+
+            # '[' narrows the detail column (grows #tickets), clamped at MAX.
+            for _ in range(10):
+                await pilot.press("[")
+                await pilot.pause()
+            assert app._tickets_fr == app._TICKETS_FR_MAX
+            assert table.styles.width.value == app._TICKETS_FR_MAX
+            right = app.query_one("#right")
+            assert right.region.width > 0, "detail panel vanished"
+            assert app._exception is None
+
+            # The ratio survives a periodic refresh within the session.
+            app._populate()
+            await pilot.pause()
+            assert app._tickets_fr == app._TICKETS_FR_MAX
+            assert app.query_one("#tickets", DataTable).styles.width.value == \
+                app._TICKETS_FR_MAX
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # --------------------------------------------------------------------------- #
 # (b) EXHAUSTIVE BINDING SWEEP — the structural defense against forgotten cases #
 # --------------------------------------------------------------------------- #
@@ -1288,13 +1332,19 @@ def test_no_notification_on_first_populate(seeded_home):
 # --------------------------------------------------------------------------- #
 
 def test_footer_binding_count_is_reduced():
-    """show=False hides low-priority shortcuts; at most 8 visible in the footer."""
+    """show=False hides low-priority shortcuts; at most 10 visible in the footer.
+
+    (TUI-19 set the original budget at 8; T-107 raised it to 10 to surface the
+    two panel-resize bindings ('[' / ']') in the footer alongside the other
+    primary actions, per its own AC — still a deliberate, bounded budget, not
+    the pre-TUI-19 17-binding clutter.)
+    """
     from textual.binding import Binding
     visible = [
         b for b in MaestroTUI.BINDINGS
         if not isinstance(b, Binding) or b.show
     ]
-    assert len(visible) <= 8, (
+    assert len(visible) <= 10, (
         f"Too many visible footer bindings ({len(visible)}): "
         + ", ".join(_bkey(b) for b in visible)
     )

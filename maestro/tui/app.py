@@ -68,8 +68,15 @@ class MaestroTUI(App):
         background: transparent;
     }
     #tickets { width: 2fr; height: 1fr; }
+    #right   { width: 1fr; height: 1fr; }
     #detail  { width: 1fr; height: 1fr; padding: 0 1; }
     """
+
+    # T-107: #tickets/#right fr split, bounding how far '[' / ']' can push it —
+    # clamped so neither the list nor the detail column can vanish.
+    _TICKETS_FR_MIN = 1.0
+    _TICKETS_FR_MAX = 4.0
+    _TICKETS_FR_STEP = 0.5
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
@@ -80,6 +87,8 @@ class MaestroTUI(App):
         Binding("n", "create", "New"),
         Binding("enter", "focus_detail", "Detail"),
         Binding("i", "inbox_message", "Inbox"),
+        Binding("[", "narrow_detail", "Detail-"),
+        Binding("]", "widen_detail", "Detail+"),
         # Less-used actions: keys work but hidden from footer to reduce clutter
         Binding("ctrl+r", "retry", "Retry", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
@@ -97,12 +106,14 @@ class MaestroTUI(App):
 
     _selected_key: str | None = None
     _tail_mode: bool = True  # default: show tail in the sidebar panel
+    _tickets_fr: float = 2.0  # #tickets fr share vs #right's fixed 1fr
 
     def __init__(self, home: str) -> None:
         super().__init__()
         self._home = Path(home)
         self._selected_key: str | None = None
         self._filter_idx: int = 0
+        self._tickets_fr: float = 2.0
         # key -> phase; None = first poll (no notifications)
         self._prev_phases: dict[str, str] | None = None
 
@@ -414,6 +425,21 @@ class MaestroTUI(App):
     def action_toggle_tail(self) -> None:
         self._tail_mode = not self._tail_mode
         self._refresh_events()
+
+    def action_narrow_detail(self) -> None:
+        """Shrink the right-hand detail column (grow #tickets), clamped."""
+        self._tickets_fr = min(self._TICKETS_FR_MAX, self._tickets_fr + self._TICKETS_FR_STEP)
+        self._apply_split()
+
+    def action_widen_detail(self) -> None:
+        """Grow the right-hand detail column (shrink #tickets), clamped."""
+        self._tickets_fr = max(self._TICKETS_FR_MIN, self._tickets_fr - self._TICKETS_FR_STEP)
+        self._apply_split()
+
+    def _apply_split(self) -> None:
+        # #right (the Vertical wrapping #detail + #events) stays a fixed 1fr in
+        # CSS, so varying #tickets' fr alone moves the whole list/detail split.
+        self.query_one("#tickets", DataTable).styles.width = f"{self._tickets_fr}fr"
 
     def action_focus_detail(self) -> None:
         if self._selected_key:
