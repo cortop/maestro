@@ -157,6 +157,32 @@ def test_ticket_rows_phase_order(home):
     assert keys.index("B-1") < keys.index("A-1"), "implementing should sort before triaging"
 
 
+def test_ticket_rows_phase_order_honors_the_five_anchors(home):
+    """T-106: the 'all' row order honors the spec's five anchors, bottom -> up:
+    done, ready, implementing, qa, awaiting-human -- i.e. top -> bottom,
+    awaiting-human sorts before qa before implementing before ready before done."""
+    for key, phase in (("A-done", "done"), ("A-ready", "ready"),
+                       ("A-impl", "implementing"), ("A-qa", "qa"),
+                       ("A-wait", "awaiting-human")):
+        event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+        event_log.append(home, key, "PhaseChanged", {"phase": phase, "reason": ""}, actor="r")
+        snap_mod.rebuild(home, key)
+
+    rows = ticket_rows(home)
+    keys = [r[0] for r in rows]
+    assert keys == ["A-wait", "A-qa", "A-impl", "A-ready", "A-done"]
+
+
+def test_table_phase_order_is_exhaustive_over_phase():
+    """RB-9: every `Phase` member has an explicit `_TABLE_PHASE_ORDER` rank --
+    mirrors `statemachine.PHASE_CLASS`'s exhaustiveness pattern. `projection`
+    itself already fails to import if this doesn't hold (see the module-level
+    assert beside `_TABLE_PHASE_ORDER`); this test names the property directly
+    so a future refactor that drops that assert still gets caught."""
+    from maestro import projection
+    assert set(projection._TABLE_PHASE_ORDER) == set(Phase)
+
+
 # --- TUI-8: filtered views / needs-you queue ---------------------------------
 
 _NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})

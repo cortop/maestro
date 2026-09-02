@@ -163,6 +163,33 @@ def test_row_highlight_renders_every_seeded_phase(seeded_home):
     asyncio.run(_inner())
 
 
+def test_all_view_orders_rows_by_phase_attention_priority(home):
+    """T-106: opening the 'all' filter shows awaiting-human tickets first and
+    done tickets last, honoring the spec's five anchors -- awaiting-human > qa
+    > implementing > ready > done -- against the real mounted DataTable, not a
+    mocked table."""
+    seed_ticket(home, "T-5", "done ticket", phase="done")
+    seed_ticket(home, "T-4", "ready ticket", phase="ready")
+    seed_ticket(home, "T-3", "implementing ticket", phase="implementing")
+    seed_ticket(home, "T-2", "qa ticket", phase="qa")
+    seed_ticket(home, "T-1", "awaiting-human ticket", phase="awaiting-human",
+                questions={"q1": "ok?"})
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            assert table.row_count == 5
+            keys = [str(table.get_row_at(r)[0]) for r in range(table.row_count)]
+            assert keys == ["T-1", "T-2", "T-3", "T-4", "T-5"]
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # --------------------------------------------------------------------------- #
 # (b) EXHAUSTIVE BINDING SWEEP — the structural defense against forgotten cases #
 # --------------------------------------------------------------------------- #

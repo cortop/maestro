@@ -26,10 +26,31 @@ _BANNER = (
     "     or edit its spec (`tickets/<KEY>/spec.md`). This file is a projection. -->\n"
 )
 
+# T-106: one exhaustive, hand-decided row per `Phase` -- the same RB-9 house
+# pattern as `statemachine.PHASE_CLASS` and `dispatcher._PHASE_COMMAND_SUFFIX`
+# -- top (needs a human first) to bottom (terminal noise). The five anchors
+# from the ticket's spec, in their required relative order:
+# awaiting-human > qa > implementing > ready > done. Everything else is
+# slotted in the same spirit: DEGRADED (also needs-you) stays beside
+# AWAITING_HUMAN; the sleeping/polling pipeline phases (IN_REVIEW,
+# AWAITING_CI, VERIFYING) sit between QA and IMPLEMENTING in the order the
+# PR lifecycle actually visits them; RESEARCHING/TRIAGING (still active, but
+# nothing yet to review) sit between IMPLEMENTING and READY; TERMINATING
+# (teardown) sits with DONE at the bottom. This is the TUI's own row order
+# only -- `render()`'s separate WORKSTATE.md/NEEDS-YOU.md `order` list above
+# is untouched (out of scope per the ticket's spec).
 _TABLE_PHASE_ORDER = [
-    Phase.IMPLEMENTING, Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.READY,
-    Phase.TRIAGING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING, Phase.DONE,
+    Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.QA, Phase.IN_REVIEW,
+    Phase.AWAITING_CI, Phase.VERIFYING, Phase.IMPLEMENTING, Phase.RESEARCHING,
+    Phase.TRIAGING, Phase.READY, Phase.TERMINATING, Phase.DONE,
 ]
+_missing_ranks = set(Phase) - set(_TABLE_PHASE_ORDER)
+if _missing_ranks:
+    raise AssertionError(
+        f"Phase member(s) have no _TABLE_PHASE_ORDER rank: "
+        f"{sorted(m.value for m in _missing_ranks)} -- add an explicit row "
+        "before shipping (see statemachine.PHASE_CLASS for the pattern)."
+    )
 _PHASE_RANK: dict[str, int] = {p.value: i for i, p in enumerate(_TABLE_PHASE_ORDER)}
 
 
