@@ -52,6 +52,7 @@ from maestro.tui import (  # noqa: E402
     _CmdModal,
     _CreateModal,
     _FILTERS,
+    _ImportLinearModal,
     _InboxModal,
     _IntervalModal,
     _RunnerModal,
@@ -248,7 +249,7 @@ def test_quit_binding_exits_clean(seeded_home):
 _BINDING_CLASSES = [
     MaestroTUI, DetailScreen, EventsScreen, LogsScreen, FleetScreen, ProposalScreen,
     ScheduleScreen, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
-    _ScheduleModal, _RunnerModal,
+    _ScheduleModal, _RunnerModal, _ImportLinearModal,
 ]
 
 
@@ -383,6 +384,70 @@ def test_answer_modal_open_and_escape(seeded_home):
 
 def test_create_modal_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, None, "create", _CreateModal)
+
+
+def test_import_linear_modal_open_and_escape(seeded_home):
+    _run_modal_test(seeded_home, None, "import_linear", _ImportLinearModal)
+
+
+def test_import_linear_flow_mints_ticket(seeded_home, monkeypatch):
+    """T-103: type an identifier into the real modal, submit it through the
+    real app, and assert the ticket actually got minted -- the only thing
+    faked is the Linear transport (`LinearTracker._transport_or_build`),
+    exactly like the non-TUI adapter tests fake it."""
+    from maestro.providers import linear as linear_mod
+
+    class FakeLinearTransport:
+        def search_issues(self, filter):
+            return []
+
+        def get_issue(self, identifier):
+            return {"identifier": "ENG-42", "title": "Fix the thing",
+                     "description": "Do the fix", "state": {"name": "Todo"}}
+
+        def get_comments(self, identifier):
+            return []
+
+    monkeypatch.setattr(linear_mod.LinearTracker, "_transport_or_build",
+                        lambda self: FakeLinearTransport())
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("import_linear")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _ImportLinearModal)
+            inp = app.screen.query_one("#import-linear-input", Input)
+            inp.value = "ENG-42"
+            inp.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1, "modal should have dismissed"
+
+    asyncio.run(_inner())
+    assert store.spec_path(seeded_home, "LINEAR-ENG-42").exists()
+
+
+def test_import_linear_malformed_input_notifies_without_crash(seeded_home):
+    """A garbage identifier surfaces as a notify(), not a crash -- proves the
+    `store.MaestroError` from `parse_identifier` is caught in the app, not
+    left to escape as an unhandled exception."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("import_linear")
+            await pilot.pause()
+            inp = app.screen.query_one("#import-linear-input", Input)
+            inp.value = "not a linear thing"
+            inp.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
 
 
 def test_create_modal_intent_is_textarea_and_accepts_multiline(seeded_home):

@@ -338,6 +338,29 @@ def test_render_detail_runner_row_shows_override_and_model():
     assert "qwen3-coder:30b" in lines[0]
 
 
+# --- External (tracker identifier) row (T-103) --------------------------------
+
+def test_render_detail_external_row_shows_source_and_id():
+    """A Linear-linked ticket's identifier (external_source/external_id --
+    already folded onto the snapshot) is rendered, not just present in raw
+    `maestro show` JSON."""
+    snap = snap_mod.Snapshot(key="LINEAR-ENG-42", phase="ready",
+                             external_source="linear", external_id="ENG-42")
+    out = _render_detail(snap)
+    lines = [l for l in out.splitlines() if "External" in l]
+    assert lines
+    assert "linear" in lines[0]
+    assert "ENG-42" in lines[0]
+
+
+def test_render_detail_external_row_shows_emdash_when_absent():
+    snap = snap_mod.Snapshot(key="T-1", phase="ready")
+    out = _render_detail(snap)
+    lines = [l for l in out.splitlines() if "External" in l]
+    assert lines
+    assert "—" in lines[0]
+
+
 # --- detail markup is valid for every phase (regression: awaiting-ci crashed) ----
 
 import pytest  # noqa: E402
