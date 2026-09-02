@@ -170,7 +170,10 @@ class FleetScreen(Screen):
 
     def on_mount(self) -> None:
         self._refresh_worker()
-        self.set_interval(5.0, self._refresh_worker)
+        # health.report() shells out to gh/launchctl/worktree probes and can run past
+        # 10s; a shorter interval than that keeps cancelling it via exclusive=True
+        # before it ever reaches SUCCESS, so #fleet-status never leaves "Loading…".
+        self.set_interval(20.0, self._refresh_worker)
 
     # --- workers (run in threads so the event loop stays free) ---------------
 

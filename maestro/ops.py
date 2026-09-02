@@ -750,6 +750,11 @@ def _prime_worktree_extras(repo: str, wt: Path, *, timeout: int = _GIT_TIMEOUT) 
         if src.exists():
             dst = wt / name
             dst.parent.mkdir(parents=True, exist_ok=True)
+            # dst can already be a symlink (e.g. back to src itself) if something
+            # other than this function created it between runs -- unlink first so
+            # copyfile always lands a real, write-isolated file rather than
+            # raising SameFileError or silently writing through a stale symlink.
+            dst.unlink(missing_ok=True)
             shutil.copyfile(src, dst)
 
     src_nm = repo_path / _PRIMED_NODE_MODULES

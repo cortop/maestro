@@ -400,6 +400,36 @@ def test_ensure_is_clean_isolated_and_idempotent(home, tmp_path):
         "second run nested a node_modules inside node_modules"
 
 
+def test_ensure_reprimes_over_a_preexisting_symlink_at_dst(home, tmp_path):
+    """A re-prime must not crash (or silently write through the symlink) if
+    something else already created `.claude/settings.local.json` in the
+    worktree as a symlink back to the repo's own file before `worktree_ensure`
+    got to it -- observed in the wild (BDA-107) as `shutil.SameFileError` from
+    `shutil.copyfile`, since `os.path.samefile(src, dst)` is true when dst
+    resolves to src itself."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    (repo / ".claude").mkdir(exist_ok=True)
+    (repo / ".claude" / "settings.local.json").write_text('{"allow": []}\n', encoding="utf-8")
+
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "G-10s")
+    ops.worktree_ensure(cfg, "G-10s")
+    wt = store.worktree_path(home, "G-10s")
+
+    dst = wt / ".claude" / "settings.local.json"
+    dst.unlink()
+    dst.symlink_to(repo / ".claude" / "settings.local.json")
+
+    ops.worktree_ensure(cfg, "G-10s")  # must not raise SameFileError
+
+    assert not dst.is_symlink(), "re-prime must replace the symlink with a real file"
+    assert dst.read_text(encoding="utf-8") == '{"allow": []}\n'
+
+    # write isolation still holds: mutating $WT's copy never reaches $REPO
+    dst.write_text('{"allow": ["mutated"]}\n', encoding="utf-8")
+    assert (repo / ".claude" / "settings.local.json").read_text(encoding="utf-8") == '{"allow": []}\n'
+
+
 def test_ensure_primed_marker_is_worktree_local_not_working_tree(home, tmp_path):
     """The primed marker lives under the worktree's OWN git dir (self-cleaning
     on `git worktree remove`), never inside the working tree -- otherwise it
