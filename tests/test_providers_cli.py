@@ -154,6 +154,32 @@ def test_run_env_none_calls_subprocess_run_with_env_none(monkeypatch):
     assert captured["env"] is None
 
 
+def test_run_env_overlay_is_merged_onto_ambient_env_not_a_replacement(monkeypatch):
+    """The GA-17 overlay (e.g. just `{"GH_TOKEN": ...}`) must be layered ON TOP
+    of the ambient environment, not passed to `subprocess.run` as the child's
+    ENTIRE environment -- a bare overlay dict has no `PATH`, which breaks
+    locating `gh` itself whenever it lives outside Python's `os.defpath`
+    fallback (e.g. Homebrew's /opt/homebrew/bin on macOS): observed in the
+    wild as a `FileNotFoundError` misclassified as a `gh` auth failure."""
+    monkeypatch.setenv("PATH", "/some/ambient/path")
+    monkeypatch.setenv("HOME", "/some/ambient/home")
+    captured = {}
+
+    def fake_subprocess_run(cmd, capture_output, text, timeout, env=None):
+        captured["env"] = env
+        class R:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    cli_mod._run(["gh", "pr", "view", "1"], env={"GH_TOKEN": "tok-x"})
+    assert captured["env"]["GH_TOKEN"] == "tok-x"
+    assert captured["env"]["PATH"] == "/some/ambient/path"
+    assert captured["env"]["HOME"] == "/some/ambient/home"
+
+
 # --- GA-6: classify_gh_failure -- pinned against real gh 2.94.0 stderr ----------
 
 @pytest.mark.parametrize("stderr", [

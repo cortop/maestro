@@ -11,11 +11,19 @@ import subprocess
 
 def _run(cmd: list[str], timeout: int = 60, env: dict | None = None) -> tuple[int, str, str]:
     """*env* (GA-17) is a credential overlay (``dispatcher.resolve_credential``)
-    to run *cmd* under instead of the ambient environment. None (the default)
-    is byte-identical to before this ticket -- ``subprocess.run(env=None)``
-    inherits the parent process's environment exactly as a bare call did."""
+    to merge ON TOP of the ambient environment -- never a replacement for it.
+    ``subprocess.run(env=...)`` treats a given ``env`` as the child's ENTIRE
+    environment, so passing the overlay dict (e.g. just ``{"GH_TOKEN": ...}``)
+    straight through drops ``PATH`` and everything else, which breaks locating
+    `gh` itself whenever it lives outside Python's ``os.defpath`` fallback
+    (e.g. Homebrew's ``/opt/homebrew/bin`` on macOS) -- the resulting
+    ``FileNotFoundError`` was observed misclassified as a `gh` auth failure
+    (its stderr text matches the "executable not found" auth marker). None
+    (the default) is byte-identical to before this ticket -- no overlay, no
+    dict built, a bare call inherits the parent's environment exactly."""
+    run_env = {**os.environ, **env} if env else None
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=run_env)
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError as e:
         # The executable itself is missing (e.g. `gh` not installed) -- a config
