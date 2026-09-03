@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, Select, Static, TextArea
+from textual.widgets import Button, Input, Label, Select, Static, TextArea
 
 from .. import schedule, store
 from ..providers import ollama as ollama_mod
@@ -57,6 +57,11 @@ class _AnswerModal(ModalScreen):
         max-height: 4;
         margin-bottom: 1;
     }
+    #answer-buttons {
+        height: auto;
+        align: right middle;
+        margin-top: 1;
+    }
     """
 
     def __init__(self, key: str, qid: str, position: int | None, total: int | None,
@@ -96,10 +101,16 @@ class _AnswerModal(ModalScreen):
                     "Ctrl+G accept all remaining recommendations[/dim]"
                 )
             yield TextArea(id="answer-input")
-            yield Label("[dim]Enter → newline · Ctrl+S → submit · Esc → cancel[/dim]")
+            with Horizontal(id="answer-buttons"):
+                yield Button("Submit", id="answer-submit-button", variant="primary")
+            yield Label("[dim]Enter → newline · Ctrl+S or button → submit · Esc → cancel[/dim]")
 
     def on_mount(self) -> None:
         self.query_one("#answer-input", TextArea).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "answer-submit-button":
+            self.action_submit()
 
     def action_submit(self) -> None:
         text = self.query_one("#answer-input", TextArea).text.strip()

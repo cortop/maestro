@@ -2341,6 +2341,37 @@ def test_answer_modal_single_line_answer_byte_identical(home):
     assert pending[0]["args"]["text"] == "postgres"
 
 
+def test_answer_modal_submit_button_clicks_submit(home):
+    """Human follow-up on T-109: a visible Submit button next to the TextArea
+    submits the answer the same as Ctrl+S, for anyone typing in a terminal
+    where Ctrl+S isn't deliverable."""
+    _seed_round(home, "T-8", [("Postgres or SQLite?", None)])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-8"
+            await app.run_action("answer")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _AnswerModal)
+            textarea = modal.query_one("#answer-input", TextArea)
+            textarea.focus()
+            await pilot.pause()
+            await pilot.press("p", "o", "s", "t", "g", "r", "e", "s")
+            await pilot.click("#answer-submit-button")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1, "modal should have dismissed after clicking Submit"
+
+    asyncio.run(_inner())
+
+    pending = inbox.pending(home, "T-8")
+    assert len(pending) == 1
+    assert pending[0]["args"]["text"] == "postgres"
+
+
 def test_detail_pane_and_screen_render_title_from_spec(home):
     """A ticket whose log carries no TicketCreated folds to `title = None`, but
     its spec's H1 has the title -- both the compact #detail pane and the full
