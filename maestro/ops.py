@@ -23,7 +23,7 @@ from . import gates
 from . import event_log, inbox, repos as repos_mod, schedule as schedule_mod, snapshot as snap_mod, store
 from . import testlang
 from .config import Config
-from .dispatcher import spec_hash_on_disk
+from .dispatcher import mint_one, spec_hash_on_disk
 from .idempotency import content_hash, step_id
 from .statemachine import Phase, can_transition
 
@@ -2381,3 +2381,53 @@ def schedule_set_enabled(cfg: Config, name: str, enabled: bool) -> dict:
     tasks[idx] = {**tasks[idx], "enabled": enabled}
     config_mod.write_scheduled(cfg.home, tasks)
     return tasks[idx]
+
+
+def import_linear(cfg: Config, url_or_id: str, *, tracker: object | None = None) -> dict:
+    """Turn a Linear issue URL or bare identifier into a fully minted ticket
+    (T-103) -- the on-demand, TUI/CLI-driven counterpart to the polled
+    ``import_filter`` sweep ``LinearTracker.import_new`` runs from
+    ``sync_external_sources``. Reuses that same ``external_source``/
+    ``external_id`` linkage and the same ``LINEAR-<identifier>`` key
+    convention -- one source of truth, not a second importer. Works whether
+    or not "linear" is a configured ``[providers] tracker`` -- this is a
+    one-off, human-initiated import, not the polled sync.
+
+    A malformed URL/identifier raises ``store.MaestroError`` (``parse_identifier``),
+    never a raw traceback. A key that's already minted is a clean no-op --
+    checked directly here (not left to ``mint_one``'s own idempotent-key
+    check) so a re-import never hits the network for an issue maestro
+    already has.
+
+    ``tracker`` is a test-only injection point (a ``LinearTracker`` built with
+    a fake ``transport=``, exactly like ``JiraTracker`` tests do) -- the only
+    thing a test should ever mock is the transport, never this function.
+    Production callers (the CLI/TUI) always omit it, so the real tracker is
+    built from ``cfg.provider_config``.
+    """
+    from .providers import linear as linear_mod
+
+    identifier = linear_mod.parse_identifier(url_or_id)
+    key = f"LINEAR-{identifier}"
+    if event_log.last_seq(cfg.home, key) > 0:
+        return {"key": key, "minted": False}
+
+    if tracker is None:
+        settings = cfg.provider_config.get("tracker", {}).get("linear", {})
+        tracker = linear_mod.LinearTracker(settings)
+    issue = tracker.view(identifier)
+    if not issue.get("identifier"):
+        raise store.MaestroError(f"Linear issue not found: {identifier}")
+
+    title = issue.get("title") or issue["identifier"]
+    intent = issue.get("description") or title
+    minted_key = mint_one(
+        cfg, key=key, prefix=None, title=title,
+        ticket_args={
+            "intent": intent,
+            "kind": "implementation",
+            "external_source": "linear",
+            "external_id": issue["identifier"],
+        },
+    )
+    return {"key": minted_key, "minted": True}

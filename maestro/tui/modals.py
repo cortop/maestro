@@ -233,6 +233,31 @@ class _IntervalModal(ModalScreen):
         self.dismiss(None)
 
 
+class _ImportLinearModal(ModalScreen):
+    """T-103: prompt for a Linear issue URL or bare identifier; dismisses with
+    the raw string (or None on cancel/blank). Parsing/minting itself happens
+    in `ops.import_linear`, called by the app after dismissal -- this modal
+    is just the input surface."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label("[bold]Import from Linear[/bold] — paste an issue URL or identifier")
+            yield Input(placeholder="https://linear.app/<org>/issue/ENG-123/... or ENG-123",
+                        id="import-linear-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#import-linear-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        raw = event.value.strip()
+        self.dismiss(raw or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _CreateModal(ModalScreen):
     """Multi-field form to queue a new ticket; dismisses with a result dict or None on cancel."""
 
