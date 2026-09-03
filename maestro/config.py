@@ -837,11 +837,16 @@ implementer = "claude_skill"
 # import_jql = "(reporter = currentUser() OR assignee = currentUser()) AND statusCategory = 'To Do'"
 # import_fields = ["summary", "description", "status", "issuetype"]
 # sync_interval = 900            # seconds between dispatcher sync ticks
+# auto_import = false            # T-110: default false -- a dispatcher sweep never bulk-imports
+                                  # on its own; run `maestro sync-tracker --name jira` by hand
+                                  # (or set true to restore the old polled-import behavior).
+                                  # Per-ticket refresh of already-imported tickets is unaffected.
 #
 # [tracker.linear]             # GraphQL adapter; opt-in ticket import + tracking sync
 # api_key_env = "LINEAR_API_KEY"   # personal API key read from env, never stored in config
 # import_filter = { assignee = { isMe = { eq = true } }, state = { type = { nin = ["completed", "canceled"] } } }
 # sync_interval = 900            # seconds between dispatcher sync ticks
+# auto_import = false            # T-110: same knob as [tracker.jira] above (default false)
 #
 # [vcs.github_cli]
 # repos = ["owner/repo"]

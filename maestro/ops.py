@@ -2460,3 +2460,29 @@ def import_linear(cfg: Config, url_or_id: str, *, tracker: object | None = None)
         },
     )
     return {"key": minted_key, "minted": True}
+
+
+def sync_tracker(cfg: Config, name: str | None = None) -> dict:
+    """[human] T-110: explicit, on-demand bulk import -- the counterpart to the
+    dispatcher's own polled sync tick (``dispatcher.sync_external_sources``),
+    whose ``import_new`` call is gated off by default (per-tracker
+    ``auto_import``, default ``False``) so a configured tracker never silently
+    floods the ``_new`` inbox with every matching issue. This verb calls
+    ``tracker.import_new(home)`` directly -- bypassing both the ``auto_import``
+    gate and the sync-interval cursor -- for the named tracker, or every
+    configured tracker when ``name`` is omitted. Idempotent on rerun:
+    ``import_new``'s own dedup guard (an already-minted key is skipped) means a
+    second call enqueues nothing already imported.
+    """
+    from . import providers
+
+    trackers = providers.get_trackers(cfg)
+    if name is not None:
+        if name not in trackers:
+            raise store.MaestroError(f"no tracker configured named {name!r}")
+        trackers = {name: trackers[name]}
+    if not trackers:
+        raise store.MaestroError("no tracker configured (providers.tracker)")
+
+    imported = {tname: tracker.import_new(cfg.home) for tname, tracker in trackers.items()}
+    return {"imported": imported, "total": sum(imported.values())}

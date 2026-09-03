@@ -1246,6 +1246,21 @@ def cmd_import_linear(args) -> int:
     return 0
 
 
+def cmd_sync_tracker(args) -> int:
+    """[human] T-110: run a configured tracker's bulk import on demand -- the
+    explicit counterpart to the dispatcher's own polled sync tick, whose
+    import is now opt-in per tracker (``auto_import``, default off).
+    Bypasses both the ``auto_import`` gate and the sync-interval cursor;
+    prints how many issues it enqueued into the ``_new`` inbox. Idempotent --
+    rerunning it enqueues nothing already imported (the same dedup guard
+    ``import_new``/``mint_one`` always use)."""
+    cfg = _cfg(args)
+    result = ops.sync_tracker(cfg, name=args.name)
+    _print(result)
+    print(f"imported {result['total']} issue(s)", file=sys.stderr)
+    return 0
+
+
 def cmd_install_commands(args) -> int:
     """GA-15: idempotently install the seven per-phase reconcile command files —
     ``--repo <name>`` copies them into a configured repo's checkout,
@@ -1476,6 +1491,10 @@ def build_parser() -> argparse.ArgumentParser:
              "[human] mint a ticket from a Linear issue URL or bare identifier (LINEAR-<id>)")
     sp.add_argument("url_or_id", metavar="URL_OR_ID",
                     help="a Linear issue URL (https://linear.app/<org>/issue/<id>/...) or bare identifier (e.g. ENG-123)")
+    sp = add("sync-tracker", cmd_sync_tracker,
+             "[human] run a configured tracker's bulk import on demand (bypasses auto_import + the sync cursor)")
+    sp.add_argument("--name", default=None,
+                    help="tracker name to sync (default: every configured tracker)")
     sp = add("install-commands", cmd_install_commands,
              "install the seven per-phase maestro-reconcile-*.md commands into a repo or user dir")
     sp.add_argument("--repo", default=None,
