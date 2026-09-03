@@ -77,6 +77,13 @@ RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not sid
 JIRA_SYNCED = "JiraSynced"              # {jira_updated_ts, status, last_comment_id}
 LINEAR_SYNCED = "LinearSynced"          # {linear_updated_ts, status, last_comment_id}
 
+# External push (T-104): the OTHER direction -- maestro's own phase change
+# mutating the linked issue's status in the tracker. LinearStatusPushed is
+# what providers.linear.LinearTracker.push_phase_status's idempotency check
+# (_last_pushed_status) compares its target against, so a phase re-entered
+# (or a different phase mapped to the same status) doesn't re-mutate.
+LINEAR_STATUS_PUSHED = "LinearStatusPushed"  # {phase, status}
+
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket
 FAILED = "Failed"                       # {error, kind?, state?}  increments failure_count

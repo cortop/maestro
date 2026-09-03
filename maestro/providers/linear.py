@@ -23,6 +23,7 @@ from typing import Protocol
 from urllib.parse import urlparse
 
 from .. import event_log, events as E, inbox, store
+from ..statemachine import Phase, _assert_exhaustive
 
 # A bare Linear identifier: team key + dash + issue number, e.g. "ENG-123".
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
@@ -53,6 +54,8 @@ class LinearTransport(Protocol):
     def search_issues(self, filter: dict) -> list[dict]: ...
     def get_issue(self, identifier: str) -> dict: ...
     def get_comments(self, identifier: str) -> list[dict]: ...
+    def get_workflow_states(self, identifier: str) -> dict: ...
+    def update_issue_state(self, issue_id: str, state_id: str) -> bool: ...
 
 
 _ISSUES_QUERY = """
@@ -72,6 +75,21 @@ query Issue($id: String!) {
 _COMMENTS_QUERY = """
 query Comments($id: String!) {
   issue(id: $id) { comments { nodes { id body createdAt } } }
+}
+"""
+
+# T-104: workflow states are per-TEAM objects in Linear, not global strings --
+# resolving one by name means fetching the issue's own team's states, not a
+# board-wide list.
+_TEAM_STATES_QUERY = """
+query IssueTeamStates($id: String!) {
+  issue(id: $id) { id team { states { nodes { id name } } } }
+}
+"""
+
+_UPDATE_STATE_MUTATION = """
+mutation UpdateIssueState($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) { success }
 }
 """
 
@@ -116,6 +134,38 @@ class HttpLinearTransport:
         issue = self._request(_COMMENTS_QUERY, {"id": identifier}).get("issue") or {}
         return ((issue.get("comments") or {}).get("nodes")) or []
 
+    def get_workflow_states(self, identifier: str) -> dict:
+        issue = self._request(_TEAM_STATES_QUERY, {"id": identifier}).get("issue") or {}
+        states = ((issue.get("team") or {}).get("states") or {}).get("nodes") or []
+        return {"issue_id": issue.get("id"), "states": states}
+
+    def update_issue_state(self, issue_id: str, state_id: str) -> bool:
+        data = self._request(_UPDATE_STATE_MUTATION, {"id": issue_id, "stateId": state_id})
+        return bool((data.get("issueUpdate") or {}).get("success"))
+
+
+# T-104 (RB-9): one exhaustive, hand-decided row per `Phase` -- the Linear
+# workflow-state NAME to push when a Linear-linked ticket enters that phase,
+# or `None` to push nothing. Mirrors `statemachine.PHASE_CLASS`'s house
+# pattern (right down to reusing its `_assert_exhaustive`): a newly added
+# `Phase` must get an explicit row here before it ships, never silently fall
+# through to "push nothing" by omission.
+STATUS_BY_PHASE: dict[Phase, str | None] = {
+    Phase.TRIAGING: None,
+    Phase.AWAITING_HUMAN: None,
+    Phase.READY: "To do",
+    Phase.IMPLEMENTING: "In Progress",
+    Phase.VERIFYING: None,
+    Phase.QA: None,
+    Phase.RESEARCHING: None,
+    Phase.AWAITING_CI: "In Review",
+    Phase.IN_REVIEW: "In Review",
+    Phase.DEGRADED: None,
+    Phase.TERMINATING: None,
+    Phase.DONE: "Done",
+}
+_assert_exhaustive(Phase, STATUS_BY_PHASE)
+
 
 class LinearTracker:
     """Implements the ``Tracker`` protocol plus the import/refresh sync half."""
@@ -143,7 +193,57 @@ class LinearTracker:
         return self._transport_or_build().get_issue(key)
 
     def transition(self, key: str, status: str) -> None:
-        pass  # not needed by the sync flow; status changes flow the other way (Linear -> maestro)
+        """T-104: push *status* (a Linear workflow-state NAME, e.g. "In
+        Progress") onto issue *key* via the real ``issueUpdate`` GraphQL
+        mutation. Workflow states are per-TEAM objects in Linear, not global
+        strings, so this resolves *key*'s own team's states and matches by
+        name before mutating. Raises ``store.MaestroError`` -- never a raw
+        traceback -- if *key* isn't found or no state on its team matches
+        *status*; ``push_phase_status`` below is the caller that catches this
+        and degrades soft, so a reconcile is never wedged by a Linear-side
+        error."""
+        transport = self._transport_or_build()
+        info = transport.get_workflow_states(key)
+        issue_id = info.get("issue_id")
+        if not issue_id:
+            raise store.MaestroError(f"Linear: issue {key!r} not found")
+        match = next((s for s in info.get("states") or [] if s.get("name") == status), None)
+        if match is None:
+            raise store.MaestroError(f"Linear: no workflow state named {status!r} on {key}'s team")
+        if not transport.update_issue_state(issue_id, match["id"]):
+            raise store.MaestroError(f"Linear: issueUpdate did not report success for {key} -> {status!r}")
+
+    def push_phase_status(self, home: Path, key: str, external_id: str, phase: Phase, *,
+                           actor: str = "reconciler") -> int:
+        """T-104: push *phase*'s mapped Linear status for *external_id*
+        (``STATUS_BY_PHASE``), idempotently. No-ops -- zero Linear calls --
+        when *phase* has no mapped status, or the mapped status already
+        matches the last one this ticket successfully pushed: the same
+        "compare against the last recorded value" dedupe shape ``refresh``
+        uses for ``updatedAt``, so re-entering the same phase (or a different
+        phase mapped to the same status, e.g. ``awaiting-ci``/``in-review``
+        both -> "In Review") mutates nothing. A failed push degrades soft: it
+        records a ``Note`` and returns instead of raising -- callers
+        (``ops.set_phase``/``ops.finalize``) must never be wedged by a
+        Linear-side error. Returns the number of events appended."""
+        status = STATUS_BY_PHASE[phase]
+        if status is None:
+            return 0
+        if _last_pushed_status(home, key) == status:
+            return 0
+        try:
+            self.transition(external_id, status)
+        except Exception as e:
+            event_log.append(
+                home, key, E.NOTE,
+                {"text": f"Linear status push to {status!r} failed: {e}"},
+                actor=actor, step_id=f"linear-status-fail-{key}-{phase.value}-{status}")
+            return 1
+        event_log.append(
+            home, key, E.LINEAR_STATUS_PUSHED,
+            {"phase": phase.value, "status": status},
+            actor=actor, step_id=f"linear-status-{key}-{phase.value}-{status}")
+        return 1
 
     def assignee(self, key: str) -> str | None:
         data = self.view(key)
@@ -226,4 +326,15 @@ def _last_synced(home: Path, key: str) -> dict | None:
     for ev in event_log.read(home, key):
         if ev.get("type") == E.LINEAR_SYNCED:
             last = ev.get("payload") or {}
+    return last
+
+
+def _last_pushed_status(home: Path, key: str) -> str | None:
+    """The status of the most recent ``LinearStatusPushed`` event, or
+    ``None`` if this ticket has never had a status successfully pushed --
+    the idempotency check ``push_phase_status`` compares its target against."""
+    last = None
+    for ev in event_log.read(home, key):
+        if ev.get("type") == E.LINEAR_STATUS_PUSHED:
+            last = (ev.get("payload") or {}).get("status")
     return last
