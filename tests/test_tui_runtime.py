@@ -2180,7 +2180,7 @@ def test_answer_flow_ctrl_r_accepts_recommendation_without_retyping(home):
             await pilot.pause()
             assert app.screen_stack[-1] is modal2, "Ctrl+R with no recommendation must not advance"
             await pilot.press("e", "x", "t", "e", "n", "d", " ", "v", "1")
-            await pilot.press("enter")
+            await pilot.press("ctrl+s")
             await pilot.pause()
             assert app._exception is None
             assert len(app.screen_stack) == 2  # Q3 modal now open
@@ -2230,7 +2230,7 @@ def test_answer_flow_ctrl_g_accepts_all_remaining_recommendations(home):
             assert remaining_modal._recommend is None
 
             await pilot.press("e", "x", "t", "e", "n", "d", " ", "v", "1")
-            await pilot.press("enter")
+            await pilot.press("ctrl+s")
             await pilot.pause()
             assert app._exception is None
             assert len(app.screen_stack) == 1  # walk finished
@@ -2243,6 +2243,102 @@ def test_answer_flow_ctrl_g_accepts_all_remaining_recommendations(home):
     assert answers[_qid_for(home, "T-4", "Use Postgres")] == "Postgres (matches prod)"
     assert answers[_qid_for(home, "T-4", "Cut a v2 API")] == "extend v1"
     assert answers[_qid_for(home, "T-4", "Who owns")] == "the reconciler"
+
+
+# --------------------------------------------------------------------------- #
+# T-109: multi-line text in the inbox answer input                            #
+# --------------------------------------------------------------------------- #
+
+def test_answer_modal_multiline_text_reaches_inbox_verbatim(home):
+    """AC1+AC2: the answer field is a TextArea whose Enter inserts a newline
+    (never submits) and whose dedicated Ctrl+S submits; the full multi-line
+    text reaches the ticket's inbox with the newline preserved."""
+    _seed_round(home, "T-5", [("Describe the steps", None)])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("answer")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _AnswerModal)
+            textarea = modal.query_one("#answer-input", TextArea)
+            textarea.focus()
+            await pilot.pause()
+            await pilot.press("s", "t", "e", "p", " ", "1")
+            await pilot.press("enter")  # newline inside TextArea, must not submit
+            await pilot.pause()
+            assert app.screen_stack[-1] is modal, "Enter must insert a newline, not submit"
+            await pilot.press("s", "t", "e", "p", " ", "2")
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1, "modal should have dismissed after Ctrl+S"
+
+    asyncio.run(_inner())
+
+    pending = inbox.pending(home, "T-5")
+    assert len(pending) == 1
+    assert pending[0]["args"]["text"] == "step 1\nstep 2"
+
+
+def test_answer_modal_escape_cancels_without_writing(home):
+    """AC2: Esc still cancels the answer modal without writing anything to the
+    inbox, even with unsent typed text sitting in the field."""
+    _seed_round(home, "T-6", [("Pick an approach", None)])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-6"
+            await app.run_action("answer")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            textarea = modal.query_one("#answer-input", TextArea)
+            textarea.focus()
+            await pilot.pause()
+            await pilot.press("d", "r", "a", "f", "t")
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1
+
+    asyncio.run(_inner())
+
+    assert inbox.pending(home, "T-6") == []
+
+
+def test_answer_modal_single_line_answer_byte_identical(home):
+    """AC3: a single-line answer submitted via the new TextArea-based modal
+    reaches the inbox exactly as it did through the old Input -- no trailing
+    newline, no markup regression."""
+    _seed_round(home, "T-7", [("Postgres or SQLite?", None)])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-7"
+            await app.run_action("answer")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            textarea = modal.query_one("#answer-input", TextArea)
+            textarea.focus()
+            await pilot.pause()
+            await pilot.press("p", "o", "s", "t", "g", "r", "e", "s")
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1
+
+    asyncio.run(_inner())
+
+    pending = inbox.pending(home, "T-7")
+    assert len(pending) == 1
+    assert pending[0]["args"]["text"] == "postgres"
 
 
 def test_detail_pane_and_screen_render_title_from_spec(home):

@@ -28,6 +28,7 @@ class _AnswerModal(ModalScreen):
 
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
+        ("ctrl+s", "submit", "Submit"),
         ("ctrl+r", "accept_recommendation", "Accept recommendation"),
         ("ctrl+g", "accept_all_remaining", "Accept all remaining"),
     ]
@@ -94,13 +95,14 @@ class _AnswerModal(ModalScreen):
                     "[dim]Ctrl+R accept this recommendation · "
                     "Ctrl+G accept all remaining recommendations[/dim]"
                 )
-            yield Input(placeholder="Answer (Enter to submit, Esc to cancel)", id="answer-input")
+            yield TextArea(id="answer-input")
+            yield Label("[dim]Enter → newline · Ctrl+S → submit · Esc → cancel[/dim]")
 
     def on_mount(self) -> None:
-        self.query_one("#answer-input", Input).focus()
+        self.query_one("#answer-input", TextArea).focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
+    def action_submit(self) -> None:
+        text = self.query_one("#answer-input", TextArea).text.strip()
         if text:
             self.dismiss(text)
 
