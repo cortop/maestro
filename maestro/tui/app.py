@@ -10,7 +10,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
+from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from ..projection import phase_predicate, ticket_rows
@@ -18,7 +18,8 @@ from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
 from .modals import (
-    _ACCEPT_ALL, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal, _InboxModal, _RunnerModal,
+    _ACCEPT_ALL, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal, _ImportLinearModal,
+    _InboxModal, _RunnerModal,
 )
 from .render import _render_badge, _styled_row
 from .screens import (
@@ -102,6 +103,7 @@ class MaestroTUI(App):
         Binding("p", "project_rebuild", "Project", show=False),
         Binding("l", "view_logs", "Logs", show=False),
         Binding("o", "runner", "Runner", show=False),
+        Binding("L", "import_linear", "Linear", show=False),
     ]
 
     _selected_key: str | None = None
@@ -311,6 +313,28 @@ class MaestroTUI(App):
             self.notify("queued; dispatcher will mint the key")
 
         self.push_screen(_CreateModal(prefixes), _on_dismiss)
+
+    def action_import_linear(self) -> None:
+        """T-103: paste a Linear issue URL/identifier, mint the ticket
+        synchronously through `ops.import_linear` (the same entrypoint
+        `maestro import-linear` calls), and refresh the table so the new
+        ticket shows up immediately instead of waiting for the next poll."""
+        def _on_dismiss(url_or_id: str | None) -> None:
+            if url_or_id is None:
+                return
+            cfg = config_mod.load(str(self._home))
+            try:
+                result = ops_mod.import_linear(cfg, url_or_id)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="error")
+                return
+            if result["minted"]:
+                self.notify(f"imported {result['key']}")
+                self._populate()
+            else:
+                self.notify(f"{result['key']} already imported", severity="warning")
+
+        self.push_screen(_ImportLinearModal(), _on_dismiss)
 
     def action_answer(self) -> None:
         key = self._selected_key

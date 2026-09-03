@@ -157,6 +157,32 @@ def test_ticket_rows_phase_order(home):
     assert keys.index("B-1") < keys.index("A-1"), "implementing should sort before triaging"
 
 
+def test_ticket_rows_phase_order_honors_the_five_anchors(home):
+    """T-106: the 'all' row order honors the spec's five anchors, bottom -> up:
+    done, ready, implementing, qa, awaiting-human -- i.e. top -> bottom,
+    awaiting-human sorts before qa before implementing before ready before done."""
+    for key, phase in (("A-done", "done"), ("A-ready", "ready"),
+                       ("A-impl", "implementing"), ("A-qa", "qa"),
+                       ("A-wait", "awaiting-human")):
+        event_log.append(home, key, "TicketCreated", {"title": key}, actor="d")
+        event_log.append(home, key, "PhaseChanged", {"phase": phase, "reason": ""}, actor="r")
+        snap_mod.rebuild(home, key)
+
+    rows = ticket_rows(home)
+    keys = [r[0] for r in rows]
+    assert keys == ["A-wait", "A-qa", "A-impl", "A-ready", "A-done"]
+
+
+def test_table_phase_order_is_exhaustive_over_phase():
+    """RB-9: every `Phase` member has an explicit `_TABLE_PHASE_ORDER` rank --
+    mirrors `statemachine.PHASE_CLASS`'s exhaustiveness pattern. `projection`
+    itself already fails to import if this doesn't hold (see the module-level
+    assert beside `_TABLE_PHASE_ORDER`); this test names the property directly
+    so a future refactor that drops that assert still gets caught."""
+    from maestro import projection
+    assert set(projection._TABLE_PHASE_ORDER) == set(Phase)
+
+
 # --- TUI-8: filtered views / needs-you queue ---------------------------------
 
 _NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
@@ -336,6 +362,29 @@ def test_render_detail_runner_row_shows_override_and_model():
     assert lines
     assert "opencode" in lines[0]
     assert "qwen3-coder:30b" in lines[0]
+
+
+# --- External (tracker identifier) row (T-103) --------------------------------
+
+def test_render_detail_external_row_shows_source_and_id():
+    """A Linear-linked ticket's identifier (external_source/external_id --
+    already folded onto the snapshot) is rendered, not just present in raw
+    `maestro show` JSON."""
+    snap = snap_mod.Snapshot(key="LINEAR-ENG-42", phase="ready",
+                             external_source="linear", external_id="ENG-42")
+    out = _render_detail(snap)
+    lines = [l for l in out.splitlines() if "External" in l]
+    assert lines
+    assert "linear" in lines[0]
+    assert "ENG-42" in lines[0]
+
+
+def test_render_detail_external_row_shows_emdash_when_absent():
+    snap = snap_mod.Snapshot(key="T-1", phase="ready")
+    out = _render_detail(snap)
+    lines = [l for l in out.splitlines() if "External" in l]
+    assert lines
+    assert "—" in lines[0]
 
 
 # --- detail markup is valid for every phase (regression: awaiting-ci crashed) ----

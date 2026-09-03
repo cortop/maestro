@@ -14,13 +14,37 @@ mirroring how ``jira.py`` uses the Jira issue key.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 
 from .. import event_log, events as E, inbox, store
+
+# A bare Linear identifier: team key + dash + issue number, e.g. "ENG-123".
+_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
+
+
+def parse_identifier(url_or_id: str) -> str:
+    """Accept either a bare Linear identifier (``ENG-123``) or a full issue URL
+    (``https://linear.app/<org>/issue/ENG-123/some-slug``) and return the bare,
+    uppercased identifier -- what ``LINEAR-<identifier>`` keys are built from
+    (T-103). Raises ``store.MaestroError`` -- never a raw traceback -- for
+    anything else, so a pasted typo surfaces as a clear CLI/TUI error."""
+    s = (url_or_id or "").strip()
+    if _ID_RE.match(s):
+        return s.upper()
+    parsed = urlparse(s)
+    if parsed.scheme in ("http", "https") and parsed.netloc.endswith("linear.app"):
+        parts = [p for p in parsed.path.split("/") if p]
+        if "issue" in parts:
+            idx = parts.index("issue")
+            if idx + 1 < len(parts) and _ID_RE.match(parts[idx + 1]):
+                return parts[idx + 1].upper()
+    raise store.MaestroError(f"not a Linear issue URL or identifier: {url_or_id!r}")
 
 
 class LinearTransport(Protocol):

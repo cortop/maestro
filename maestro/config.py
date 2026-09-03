@@ -363,10 +363,16 @@ _RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
 # (dispatcher.runner_eligible_phases; default NONE -- see
 # dispatcher._RUNNER_DEFAULT_PHASES's own PI-8 comment on why pi's default is
 # deliberately narrower than opencode's) are the same two keys
-# _RUNNER_OPENCODE_KEYS already carries.
+# _RUNNER_OPENCODE_KEYS already carries. `headers` (T-105) is a table of
+# string->string pairs threaded verbatim into the provider block by
+# `store.generate_pi_models_json` -- confirmed against the installed pi
+# 0.79.2's own `core/model-registry.js` (`ProviderConfigSchema.headers:
+# Record<string,string>`) that `headers` is the exact key name pi's model
+# registry expects at the provider level, the same posture as `api_key`
+# (verbatim, never resolved -- see that function's own docstring).
 _RUNNER_PI_KEYS = frozenset({
     "provider", "base_url", "api", "compat", "models", "api_key", "version",
-    "concurrency", "phases",
+    "concurrency", "phases", "headers",
 })
 
 
@@ -617,6 +623,18 @@ def load(home_arg: str | None = None) -> Config:
                     raise store.MaestroError(
                         f"config.toml: [runner.pi] has unrecognized key(s): "
                         f"{', '.join(sorted(unknown))}")
+                # T-105: [runner.pi.headers] must be a table of string->string
+                # pairs -- fail closed the same way an unrecognized key does,
+                # rather than let a malformed value silently reach
+                # `store.generate_pi_models_json` and corrupt models.json.
+                raw_headers = raw_pi_table.get("headers")
+                if raw_headers is not None and (
+                        not isinstance(raw_headers, dict)
+                        or not all(isinstance(k, str) and isinstance(v, str)
+                                   for k, v in raw_headers.items())):
+                    raise store.MaestroError(
+                        "config.toml: [runner.pi.headers] must be a table of "
+                        "string->string pairs")
         cfg.provider_config = {
             k: v for k, v in data.items()
             if k not in {"maestro", "providers"}
@@ -955,6 +973,17 @@ implementer = "claude_skill"
 # api_key = "$ZAI_API_KEY"          # a RESOLVER EXPRESSION only -- "$ENV_VAR" (interpolated)
                                      # or "!command" (executed, stdout used) -- written through
                                      # verbatim. maestro never reads or holds the secret value.
+#
+# [runner.pi.headers]               # T-105: custom HTTP headers a gateway requires beyond the
+                                     # bearer api_key (e.g. an internal auth proxy rejecting
+                                     # requests missing a `source`/`org-id` header) -- string ->
+                                     # string, written through VERBATIM into models.json under
+                                     # pi's own `headers` provider field (same posture as
+                                     # api_key: never read/resolved here). Unset produces a
+                                     # byte-identical models.json to before this table existed.
+# source = "maestro"
+# org-id = "your-org-id"
+#
 # version = "0.79.2"                # pinned installed `pi --version`; health.check_pi_version
                                      # WARNs when the real binary drifts from this
 # concurrency = 1                   # PI-8: cap on concurrently-running pi reconcilers -- default

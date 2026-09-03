@@ -1232,6 +1232,20 @@ def cmd_worktree(args) -> int:
     raise store.MaestroError(f"worktree: unknown action {args.action!r}")
 
 
+def cmd_import_linear(args) -> int:
+    """[human] T-103: mint a ticket from a Linear issue URL or bare identifier,
+    on demand -- no waiting on a dispatcher sync sweep. A malformed
+    URL/identifier surfaces as ``error: ...`` via `main`'s own MaestroError
+    catch; a re-import of an already-minted key prints a clean no-op instead
+    of a duplicate ticket."""
+    cfg = _cfg(args)
+    result = ops.import_linear(cfg, args.url_or_id)
+    _print(result)
+    if not result["minted"]:
+        print(f"{result['key']} already imported", file=sys.stderr)
+    return 0
+
+
 def cmd_install_commands(args) -> int:
     """GA-15: idempotently install the seven per-phase reconcile command files —
     ``--repo <name>`` copies them into a configured repo's checkout,
@@ -1458,6 +1472,10 @@ def build_parser() -> argparse.ArgumentParser:
              "[agent] idempotently create/adopt a ticket's worktree and run its repo's `prime`")
     sp.add_argument("action", choices=["ensure"])
     sp.add_argument("key")
+    sp = add("import-linear", cmd_import_linear,
+             "[human] mint a ticket from a Linear issue URL or bare identifier (LINEAR-<id>)")
+    sp.add_argument("url_or_id", metavar="URL_OR_ID",
+                    help="a Linear issue URL (https://linear.app/<org>/issue/<id>/...) or bare identifier (e.g. ENG-123)")
     sp = add("install-commands", cmd_install_commands,
              "install the seven per-phase maestro-reconcile-*.md commands into a repo or user dir")
     sp.add_argument("--repo", default=None,

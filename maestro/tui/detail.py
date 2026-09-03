@@ -55,6 +55,15 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
     if runner_model:
         runner_info += f" [dim]({_esc(runner_model)})[/dim]"
 
+    # T-103: the tracker identifier (e.g. Linear's `ENG-123`) is not a second
+    # stored field -- it's `external_source`/`external_id`, already folded
+    # onto the snapshot for the sync path (`sync_external_sources`); this is
+    # just that same datum surfaced in the pane instead of only living in raw
+    # JSON (`maestro show`).
+    external_info = _EM
+    if snap.external_source and snap.external_id:
+        external_info = f"{_esc(snap.external_source)} {_esc(snap.external_id)}"
+
     # T-89 (AC5): a Failed/Stalled that fired while the provider check was
     # non-ok carries kind="provider" + the observed state -- surface that
     # here so a degraded ticket reads as provider-caused, not a bare
@@ -70,6 +79,7 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
         f"[dim]Phase[/dim]         {v(snap.phase)}\n"
         f"[dim]Runner[/dim]        {runner_info}\n"
         f"[dim]Source[/dim]        {v(snap.source)}\n"
+        f"[dim]External[/dim]      {external_info}\n"
         f"[dim]PR[/dim]            {pr_info}\n"
         f"[dim]CI[/dim]            {v(snap.ci_state)}\n"
         f"[dim]Failures[/dim]      {snap.failure_count}\n"

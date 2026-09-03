@@ -290,21 +290,26 @@ def generate_pi_models_json(home: Path, pi_config: dict) -> bool:
 
     Schema verified against the installed pi 0.79.2's own
     ``core/model-registry.js`` (there is no public schema doc for this file):
-    ``{"providers": {<name>: {baseUrl, api, apiKey, compat, models: [{id,
-    contextWindow, maxTokens, reasoning, cost: {input, output, cacheRead,
-    cacheWrite}}, ...]}}}``. ``pi_config``'s own keys are this codebase's usual
-    TOML ``snake_case`` (matching every other ``[runner.<name>]`` table);
-    ``base_url``/``api``/``api_key``/``compat`` map onto that provider block
-    1:1 (``api_key`` -> ``apiKey`` is a resolver expression -- ``$ENV_VAR`` or
-    ``!command ...`` -- written through VERBATIM; nothing in this function
-    reads or resolves a secret value), and ``models`` (a table of ``<model
-    id>`` -> ``{context_window, max_tokens, reasoning, cost: {input, output,
-    cache_read, cache_write}}``) becomes that provider's own ``models`` array,
-    one entry per configured id. ``reasoning`` (bool) is a straight
-    pass-through -- omitted pi defaults it to ``false``, which silently drops
-    thinking support pi's OWN bundled sibling models of the same family carry
-    (verified against a real ``pi --list-models``); set it explicitly for a
-    reasoning model.
+    ``{"providers": {<name>: {baseUrl, api, apiKey, headers, compat, models:
+    [{id, contextWindow, maxTokens, reasoning, cost: {input, output,
+    cacheRead, cacheWrite}}, ...]}}}``. ``pi_config``'s own keys are this
+    codebase's usual TOML ``snake_case`` (matching every other
+    ``[runner.<name>]`` table); ``base_url``/``api``/``api_key``/``compat``
+    map onto that provider block 1:1 (``api_key`` -> ``apiKey`` is a resolver
+    expression -- ``$ENV_VAR`` or ``!command ...`` -- written through
+    VERBATIM; nothing in this function reads or resolves a secret value), and
+    ``models`` (a table of ``<model id>`` -> ``{context_window, max_tokens,
+    reasoning, cost: {input, output, cache_read, cache_write}}``) becomes that
+    provider's own ``models`` array, one entry per configured id. ``reasoning``
+    (bool) is a straight pass-through -- omitted pi defaults it to ``false``,
+    which silently drops thinking support pi's OWN bundled sibling models of
+    the same family carry (verified against a real ``pi --list-models``); set
+    it explicitly for a reasoning model. ``headers`` (T-105, a table of
+    string -> string) maps 1:1 onto that same provider block's own ``headers``
+    field (confirmed against ``model-registry.js``'s
+    ``ProviderConfigSchema.headers: Record<string,string>``) -- written
+    through VERBATIM, same posture as ``api_key``, for a gateway that requires
+    custom auth headers beyond the bearer key.
     """
     provider = pi_model_provider(pi_config)
     provider_block: dict = {}
@@ -313,6 +318,8 @@ def generate_pi_models_json(home: Path, pi_config: dict) -> bool:
             provider_block[dst] = pi_config[src]
     if pi_config.get("compat"):
         provider_block["compat"] = pi_config["compat"]
+    if pi_config.get("headers"):
+        provider_block["headers"] = pi_config["headers"]
 
     models = []
     for model_id, model_cfg in (pi_config.get("models") or {}).items():
