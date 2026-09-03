@@ -385,6 +385,15 @@ def test_check_backup_age_non_ok_after_restore_into_a_backupless_home(tmp_path, 
     vault.mkdir()
     tarball = vault / Path(created["created"]).name
     Path(created["created"]).rename(tarball)
+    # The `dispatch` above is home's very first-ever sweep, so
+    # `backup.maybe_backup`'s own cursor-absent case already fired an auto
+    # backup of its own (T-88) -- a second, distinct tarball whenever it lands
+    # in a different wall-clock second than the explicit `backup` call just
+    # above. Sweep out anything left behind so src's backup_dir is genuinely
+    # empty for the backupless-home scenario below, not just empty by
+    # timestamp-collision luck.
+    for leftover in backup.list_backups(src_cfg):
+        leftover.rename(vault / leftover.name)
     assert not backup.list_backups(src_cfg)  # backup_dir is empty again
 
     dst = tmp_path / "dst"

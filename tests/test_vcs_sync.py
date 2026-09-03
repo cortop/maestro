@@ -497,6 +497,82 @@ def test_review_feedback_idempotent_per_comment_id(cfg, monkeypatch):
     assert len(review_evs) == 1
 
 
+# --- T-108: a plain COMMENTED review also earns one implementing pass ----------
+
+def test_commented_review_routes_to_implementing_with_body_in_reason(cfg, monkeypatch):
+    fake = FakeVCS(
+        statuses={42: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha6",
+                       "ci_state": "passing", "failing_checks": []}},
+        reviews={42: [{"id": "cm-1", "state": "COMMENTED",
+                      "body": "consider adding a docstring here", "author": "reviewer2"}]},
+    )
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+
+    disp.sync_vcs(cfg, now=1000)
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.IMPLEMENTING.value
+
+    evs = event_log.read(cfg.home, "T-5")
+    phase_evs = [e for e in evs if e["type"] == "PhaseChanged"
+                and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+    assert phase_evs
+    assert phase_evs[-1]["payload"]["reason"] == "review comment: consider adding a docstring here"
+
+
+def test_commented_review_does_not_route_twice_for_same_comment(cfg, monkeypatch):
+    fake = FakeVCS(
+        statuses={42: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha6",
+                       "ci_state": "passing", "failing_checks": []}},
+        reviews={42: [{"id": "cm-1", "state": "COMMENTED",
+                      "body": "consider adding a docstring here", "author": "reviewer2"}]},
+    )
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+
+    disp.sync_vcs(cfg, now=1000)
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IMPLEMENTING.value
+
+    # Simulate the implementer handing back off to in-review, then re-poll the
+    # SAME comment id on a later sweep -- already-recorded (dedup fencing via
+    # step_id=f"review-{key}-{cid}"), so it must not route a second time.
+    from maestro import ops
+    cfg.awaiting_ci_qa_gate = False  # off-topic here: this test is about review dedup, not QA
+    ops.set_phase(cfg, "T-5", Phase.IN_REVIEW, reason="pushed fix", force=True)
+    disp.sync_vcs(cfg, now=2000)
+
+    evs = event_log.read(cfg.home, "T-5")
+    review_evs = [e for e in evs if e["type"] == "ReviewFeedbackReceived"]
+    assert len(review_evs) == 1
+    phase_evs = [e for e in evs if e["type"] == "PhaseChanged"
+                and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+    assert len(phase_evs) == 1  # only the original routing pass
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IN_REVIEW.value
+
+
+def test_approved_review_and_empty_commented_review_leave_phase_unchanged(cfg, monkeypatch):
+    fake = FakeVCS(
+        statuses={42: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha6",
+                       "ci_state": "passing", "failing_checks": []}},
+        reviews={42: [
+            {"id": "ap-1", "state": "APPROVED", "body": "great work", "author": "reviewer3"},
+            {"id": "cm-2", "state": "COMMENTED", "body": "", "author": "reviewer4"},
+        ]},
+    )
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+
+    disp.sync_vcs(cfg, now=1000)
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.IN_REVIEW.value
+
+    evs = event_log.read(cfg.home, "T-5")
+    review_evs = [e for e in evs if e["type"] == "ReviewFeedbackReceived"]
+    assert len(review_evs) == 2  # both still observed/recorded
+    assert not [e for e in evs if e["type"] == "PhaseChanged"
+               and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+
+
 def test_in_review_is_a_sleeping_phase():
     assert Phase.IN_REVIEW in SLEEPING_PHASES
 

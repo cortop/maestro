@@ -39,7 +39,10 @@ with the **Read** tool — never `cat`/`sed`, this preamble reads no file via th
   context from raw events. It may not exist yet for a brand-new ticket; a Read error there just
   means no context has been folded yet, not a failure. **This is also how you tell a fix round
   from a fresh implementation** — if the most recent phase-history line reads `qa -> implementing`
-  with a reason citing a failing AC, `qa` sent you back; see step 1 below.
+  with a reason citing a failing AC, `qa` sent you back; see step 1 below. If instead it reads
+  `in-review -> implementing` or `awaiting-ci -> implementing` with a reason starting `changes
+  requested:` or `review comment:`, a PR reviewer's feedback sent you back — see the review-
+  feedback case in step 1 below, a different fix round from the `qa` one.
 
 If the snapshot shows pending inbox commands, fold them before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
@@ -132,7 +135,19 @@ Otherwise implement the spec's Acceptance criteria:
    this is a **fix round**, not a fresh implementation. Fix the code per that evidence and
    continue at step 2 — do not re-derive the diff or re-judge the AC yourself, that is `qa`'s own
    independent job, running in its own phase; yours here is only to fix and hand off again (step
-   5). Otherwise, make the change fresh.
+   5).
+   **If a PR reviewer sent you back instead** (the most recent phase-history transition is
+   `in-review -> implementing` or `awaiting-ci -> implementing`, reason `changes requested: <body>`
+   or `review comment: <body>` — the verbatim comment text is right there in the reason): this is
+   a **review-feedback round**, a third case alongside the `qa` fix round and a fresh
+   implementation. Evaluate the comment on its merits — address it with a real code change where
+   it's warranted, or, if no change is warranted, say why:
+   `maestro append "$KEY" --type Note --payload "{\"text\":\"review comment: <verbatim comment>
+   -- no change: <your reasoning>\"}"`. Either way continue at step 2, then at step 5 push the fix
+   (or, if you recorded a Note and made no code change, just the Note — nothing to push) and
+   `set-phase awaiting-ci` instead of `set-phase qa`: a human is already reviewing this PR
+   directly on GitHub, so this pass hands back to CI/that review rather than routing through
+   `qa` again. Otherwise, make the change fresh.
 2. **Tests are the proof — QA against the real app, not mocks.** Every change ships with a test
    that exercises the actual surface and shows the feature working end-to-end: drive the real
    `maestro` CLI / a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`) over a temp
@@ -210,6 +225,10 @@ Otherwise implement the spec's Acceptance criteria:
    maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr-number>,\"url\":\"<pr-url>\",\"draft\":true}" --step-id "pr-$KEY"
    maestro set-phase "$KEY" qa --requeue 300
    ```
+   On a review-feedback round (see step 1), skip straight to `set-phase "$KEY" awaiting-ci
+   --requeue 300` instead of `qa` — a human is already reviewing this PR directly on GitHub, so
+   this hands back to CI/that review rather than an internal re-review; push the commit first if
+   you made a code change, or skip the push entirely if this round only recorded a Note.
    Push normally — never force-push. Let hooks run — never skip them. Test the real behavior,
    never a mock. Then exit; the dispatcher's next sweep spawns the independent `qa` reconciler
    (`skills/maestro-reconcile-qa.md`) — this session never judges its own diff, and does not poll
@@ -221,7 +240,10 @@ handing review off to the independent `qa` phase; (b) a fix round — the fix is
 evidence, tests are green, `impl-turn` recorded the round (and did not park the ticket), the fix
 is pushed, and `set-phase qa` has appended again to re-request review; (c) a conflict-only pass —
 the rebase is clean (or escalated via `maestro ask` with a `conflict-$KEY-<n>` qid), tests are
-green, and the branch is pushed with `set-phase awaiting-ci` appended; or (d) tests did not
-converge within this session and you appended `maestro fail` naming why, or `impl-turn` parked the
-ticket on the `max_impl_turns` ceiling (it has already called `ops.fail` itself — nothing further
-to append). In every case, `maestro release "$KEY"` has run.
+green, and the branch is pushed with `set-phase awaiting-ci` appended; (d) a review-feedback
+round — the comment in the routing reason was evaluated and either addressed with a pushed code
+change or given a recorded `Note` explaining why no change is needed, tests are green if code
+changed, and `set-phase awaiting-ci` has appended; or (e) tests did not converge within this
+session and you appended `maestro fail` naming why, or `impl-turn` parked the ticket on the
+`max_impl_turns` ceiling (it has already called `ops.fail` itself — nothing further to append).
+In every case, `maestro release "$KEY"` has run.

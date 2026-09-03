@@ -1593,6 +1593,12 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
 def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None,
                      env: dict | None = None) -> None:
     changes_requested_body: str | None = None
+    # T-108: a plain COMMENTED review with substantive body content also
+    # earns one implementing pass -- just a lower-priority one than an
+    # explicit CHANGES_REQUESTED, so a review round that carries both only
+    # routes once, on the CHANGES_REQUESTED reason. An APPROVED review, or a
+    # COMMENTED review with an empty body, stays a no-op exactly like today.
+    commented_body: str | None = None
     for r in vcs.review_feedback(pr_number, repo=repo, env=env):
         cid = r.get("id")
         if not cid:
@@ -1603,14 +1609,24 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
              "author": r.get("author")},
             actor="dispatcher", step_id=f"review-{key}-{cid}",
         )
-        if ev is not None and r.get("state") == "CHANGES_REQUESTED":
-            changes_requested_body = r.get("body", "")
-    if changes_requested_body is None:
+        if ev is None:
+            continue
+        state = r.get("state")
+        body = r.get("body", "")
+        if state == "CHANGES_REQUESTED":
+            changes_requested_body = body
+        elif state == "COMMENTED" and body:
+            commented_body = body
+    if changes_requested_body is not None:
+        reason = f"changes requested: {changes_requested_body}"
+    elif commented_body is not None:
+        reason = f"review comment: {commented_body}"
+    else:
         return
     fresh = snap_mod.rebuild(cfg.home, key)
     from . import ops
     ops.set_phase(cfg, key, Phase.IMPLEMENTING,
-                 reason=f"changes requested: {changes_requested_body}", actor="dispatcher",
+                 reason=reason, actor="dispatcher",
                  expect=fresh.observed_seq)
 
 
