@@ -205,7 +205,30 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
         _warn_unverified_acs(cfg, key, actor=actor)
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
+    _push_linear_status(cfg, key, phase, actor=actor)
     return ev
+
+
+def _push_linear_status(cfg: Config, key: str, phase: Phase, *, actor: str) -> None:
+    """T-104: push *phase*'s mapped Linear status for a Linear-linked ticket.
+    ``set_phase`` (above) and ``finalize`` (below) are the ONLY two places
+    ``PhaseChanged``/``Finalized`` are ever appended -- see ``ops.py``'s
+    module docstring and ``events.SIDE_EFFECTING`` -- so calling this from
+    both is exhaustive over every real phase change, not merely the common
+    path. Ships dark for everything else: only a ticket carrying the T-103
+    Linear identifier (``external_source == "linear"``) makes any call at
+    all -- everything else is byte-identical to before this ticket. Never
+    raises: ``LinearTracker.push_phase_status`` degrades a failed push to a
+    ``Note`` event on its own, so a Linear-side error never wedges the
+    reconcile."""
+    snap = snap_mod.load(cfg.home, key)
+    if snap.external_source != "linear" or not snap.external_id:
+        return
+    from . import providers
+    tracker = providers.get_trackers(cfg).get("linear")
+    if tracker is None:
+        return
+    tracker.push_phase_status(cfg.home, key, snap.external_id, phase, actor=actor)
 
 
 def _annotations_active(cfg: Config, key: str) -> bool:
@@ -1988,6 +2011,7 @@ def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
             _refuse_if_qa_failing(cfg, key, snap)
             _refuse_if_qa_incomplete(cfg, key, snap)
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
+    _push_linear_status(cfg, key, Phase.DONE, actor=actor)
 
 
 def _prune_plan(cfg: Config, key: str, *, now: float | None = None) -> list[dict]:
