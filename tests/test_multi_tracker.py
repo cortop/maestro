@@ -73,13 +73,15 @@ def test_get_trackers_resolves_a_keyed_set(home):
 def test_dispatch_sweep_imports_and_refreshes_both_trackers(home, monkeypatch):
     """AC2 + AC4: a real dispatcher sweep, with two fake trackers configured at
     once, imports both sets of tickets and refreshes each one against its OWN
-    tracker (never the other one's) via a per-source cursor."""
+    tracker (never the other one's) via a per-source cursor. auto_import is
+    opted in explicitly here (T-110's default-off gate lives in
+    test_linear_import.py) so this test keeps exercising the import half."""
     cfg = _cfg_for(home)
     cfg.providers["tracker"] = ["jira", "linear"]
     cfg.provider_config = {
         "tracker": {
-            "jira": {"sync_interval": 0},
-            "linear": {"sync_interval": 0},
+            "jira": {"sync_interval": 0, "auto_import": True},
+            "linear": {"sync_interval": 0, "auto_import": True},
         }
     }
 
@@ -133,8 +135,8 @@ def test_per_source_cursor_gates_each_tracker_independently(home, monkeypatch):
     cfg.providers["tracker"] = ["jira", "linear"]
     cfg.provider_config = {
         "tracker": {
-            "jira": {"sync_interval": 0},
-            "linear": {"sync_interval": 999999},
+            "jira": {"sync_interval": 0, "auto_import": True},
+            "linear": {"sync_interval": 999999, "auto_import": True},
         }
     }
 

@@ -206,7 +206,9 @@ def test_hook_mint_new_tickets_is_absent_under_dry_run(home, cfg):
 def test_hook_sync_external_sources_is_absent_under_dry_run(home, cfg, monkeypatch):
     fake = FakeTracker()
     monkeypatch.setattr(providers, "get_trackers", lambda c: {"fake": fake})
-    cfg.provider_config = {"tracker": {"fake": {"sync_interval": 0}}}
+    # T-110: import is opt-in per tracker (auto_import, default off) -- opt in
+    # explicitly here since this test is about the dry-run hook gate, not that one.
+    cfg.provider_config = {"tracker": {"fake": {"sync_interval": 0, "auto_import": True}}}
     sync_cursor = home / "derived" / ".sync_cursor.json"
 
     disp.dispatch(cfg, DryRunSessions(), now=1000, dry_run=True)

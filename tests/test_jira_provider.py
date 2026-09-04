@@ -110,10 +110,12 @@ def _cfg_for(home):
 def test_dispatch_sweep_imports_then_mints_and_refreshes(home, monkeypatch):
     """Real-app QA: two `dispatch()` sweeps (mint lags import by one sweep, matching
     the existing `_new` inbox model) prove Jira import, ticket minting, and
-    tracked-ticket refresh all wire together, with no duplicate work on repeats."""
+    tracked-ticket refresh all wire together, with no duplicate work on repeats.
+    auto_import is opted in explicitly (T-110's default-off gate is covered in
+    tests/test_linear_import.py)."""
     cfg = _cfg_for(home)
     cfg.providers["tracker"] = "jira"
-    cfg.provider_config = {"tracker": {"jira": {"sync_interval": 0}}}
+    cfg.provider_config = {"tracker": {"jira": {"sync_interval": 0, "auto_import": True}}}
 
     issue = {"key": "ACME-9", "fields": {"summary": "Sync me", "description": _adf_para("desc"),
                                           "status": {"name": "To Do"}, "updated": "2026-01-01T00:00:00.000+0000"}}

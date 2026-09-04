@@ -873,6 +873,14 @@ def sync_external_sources(cfg: Config, now: float) -> dict:
     Imports new work via ``import_new`` (which itself funnels through the audited
     ``_new`` inbox) and refreshes every tracked, not-done ticket sourced from a due
     tracker.
+
+    T-110: the import half is opt-in per tracker (``auto_import``, default
+    ``False``) -- a due tracker with ``auto_import`` unset/false skips the
+    ``import_new`` call entirely but still counts as "due" for the refresh
+    half below, so an already-imported ticket keeps refreshing on its
+    ``sync_interval`` regardless. Bulk import then only ever happens via the
+    explicit ``maestro sync-tracker`` verb (``ops.sync_tracker``), which calls
+    ``import_new`` directly, bypassing both this gate and the cursor.
     """
     home = cfg.home
     # Import lazily to avoid a hard dependency from the core onto any one adapter.
@@ -893,7 +901,8 @@ def sync_external_sources(cfg: Config, now: float) -> dict:
         if now - cursor.get(name, 0) < interval:
             continue
         due_names.append(name)
-        imported += tracker.import_new(home)
+        if settings.get("auto_import", False):
+            imported += tracker.import_new(home)
 
     if not due_names:
         return {"imported": 0, "refreshed": 0}
