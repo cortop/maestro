@@ -521,6 +521,47 @@ def test_import_linear_malformed_input_notifies_without_crash(seeded_home):
     asyncio.run(_inner())
 
 
+def test_import_linear_transport_failure_notifies_without_crash(seeded_home, monkeypatch):
+    """T-111: a transport-level failure (network down, bad/missing API key,
+    a Linear GraphQL error) must surface as an error notify(), not take the
+    whole app down -- `ops.import_linear` now normalizes these into
+    `store.MaestroError` at the ops boundary, so the app's existing
+    `except store.MaestroError` catches this exactly like a malformed
+    identifier already does above."""
+    import urllib.error
+
+    from maestro.providers import linear as linear_mod
+
+    class FailingLinearTransport:
+        def search_issues(self, filter):
+            return []
+
+        def get_issue(self, identifier):
+            raise urllib.error.URLError("network is unreachable")
+
+        def get_comments(self, identifier):
+            return []
+
+    monkeypatch.setattr(linear_mod.LinearTracker, "_transport_or_build",
+                        lambda self: FailingLinearTransport())
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("import_linear")
+            await pilot.pause()
+            inp = app.screen.query_one("#import-linear-input", Input)
+            inp.value = "ENG-42"
+            inp.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    assert not store.spec_path(seeded_home, "LINEAR-ENG-42").exists()
+
+
 def test_create_modal_intent_is_textarea_and_accepts_multiline(seeded_home):
     """Intent field must be a TextArea (not an Input) and must accept newlines."""
     from textual.widgets import Input, TextArea

@@ -122,6 +122,63 @@ def test_import_linear_malformed_input_raises_maestro_error(cfg):
         pass
 
 
+class RaisingLinearTransport:
+    """Fakes the external boundary raising the real transport's own exception
+    types (T-111) -- a network failure (`urllib.error.URLError`, of which
+    `HTTPError` is a subclass -- covers a missing/invalid `LINEAR_API_KEY`'s
+    401 too), a GraphQL error (`RuntimeError`), or a malformed body
+    (`json.JSONDecodeError`)."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def search_issues(self, filter):
+        raise self.exc
+
+    def get_issue(self, identifier):
+        raise self.exc
+
+    def get_comments(self, identifier):
+        return []
+
+
+def test_import_linear_network_failure_raises_maestro_error(cfg):
+    import urllib.error
+
+    tracker = LinearTracker({}, transport=RaisingLinearTransport(
+        urllib.error.URLError("network is unreachable")))
+    try:
+        ops.import_linear(cfg, "ENG-42", tracker=tracker)
+        assert False, "expected MaestroError"
+    except store.MaestroError as e:
+        assert "ENG-42" in str(e)
+    assert event_log.last_seq(cfg.home, "LINEAR-ENG-42") == 0
+
+
+def test_import_linear_graphql_error_raises_maestro_error(cfg):
+    tracker = LinearTracker({}, transport=RaisingLinearTransport(
+        RuntimeError("Linear API error: [{'message': 'boom'}]")))
+    try:
+        ops.import_linear(cfg, "ENG-42", tracker=tracker)
+        assert False, "expected MaestroError"
+    except store.MaestroError:
+        pass
+    assert event_log.last_seq(cfg.home, "LINEAR-ENG-42") == 0
+
+
+def test_import_linear_bad_body_raises_maestro_error(cfg):
+    import json as json_mod
+
+    exc = json_mod.JSONDecodeError("Expecting value", "", 0)
+    tracker = LinearTracker({}, transport=RaisingLinearTransport(exc))
+    try:
+        ops.import_linear(cfg, "ENG-42", tracker=tracker)
+        assert False, "expected MaestroError"
+    except store.MaestroError:
+        pass
+    assert event_log.last_seq(cfg.home, "LINEAR-ENG-42") == 0
+
+
 def test_import_linear_issue_not_found_raises_maestro_error(cfg):
     transport = FakeLinearTransport([])  # empty -- ENG-42 does not exist
     tracker = LinearTracker({}, transport=transport)
@@ -238,3 +295,23 @@ def test_import_linear_single_issue_unaffected_by_auto_import_default(cfg):
     result = ops.import_linear(cfg, "ENG-42", tracker=tracker)
     assert result == {"key": "LINEAR-ENG-42", "minted": True}
     assert store.spec_path(cfg.home, "LINEAR-ENG-42").exists()
+
+
+def test_cli_import_linear_transport_failure_errors_cleanly(home, monkeypatch, capsys):
+    """T-111: the same transport-level failure (network/auth/GraphQL) that
+    the TUI turns into an error toast must exit non-zero with a one-line
+    error here too, never a raw traceback -- both callers share the same
+    `ops.import_linear` normalization."""
+    import urllib.error
+
+    from maestro.providers import linear as linear_mod
+
+    monkeypatch.setattr(
+        linear_mod.LinearTracker, "_transport_or_build",
+        lambda self: RaisingLinearTransport(urllib.error.URLError("network is unreachable")))
+
+    rc = cli_main(["--home", str(home), "import-linear", "ENG-42"])
+    assert rc == 2  # main()'s MaestroError catch, not a raw traceback
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert not store.spec_path(home, "LINEAR-ENG-42").exists()
