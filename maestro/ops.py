@@ -12,6 +12,7 @@ import random
 import re
 import shutil
 import subprocess
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -2444,7 +2445,18 @@ def import_linear(cfg: Config, url_or_id: str, *, tracker: object | None = None)
     if tracker is None:
         settings = cfg.provider_config.get("tracker", {}).get("linear", {})
         tracker = linear_mod.LinearTracker(settings)
-    issue = tracker.view(identifier)
+    try:
+        issue = tracker.view(identifier)
+    except (urllib.error.URLError, RuntimeError, json.JSONDecodeError) as e:
+        # Normalize the transport's raw exceptions (network/auth failures raise
+        # urllib.error.URLError -- HTTPError is a subclass, so a missing/invalid
+        # LINEAR_API_KEY's 401 lands here too; a GraphQL error raises RuntimeError;
+        # a malformed body raises json.JSONDecodeError) into store.MaestroError at
+        # this ops boundary -- "never a raw traceback" (see module docstring on
+        # parse_identifier) -- so both the TUI (an error toast, app stays alive)
+        # and the CLI (`maestro import-linear`, a one-line error + non-zero exit)
+        # handle a Linear-side failure the same, uniform way.
+        raise store.MaestroError(f"Linear import failed for {identifier}: {e}") from e
     if not issue.get("identifier"):
         raise store.MaestroError(f"Linear issue not found: {identifier}")
 
