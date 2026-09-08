@@ -27,6 +27,7 @@ from .screens import (
     EnvScreen,
     EventsScreen,
     FleetScreen,
+    InboxScreen,
     LogsScreen,
     ScheduleScreen,
     SpecScreen,
@@ -102,6 +103,7 @@ class MaestroTUI(App):
         Binding("z", "release", "Release", show=False),
         Binding("p", "project_rebuild", "Project", show=False),
         Binding("l", "view_logs", "Logs", show=False),
+        Binding("I", "view_inbox", "Inbox log", show=False),
         Binding("o", "runner", "Runner", show=False),
         Binding("L", "import_linear", "Linear", show=False),
     ]
@@ -490,6 +492,12 @@ class MaestroTUI(App):
     def action_view_logs(self) -> None:
         if self._selected_key:
             self.push_screen(LogsScreen(self._home, self._selected_key))
+
+    def action_view_inbox(self) -> None:
+        if self._selected_key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(InboxScreen(self._home, self._selected_key))
 
     def _populate(self) -> None:
         _name, predicate = _FILTERS[self._filter_idx]

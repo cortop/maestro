@@ -16,7 +16,7 @@ from .. import claims, config as config_mod, event_log, fleet as fleet_mod, heal
 from ..dispatcher import schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
-from .events import render_log, render_log_line, render_opencode_log_line, render_pi_log_line
+from .events import render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line
 from .modals import _IntervalModal, _ScheduleModal
 from .render import _fmt_epoch, _render_env, _render_fleet
 
@@ -53,6 +53,39 @@ class EventsScreen(Screen):
         events = event_log.read(self._home, self._key)
         log.clear()
         for line in render_log(events, tail=self._tail_mode):
+            log.write(line)
+
+
+class InboxScreen(Screen):
+    """Full-screen listing of every inbox entry for one ticket (T-114) --
+    including already-processed ones, with pending/processed visibly distinct.
+    Read-only: derives the split from the machine-owned cursor, never writes."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back")]
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield RichLog(id="inbox-full", highlight=True, markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Inbox: {self._key}"
+        self._refresh()
+
+    def _refresh(self) -> None:
+        log = self.query_one("#inbox-full", RichLog)
+        log.clear()
+        entries = store.read_jsonl(store.inbox_path(self._home, self._key))
+        if not entries:
+            log.write("(inbox empty)")
+            return
+        cursor = inbox._cursor(store.cursor_path(self._home, self._key))
+        for line in render_inbox(entries, cursor):
             log.write(line)
 
 
