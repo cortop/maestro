@@ -1819,6 +1819,70 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
     return {"runner": runner, "runner_model": runner_model, "warning": warning}
 
 
+def _append_ac(spec_text: str, text: str) -> str:
+    """Insert ``- [ ] <text>`` as the new last line of *spec_text*'s
+    ``## Acceptance criteria`` section, creating the section (appended at
+    the end of the file) if the spec doesn't have one yet -- the
+    `_set_frontmatter_fields` precedent's surgical-edit style: every other
+    byte of *spec_text* is preserved untouched.
+
+    T-112 Q4: a freshly-minted spec's own dangling ``- [ ] `` placeholder
+    line (no trailing newline, right at EOF -- see `cli._SEED_SPEC_TEMPLATE`)
+    is never special-cased; the new line is simply appended after it, same
+    as after any other existing AC line."""
+    lines = spec_text.splitlines(keepends=True)
+    header_idx = None
+    for i, line in enumerate(lines):
+        if line.rstrip("\n").strip() == "## Acceptance criteria":
+            header_idx = i
+            break
+    new_line = f"- [ ] {text}\n"
+    if header_idx is None:
+        prefix = spec_text if spec_text.endswith("\n") else spec_text + "\n"
+        if not prefix.endswith("\n\n"):
+            prefix += "\n"
+        return prefix + "## Acceptance criteria\n" + new_line
+
+    insert_at = len(lines)
+    for i in range(header_idx + 1, len(lines)):
+        if lines[i].rstrip("\n").startswith("##"):
+            insert_at = i
+            break
+    # The seed template's own trailing "- [ ] " placeholder has no newline
+    # (it's the last byte in the file) -- give it one before inserting after.
+    if insert_at > 0 and not lines[insert_at - 1].endswith("\n"):
+        lines[insert_at - 1] = lines[insert_at - 1] + "\n"
+    lines[insert_at:insert_at] = [new_line]
+    return "".join(lines)
+
+
+def add_ac(cfg: Config, key: str, text: str) -> dict:
+    """[human] Append a new ``- [ ] <text>`` line to *key*'s spec
+    ``## Acceptance criteria`` section (creating the section if the spec
+    lacks one) -- the `ops.set_runner` / UX-1 precedent for a human-owned
+    spec.md mutation that still goes through deterministic Python rather
+    than direct editing, so a caller (the TUI's add-AC modal, or this same
+    verb's CLI subcommand) never hand-edits the spec file itself.
+
+    Raises `store.MaestroError` -- never a bare exception -- if *text* is
+    blank/whitespace-only, or no spec.md exists for *key*.
+
+    Appends NO event, same posture as `set_runner`: the spec hash on disk no
+    longer matching the snapshot's own recorded hash is what wakes the
+    ticket next sweep (`dispatcher.is_due`'s "spec-changed" branch) -- the
+    same mechanism any other direct human spec edit already relies on.
+    Returns ``{"text": text}``."""
+    text = text.strip()
+    if not text:
+        raise store.MaestroError(f"add-ac {key}: AC text must not be blank")
+    spec_file = store.spec_path(cfg.home, key)
+    if not spec_file.exists():
+        raise store.MaestroError(f"{key}: no spec.md to add an AC to")
+    spec_text = spec_file.read_text(encoding="utf-8")
+    store.atomic_write(spec_file, _append_ac(spec_text, text))
+    return {"text": text}
+
+
 def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | None:
     h = spec_hash_on_disk(cfg.home, key)
     if h is None:

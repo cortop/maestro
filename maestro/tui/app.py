@@ -18,8 +18,8 @@ from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
 from .modals import (
-    _ACCEPT_ALL, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal, _ImportLinearModal,
-    _InboxModal, _RunnerModal,
+    _ACCEPT_ALL, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal,
+    _ImportLinearModal, _InboxModal, _RunnerModal,
 )
 from .render import _render_badge, _styled_row
 from .screens import (
@@ -104,6 +104,7 @@ class MaestroTUI(App):
         Binding("l", "view_logs", "Logs", show=False),
         Binding("o", "runner", "Runner", show=False),
         Binding("L", "import_linear", "Linear", show=False),
+        Binding("A", "add_ac", "Add AC", show=False),
     ]
 
     _selected_key: str | None = None
@@ -279,6 +280,29 @@ class MaestroTUI(App):
                 self.notify(f"runner updated for {key}")
 
         self.push_screen(_RunnerModal(key, runner, runner_model, home=self._home), _on_dismiss)
+
+    def action_add_ac(self) -> None:
+        """T-112: open the add-AC modal for the selected ticket. All state
+        mutation goes through `ops.add_ac` in `_on_dismiss` -- the TUI never
+        hand-edits the spec file. The `key is None` guard is required by the
+        binding sweep, which presses every key with no ticket selected."""
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+
+        def _on_dismiss(text: str | None) -> None:
+            if text is None:
+                return
+            cfg = Config(home=self._home)
+            try:
+                ops_mod.add_ac(cfg, key, text)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
+            self.notify(f"AC added to {key}")
+
+        self.push_screen(_AddAcModal(key), _on_dismiss)
 
     def action_env_panel(self) -> None:
         self.push_screen(EnvScreen(self._home))

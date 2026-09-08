@@ -221,6 +221,55 @@ class _CmdModal(ModalScreen):
         self.dismiss(None)
 
 
+class _AddAcModal(ModalScreen):
+    """Type a new acceptance-criterion line for one ticket (T-112); dismisses
+    with the typed text, or ``None`` on cancel/blank. Copies `_CmdModal`'s
+    single-`Input`, minimalist shape (T-112 Q5: an AC is one checkbox line).
+    All state mutation happens in the caller's `_on_dismiss` (via
+    `ops.add_ac`) -- this modal only collects the text, it never touches the
+    spec file itself."""
+
+    DEFAULT_CSS = """
+    _AddAcModal {
+        align: center middle;
+    }
+    #add-ac-dialog {
+        width: 70%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="add-ac-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] — add acceptance criterion")
+            yield Input(
+                placeholder="AC text, optionally ending '(test: ...)'/'(check: ...)'  "
+                            "[Enter to send, Esc to cancel]",
+                id="add-ac-input",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#add-ac-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        text = self.query_one("#add-ac-input", Input).value.strip()
+        self.dismiss(text if text else None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _IntervalModal(ModalScreen):
     """Prompt for a dispatch interval (seconds) before calling fleet up."""
 
