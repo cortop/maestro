@@ -1883,6 +1883,75 @@ def add_ac(cfg: Config, key: str, text: str) -> dict:
     return {"text": text}
 
 
+_SUGGEST_ACS_TIMEOUT = 120  # seconds; a bounded, synchronous claude -p capture call
+
+
+def suggest_acs(cfg: Config, key: str, *, run=subprocess.run) -> list[str]:
+    """[human] Draft candidate acceptance criteria for *key* via a bounded,
+    synchronous ``claude -p`` capture-output call -- distinct from
+    `sessions.py`'s detached, agentic `claim`-tracked spawn (T-113's Notes):
+    this is a single request/response round-trip with no session claim, no
+    captured log file, no ``--allowedTools`` grant. The TUI's suggest-ACs
+    action runs this on a worker thread and blocks on it; the caller never
+    writes anything from the result -- only the human's later acceptance,
+    via `add_ac` above, does that (`add_ac(cfg, key, text)` per accepted
+    suggestion; this verb has no batch form of its own).
+
+    "Deterministic plumbing in Python, intelligence in Claude": the
+    suggestions themselves always come from the model, never a hardcoded
+    heuristic list.
+
+    Raises `store.MaestroError` -- never a bare exception -- if spec.md is
+    missing, the invocation fails or times out, or its output can't be
+    parsed into a non-empty list of strings. The caller (the TUI action)
+    turns that into a single error notify (T-113 AC3); it never crashes.
+    Returns the cleaned suggestion strings (no leading ``- [ ]``, no
+    ordering guarantee beyond what the model returned).
+    """
+    spec_file = store.spec_path(cfg.home, key)
+    if not spec_file.exists():
+        raise store.MaestroError(f"{key}: no spec.md to suggest ACs for")
+    spec_text = spec_file.read_text(encoding="utf-8")
+    prompt = (
+        "Given this ticket spec (which currently has no acceptance criteria), "
+        "draft 3-6 concrete, testable acceptance criteria for its "
+        "`## Acceptance criteria` section. Reply with ONLY a JSON array of "
+        "strings, one per suggested AC line -- no leading '- [ ]', no "
+        "markdown, no commentary. Example: [\"...\", \"...\"].\n\n" + spec_text
+    )
+    cmd = ["claude", "-p", prompt, "--model", cfg.reconcile_model, "--output-format", "json"]
+    try:
+        proc = run(cmd, capture_output=True, text=True, timeout=_SUGGEST_ACS_TIMEOUT)
+    except FileNotFoundError as e:
+        raise store.MaestroError(f"{key}: claude not found: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise store.MaestroError(
+            f"{key}: suggest-acs timed out after {_SUGGEST_ACS_TIMEOUT}s") from e
+    if proc.returncode != 0:
+        raise store.MaestroError(
+            f"{key}: claude -p exited {proc.returncode}: {proc.stderr.strip()[:500]}")
+    # `--output-format json` wraps the model's final text reply in an envelope
+    # (a dict with a "result" key, among others) -- unwrap it if present, but
+    # tolerate a bare JSON array too (what a test double, or a future
+    # `--output-format text`, would hand back directly).
+    stdout = proc.stdout.strip()
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        raise store.MaestroError(f"{key}: could not parse claude's output: {e}") from e
+    result_text = envelope["result"] if isinstance(envelope, dict) and "result" in envelope else stdout
+    try:
+        suggestions = result_text if isinstance(result_text, list) else json.loads(result_text)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise store.MaestroError(f"{key}: could not parse suggested ACs: {e}") from e
+    if not isinstance(suggestions, list):
+        raise store.MaestroError(f"{key}: claude returned no usable suggested ACs")
+    cleaned = [str(s).strip() for s in suggestions if str(s).strip()]
+    if not cleaned:
+        raise store.MaestroError(f"{key}: claude returned no usable suggested ACs")
+    return cleaned
+
+
 def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | None:
     h = spec_hash_on_disk(cfg.home, key)
     if h is None:

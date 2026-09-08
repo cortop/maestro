@@ -6,7 +6,7 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Label, Select, Static, TextArea
 
 from .. import schedule, store
 from ..providers import ollama as ollama_mod
@@ -268,6 +268,87 @@ class _AddAcModal(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class _SuggestAcsModal(ModalScreen):
+    """T-113: review a batch of Claude-drafted acceptance-criteria suggestions
+    for one AC-less ticket, one checkbox per suggestion (all checked by
+    default). Dismisses with the list of accepted (checked) suggestion
+    strings on accept -- possibly empty, if the human unchecked every box --
+    or ``None`` on cancel. Net-new shape: every other modal in this module
+    collects a single value; this is the first multi-item selection, hence
+    `Checkbox` (new import above) rather than an `Input`/`Select`.
+
+    The caller (`MaestroTUI._open_suggest_acs_modal`) is the only place that
+    writes -- one `ops.add_ac` call per accepted string. This modal never
+    touches spec.md itself, same posture as every other modal here."""
+
+    DEFAULT_CSS = """
+    _SuggestAcsModal {
+        align: center middle;
+    }
+    #suggest-acs-dialog {
+        width: 80%;
+        max-height: 85%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    #suggest-acs-scroll {
+        max-height: 16;
+        border: solid $panel;
+        margin: 1 0;
+    }
+    #suggest-acs-buttons {
+        height: auto;
+        align: right middle;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+enter", "submit", "Submit"),
+    ]
+
+    def __init__(self, key: str, suggestions: list[str]) -> None:
+        super().__init__()
+        self._key = key
+        self._suggestions = suggestions
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="suggest-acs-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] — suggested acceptance criteria")
+            yield Label("[dim]Space toggles · Ctrl+Enter accepts checked · Esc cancels[/dim]")
+            with VerticalScroll(id="suggest-acs-scroll"):
+                for i, text in enumerate(self._suggestions):
+                    yield Checkbox(text, value=True, id=f"suggest-ac-{i}")
+            with Horizontal(id="suggest-acs-buttons"):
+                yield Button("Accept checked", id="suggest-accept-button", variant="primary")
+                yield Button("Cancel", id="suggest-cancel-button")
+
+    def on_mount(self) -> None:
+        checkboxes = self.query(Checkbox)
+        if checkboxes:
+            checkboxes.first().focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "suggest-accept-button":
+            self._submit()
+        elif event.button.id == "suggest-cancel-button":
+            self.dismiss(None)
+
+    def action_submit(self) -> None:
+        self._submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _submit(self) -> None:
+        accepted = [
+            text for i, text in enumerate(self._suggestions)
+            if self.query_one(f"#suggest-ac-{i}", Checkbox).value
+        ]
+        self.dismiss(accepted)
 
 
 class _IntervalModal(ModalScreen):
