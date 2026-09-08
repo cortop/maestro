@@ -2,10 +2,16 @@
 <text>` CLI verb that calls it -- appending a new `- [ ] <text>` line to a
 ticket's spec `## Acceptance criteria` section from outside the TUI. Mirrors
 `test_runner_edit.py`'s shape for the `ops.set_runner` / UX-1 precedent.
+
+T-113: `ops.suggest_acs` -- the read-only, bounded `claude -p` capture call
+that drafts candidate ACs for an AC-less ticket; `run=` is mocked as the
+external boundary, same convention as `providers/cli.py._run`.
 """
 from __future__ import annotations
 
 import difflib
+import json
+import subprocess
 
 import pytest
 
@@ -164,3 +170,118 @@ def test_cli_add_ac_rejects_unknown_key(home, capsys):
     assert rc != 0
     err = capsys.readouterr().err
     assert "error:" in err
+
+
+# --- ops.suggest_acs (T-113) -------------------------------------------------
+# `run=` is the injectable external boundary (the `providers/cli.py._run`
+# convention) -- these tests never spawn a real `claude` process.
+
+def _fake_run(*, returncode=0, stdout="", stderr=""):
+    def run(cmd, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=returncode,
+                                           stdout=stdout, stderr=stderr)
+    return run
+
+
+def test_suggest_acs_parses_json_envelope_result(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+    envelope = json.dumps({"type": "result", "subtype": "success",
+                           "result": json.dumps(["AC one", "AC two"])})
+
+    suggestions = ops.suggest_acs(cfg, "T-1", run=_fake_run(stdout=envelope))
+
+    assert suggestions == ["AC one", "AC two"]
+
+
+def test_suggest_acs_parses_bare_json_array(home, cfg):
+    """Tolerates a fake/future run= that hands back the array directly,
+    with no `--output-format json` envelope wrapper."""
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+
+    suggestions = ops.suggest_acs(
+        cfg, "T-1", run=_fake_run(stdout=json.dumps(["a thing works"])))
+
+    assert suggestions == ["a thing works"]
+
+
+def test_suggest_acs_strips_and_drops_blank_entries(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+    envelope = json.dumps({"result": json.dumps(["  padded  ", "", "   ", "ok"])})
+
+    suggestions = ops.suggest_acs(cfg, "T-1", run=_fake_run(stdout=envelope))
+
+    assert suggestions == ["padded", "ok"]
+
+
+def test_suggest_acs_includes_reconcile_model_and_spec_in_prompt(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+    seen_cmd = {}
+
+    def run(cmd, **kwargs):
+        seen_cmd["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0,
+                                           stdout=json.dumps(["ok"]))
+
+    ops.suggest_acs(cfg, "T-1", run=run)
+
+    cmd = seen_cmd["cmd"]
+    assert cmd[0:2] == ["claude", "-p"]
+    assert "Do the thing." in cmd[2]  # the spec text rode along in the prompt
+    assert cfg.reconcile_model in cmd
+    assert "--output-format" in cmd and "json" in cmd
+
+
+def test_suggest_acs_raises_on_nonzero_exit(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+
+    with pytest.raises(store.MaestroError):
+        ops.suggest_acs(cfg, "T-1", run=_fake_run(returncode=1, stderr="boom"))
+
+
+def test_suggest_acs_raises_on_unparseable_output(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+
+    with pytest.raises(store.MaestroError):
+        ops.suggest_acs(cfg, "T-1", run=_fake_run(stdout="not json at all"))
+
+
+def test_suggest_acs_raises_on_empty_suggestion_list(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+
+    with pytest.raises(store.MaestroError):
+        ops.suggest_acs(cfg, "T-1", run=_fake_run(stdout=json.dumps({"result": "[]"})))
+
+
+def test_suggest_acs_raises_on_timeout(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+
+    def run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    with pytest.raises(store.MaestroError):
+        ops.suggest_acs(cfg, "T-1", run=run)
+
+
+def test_suggest_acs_raises_when_claude_not_found(home, cfg):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+
+    def run(cmd, **kwargs):
+        raise FileNotFoundError("claude")
+
+    with pytest.raises(store.MaestroError):
+        ops.suggest_acs(cfg, "T-1", run=run)
+
+
+def test_suggest_acs_rejects_missing_spec(home, cfg):
+    with pytest.raises(store.MaestroError):
+        ops.suggest_acs(cfg, "NOPE", run=_fake_run(stdout=json.dumps(["ok"])))
+
+
+def test_suggest_acs_never_writes_spec(home, cfg):
+    """Suggesting is read-only -- only a later `ops.add_ac` call writes."""
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+    before = store.spec_path(home, "T-1").read_bytes()
+
+    ops.suggest_acs(cfg, "T-1", run=_fake_run(stdout=json.dumps(["ok"])))
+
+    assert store.spec_path(home, "T-1").read_bytes() == before

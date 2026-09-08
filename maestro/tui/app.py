@@ -19,7 +19,7 @@ from .detail import render as _render_detail
 from .events import render_log
 from .modals import (
     _ACCEPT_ALL, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal,
-    _ImportLinearModal, _InboxModal, _RunnerModal,
+    _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
 )
 from .render import _render_badge, _styled_row
 from .screens import (
@@ -107,6 +107,7 @@ class MaestroTUI(App):
         Binding("o", "runner", "Runner", show=False),
         Binding("L", "import_linear", "Linear", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
+        Binding("g", "suggest_acs", "Suggest ACs", show=False),
     ]
 
     _selected_key: str | None = None
@@ -121,6 +122,11 @@ class MaestroTUI(App):
         self._tickets_fr: float = 2.0
         # key -> phase; None = first poll (no notifications)
         self._prev_phases: dict[str, str] | None = None
+        # T-113: the ticket a pending "suggest-acs" worker is drafting for --
+        # stashed here (not re-read from `self._selected_key` when the worker
+        # resolves) so a table reselection while the ~120s claude call is in
+        # flight can't attribute its result to the wrong ticket.
+        self._suggest_acs_key: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -181,6 +187,17 @@ class MaestroTUI(App):
                 self.notify(str(event.worker.result))
             elif event.state == WorkerState.ERROR:
                 self.notify(f"Project failed: {event.worker.error}", severity="error")
+        elif event.worker.name == "suggest-acs":
+            key = self._suggest_acs_key
+            if event.state == WorkerState.SUCCESS:
+                if key is not None:
+                    self._open_suggest_acs_modal(key, event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                # T-113 AC3: a failed/unavailable claude invocation surfaces as an
+                # error notify -- spec.md is untouched (nothing was ever written
+                # here) and the app never crashes (this branch is exactly what
+                # keeps `event.worker.error` from propagating further).
+                self.notify(f"Suggest ACs failed: {event.worker.error}", severity="error")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
@@ -305,6 +322,56 @@ class MaestroTUI(App):
             self.notify(f"AC added to {key}")
 
         self.push_screen(_AddAcModal(key), _on_dismiss)
+
+    def action_suggest_acs(self) -> None:
+        """T-113: draft suggested ACs for the selected AC-less ticket via a
+        bounded `claude -p` capture call (`ops.suggest_acs`) -- run on a
+        worker thread (`run_worker(thread=True)`, same shape as
+        `action_compact`) so the TUI never blocks on it. Refuses up front
+        with a warning notify, writing nothing, if the ticket already has
+        ACs (`snapshot.has_acs` gate, per the spec) -- the `key is None`
+        guard is required by the binding sweep, which presses every key with
+        no ticket selected. The review modal only opens once the worker
+        resolves (`on_worker_state_changed`'s "suggest-acs" branch); a
+        failed/unavailable spawn there surfaces as an error notify instead --
+        `exit_on_error=False` is required for that: `run_worker`'s default
+        (`True`) would otherwise hand a raised `MaestroError` to the App's
+        own exception handler too (AC3 says a failed invocation must not
+        crash the app -- this is the actual guard for that, not just the
+        `on_worker_state_changed` notify below)."""
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        spec_file = store.spec_path(self._home, key)
+        spec_text = spec_file.read_text(encoding="utf-8") if spec_file.exists() else ""
+        if snap_mod.has_acs(spec_text):
+            self.notify(f"{key} already has acceptance criteria", severity="warning")
+            return
+        cfg = Config(home=self._home)
+        self._suggest_acs_key = key
+        self.run_worker(lambda: ops_mod.suggest_acs(cfg, key), thread=True, name="suggest-acs",
+                        exit_on_error=False)
+
+    def _open_suggest_acs_modal(self, key: str, suggestions: list[str]) -> None:
+        """Push the review modal for a resolved "suggest-acs" worker; on
+        accept, writes exactly the accepted suggestions via `ops.add_ac`
+        (T-112's verb, one call per accepted string -- it has no batch form
+        of its own); cancelling (or accepting zero checked boxes) writes
+        nothing."""
+        def _on_dismiss(accepted: list[str] | None) -> None:
+            if not accepted:
+                return
+            cfg = Config(home=self._home)
+            for text in accepted:
+                try:
+                    ops_mod.add_ac(cfg, key, text)
+                except store.MaestroError as e:
+                    self.notify(str(e), severity="warning")
+                    return
+            self.notify(f"{len(accepted)} AC(s) added to {key}")
+
+        self.push_screen(_SuggestAcsModal(key, suggestions), _on_dismiss)
 
     def action_env_panel(self) -> None:
         self.push_screen(EnvScreen(self._home))
