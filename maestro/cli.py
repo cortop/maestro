@@ -592,6 +592,20 @@ def cmd_runner(args) -> int:
     return 0
 
 
+def cmd_add_ac(args) -> int:
+    """Append a new `- [ ] <text>` line to a ticket's spec `## Acceptance
+    criteria` section -- the CLI counterpart to the TUI's add-AC modal
+    (T-112), for agents/humans working outside the TUI."""
+    cfg = _cfg(args)
+    try:
+        result = ops.add_ac(cfg, args.key, args.text)
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
 # --- dispatcher / projection (launchd) --------------------------------------
 def _parse_key_filter(raw: list[str] | None) -> list[str] | None:
     """``--key`` is repeatable (``--key A --key B``) and each occurrence may
@@ -1408,6 +1422,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--runner", default=None, help="non-default runner for the `implementing` step")
     sp.add_argument("--runner-model", dest="runner_model", default=None,
                     help="model override passed to --runner")
+    sp = add("add-ac", cmd_add_ac,
+             "append a new '- [ ] <text>' acceptance criterion to a ticket's spec")
+    sp.add_argument("key")
+    sp.add_argument("text", help="the acceptance-criterion text (may carry a trailing "
+                                  "'(test: ...)'/'(check: ...)' annotation)")
     sp = add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
     sp.add_argument("--strict", action="store_true",
                     help="exit 1 when any check is not ok (default: only the runaway check gates exit code)")

@@ -39,7 +39,15 @@ from .idempotency import content_hash
 from .statemachine import Phase
 
 # Spec acceptance criteria are Markdown task-list items: "- [ ] ..." / "- [x] ...".
-_AC_RE = re.compile(r"^- \[[ xX]\]\s*(.+)$", re.MULTILINE)
+# T-112: the gap between "]" and the captured text is `[ \t]*`, NOT `\s*` --
+# `\s` matches a newline too, so a blank "- [ ] " placeholder line
+# immediately followed by another AC line would otherwise have its trailing
+# whitespace run bleed across the line break and swallow the next line's
+# checkbox+text into this one's capture (a match spanning two lines instead
+# of one) -- exactly the adjacency `ops.add_ac` (T-112) produces when a
+# human appends their first real AC right after the seed template's own
+# dangling placeholder.
+_AC_RE = re.compile(r"^- \[[ xX]\][ \t]*(.+)$", re.MULTILINE)
 
 # A spec's title is its first level-1 heading, conventionally "# <KEY>: <title>".
 _TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
