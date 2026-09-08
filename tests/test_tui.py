@@ -1092,6 +1092,48 @@ def test_render_log_tail_false_shows_all(home):
     assert len(lines) == 5
 
 
+# --- inbox rendering (T-114) --------------------------------------------------
+
+from maestro.tui.events import render_inbox  # noqa: E402
+
+
+def test_render_inbox_splits_processed_vs_pending_at_cursor():
+    """Entries below the cursor index render PROCESSED, the rest PENDING --
+    the same split ``inbox.pending`` uses."""
+    entries = [
+        {"ts": "2026-06-25T00:00:00+00:00", "command": "msg", "args": {"text": "one"}},
+        {"ts": "2026-06-25T00:01:00+00:00", "command": "msg", "args": {"text": "two"}},
+        {"ts": "2026-06-25T00:02:00+00:00", "command": "msg", "args": {"text": "three"}},
+    ]
+    lines = render_inbox(entries, cursor=2)
+    assert len(lines) == 3
+    assert "PROCESSED" in lines[0] and "PROCESSED" in lines[1]
+    assert "PENDING" in lines[2] and "PROCESSED" not in lines[2]
+
+
+def test_render_inbox_empty_entries_returns_no_lines():
+    assert render_inbox([], cursor=0) == []
+
+
+def test_render_inbox_cursor_at_zero_all_pending():
+    entries = [{"ts": "t", "command": "msg", "args": {"text": "x"}}]
+    lines = render_inbox(entries, cursor=0)
+    assert "PENDING" in lines[0]
+
+
+def test_render_inbox_cursor_past_all_all_processed():
+    entries = [{"ts": "t", "command": "msg", "args": {"text": "x"}}]
+    lines = render_inbox(entries, cursor=1)
+    assert "PROCESSED" in lines[0]
+
+
+def test_render_inbox_includes_command_and_text_summary():
+    entries = [{"ts": "2026-06-25T00:00:00+00:00", "command": "retry", "args": {"text": "hello world"}}]
+    lines = render_inbox(entries, cursor=0)
+    assert "retry" in lines[0]
+    assert "hello world" in lines[0]
+
+
 # --- cursor preservation across _populate ------------------------------------
 
 def _make_tickets(home, keys):

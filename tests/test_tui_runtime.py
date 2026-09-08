@@ -44,6 +44,7 @@ from maestro.tui import (  # noqa: E402
     DetailScreen,
     EventsScreen,
     FleetScreen,
+    InboxScreen,
     LogsScreen,
     MaestroTUI,
     ProposalScreen,
@@ -318,7 +319,7 @@ def test_quit_binding_exits_clean(seeded_home):
 # False, no exception) — the press-sweep above cannot see that, so guard it here.
 
 _BINDING_CLASSES = [
-    MaestroTUI, DetailScreen, EventsScreen, LogsScreen, FleetScreen, ProposalScreen,
+    MaestroTUI, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
     ScheduleScreen, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
     _ScheduleModal, _RunnerModal, _ImportLinearModal,
 ]
@@ -894,6 +895,82 @@ def test_detail_pane_surfaces_provider_marker_for_a_provider_caused_degrade(home
 
 def test_events_screen_open_and_escape(seeded_home):
     _run_modal_test(seeded_home, "T-3", "view_events", EventsScreen)
+
+
+def test_inbox_screen_open_and_escape(seeded_home):
+    _run_modal_test(seeded_home, "T-3", "view_inbox", InboxScreen)
+
+
+def test_inbox_screen_shows_processed_and_pending_entries(seeded_home):
+    """AC1/AC2: every inbox entry lists -- both consumed and unconsumed -- with
+    the pending/processed split landing exactly at the cursor, same as
+    ``inbox.pending``'s own split, proved via the real mounted app."""
+    inbox.append_command(seeded_home, "T-3", "msg", {"text": "already handled"})
+    inbox.append_command(seeded_home, "T-3", "msg", {"text": "second processed one"})
+    inbox.append_command(seeded_home, "T-3", "msg", {"text": "still pending"})
+    inbox.ack(seeded_home, "T-3")  # cursor -> 2: first two processed, third pending
+    inbox.append_command(seeded_home, "T-3", "retry", {})  # appended after ack -> pending
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("view_inbox")
+            await pilot.pause()
+            screen = app.screen_stack[-1]
+            assert isinstance(screen, InboxScreen)
+            from textual.widgets import RichLog
+            log_widget = screen.query_one("#inbox-full", RichLog)
+            content = "\n".join(strip.text for strip in log_widget.lines)
+            assert "already handled" in content
+            assert "second processed one" in content
+            assert "still pending" in content
+            assert "PROCESSED" in content
+            assert "PENDING" in content
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_inbox_screen_empty_inbox_shows_placeholder_not_crash(seeded_home):
+    """AC3: a ticket with no inbox file at all -- no inbox/<KEY>.jsonl ever
+    written -- shows a placeholder instead of crashing."""
+    assert not store.inbox_path(seeded_home, "T-5").exists()
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-5"
+            await app.run_action("view_inbox")
+            await pilot.pause()
+            screen = app.screen_stack[-1]
+            assert isinstance(screen, InboxScreen)
+            from textual.widgets import RichLog
+            log_widget = screen.query_one("#inbox-full", RichLog)
+            content = "\n".join(strip.text for strip in log_widget.lines)
+            assert "empty" in content.lower()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_inbox_action_notifies_when_no_ticket_selected(seeded_home):
+    """AC3: the no-selection case notifies instead of pushing a screen or crashing."""
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = None
+            notifications_before = len(app._notifications)
+            await app.run_action("view_inbox")
+            await pilot.pause()
+            assert len(app.screen_stack) == 1
+            assert len(app._notifications) > notifications_before
+            assert app._exception is None
+
+    asyncio.run(_inner())
 
 
 def test_logs_screen_open_and_escape(seeded_home):

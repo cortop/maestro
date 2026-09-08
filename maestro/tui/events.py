@@ -73,6 +73,36 @@ def render_log(events: list[dict], *, tail: bool = False) -> list[str]:
     return [render_event(ev) for ev in shown]
 
 
+def _summarize_inbox_args(args: dict) -> str:
+    """A short, single-line preview of an inbox entry's args (T-114)."""
+    text = args.get("text") if args else None
+    if text:
+        return str(text).replace("\n", " ")[:80]
+    if args:
+        return _json.dumps(args)[:80]
+    return ""
+
+
+def render_inbox(entries: list[dict], cursor: int) -> list[str]:
+    """Format every inbox entry (T-114) -- both processed and pending -- as a
+    Rich markup line, oldest-first, with the processed/pending split exactly
+    at ``cursor`` (index < cursor is processed, same split ``inbox.pending``
+    uses)."""
+    lines = []
+    for i, entry in enumerate(entries):
+        processed = i < cursor
+        state = "processed" if processed else "pending"
+        color = "dim" if processed else "bold yellow"
+        ts = (entry.get("ts") or "")[:19]
+        command = _esc_log(str(entry.get("command", _EM)))
+        summary = _esc_log(_summarize_inbox_args(entry.get("args") or {}))
+        lines.append(
+            f"[{color}]{state.upper():>9}[/{color}] [cyan]{ts}[/cyan] "
+            f"{command}  [dim]{summary}[/dim]"
+        )
+    return lines
+
+
 def _esc_log(s: str) -> str:
     """Escape Rich markup chars in user/agent generated content."""
     return s.replace("\\", "\\\\").replace("[", "\\[")
