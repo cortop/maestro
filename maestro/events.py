@@ -70,6 +70,14 @@ AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, 
                                          # `implementing -> awaiting-ci` (see ops._refuse_if_qa_failing);
                                          # a "standards" verdict is advisory and recorded only.
 
+# Post-QA notification (T-115): the dispatcher's own record that it fired the
+# config-referenced `post_qa_skill` for one QA pass -- appended FIRST, keyed by
+# a step-id folding in a fingerprint of that pass's QA verdicts (dispatcher.
+# _post_qa_tree_key), so the append itself is the idempotency reservation: a
+# re-sweep after an already-recorded fire is a duplicate-step_id no-op, never a
+# second spawn (see dispatcher.sync_post_qa_skill).
+POST_QA_SKILL_SPAWNED = "PostQaSkillSpawned"  # {skill, tree_key}
+
 # Research
 RESEARCH_PROPOSED = "ResearchProposed"  # {proposal_path, alternatives}  not side-effecting; file write is content-idempotent
 
