@@ -149,12 +149,13 @@ def test_resolve_token_env_empty_fails_closed(monkeypatch):
 def test_resolve_gh_account_shells_gh_auth_token():
     calls = []
     def fake_run(cmd, **kwargs):
-        calls.append(cmd)
+        calls.append((cmd, kwargs))
         return subprocess.CompletedProcess(cmd, 0, stdout="tok-from-keychain\n", stderr="")
     r = credentials.resolve("cortop", None, run=fake_run)
     assert r.ok
     assert r.env == {"GH_TOKEN": "tok-from-keychain"}
-    assert calls == [["gh", "auth", "token", "--user", "cortop"]]
+    assert [cmd for cmd, _ in calls] == [["gh", "auth", "token", "--user", "cortop"]]
+    assert calls[0][1]["timeout"] == credentials.GH_TIMEOUT_S
 
 
 def test_resolve_gh_account_nonzero_exit_fails_closed():
@@ -500,11 +501,14 @@ def test_check_gh_credential_reachability_no_repos_no_network_call(cfg):
 def test_check_gh_credential_reachability_ok_when_reachable(cfg):
     cfg.repos = {"alpha": {"path": "/repo/alpha", "slug": "acme/alpha",
                            "gh_account": None, "token_env": None}}
+    calls = []
     def fake_run(cmd, **kwargs):
+        calls.append(kwargs)
         return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
     result = health.check_gh_credential_reachability(cfg, 1000, run=fake_run)
     assert result["status"] == "ok"
     assert result["unreachable"] == {}
+    assert calls[0]["timeout"] == credentials.GH_TIMEOUT_S
 
 
 def test_check_gh_credential_reachability_warns_when_unreachable(cfg):
