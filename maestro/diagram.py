@@ -90,17 +90,63 @@ def _dict_outcome_value(node: ast.Dict) -> ast.expr | None:
     return None
 
 
+def _decisions_aliases(tree: ast.Module) -> set[str]:
+    """Local names bound to ``decisions.setdefault(<key>, {})`` -- e.g.
+    ``_ask_park``'s ``entry = decisions.setdefault(key, {})``. An outcome
+    assigned through such an alias (``entry["outcome"] = ...``) is exactly as
+    real a gate as one written straight through ``decisions[key]["outcome"]``;
+    detecting the pattern generically (rather than hardcoding the name
+    ``entry``) keeps this from silently going blind again if a future helper
+    renames its local."""
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        call = node.value
+        if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "setdefault"
+                and isinstance(call.func.value, ast.Name) and call.func.value.id == "decisions"):
+            aliases.add(node.targets[0].id)
+    return aliases
+
+
+def _ask_park_outcomes(tree: ast.Module) -> list[tuple[int, str]]:
+    """(lineno, literal) for every ``_ask_park(..., outcome="<literal>", ...)``
+    call's ``outcome`` keyword. ``_ask_park`` (dispatcher.py) is the shared
+    ``_run_hook`` isolation wrapper the missing-acs/backend-interlock/
+    runner-* parks route their ``ops.ask`` call through (RB-3: `ops.ask` can
+    now raise on a permanent-qid recurrence -- T-2 -- and an uncaught raise
+    at one of these call sites would abort the whole sweep). Its ``outcome``
+    argument is the literal a plain ``decisions[key]["outcome"] = "<literal>"``
+    used to carry directly at each of these sites before they were routed
+    through the helper, so it's a gate outcome exactly like those still are."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_ask_park"):
+            continue
+        for kw in node.keywords:
+            if (kw.arg == "outcome" and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)):
+                found.append((kw.value.lineno, kw.value.value))
+    return found
+
+
 def _outcome_assignments(source: str) -> list[tuple[int, str]]:
     """(lineno, literal) for every ``decisions[<key>]`` outcome assignment in
-    `source` -- both the subscript form
-    (``decisions[<key>]["outcome"] = "<literal>"``) and the dict-literal form
-    (``decisions[<key>] = {"outcome": "<literal>", ...}``), the latter dropped
-    by this walk until T-93 widened it. Either form's value may be a plain
-    string or a conditional expression, in which case both arms are yielded
-    (see `_outcome_literals`). Sorted into source order -- ``ast.walk`` visits
-    nodes breadth-first, not in source order, so the sort is what actually
-    orders these, not incidental."""
+    `source` -- the subscript form (``decisions[<key>]["outcome"] =
+    "<literal>"``), that same form through a ``decisions.setdefault(...)``
+    alias (see `_decisions_aliases`), the dict-literal form
+    (``decisions[<key>] = {"outcome": "<literal>", ...}``, dropped by this
+    walk until T-93 widened it), and an ``_ask_park(...)`` call's ``outcome``
+    keyword (see `_ask_park_outcomes`). Any of these forms' value may be a
+    plain string or a conditional expression, in which case both arms are
+    yielded (see `_outcome_literals`). Sorted into source order -- ``ast.walk``
+    visits nodes breadth-first, not in source order, so the sort is what
+    actually orders these, not incidental."""
     tree = ast.parse(source)
+    aliases = _decisions_aliases(tree)
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -115,6 +161,10 @@ def _outcome_assignments(source: str) -> list[tuple[int, str]]:
                 and target.value.value.id == "decisions"):
             # decisions[<key>]["outcome"] = <value>
             value_expr = node.value
+        elif (isinstance(target.slice, ast.Constant) and target.slice.value == "outcome"
+                and isinstance(target.value, ast.Name) and target.value.id in aliases):
+            # <alias>["outcome"] = <value>, where <alias> = decisions.setdefault(...)
+            value_expr = node.value
         elif (isinstance(target.value, ast.Name) and target.value.id == "decisions"
                 and isinstance(node.value, ast.Dict)):
             # decisions[<key>] = {"outcome": <value>, ...}
@@ -124,6 +174,7 @@ def _outcome_assignments(source: str) -> list[tuple[int, str]]:
         if value_expr is None:
             continue
         found.extend(_outcome_literals(value_expr))
+    found.extend(_ask_park_outcomes(tree))
     found.sort(key=lambda pair: pair[0])
     return found
 

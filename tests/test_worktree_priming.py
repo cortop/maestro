@@ -93,22 +93,63 @@ def test_ensure_adopts_existing_branch(home, tmp_path):
     assert branch == "maestro/G-2"
 
 
-def test_ensure_refuses_to_adopt_stale_branch_without_prior_implementing_history(home, tmp_path, capsys):
-    """T-44, reproducing the 2026-08-09 shape end-to-end: a pre-existing
-    `maestro/<KEY>` branch left behind by an EARLIER incarnation of this key,
-    forked from a base that has since moved on -- and this ticket's own event
-    log has no prior `implementing` phase, so this run has never touched that
-    branch. The adopt fallback must refuse (MaestroError, no event appended,
-    non-zero exit, the branch named and archive/rename suggested) rather than
-    silently binding this run to a stranger's history."""
+def test_ensure_auto_prunes_orphaned_empty_branch_and_creates(home, tmp_path):
+    """T-2, 2026-09-09: a pre-existing `maestro/<KEY>` branch left behind by an
+    EARLIER incarnation of this key, forked from a base that has since moved
+    on -- but carrying ZERO commits ahead of the current `origin/<base>`, so
+    there is nothing a human would recognize as work to lose. Unlike the
+    real-commits case below, this must be auto-pruned and the create retried,
+    not refused -- before this fix, exactly this shape stranded a real ticket
+    in a `triaging <-> awaiting-human` loop forever until a human manually
+    renamed the branch."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
     cfg = _write_config(home, repo)
     _seed_spec(home, "R-1")
 
     # A branch already exists for this key -- left over from an earlier
     # incarnation -- forked from a base commit that origin has since moved
-    # past.
+    # past, but never advanced beyond it.
     _git("branch", "maestro/R-1", cwd=repo)
+    (repo / "README.md").write_text("main moved on\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "main moved on", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    assert event_log.read(home, "R-1") == []  # no prior implementing history
+
+    result = ops.worktree_ensure(cfg, "R-1")
+    assert result["created"] is True
+
+    wt = store.worktree_path(home, "R-1")
+    assert wt.is_dir()
+    log = subprocess.run(["git", "-C", str(wt), "log", "--oneline", "origin/main"],
+                         capture_output=True, text=True, check=True).stdout
+    assert "main moved on" in log  # branched off the CURRENT origin/main, not the stale tip
+
+
+def test_ensure_refuses_to_adopt_stale_branch_with_real_commits_and_no_prior_implementing_history(
+        home, tmp_path, capsys):
+    """T-44, reproducing the 2026-08-09 shape end-to-end: a pre-existing
+    `maestro/<KEY>` branch left behind by an EARLIER incarnation of this key,
+    carrying its OWN real commit ahead of a base that has since moved on --
+    and this ticket's own event log has no prior `implementing` phase, so this
+    run has never touched that branch. Unlike the empty-branch case above,
+    there IS something to lose here, so the adopt fallback must still refuse
+    (MaestroError, no event appended, non-zero exit, the branch named and
+    archive/rename suggested) rather than silently binding this run to a
+    stranger's history."""
+    origin, repo = _make_origin_and_repo(tmp_path, name="target")
+    cfg = _write_config(home, repo)
+    _seed_spec(home, "R-1")
+
+    # A branch already exists for this key -- left over from an earlier
+    # incarnation -- with a real commit of its own, forked from a base commit
+    # that origin has since moved past.
+    _git("checkout", "-b", "maestro/R-1", cwd=repo)
+    (repo / "stranger.txt").write_text("someone else's work\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "stranger's own commit", cwd=repo)
+    _git("checkout", "main", cwd=repo)
     (repo / "README.md").write_text("main moved on\n", encoding="utf-8")
     _git("add", "-A", cwd=repo)
     _git("commit", "-q", "-m", "main moved on", cwd=repo)
@@ -125,6 +166,10 @@ def test_ensure_refuses_to_adopt_stale_branch_without_prior_implementing_history
 
     assert not store.worktree_path(home, "R-1").exists()
     assert event_log.read(home, "R-1") == []
+    # The stranger's branch and its commit must survive untouched.
+    branches = subprocess.run(["git", "-C", str(repo), "branch", "--list", "maestro/R-1"],
+                              capture_output=True, text=True, check=True).stdout
+    assert "maestro/R-1" in branches
 
 
 def test_ensure_is_noop_when_worktree_already_exists(home, tmp_path):

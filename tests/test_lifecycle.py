@@ -1,4 +1,6 @@
 """End-to-end-ish: a ticket walks the lifecycle, and crash-safety holds."""
+import pytest
+
 from maestro import dispatcher as disp
 from maestro import event_log, inbox, ops, projection, snapshot as snap_mod, store
 from maestro.statemachine import Phase
@@ -31,6 +33,36 @@ def test_ask_then_answer_flow(cfg):
     inbox.ack(home, "T-1")
     assert snap_mod.load(home, "T-1").phase == Phase.READY.value
     assert not inbox.has_pending(home, "T-1")
+
+
+def test_ask_refuses_to_reuse_a_resolved_qid(cfg):
+    """T-2, 2026-09-09: once a qid has been asked and answered, reusing it
+    would silently no-op the QuestionAsked append (event_log's step_id dedup)
+    yet still flip the ticket to awaiting-human with nothing newly open --
+    exactly the shape that stranded a real ticket in a `triaging <->
+    awaiting-human` loop forever. `ask` must raise instead."""
+    home = cfg.home
+    _create(cfg, "T-1")
+    ops.ask(cfg, "T-1", "Can I pick this up?", qid="q1")
+    inbox.append_command(home, "T-1", "ans", {"text": "yes", "qid": "q1"})
+    ops.fold_inbox(cfg, "T-1")
+    assert snap_mod.load(home, "T-1").question_open is False
+
+    with pytest.raises(store.MaestroError, match="q1"):
+        ops.ask(cfg, "T-1", "Can I pick this up again?", qid="q1")
+
+
+def test_ask_round_refuses_to_reuse_a_resolved_qid(cfg):
+    home = cfg.home
+    _create(cfg, "T-1")
+    ops.ask_round(cfg, "T-1", [("Q1?", None, "q1"), ("Q2?", None, "q2")])
+    inbox.append_command(home, "T-1", "ans", {"text": "a1", "qid": "q1"})
+    inbox.append_command(home, "T-1", "ans", {"text": "a2", "qid": "q2"})
+    ops.fold_inbox(cfg, "T-1")
+    assert snap_mod.load(home, "T-1").question_open is False
+
+    with pytest.raises(store.MaestroError, match="q1"):
+        ops.ask_round(cfg, "T-1", [("Q1 again?", None, "q1"), ("Q3?", None, "q3")])
 
 
 def test_crash_before_ack_is_safe(cfg):

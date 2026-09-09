@@ -296,6 +296,43 @@ def test_editor_seeded_flow_warns_when_the_ac_section_is_left_untouched(monkeypa
     assert "no acceptance criteria" in capsys.readouterr().err
 
 
+def test_dispatch_isolates_ask_park_failure_when_qid_already_resolved(home, cfg):
+    """T-2, 2026-09-09: once `missing-acs-<key>` has been asked and answered,
+    the condition recurring later (spec still/again AC-less) must not
+    silently no-op the park or crash the whole sweep -- `ops.ask` now raises
+    on a resolved-qid reuse (`ops._resolved_qids`), and `_ask_park` isolates
+    that raise via `_run_hook` so it surfaces as `ask_failed` for just this
+    key, leaving every other due ticket in the same sweep unaffected."""
+    _seed(home, "T-1", phase=Phase.READY, ac_body=BARE_DASH_AC)
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+    assert snap_mod.load(home, "T-1").phase == Phase.AWAITING_HUMAN.value
+
+    rc = cli_mod.main(["--home", str(home), "ans", "T-1", "done",
+                       "--qid", "missing-acs-T-1", "--no-nudge"])
+    assert rc == 0
+    ops.fold_inbox(cfg, "T-1")
+    assert snap_mod.load(home, "T-1").question_open is False
+    inbox.ack(home, "T-1")
+    # Force the condition to recur without ever fixing the spec -- stands in
+    # for a human editing the ACs back out later, or any other regression
+    # that re-triggers the same permanent-qid park a second time.
+    ops.set_phase(cfg, "T-1", Phase.READY, reason="test: force missing-acs recurrence")
+
+    _seed(home, "T-2", phase=Phase.READY, ac_body=REAL_AC)
+    events_before = event_log.read(home, "T-1")
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=1001)
+
+    assert "T-2" in report.spawned
+    assert "T-1" not in report.spawned
+    assert event_log.read(home, "T-1") == events_before  # the refused ask appended nothing
+
+    decisions = disp.key_decisions(home, "T-1", tail=1)
+    assert decisions[-1]["outcome"] == "ask_failed"
+    assert decisions[-1]["hook_errors"]
+    assert any("missing-acs-T-1" in msg for msg in decisions[-1]["hook_errors"].values())
+
+
 # --- AC8: a sweep over a home whose specs all carry ACs is unaffected ------
 
 def test_dispatch_never_intercepts_a_ticket_whose_spec_has_real_acs(home, cfg):
