@@ -1075,7 +1075,7 @@ def check_gh_credential_reachability(cfg: Config, now: float, *, run=None) -> di
             env.update(cred.env)
         try:
             p = run(["gh", "repo", "view", slug, "--json", "name"],
-                   capture_output=True, text=True, timeout=15, env=env)
+                   capture_output=True, text=True, timeout=credentials.GH_TIMEOUT_S, env=env)
         except (OSError, subprocess.TimeoutExpired) as e:
             unreachable[name] = f"{type(e).__name__}: {e}"
             continue

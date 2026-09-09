@@ -33,6 +33,13 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+# Shared by every `gh` subprocess call in this package (here and in
+# `health.check_gh_credential_reachability`) -- a slow-but-fine GitHub response
+# shouldn't read as an unresolvable credential or an unreachable repo. 45s is
+# 3x the original 15s (chosen empirically too tight for real-world latency),
+# not a config knob.
+GH_TIMEOUT_S = 45
+
 
 @dataclass
 class CredentialResolution:
@@ -79,7 +86,7 @@ def resolve(gh_account: str | None, token_env: str | None, *,
     if gh_account:
         try:
             p = run(["gh", "auth", "token", "--user", gh_account],
-                   capture_output=True, text=True, timeout=15)
+                   capture_output=True, text=True, timeout=GH_TIMEOUT_S)
         except (OSError, subprocess.TimeoutExpired) as e:
             return CredentialResolution(ok=False, label=label,
                                         error=f"gh auth token --user {gh_account} failed: "
