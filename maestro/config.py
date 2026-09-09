@@ -162,6 +162,22 @@ class Config:
     # no board-wide override; a repo table with no `language` of its own
     # still resolves to "python" exactly as before this field existed.
     language: str | None = None
+    # T-115: board-wide DEFAULT slash-command skill to fire, exactly once per
+    # QA pass, at the `qa -> awaiting-ci` trigger point -- once a ticket in
+    # `awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on
+    # EVERY current-hash AC (`Snapshot.qa_all_passing`, the same predicate
+    # T-86's undraft step already uses). A `[repos.<name>] post_qa_skill`
+    # override wins, same "table wins, unset inherits" precedence as
+    # `test_command`/`language` above -- see `repos.RepoBinding.post_qa_skill`.
+    # None (default) fires nothing -- ships dark, byte-identical to before
+    # this knob existed. A set-but-malformed value (not a leading-`/`
+    # slash-command name) fails `config.load()` closed, same posture as
+    # `language`/`test_selector` (see `_validate_skill_name`). The spawned
+    # session is dispatcher-owned (`dispatcher.sync_post_qa_skill`), counted
+    # against `max_concurrency` like a reconciler spawn, and can never move
+    # the ticket's phase or block `awaiting-ci` -- it carries no maestro-verb
+    # `--allowedTools` grant.
+    post_qa_skill: str | None = None
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -318,7 +334,7 @@ _REPO_TABLE_KEYS = frozenset({
     # T-90: per-repo overrides of the board-wide [maestro] defaults above --
     # unset inherits, same resolution shape as `prime`/`base_drift_policy`.
     "prime_timeout", "worktree_timeout",
-    "language", "test_selector",
+    "language", "test_selector", "post_qa_skill",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -374,6 +390,28 @@ _RUNNER_PI_KEYS = frozenset({
     "provider", "base_url", "api", "compat", "models", "api_key", "version",
     "concurrency", "phases", "headers",
 })
+
+
+# T-115: the shape a `post_qa_skill` value must have -- a leading `/`, then a
+# letter, then letters/digits/hyphens/underscores, e.g. "/my-pr-polish". Same
+# family of name every `.claude/commands/<name>.md` / `.opencode/command/
+# <name>.md` skill file resolves from (`dispatcher.resolve_reconcile_command`/
+# `skills_install`'s own `maestro-reconcile-<phase>` filenames), just not
+# restricted to that one reserved prefix -- this is a human's own skill.
+_SKILL_NAME_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def _validate_skill_name(value, *, where: str) -> None:
+    """T-115: fail `config.load()` closed on a malformed `post_qa_skill` value --
+    same posture as `language` (`testlang.SUPPORTED`) and `test_selector`
+    (`testlang.validate_selector_template`) above: a human typo in a skill
+    name should be a loud, immediate config error, never a silently-never-
+    firing knob discovered only after a QA pass quietly didn't spawn anything."""
+    if not isinstance(value, str) or not _SKILL_NAME_RE.match(value):
+        raise store.MaestroError(
+            f"config.toml: {where} must be a slash-command name like "
+            f"\"/my-pr-polish\" (a leading '/', then a letter, then letters/"
+            f"digits/hyphens/underscores), got {value!r}")
 
 
 def config_path(home: Path) -> Path:
@@ -451,6 +489,12 @@ def load(home_arg: str | None = None) -> Config:
                 f"config.toml: [maestro] language must be one of "
                 f"{sorted(testlang.SUPPORTED)} (or unset), got {raw_board_language!r}")
         cfg.language = raw_board_language
+        # T-115: fail closed on a malformed board-wide post_qa_skill, same
+        # posture as language just above -- unset (None) is valid.
+        raw_post_qa_skill = m.get("post_qa_skill", cfg.post_qa_skill) or None
+        if raw_post_qa_skill is not None:
+            _validate_skill_name(raw_post_qa_skill, where="[maestro] post_qa_skill")
+        cfg.post_qa_skill = raw_post_qa_skill
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.opencode_user_commands_dir = m.get(
             "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
@@ -504,6 +548,12 @@ def load(home_arg: str | None = None) -> Config:
                         testlang.validate_selector_template(raw_test_selector)
                     except ValueError as exc:
                         raise store.MaestroError(f"config.toml: [repos.{name}] {exc}") from exc
+                # T-115: fail closed on a malformed per-repo post_qa_skill too --
+                # unset (None) is valid (RepoBinding.post_qa_skill's own
+                # None-means-inherit-the-board-wide-default fallback).
+                raw_post_qa_skill = table.get("post_qa_skill") or None
+                if raw_post_qa_skill is not None:
+                    _validate_skill_name(raw_post_qa_skill, where=f"[repos.{name}] post_qa_skill")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -543,6 +593,10 @@ def load(home_arg: str | None = None) -> Config:
                     # (unset) means the language profile's own format_selector (see
                     # repos.RepoBinding.test_selector).
                     "test_selector": raw_test_selector,
+                    # T-115: this repo's post_qa_skill override -- validated above; None
+                    # (unset) inherits cfg.post_qa_skill (see
+                    # repos.RepoBinding.post_qa_skill).
+                    "post_qa_skill": raw_post_qa_skill,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -807,6 +861,15 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # unless every current-hash AC has a PASSING spec-axis QA
                                   # verdict, not merely no failing one -- set false to revert to
                                   # pre-T-85's weaker check
+# post_qa_skill = "/my-pr-polish"  # T-115: board-wide DEFAULT skill to fire, exactly once per QA
+                                  # pass, at the qa -> awaiting-ci trigger point (once every
+                                  # current-hash AC carries a passing spec-axis QA verdict) --
+                                  # a slash-command name resolving to an installed skill file
+                                  # (the human's own -- rewrite the PR description, post a
+                                  # summary comment, notify a channel; that's the skill's
+                                  # business, not maestro's). [repos.<name>] post_qa_skill below
+                                  # overrides this per repo. Default unset -- fires nothing
+                                  # (ships dark). Malformed value fails config load closed.
 # compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
                                   # (0 disables; a manual `maestro compact <key>` always works)
 # compact_min_events = 200        # skip compacting a key until its folded log reaches this size
@@ -935,6 +998,9 @@ implementer = "claude_skill"
                                      # above -- unset inherits the board-wide default. Bounds
                                      # ONLY `git worktree add`/adopt; has no effect on
                                      # prime_timeout above.
+# post_qa_skill = "/my-pr-polish"   # T-115: this repo's override of [maestro] post_qa_skill
+                                     # above -- unset inherits the board-wide default. See that
+                                     # key's own comment for the trigger point and shape.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see

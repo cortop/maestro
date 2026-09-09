@@ -94,6 +94,11 @@ class RepoBinding:
     # SELECTOR_PLACEHOLDERS`, validated fail-closed at `config.load()` the
     # same way `language` is -- see `testlang.validate_selector_template`.
     test_selector: str | None = None
+    # T-115: this repo's post_qa_skill override, already resolved against the
+    # board-wide [maestro] post_qa_skill default -- see resolve(), the sole
+    # reader `dispatcher.sync_post_qa_skill` goes through. None means the
+    # post-QA notification hook is fully disabled for this key (ships dark).
+    post_qa_skill: str | None = None
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -133,6 +138,9 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         # T-98: no board-wide fallback -- unset means the language profile's
         # own format_selector (see RepoBinding.test_selector).
         test_selector=table.get("test_selector") or None,
+        # T-115: same "table wins, unset inherits" precedence as test_command
+        # above.
+        post_qa_skill=table.get("post_qa_skill") or cfg.post_qa_skill,
     )
 
 
@@ -170,6 +178,8 @@ def implicit_default(cfg: Config) -> RepoBinding:
         worktree_timeout=cfg.worktree_timeout,
         # T-96: same board-wide-default precedence as test_command above.
         language=cfg.language,
+        # T-115: same board-wide-default precedence as test_command above.
+        post_qa_skill=cfg.post_qa_skill,
     )
 
 

@@ -71,7 +71,7 @@ def test_config_load_parses_repos_tables(home):
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
         "prime_timeout": None, "worktree_timeout": None, "language": None,
-        "test_selector": None,
+        "test_selector": None, "post_qa_skill": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
@@ -80,7 +80,7 @@ def test_config_load_parses_repos_tables(home):
         "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
         "test_command": None,
         "prime_timeout": None, "worktree_timeout": None, "language": None,
-        "test_selector": None,
+        "test_selector": None, "post_qa_skill": None,
     }
 
 

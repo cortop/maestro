@@ -1711,6 +1711,124 @@ def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str |
         snap_mod.rebuild(cfg.home, key)
 
 
+def _post_qa_tree_key(snap) -> str:
+    """T-115: a fingerprint of *snap*'s current spec-axis QA verdicts, used by
+    `sync_post_qa_skill` as its idempotency key -- NOT the PR's head sha (a
+    fresh push doesn't necessarily mean a fresh independent QA pass happened;
+    see that function's docstring for why observed_seq/head-sha are the wrong
+    axis here).
+
+    Each verdict's `ac_hash` key is the AC's own TEXT, unchanged round to
+    round (only the code changes on a fix round) -- so this hashes each
+    entry's `evidence` alongside its hash and verdict: a genuinely new
+    independent QA pass records fresh `AcQaVerdict` events with new evidence
+    text (referencing the new diff), producing a different fingerprint even
+    though the `ac_hash` keys themselves are identical. A conflict-only or
+    review-feedback pass that re-enters `awaiting-ci` WITHOUT a fresh QA
+    re-check leaves `qa_verdicts` byte-identical (never reset by a phase
+    change -- see `Snapshot.qa_verdicts`), so this yields the exact same
+    fingerprint and `sync_post_qa_skill`'s step-id dedup makes that a pure
+    no-op, never a second fire -- the T-115 spec's "NOT ... PR creation in
+    implementing" and "a second QA pass after a CHANGES_REQUESTED round-trip
+    never double-fires" requirements fall out of this for free.
+    """
+    parts = sorted(
+        f"{h}:{v.get('verdict')}:{v.get('evidence', '')}"
+        for h, v in snap.qa_verdicts.items()
+    )
+    return content_hash("|".join(parts))
+
+
+def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float) -> dict:
+    """T-115: fires the config-referenced `post_qa_skill` (a human-owned slash-
+    command skill -- rewrite the PR description, post a summary comment,
+    notify a channel; that's the skill's business, not maestro's) exactly once
+    per QA pass, at the trigger point named in the ticket's spec: the
+    `qa -> awaiting-ci` transition, i.e. once a ticket carries a passing
+    spec-axis QA verdict on EVERY current-hash AC (`Snapshot.qa_all_passing`,
+    the same predicate T-86's `_maybe_undraft` already uses).
+
+    Level-triggered, not edge-triggered, matching the dispatcher's own
+    philosophy (see module docstring): this checks CURRENT snapshot state
+    every sweep rather than diffing phase history for the literal `qa ->
+    awaiting-ci` edge, so a ticket already sitting in `awaiting-ci`/
+    `in-review` the first sweep after this knob is set fires once too --
+    idempotency is entirely carried by `_post_qa_tree_key`'s fingerprint, not
+    by which edge was observed.
+
+    Ships dark (T-115 AC4): a key whose resolved repo binding carries no
+    `post_qa_skill` is skipped before any event is ever appended -- byte-
+    identical to before this knob existed, no event, no spawn.
+
+    Idempotent per (key, tree fingerprint), append-first: the
+    `PostQaSkillSpawned` event is appended BEFORE the spawn, keyed by a
+    step-id folding in `_post_qa_tree_key` -- the same "the append is the
+    reservation" idiom `_observe_ci`'s `check_key` uses. Only a successful
+    (non-duplicate) append actually calls `sessions.spawn`, so a re-sweep
+    after an already-recorded fire is one cheap event-log read, never a
+    second `claude -p` launch.
+
+    Counted against `max_concurrency` (spec Notes) via the same
+    `sessions.spawn` call a reconciler spawn uses -- `DryRunSessions` can
+    prove it in tests exactly like a real reconciler spawn -- but this is its
+    OWN small capacity check against `sessions.list_active()`, not routed
+    through the main due/claim/credential/runner-preflight spawn loop below:
+    a post-QA notification isn't a phase reconciler (the ticket isn't even
+    `due` by that loop's own definition -- it's sleeping in `awaiting-ci`/
+    `in-review`), and it must never be capable of moving the ticket's phase
+    or blocking `awaiting-ci` (spec Notes) -- it gets no maestro-verb
+    `--allowedTools` grant, `disallowed_tools`, or credential/runner
+    resolution the way a real reconciler spawn does. Spawning under the
+    ticket's OWN key means it still occupies that key's claim (`sessions.
+    list_active()`), so a real reconciler can't race it into the same
+    worktree while it runs.
+
+    `sessions.list_active()` is fetched LAZILY, only once a real candidate
+    (unset `post_qa_skill` skipped, wrong phase skipped, not-yet-all-passing
+    skipped) is actually found -- a real `SessionManager` backend's
+    `list_active()` is a live probe (e.g. a `ps` call; see `claims.
+    active_keys`), and a board with this knob unset (the common case, ships
+    dark) must add ZERO extra probes to a sweep that already takes one in the
+    main spawn loop below.
+    """
+    from . import repos as repos_mod
+
+    home = cfg.home
+    fired: list[str] = []
+    active: set[str] | None = None
+    for key in list_keys(home):
+        snap = snap_mod.load(home, key)
+        if Phase(snap.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
+            continue
+        binding = repos_mod.resolve(cfg, home, key)
+        skill = binding.post_qa_skill
+        if not skill:
+            continue
+        spec_path = store.spec_path(home, key)
+        if not spec_path.exists():
+            continue
+        if not snap.qa_all_passing(spec_path.read_text(encoding="utf-8")):
+            continue
+        if active is None:
+            active = sessions.list_active()
+        if key in active:
+            continue
+        if len(active) >= cfg.max_concurrency:
+            break  # fleet at capacity this sweep -- no reservation burned, retried next sweep
+        tree_key = _post_qa_tree_key(snap)
+        ev = event_log.append(home, key, E.POST_QA_SKILL_SPAWNED,
+                              {"skill": skill, "tree_key": tree_key},
+                              actor="dispatcher", step_id=f"postqa-{key}-{tree_key}")
+        if ev is None:
+            continue  # already fired for this exact QA-pass fingerprint
+        cwd = _worker_cwd(cfg, key)
+        model, effort = _resolve_model_effort(cfg, key)
+        sessions.spawn(key, skill, cwd, model=model, effort=effort)
+        active = sessions.list_active()
+        fired.append(key)
+    return {"fired": fired}
+
+
 # RB-14: board-wide cap on IN-FLIGHT dispatcher-owned test-run subprocesses --
 # mirrors `_RUNNER_DEFAULT_CONCURRENCY`'s shape (a small, explicit, documented
 # ceiling below), but is its own knob: a test run costs CPU/IO, never a token,
@@ -2681,6 +2799,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # RB-14: same sleeping-phase-observation shape as sync_vcs just above,
         # applied to `verifying`/`cfg.test_command` instead of a PR.
         _run_hook("sync_test_runs", hook_errors, sync_test_runs, cfg, now, default={})
+        # T-115: fires each key's config-referenced post_qa_skill (if any) once
+        # per QA pass -- see sync_post_qa_skill's own docstring for why this
+        # needs `sessions` (a real spawn, unlike every other hook above).
+        _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,
+                  default={})
         _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
         _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
         _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)

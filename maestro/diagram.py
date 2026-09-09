@@ -205,6 +205,36 @@ _BRAKES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# T-115: dispatcher-owned one-shot hooks that act on a SLEEPING ticket's
+# current state (never a `decisions[key]` entry from the per-key due/spawn
+# walk above -- the ticket isn't even `due` by that loop's own definition).
+# Documented the same way the sweep-level brakes are: (name, marker,
+# description), `marker` matched as a literal substring of its defining
+# source line so a rename in dispatcher.py fails this loudly instead of
+# silently going stale.
+_HOOKS: tuple[tuple[str, str, str], ...] = (
+    ("post_qa_skill", "def sync_post_qa_skill(",
+     "fires the config-referenced `[maestro] post_qa_skill` / `[repos.<name>] "
+     "post_qa_skill` slash-command skill exactly once per ticket per QA pass, "
+     "at the `qa -> awaiting-ci` trigger point -- once a ticket in "
+     "`awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on "
+     "every current-hash AC (`Snapshot.qa_all_passing`). Idempotent per "
+     "(key, QA-verdict fingerprint) via a `PostQaSkillSpawned` event appended "
+     "before the spawn. Unset (default) fires nothing -- ships dark."),
+)
+
+
+def _hook_source_lines(source: str) -> list[tuple[str, int, str]]:
+    lines = source.splitlines()
+    found = []
+    for name, marker, desc in _HOOKS:
+        lineno = next((i for i, line in enumerate(lines, start=1) if marker in line), None)
+        if lineno is None:
+            raise ValueError(f"dispatch hook marker not found in dispatcher.py: {marker!r}")
+        found.append((name, lineno, desc))
+    return found
+
+
 def _brake_source_lines(source: str) -> list[tuple[str, int, str]]:
     """(name, lineno, description) for each of `_BRAKES`, located by finding
     its marker as a plain substring of a source line -- raises if a marker
@@ -252,6 +282,15 @@ def render_dispatch_gates() -> str:
               "spawns this sweep.",
               "", "| brake | source | what it guards |", "|---|---|---|"]
     for name, lineno, desc in brakes:
+        lines.append(f"| {name} | `maestro/dispatcher.py:{lineno}` | {desc} |")
+    hooks = _hook_source_lines(source)
+    lines += ["", "## Dispatcher hooks", "",
+              "Dispatcher-owned, one-shot hooks that act on a ticket's CURRENT "
+              "state directly -- never a `decisions[key][\"outcome\"]` entry from "
+              "the per-key due/spawn walk above, since the ticket isn't `due` by "
+              "that loop's own definition.",
+              "", "| hook | source | what it does |", "|---|---|---|"]
+    for name, lineno, desc in hooks:
         lines.append(f"| {name} | `maestro/dispatcher.py:{lineno}` | {desc} |")
     lines.append("")
     return "\n".join(lines)
