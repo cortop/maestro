@@ -2436,6 +2436,43 @@ def _run_hook(name: str, hook_errors: dict, fn, *args, default=None, **kwargs):
         return default
 
 
+def _ask_park(cfg: Config, key: str, text: str, *, qid: str, actor: str,
+              hook_errors: dict, decisions: dict, outcome: str,
+              reason: str | None = None) -> None:
+    """Park *key* in awaiting-human with a stable, permanent-by-design qid --
+    the `missing-acs-<key>`/`backend-interlock-<key>`/`runner-*-<key>-...`
+    family of preflight parks below, meant to ask exactly once for as long as
+    the underlying condition holds. Only sets `decisions[key]["outcome"]`
+    (and `["reason"]` only if *reason* is given) -- never replaces the whole
+    entry, so a `reason` an earlier gate already recorded for this key (e.g.
+    the due-check's own) survives untouched, same as before this helper
+    existed.
+
+    Routed through `_run_hook` (isolated the same as every other per-sweep
+    hook, RB-3) because `ops.ask` now refuses a qid that was already asked
+    AND resolved earlier in this same ticket's lifetime (`ops._resolved_qids`)
+    -- e.g. the condition got fixed once, then recurred later. Before that
+    guard existed this just silently no-op'd and stranded the ticket in an
+    `awaiting-human` <-> `triaging` loop (T-2, 2026-09-09); the guard fixes
+    that loop by raising instead, but an uncaught raise here would abort the
+    ENTIRE sweep for every other due key -- these call sites' loops have no
+    isolation of their own the way `sync_test_runs` does. On refusal, the
+    entry is set to `"ask_failed"` so the key is left for a human to sort out
+    (rename the qid, or resolve the recurrence somehow) rather than spawning
+    or silently doing nothing.
+    """
+    entry = decisions.setdefault(key, {})
+    entry["outcome"] = outcome
+    if reason is not None:
+        entry["reason"] = reason
+    from . import ops
+    hook_name = f"ask:{key}:{qid}"
+    _run_hook(hook_name, hook_errors, ops.ask, cfg, key, text, qid=qid, actor=actor)
+    if hook_name in hook_errors:
+        entry["outcome"] = "ask_failed"
+        entry["reason"] = hook_errors[hook_name]
+
+
 # --- per-sweep decision ledger (`derived/dispatch.jsonl` + `maestro why`) ----
 
 def dispatch_ledger_path(home: Path) -> Path:
@@ -2751,18 +2788,21 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
             # inbox and re-route, exactly like every other `ops.ask` park.
             if (res.reason not in _MISSING_ACS_EXEMPT_DUE_REASONS
                     and _missing_acs(home, key)):
-                decisions[key] = {
-                    "outcome": "would_park_missing_acs" if dry_run else "missing_acs",
-                    "reason": "spec has no acceptance criteria",
-                }
-                if not dry_run:
-                    from . import ops
-                    ops.ask(cfg, key,
-                            f"{key}: spec.md has no acceptance criteria (its "
-                            "'## Acceptance criteria' section parses to zero non-blank "
-                            "'- [ ] ...' lines) -- add at least one, then answer this "
-                            "question to unpark it",
-                            qid=f"missing-acs-{key}", actor="dispatcher")
+                if dry_run:
+                    decisions[key] = {
+                        "outcome": "would_park_missing_acs",
+                        "reason": "spec has no acceptance criteria",
+                    }
+                else:
+                    _ask_park(cfg, key,
+                              f"{key}: spec.md has no acceptance criteria (its "
+                              "'## Acceptance criteria' section parses to zero non-blank "
+                              "'- [ ] ...' lines) -- add at least one, then answer this "
+                              "question to unpark it",
+                              qid=f"missing-acs-{key}", actor="dispatcher",
+                              hook_errors=hook_errors, decisions=decisions,
+                              outcome="missing_acs",
+                              reason="spec has no acceptance criteria")
                 continue
             if key in active:
                 claimed.append(key)        # per-key serialization: one reconciler per key
@@ -2991,10 +3031,9 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                         # once (idempotent qid) -- instead of respawning it into the same
                         # refusal every sweep. No attempts-ledger spend either, same as
                         # the credential_unresolvable branch below.
-                        decisions[key]["outcome"] = "backend_interlocked"
-                        from . import ops
-                        ops.ask(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
-                                actor="dispatcher")
+                        _ask_park(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
+                                  actor="dispatcher", hook_errors=hook_errors,
+                                  decisions=decisions, outcome="backend_interlocked")
                         continue
                     cred = resolve_credential(binding, credential_cache)
                     if not cred.ok:
@@ -3017,13 +3056,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                         # no attempts-ledger slot: this is a config problem for a human
                         # to fix (register the runner, or fix the spec's `runner:` line),
                         # not a no-progress spawn attempt.
-                        decisions[key]["outcome"] = "runner_unregistered"
-                        from . import ops
-                        ops.ask(cfg, key,
-                                f"spec names runner {runner!r}, which has no registered "
-                                f"SessionManager (registered: {sorted(_REGISTERED_RUNNERS)}) -- "
-                                "fix the spec's `runner:` line or register the runner",
-                                qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher")
+                        _ask_park(cfg, key,
+                                  f"spec names runner {runner!r}, which has no registered "
+                                  f"SessionManager (registered: {sorted(_REGISTERED_RUNNERS)}) -- "
+                                  "fix the spec's `runner:` line or register the runner",
+                                  qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher",
+                                  hook_errors=hook_errors, decisions=decisions,
+                                  outcome="runner_unregistered")
                         continue
                     if runner != "claude":
                         # OC-2: fail-closed preflight for a registered non-claude
@@ -3051,14 +3090,14 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                         # awaiting-human for a human to flip `runner_enabled` or fix
                         # the spec's `runner:` line.
                         if runner not in cfg.runner_enabled:
-                            decisions[key]["outcome"] = "runner_disabled"
-                            from . import ops
-                            ops.ask(cfg, key,
-                                    f"runner {runner!r} is not enabled on this board "
-                                    f"(runner_enabled={sorted(cfg.runner_enabled)}) -- flip "
-                                    "the board config's `runner_enabled` or fix the spec's "
-                                    "`runner:` line",
-                                    qid=f"runner-disabled-{key}-{runner}", actor="dispatcher")
+                            _ask_park(cfg, key,
+                                      f"runner {runner!r} is not enabled on this board "
+                                      f"(runner_enabled={sorted(cfg.runner_enabled)}) -- flip "
+                                      "the board config's `runner_enabled` or fix the spec's "
+                                      "`runner:` line",
+                                      qid=f"runner-disabled-{key}-{runner}", actor="dispatcher",
+                                      hook_errors=hook_errors, decisions=decisions,
+                                      outcome="runner_disabled")
                             continue
                         probe_fn = runner_probe or _make_default_runner_probe(cfg)
                         if runner not in runner_probe_cache:
@@ -3081,14 +3120,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                             verdict, vreason = verdict_fn(
                                 probed["models"], probed.get("daemon_reason"), runner_model)
                         if verdict != "ok":
-                            decisions[key]["outcome"] = "runner_model_unavailable"
-                            from . import ops
-                            ops.ask(cfg, key,
-                                    f"runner {runner!r} model {runner_model!r} unavailable: "
-                                    f"{vreason} -- fix the spec's `runner_model:` line or "
-                                    "install/pull the model",
-                                    qid=f"runner-model-{key}-{runner}-{runner_model}",
-                                    actor="dispatcher")
+                            _ask_park(cfg, key,
+                                      f"runner {runner!r} model {runner_model!r} unavailable: "
+                                      f"{vreason} -- fix the spec's `runner_model:` line or "
+                                      "install/pull the model",
+                                      qid=f"runner-model-{key}-{runner}-{runner_model}",
+                                      actor="dispatcher", hook_errors=hook_errors,
+                                      decisions=decisions, outcome="runner_model_unavailable")
                             continue
                         # OC-4: per-runner concurrency cap -- still OC-2's own preflight
                         # (before `_allow_spawn`, no attempts-ledger spend), because the

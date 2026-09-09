@@ -644,13 +644,24 @@ def _cleanup_partial_worktree(repo: str, wt: Path, *, branch: str | None = None,
         shutil.rmtree(wt, ignore_errors=True)
     _run_recovery_git(["git", "-C", repo, "worktree", "prune"],
                       timeout=timeout, what="`git worktree prune`")
-    if branch and base:
-        ahead = _run_recovery_git(
-            ["git", "-C", repo, "rev-list", "--count", f"origin/{base}..{branch}"],
-            timeout=timeout, what=f"`git rev-list --count origin/{base}..{branch}`")
-        if ahead.returncode == 0 and ahead.stdout.strip() == "0":
-            _run_recovery_git(["git", "-C", repo, "branch", "-D", branch],
-                              timeout=timeout, what=f"`git branch -D {branch}`")
+    if branch and base and _is_empty_branch(repo, branch, base, timeout=timeout):
+        _run_recovery_git(["git", "-C", repo, "branch", "-D", branch],
+                          timeout=timeout, what=f"`git branch -D {branch}`")
+
+
+def _is_empty_branch(repo: str, branch: str, base: str, *, timeout: int) -> bool:
+    """True if *branch* exists locally with zero commits ahead of
+    ``origin/<base>`` -- indistinguishable from a branch `worktree add -b`
+    just created (fast) moments before being killed mid-checkout (slow), or
+    from a never-touched leftover of some earlier, never-run incarnation of
+    this key (T-44) -- either way, nothing this repo would lose by discarding
+    it. A branch WITH real commits ahead always returns False here, however
+    this is called: that's the genuine T-44 resume case (or a stranger's real
+    history), and only a human's explicit archive/rename may discard it."""
+    ahead = _run_recovery_git(
+        ["git", "-C", repo, "rev-list", "--count", f"origin/{base}..{branch}"],
+        timeout=timeout, what=f"`git rev-list --count origin/{base}..{branch}`")
+    return ahead.returncode == 0 and ahead.stdout.strip() == "0"
 
 
 def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch: str, base: str,
@@ -680,7 +691,20 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
     proof *this* run has been in `implementing` before -- and refuses
     (`store.MaestroError`, no event appended, non-zero exit) naming the
     branch and telling the operator to archive/rename it, rather than
-    adopting-and-hoping. On success (create or adopt), writes the completion
+    adopting-and-hoping.
+
+    Before even reaching that history gate, though, a same-named branch that
+    is empty (`_is_empty_branch`: zero commits ahead of `origin/<base>`) is
+    auto-pruned and the create retried once. There is no history to lose --
+    unlike the adopt fallback, this discards nothing a human would recognize
+    as work -- and this is precisely the shape a stale leftover from an
+    earlier, never-implemented incarnation of a reused key takes (T-2,
+    2026-09-09: `worktree ensure` refused forever on exactly this, looping the
+    ticket through `triaging`/`awaiting-human` until a human manually
+    archived the branch). Only once the branch carries real commits does this
+    fall through to the history-gated adopt-or-refuse path above.
+
+    On success (create, prune-then-create, or adopt), writes the completion
     witness (`_WORKTREE_COMPLETE_MARKER`, under *wt*'s own git dir) that
     `worktree_ensure` gates teardown on -- never before this point, so a
     crash/timeout anywhere above leaves no witness behind (T-81)."""
@@ -710,6 +734,10 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
                 f"legitimately takes longer.")
 
     created = _add([str(wt), "-b", branch, f"origin/{base}"], "create", prune_branch=True)
+    if created.returncode != 0 and _is_empty_branch(repo, branch, base, timeout=timeout):
+        _run_recovery_git(["git", "-C", repo, "branch", "-D", branch],
+                          timeout=timeout, what=f"`git branch -D {branch}`")
+        created = _add([str(wt), "-b", branch, f"origin/{base}"], "create", prune_branch=True)
     if created.returncode != 0:
         if not _has_prior_implementing_history(cfg, key):
             raise store.MaestroError(
@@ -1569,8 +1597,35 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
     return h
 
 
+def _resolved_qids(cfg: Config, key: str) -> set[str]:
+    """qids from a past `QuestionAsked` for *key* that are no longer open --
+    i.e. already asked AND resolved earlier in this ticket's lifetime.
+
+    `ask`/`ask_round` key their append's step-id as `ask-{key}-{qid}` for the
+    ticket's ENTIRE lifetime (`event_log.append` scans active log + archive),
+    so reusing one of these qids -- either an explicit one, or an auto-derived
+    `content_hash(text)` that happens to repeat -- silently no-ops the append
+    forever. Before this guard, the caller didn't check that, so it went on to
+    flip the ticket to `awaiting-human` anyway with nothing newly open; the
+    dispatcher's stranded-recovery safety net (`is_due`) then bounced it
+    straight back to `triaging`, which re-asked the same qid and looped
+    forever (T-2, 2026-09-09)."""
+    snap = snap_mod.load(cfg.home, key)
+    asked_ever = {
+        ev["payload"]["qid"] for ev in event_log.read(cfg.home, key)
+        if ev["type"] == E.QUESTION_ASKED
+    }
+    return asked_ever - set(snap.open_questions)
+
+
 def ask(cfg: Config, key: str, text: str, *, qid: str | None = None, actor: str = "reconciler") -> str:
     qid = qid or content_hash(text)
+    if qid in _resolved_qids(cfg, key):
+        raise store.MaestroError(
+            f"{key}: refusing to ask -- qid {qid!r} was already asked and resolved earlier "
+            f"in this ticket's lifetime; reusing it would silently no-op the append and still "
+            f"flip the ticket to awaiting-human with nothing newly open (see `_resolved_qids`). "
+            f"Pass a fresh, distinct --qid for this round.")
     _append(cfg, key, E.QUESTION_ASKED, {"qid": qid, "text": text},
             actor=actor, sid=f"ask-{key}-{qid}")
     # The QuestionAsked append just above is the fold this decision is made
@@ -1605,16 +1660,21 @@ def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str 
     """
     if not questions:
         raise store.MaestroError(f"{key}: ask_round needs at least one question")
-    qids = []
+    qids = [qid or content_hash(text) for text, _recommend, qid in questions]
+    stale = sorted(set(qids) & _resolved_qids(cfg, key))
+    if stale:
+        raise store.MaestroError(
+            f"{key}: refusing to ask -- qid(s) {stale} were already asked and resolved "
+            f"earlier in this ticket's lifetime; see `_resolved_qids` for why reusing one "
+            f"would silently no-op the append and still flip the ticket to awaiting-human "
+            f"with nothing newly open. Pass fresh, distinct qids for this round.")
     total = len(questions)
-    for i, (text, recommend, qid) in enumerate(questions, start=1):
-        qid = qid or content_hash(text)
+    for i, ((text, recommend, _qid), qid) in enumerate(zip(questions, qids), start=1):
         numbered = f"{i}/{total}. {text}" if total > 1 else text
         if recommend:
             numbered += f"\n   Recommended: {recommend}"
         _append(cfg, key, E.QUESTION_ASKED, {"qid": qid, "text": numbered},
                 actor=actor, sid=f"ask-{key}-{qid}")
-        qids.append(qid)
     # Same fencing rationale as `ask` above: reload after the last QuestionAsked
     # append and fence the phase transition against that observed tail.
     snap = snap_mod.load(cfg.home, key)
