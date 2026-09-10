@@ -466,7 +466,7 @@ def test_trigger_post_qa_skill_raises_on_pi_preflight_failure_with_reason(home, 
 
     sessions = RoutingSessions({"claude": DryRunSessions(), "pi": DryRunSessions()})
     with pytest.raises(store.MaestroError, match="daemon_unreachable"):
-        disp.trigger_post_qa_skill(cfg, sessions, "T-1")
+        disp.trigger_post_qa_skill(cfg, sessions, "T-1", runner_probe=bad_probe)
 
     assert not any(e["type"] == "PostQaSkillSpawned" for e in event_log.read(home, "T-1"))
 

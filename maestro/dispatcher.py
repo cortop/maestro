@@ -1888,7 +1888,9 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
     return {"fired": fired}
 
 
-def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str) -> dict:
+def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, *,
+                          runner_probe: Callable[[str], dict] | None = None,
+                          runner_verdict: Callable[[str], Callable] | None = None) -> dict:
     """T-117: [human] manual escape hatch for `post_qa_skill` (`maestro
     trigger-post-qa <key>` / the TUI's "Q" binding) -- fires it on demand,
     bypassing every gate `sync_post_qa_skill` applies before firing
@@ -1913,6 +1915,11 @@ def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str) -> di
     Raises `store.MaestroError` if the resolved binding has no `post_qa_skill`
     configured, or if the key already has an active session. Returns
     ``{"key", "skill", "runner", "pid"}`` on success.
+
+    `runner_probe`/`runner_verdict` are the same injectable overrides
+    `sync_post_qa_skill`/`dispatch` accept, threaded straight into
+    `_runner_preflight` -- unset (the CLI/TUI callers' case) falls back to the
+    real default probe/verdict factories, unchanged production behavior.
     """
     from . import repos as repos_mod
 
@@ -1927,7 +1934,8 @@ def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str) -> di
     runner, runner_model = _post_qa_skill_runner(cfg, binding)
     if runner != "claude":
         outcome, reason = _runner_preflight(
-            cfg, runner, runner_model, active, runner_probe=None, runner_verdict=None,
+            cfg, runner, runner_model, active,
+            runner_probe=runner_probe, runner_verdict=runner_verdict,
             state={}, home=home)
         if outcome != "ok":
             raise store.MaestroError(f"{key}: runner {runner!r} preflight failed ({outcome}): {reason}")
