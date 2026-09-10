@@ -606,6 +606,47 @@ def cmd_add_ac(args) -> int:
     return 0
 
 
+def cmd_trigger_post_qa(args) -> int:
+    """[human] manually fire `post_qa_skill` for one ticket right now (T-117),
+    bypassing the phase/QA-verdict/dedup gates `dispatcher.sync_post_qa_skill`
+    applies before firing automatically -- see `dispatcher.
+    trigger_post_qa_skill`'s own docstring for exactly which gates are
+    skipped and why. Human-only verb, mirroring `cmd_runner`'s shape: never
+    added to `_AGENT_TOOL_VERBS`."""
+    cfg = _cfg(args)
+    # RF-2/OC-4/PI-8: same RoutingSessions wiring as _nudge/cmd_dispatch above --
+    # every registered non-claude backend, so a manual trigger can route to
+    # whatever runner `post_qa_skill_runner` names.
+    sessions = RoutingSessions({
+        "claude": ClaudeCliSessions(
+            cfg.home, model=cfg.reconcile_model,
+            permission_mode=cfg.permission_mode,
+            base_allowed_tools=_reconciler_tool_grants(cfg),
+            capture_session_logs=cfg.capture_session_logs,
+            session_log_format=cfg.session_log_format,
+            max_session_turns=cfg.max_session_turns,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+        "opencode": OpencodeCliSessions(
+            cfg.home,
+            capture_session_logs=cfg.capture_session_logs,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+        "pi": PiCliSessions(
+            cfg.home,
+            capture_session_logs=cfg.capture_session_logs,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+    }, home=cfg.home)
+    try:
+        result = disp.trigger_post_qa_skill(cfg, sessions, args.key)
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
 # --- dispatcher / projection (launchd) --------------------------------------
 def _parse_key_filter(raw: list[str] | None) -> list[str] | None:
     """``--key`` is repeatable (``--key A --key B``) and each occurrence may
@@ -1427,6 +1468,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key")
     sp.add_argument("text", help="the acceptance-criterion text (may carry a trailing "
                                   "'(test: ...)'/'(check: ...)' annotation)")
+    sp = add("trigger-post-qa", cmd_trigger_post_qa,
+             "[human] manually fire this ticket's post_qa_skill now, bypassing its gates")
+    sp.add_argument("key")
     sp = add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
     sp.add_argument("--strict", action="store_true",
                     help="exit 1 when any check is not ok (default: only the runaway check gates exit code)")

@@ -99,6 +99,13 @@ class RepoBinding:
     # reader `dispatcher.sync_post_qa_skill` goes through. None means the
     # post-QA notification hook is fully disabled for this key (ships dark).
     post_qa_skill: str | None = None
+    # T-117: post_qa_skill's own runner/runner_model override, already resolved
+    # against the board-wide [maestro] defaults -- see resolve(). None means
+    # "claude" (post_qa_skill_runner) / cfg.runner_model (post_qa_skill_runner_model),
+    # same fallback shape `dispatcher.resolve_runner` gives a real reconciler
+    # spawn with no spec override.
+    post_qa_skill_runner: str | None = None
+    post_qa_skill_runner_model: str | None = None
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -141,6 +148,11 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         # T-115: same "table wins, unset inherits" precedence as test_command
         # above.
         post_qa_skill=table.get("post_qa_skill") or cfg.post_qa_skill,
+        # T-117: same "table wins, unset inherits" precedence as post_qa_skill
+        # above.
+        post_qa_skill_runner=table.get("post_qa_skill_runner") or cfg.post_qa_skill_runner,
+        post_qa_skill_runner_model=(
+            table.get("post_qa_skill_runner_model") or cfg.post_qa_skill_runner_model),
     )
 
 
@@ -180,6 +192,9 @@ def implicit_default(cfg: Config) -> RepoBinding:
         language=cfg.language,
         # T-115: same board-wide-default precedence as test_command above.
         post_qa_skill=cfg.post_qa_skill,
+        # T-117: ditto.
+        post_qa_skill_runner=cfg.post_qa_skill_runner,
+        post_qa_skill_runner_model=cfg.post_qa_skill_runner_model,
     )
 
 

@@ -72,6 +72,7 @@ def test_config_load_parses_repos_tables(home):
         "test_command": None,
         "prime_timeout": None, "worktree_timeout": None, "language": None,
         "test_selector": None, "post_qa_skill": None,
+        "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
@@ -81,6 +82,7 @@ def test_config_load_parses_repos_tables(home):
         "test_command": None,
         "prime_timeout": None, "worktree_timeout": None, "language": None,
         "test_selector": None, "post_qa_skill": None,
+        "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
     }
 
 

@@ -178,6 +178,23 @@ class Config:
     # the ticket's phase or block `awaiting-ci` -- it carries no maestro-verb
     # `--allowedTools` grant.
     post_qa_skill: str | None = None
+    # T-117: `post_qa_skill`'s own runner override -- same "table wins, unset
+    # inherits" precedence as `post_qa_skill` itself (see
+    # `repos.RepoBinding.post_qa_skill_runner`). None (default) means
+    # "claude", byte-identical to before this knob existed: `sync_post_qa_skill`
+    # never threaded a `runner` through `sessions.spawn` before T-117.
+    # Deliberately UNVALIDATED at `config.load()` -- mirrors `runner` above,
+    # not `post_qa_skill`'s own `_validate_skill_name` fail-closed regex: this
+    # is a runner name, not a slash-command, a different shape entirely, and
+    # an unregistered/disabled name is instead caught by the same non-claude
+    # preflight `resolve_runner`'s own callers already fail closed against
+    # (`dispatcher._runner_preflight`).
+    post_qa_skill_runner: str | None = None
+    # T-117: `post_qa_skill`'s own runner_model override. None falls back to
+    # the board-wide `runner_model` default above -- the same fallback
+    # `resolve_runner` gives a real reconciler spawn with no spec override.
+    # Unvalidated at load, same posture as `post_qa_skill_runner` just above.
+    post_qa_skill_runner_model: str | None = None
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -335,6 +352,7 @@ _REPO_TABLE_KEYS = frozenset({
     # unset inherits, same resolution shape as `prime`/`base_drift_policy`.
     "prime_timeout", "worktree_timeout",
     "language", "test_selector", "post_qa_skill",
+    "post_qa_skill_runner", "post_qa_skill_runner_model",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -495,6 +513,11 @@ def load(home_arg: str | None = None) -> Config:
         if raw_post_qa_skill is not None:
             _validate_skill_name(raw_post_qa_skill, where="[maestro] post_qa_skill")
         cfg.post_qa_skill = raw_post_qa_skill
+        # T-117: unvalidated -- see Config.post_qa_skill_runner's own docstring
+        # for why (a runner name/model id, not a slash-command).
+        cfg.post_qa_skill_runner = m.get("post_qa_skill_runner", cfg.post_qa_skill_runner) or None
+        cfg.post_qa_skill_runner_model = m.get(
+            "post_qa_skill_runner_model", cfg.post_qa_skill_runner_model) or None
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.opencode_user_commands_dir = m.get(
             "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
@@ -597,6 +620,11 @@ def load(home_arg: str | None = None) -> Config:
                     # (unset) inherits cfg.post_qa_skill (see
                     # repos.RepoBinding.post_qa_skill).
                     "post_qa_skill": raw_post_qa_skill,
+                    # T-117: unvalidated, same posture as the board-wide fields --
+                    # None (unset) inherits cfg.post_qa_skill_runner/_model (see
+                    # repos.RepoBinding.post_qa_skill_runner).
+                    "post_qa_skill_runner": table.get("post_qa_skill_runner") or None,
+                    "post_qa_skill_runner_model": table.get("post_qa_skill_runner_model") or None,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -870,6 +898,19 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # business, not maestro's). [repos.<name>] post_qa_skill below
                                   # overrides this per repo. Default unset -- fires nothing
                                   # (ships dark). Malformed value fails config load closed.
+# post_qa_skill_runner = "pi"      # T-117: which runner spawns post_qa_skill -- unset means
+                                  # "claude" (byte-identical to before this knob existed). A
+                                  # non-claude value gets the same fail-closed preflight
+                                  # (registered/enabled/binary/daemon/model/concurrency) a real
+                                  # reconciler spawn gets; any failure silently retries next
+                                  # sweep -- this hook never parks a ticket in awaiting-human.
+# post_qa_skill_runner_model = "baseten/zai-org/GLM-5.3"  # T-117: unset falls back to the
+                                  # board-wide `runner_model` default. Can't run without a
+                                  # `post_qa_skill_runner` other than claude to pair with it.
+                                  # `maestro trigger-post-qa <KEY>` (also bindable from the TUI)
+                                  # fires post_qa_skill on demand, bypassing the QA-pass gate and
+                                  # its once-per-pass dedup -- useful to re-run the skill, or to
+                                  # try it before a real QA pass reaches awaiting-ci.
 # compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
                                   # (0 disables; a manual `maestro compact <key>` always works)
 # compact_min_events = 200        # skip compacting a key until its folded log reaches this size
@@ -1001,6 +1042,10 @@ implementer = "claude_skill"
 # post_qa_skill = "/my-pr-polish"   # T-115: this repo's override of [maestro] post_qa_skill
                                      # above -- unset inherits the board-wide default. See that
                                      # key's own comment for the trigger point and shape.
+# post_qa_skill_runner = "pi"        # T-117: this repo's override of [maestro]
+                                     # post_qa_skill_runner -- unset inherits the board-wide default.
+# post_qa_skill_runner_model = "baseten/zai-org/GLM-5.3"  # T-117: ditto, for
+                                     # post_qa_skill_runner_model.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see
