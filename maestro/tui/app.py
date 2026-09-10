@@ -13,7 +13,9 @@ from textual.worker import Worker, WorkerState
 from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
+from .. import dispatcher as disp
 from ..projection import phase_predicate, ticket_rows
+from ..sessions import ClaudeCliSessions, OpencodeCliSessions, PiCliSessions, RoutingSessions
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
@@ -108,6 +110,7 @@ class MaestroTUI(App):
         Binding("L", "import_linear", "Linear", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
         Binding("g", "suggest_acs", "Suggest ACs", show=False),
+        Binding("Q", "trigger_post_qa", "Post-QA", show=False),
     ]
 
     _selected_key: str | None = None
@@ -198,6 +201,16 @@ class MaestroTUI(App):
                 # here) and the app never crashes (this branch is exactly what
                 # keeps `event.worker.error` from propagating further).
                 self.notify(f"Suggest ACs failed: {event.worker.error}", severity="error")
+        elif event.worker.name == "trigger-post-qa":
+            if event.state == WorkerState.SUCCESS:
+                r = event.worker.result
+                self.notify(f"post_qa_skill fired for {r['key']} (runner={r['runner']})")
+            elif event.state == WorkerState.ERROR:
+                # T-117: a MaestroError (no post_qa_skill configured, an active
+                # session, a failed runner preflight) surfaces as an error
+                # notify -- the app must never crash on it, same posture as
+                # "suggest-acs" above.
+                self.notify(f"Trigger post-QA failed: {event.worker.error}", severity="error")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
@@ -372,6 +385,44 @@ class MaestroTUI(App):
             self.notify(f"{len(accepted)} AC(s) added to {key}")
 
         self.push_screen(_SuggestAcsModal(key, suggestions), _on_dismiss)
+
+    def action_trigger_post_qa(self) -> None:
+        """T-117: manual escape hatch for `post_qa_skill`
+        (`dispatcher.trigger_post_qa_skill`) -- run on a worker thread
+        (`run_worker(thread=True)`, same shape as `action_suggest_acs`) so the
+        TUI never blocks on the spawn; `exit_on_error=False` for the same
+        reason as `action_suggest_acs` -- a raised `MaestroError` (no
+        `post_qa_skill` configured, an active session, a failed runner
+        preflight) must surface via `on_worker_state_changed`'s notify, not
+        the App's own exception handler. The `key is None` guard is required
+        by the binding sweep, which presses every key with no ticket
+        selected. Same `RoutingSessions` construction as `cli.cmd_dispatch`/
+        `cli._nudge` -- every registered non-claude backend wired, so a
+        manual fire can route to whatever `post_qa_skill_runner` names."""
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        cfg = Config(home=self._home)
+        sessions = RoutingSessions({
+            "claude": ClaudeCliSessions(
+                cfg.home, model=cfg.reconcile_model, permission_mode=cfg.permission_mode,
+                capture_session_logs=cfg.capture_session_logs,
+                session_log_format=cfg.session_log_format,
+                max_session_turns=cfg.max_session_turns,
+                unverified_claim_max_age=cfg.unverified_claim_max_age,
+            ),
+            "opencode": OpencodeCliSessions(
+                cfg.home, capture_session_logs=cfg.capture_session_logs,
+                unverified_claim_max_age=cfg.unverified_claim_max_age,
+            ),
+            "pi": PiCliSessions(
+                cfg.home, capture_session_logs=cfg.capture_session_logs,
+                unverified_claim_max_age=cfg.unverified_claim_max_age,
+            ),
+        }, home=cfg.home)
+        self.run_worker(lambda: disp.trigger_post_qa_skill(cfg, sessions, key),
+                        thread=True, name="trigger-post-qa", exit_on_error=False)
 
     def action_env_panel(self) -> None:
         self.push_screen(EnvScreen(self._home))

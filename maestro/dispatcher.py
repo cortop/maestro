@@ -1739,7 +1739,50 @@ def _post_qa_tree_key(snap) -> str:
     return content_hash("|".join(parts))
 
 
-def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float) -> dict:
+def _post_qa_skill_runner(cfg: Config, binding) -> tuple[str, str | None]:
+    """T-117: resolve `post_qa_skill`'s own runner/runner_model -- deliberately
+    NOT `resolve_runner` (that one reads spec `runner:` front-matter gated by
+    `runner_eligible_phases`; this knob has no spec line and no phase-eligible
+    concept of its own, it's a board/repo config pair). `binding.
+    post_qa_skill_runner`/`post_qa_skill_runner_model` are already resolved
+    against the board-wide `[maestro]` defaults by `repos.resolve` -- unset
+    means "claude" / `cfg.runner_model` respectively, the same fallback shape
+    `resolve_runner` gives a real reconciler spawn with no spec override (see
+    both fields' own docstrings in `repos.RepoBinding`).
+    """
+    runner = binding.post_qa_skill_runner or "claude"
+    runner_model = binding.post_qa_skill_runner_model or cfg.runner_model
+    return runner, runner_model
+
+
+def _spawn_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, skill: str,
+                         runner: str, runner_model: str | None, binding) -> int | None:
+    """T-117: the one `sessions.spawn` call for `post_qa_skill`, shared by
+    `sync_post_qa_skill` (automatic, gated on a fresh QA pass) and
+    `trigger_post_qa_skill` (manual, ungated) -- "exactly one definition" of
+    both the tool-grant composition and the runner kwargs, so the two paths
+    can never silently diverge on what a fired skill is allowed to touch.
+
+    `allowed_tools` grants exactly `Bash(maestro show:*)` -- the one
+    read-only `AGENT_TOOL_VERBS` entry this skill needs (reading the linked
+    Linear ticket via the snapshot's `external_id`/`external_source`) --
+    unioned with the repo binding's own `resolved_allowed_tools` (its git/gh/
+    test surface); every other maestro verb stays withheld, per T-115's own
+    "must never move the ticket's phase" intent. `disallowed_tools` is the
+    flat `MERGE_DENYLIST` -- merging is always a human decision (AD-7),
+    unconditionally.
+    """
+    cwd = _worker_cwd(cfg, key)
+    model, effort = _resolve_model_effort(cfg, key)
+    allowed_tools = ["Bash(maestro show:*)"] + resolved_allowed_tools(cfg, binding)
+    return sessions.spawn(key, skill, cwd, model=model, effort=effort,
+                          allowed_tools=allowed_tools, disallowed_tools=MERGE_DENYLIST,
+                          runner=runner, runner_model=runner_model)
+
+
+def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
+                       runner_probe: Callable[[str], dict] | None = None,
+                       runner_verdict: Callable[[str], Callable] | None = None) -> dict:
     """T-115: fires the config-referenced `post_qa_skill` (a human-owned slash-
     command skill -- rewrite the PR description, post a summary comment,
     notify a channel; that's the skill's business, not maestro's) exactly once
@@ -1772,16 +1815,12 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float) -> dic
     `sessions.spawn` call a reconciler spawn uses -- `DryRunSessions` can
     prove it in tests exactly like a real reconciler spawn -- but this is its
     OWN small capacity check against `sessions.list_active()`, not routed
-    through the main due/claim/credential/runner-preflight spawn loop below:
-    a post-QA notification isn't a phase reconciler (the ticket isn't even
-    `due` by that loop's own definition -- it's sleeping in `awaiting-ci`/
-    `in-review`), and it must never be capable of moving the ticket's phase
-    or blocking `awaiting-ci` (spec Notes) -- it gets no maestro-verb
-    `--allowedTools` grant, `disallowed_tools`, or credential/runner
-    resolution the way a real reconciler spawn does. Spawning under the
-    ticket's OWN key means it still occupies that key's claim (`sessions.
-    list_active()`), so a real reconciler can't race it into the same
-    worktree while it runs.
+    through the main due/claim/credential spawn loop below: a post-QA
+    notification isn't a phase reconciler (the ticket isn't even `due` by
+    that loop's own definition -- it's sleeping in `awaiting-ci`/
+    `in-review`). Spawning under the ticket's OWN key means it still occupies
+    that key's claim (`sessions.list_active()`), so a real reconciler can't
+    race it into the same worktree while it runs.
 
     `sessions.list_active()` is fetched LAZILY, only once a real candidate
     (unset `post_qa_skill` skipped, wrong phase skipped, not-yet-all-passing
@@ -1790,12 +1829,27 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float) -> dic
     active_keys`), and a board with this knob unset (the common case, ships
     dark) must add ZERO extra probes to a sweep that already takes one in the
     main spawn loop below.
+
+    T-117: a non-claude `post_qa_skill_runner` runs through the exact same
+    `_runner_preflight` (OC-2/OC-3/OC-4/PI-3) the main spawn loop uses --
+    "the rule must have exactly one definition" -- but reacts to it
+    differently on purpose: this hook must NEVER move a ticket's phase (spec
+    Notes, unchanged since T-115), so every non-"ok" outcome (unregistered,
+    disabled, binary missing, daemon unreachable, model unavailable, at its
+    concurrency cap) is treated as transient-shaped and silently skips this
+    key for this sweep -- no event appended, no spawn, no `_ask_park`, no
+    phase change. It is retried automatically next sweep once the underlying
+    condition clears, unlike the main loop's park-and-wait-for-a-human
+    reaction to the very same outcomes. `runner_probe`/`runner_verdict` mirror
+    `dispatch()`'s own params of the same name, threaded through by its
+    caller so a test can inject a fake probe/verdict into a real sweep.
     """
     from . import repos as repos_mod
 
     home = cfg.home
     fired: list[str] = []
     active: set[str] | None = None
+    preflight_state: dict = {}
     for key in list_keys(home):
         snap = snap_mod.load(home, key)
         if Phase(snap.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
@@ -1815,18 +1869,74 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float) -> dic
             continue
         if len(active) >= cfg.max_concurrency:
             break  # fleet at capacity this sweep -- no reservation burned, retried next sweep
+        runner, runner_model = _post_qa_skill_runner(cfg, binding)
+        if runner != "claude":
+            outcome, _reason = _runner_preflight(
+                cfg, runner, runner_model, active, runner_probe=runner_probe,
+                runner_verdict=runner_verdict, state=preflight_state, home=home)
+            if outcome != "ok":
+                continue  # T-117: never _ask_park here -- retried automatically next sweep
         tree_key = _post_qa_tree_key(snap)
         ev = event_log.append(home, key, E.POST_QA_SKILL_SPAWNED,
                               {"skill": skill, "tree_key": tree_key},
                               actor="dispatcher", step_id=f"postqa-{key}-{tree_key}")
         if ev is None:
             continue  # already fired for this exact QA-pass fingerprint
-        cwd = _worker_cwd(cfg, key)
-        model, effort = _resolve_model_effort(cfg, key)
-        sessions.spawn(key, skill, cwd, model=model, effort=effort)
+        _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding)
         active = sessions.list_active()
         fired.append(key)
     return {"fired": fired}
+
+
+def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str) -> dict:
+    """T-117: [human] manual escape hatch for `post_qa_skill` (`maestro
+    trigger-post-qa <key>` / the TUI's "Q" binding) -- fires it on demand,
+    bypassing every gate `sync_post_qa_skill` applies before firing
+    automatically: the phase check (`awaiting-ci`/`in-review`), the
+    `qa_all_passing` verdict check, and the QA-fingerprint dedup
+    (`_post_qa_tree_key`) -- a human asking for it again is not a duplicate,
+    it's a request. Human-only verb, same posture as `ops.set_runner`: never
+    added to `AGENT_TOOL_VERBS`.
+
+    Unlike `sync_post_qa_skill`'s silent skip-and-retry, a non-"ok" runner
+    preflight outcome here RAISES `store.MaestroError` carrying the reason --
+    this is a human-initiated action, so failing loudly with why beats
+    failing silently with nothing to look at.
+
+    Still refuses if the key already has an active session (a manual fire
+    can't race a live reconciler into the same worktree/claim), and still
+    appends a `PostQaSkillSpawned` event -- but keyed by a step_id that folds
+    in `store.now_epoch()`, so two manual triggers in a row each get their
+    own event rather than colliding on the same tree-fingerprint step_id
+    `sync_post_qa_skill` uses (deliberately NOT deduped: "always fires").
+
+    Raises `store.MaestroError` if the resolved binding has no `post_qa_skill`
+    configured, or if the key already has an active session. Returns
+    ``{"key", "skill", "runner", "pid"}`` on success.
+    """
+    from . import repos as repos_mod
+
+    home = cfg.home
+    binding = repos_mod.resolve(cfg, home, key)
+    skill = binding.post_qa_skill
+    if not skill:
+        raise store.MaestroError(f"{key}: no post_qa_skill configured for this ticket's repo binding")
+    active = sessions.list_active()
+    if key in active:
+        raise store.MaestroError(f"{key}: already has an active session")
+    runner, runner_model = _post_qa_skill_runner(cfg, binding)
+    if runner != "claude":
+        outcome, reason = _runner_preflight(
+            cfg, runner, runner_model, active, runner_probe=None, runner_verdict=None,
+            state={}, home=home)
+        if outcome != "ok":
+            raise store.MaestroError(f"{key}: runner {runner!r} preflight failed ({outcome}): {reason}")
+    step_id = f"postqa-manual-{key}-{store.now_epoch()}"
+    event_log.append(home, key, E.POST_QA_SKILL_SPAWNED,
+                     {"skill": skill, "tree_key": "manual"},
+                     actor="human", step_id=step_id)
+    pid = _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding)
+    return {"key": key, "skill": skill, "runner": runner, "pid": pid}
 
 
 # RB-14: board-wide cap on IN-FLIGHT dispatcher-owned test-run subprocesses --
@@ -2803,7 +2913,7 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # per QA pass -- see sync_post_qa_skill's own docstring for why this
         # needs `sessions` (a real spawn, unlike every other hook above).
         _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,
-                  default={})
+                  runner_probe=runner_probe, runner_verdict=runner_verdict, default={})
         _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
         _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
         _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
@@ -3098,28 +3208,23 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 # GA-17: memoized per (gh_account, token_env) for this whole sweep -- N
                 # keys bound to the same repo resolve the credential once, not once each.
                 credential_cache: dict = {}
-                # OC-2: memoized per runner name for this whole sweep -- N keys bound
+                # T-117: `_runner_preflight`'s per-call-site cache -- "probe_cache"
+                # (OC-2: memoized per runner name for this whole sweep -- N keys bound
                 # to the same non-claude runner probe its binary/daemon once, not once
-                # each ("Probe once per sweep, cached — never per key").
-                runner_probe_cache: dict = {}
-                # OC-4: {runner name: count}, seeded lazily (once per runner name, on
-                # first key that reaches the cap check below) from keys already in
-                # `active` this sweep, then incremented in-place as this sweep spawns
-                # more of that runner -- so two due opencode keys in the SAME sweep
-                # can't both slip through a cap computed from a snapshot taken before
-                # either spawned.
-                runner_active_counts: dict[str, int] = {}
-                # T-54: the seed sum below counts from the runner recorded ON EACH
-                # ACTIVE KEY'S CLAIM at spawn time (`claims.write_claim`'s own
-                # `runner` field), never from re-resolving `resolve_runner(cfg, k,
-                # phase_by_key.get(k, ""))` -- a session spawned while `k` was
-                # `implementing` still holds its slot after `k` folds to a phase
-                # where its runner is no longer eligible (e.g. `qa`, by default),
-                # and re-resolving would silently stop counting it, leaking a cap
-                # slot (spec Notes: "the claim is the fact; count from the claim,
-                # not from a re-resolution"). Loaded lazily, once for the whole
-                # sweep, only if a cap check is actually reached.
-                claims_by_key: dict[str, dict] | None = None
+                # each, "Probe once per sweep, cached — never per key"), "active_counts"
+                # (OC-4: {runner name: count}, seeded lazily on first key that reaches
+                # the cap check, then incremented in-place as this sweep spawns more of
+                # that runner -- so two due opencode keys in the SAME sweep can't both
+                # slip through a cap computed from a snapshot taken before either
+                # spawned), and "claims_by_key" (T-54: the seed sum counts from the
+                # runner recorded ON EACH ACTIVE KEY'S CLAIM at spawn time
+                # (`claims.write_claim`'s own `runner` field), never from re-resolving
+                # `resolve_runner(cfg, k, phase_by_key.get(k, ""))` -- a session spawned
+                # while `k` was `implementing` still holds its slot after `k` folds to a
+                # phase where its runner is no longer eligible, and re-resolving would
+                # silently stop counting it, leaking a cap slot; loaded lazily, once for
+                # the whole sweep, only if a cap check is actually reached).
+                runner_preflight_state: dict = {}
 
                 spawned = []
                 rotation_changed = False
@@ -3212,65 +3317,52 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                         # above: no attempts-ledger spend, a stable qid, parked in
                         # awaiting-human for a human to flip `runner_enabled` or fix
                         # the spec's `runner:` line.
-                        if runner not in cfg.runner_enabled:
-                            _ask_park(cfg, key,
-                                      f"runner {runner!r} is not enabled on this board "
-                                      f"(runner_enabled={sorted(cfg.runner_enabled)}) -- flip "
-                                      "the board config's `runner_enabled` or fix the spec's "
-                                      "`runner:` line",
+                        #
+                        # T-117: the actual checks (registered/enabled/binary/daemon/
+                        # model/concurrency) live in `_runner_preflight`, shared with
+                        # `sync_post_qa_skill`/`trigger_post_qa_skill` -- only what each
+                        # OUTCOME means (ask-park here vs. transient blocker vs. capped)
+                        # stays local, since that part is where this loop and the
+                        # post-QA hook deliberately disagree.
+                        outcome, reason = _runner_preflight(
+                            cfg, runner, runner_model, active,
+                            runner_probe=runner_probe, runner_verdict=runner_verdict,
+                            state=runner_preflight_state, home=home)
+                        if outcome == "disabled":
+                            _ask_park(cfg, key, reason,
                                       qid=f"runner-disabled-{key}-{runner}", actor="dispatcher",
                                       hook_errors=hook_errors, decisions=decisions,
                                       outcome="runner_disabled")
                             continue
-                        probe_fn = runner_probe or _make_default_runner_probe(cfg)
-                        if runner not in runner_probe_cache:
-                            runner_probe_cache[runner] = probe_fn(runner)
-                        probed = runner_probe_cache[runner]
-                        if not probed.get("binary_ok"):
+                        if outcome == "binary_missing":
                             decisions[key]["outcome"] = "runner_binary_missing"
-                            runner_blockers[runner] = f"{runner!r} binary not found on PATH"
+                            runner_blockers[runner] = reason
                             continue
-                        if probed.get("models") is None:
+                        if outcome == "daemon_unreachable":
                             decisions[key]["outcome"] = "runner_daemon_unreachable"
-                            runner_blockers[runner] = (f"{runner!r} daemon unreachable: "
-                                                        f"{probed.get('daemon_reason')}")
+                            runner_blockers[runner] = reason
                             continue
-                        if not runner_model:
-                            verdict, vreason = "missing", "no runner_model configured"
-                        else:
-                            verdict_resolver = runner_verdict or _make_default_runner_verdict(cfg)
-                            verdict_fn = verdict_resolver(runner)
-                            verdict, vreason = verdict_fn(
-                                probed["models"], probed.get("daemon_reason"), runner_model)
-                        if verdict != "ok":
-                            _ask_park(cfg, key,
-                                      f"runner {runner!r} model {runner_model!r} unavailable: "
-                                      f"{vreason} -- fix the spec's `runner_model:` line or "
-                                      "install/pull the model",
+                        if outcome == "model_unavailable":
+                            _ask_park(cfg, key, reason,
                                       qid=f"runner-model-{key}-{runner}-{runner_model}",
                                       actor="dispatcher", hook_errors=hook_errors,
                                       decisions=decisions, outcome="runner_model_unavailable")
                             continue
-                        # OC-4: per-runner concurrency cap -- still OC-2's own preflight
-                        # (before `_allow_spawn`, no attempts-ledger spend), because the
-                        # thing bounding a fast-failing runner's spawn RATE must never be
-                        # the no-progress circuit breaker (that would burn `max_failures`
-                        # attempts and dead-letter the ticket over what is, here, pure
-                        # capacity -- not a broken ticket). Group-level skip, modelled on
-                        # `repo_capped`/`repo_blocked`: no event, ticket stays due, retried
-                        # next sweep once a slot frees up.
-                        cap = _runner_concurrency_cap(cfg, runner)
-                        if cap is not None:
-                            if runner not in runner_active_counts:
-                                if claims_by_key is None:
-                                    claims_by_key = claims.all_claims(home)
-                                runner_active_counts[runner] = sum(
-                                    1 for k in active
-                                    if (claims_by_key.get(k) or {}).get("runner", "claude") == runner)
-                            if runner_active_counts[runner] >= cap:
-                                decisions[key]["outcome"] = "runner_capped"
-                                continue
-                            runner_active_counts[runner] += 1
+                        if outcome == "capped":
+                            # OC-4: per-runner concurrency cap -- still OC-2's own preflight
+                            # (before `_allow_spawn`, no attempts-ledger spend), because the
+                            # thing bounding a fast-failing runner's spawn RATE must never be
+                            # the no-progress circuit breaker (that would burn `max_failures`
+                            # attempts and dead-letter the ticket over what is, here, pure
+                            # capacity -- not a broken ticket). Group-level skip, modelled on
+                            # `repo_capped`/`repo_blocked`: no event, ticket stays due, retried
+                            # next sweep once a slot frees up.
+                            decisions[key]["outcome"] = "runner_capped"
+                            continue
+                        # outcome == "ok": fall through to the spawn below. "unregistered"
+                        # can't reach here -- it's already handled above, before this
+                        # `if runner != "claude"` block, and _REGISTERED_RUNNERS always
+                        # contains "claude" so this branch never sees it anyway.
                     if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
                         attempts_changed = True
                         reaped.append(key)
@@ -3676,6 +3768,99 @@ def _make_default_runner_verdict(cfg: Config) -> Callable[[str], Callable]:
         return verdict_fn_getter()
 
     return _resolve
+
+
+# T-117: the outcome vocabulary `_runner_preflight` classifies a non-claude
+# runner into -- named here so every caller switches on the same fixed set
+# rather than a magic string of its own invention.
+_RUNNER_PREFLIGHT_OUTCOMES = frozenset({
+    "ok", "unregistered", "disabled", "binary_missing",
+    "daemon_unreachable", "model_unavailable", "capped",
+})
+
+
+def _runner_preflight(cfg: Config, runner: str, runner_model: str | None, active: Iterable[str],
+                       *, runner_probe: Callable[[str], dict] | None,
+                       runner_verdict: Callable[[str], Callable] | None,
+                       state: dict, home: Path) -> tuple[str, str | None]:
+    """OC-2/OC-3/OC-4/PI-3's non-claude runner preflight (registered? enabled?
+    binary on PATH? daemon reachable? model tool-capable? under its
+    concurrency cap?), extracted here (T-117) into the ONE shared definition
+    both the main reconciler spawn loop below AND `sync_post_qa_skill`/
+    `trigger_post_qa_skill` consult -- "the rule must have exactly one
+    definition", the same posture `resolve_runner`'s own docstring states for
+    the runner-CHOICE rule; this is that choice's preflight. Never called for
+    ``runner == "claude"`` -- every caller already knows the resolved runner
+    isn't claude before reaching here.
+
+    Returns ``(outcome, reason)``, *outcome* one of `_RUNNER_PREFLIGHT_OUTCOMES`
+    and *reason* a human-readable sentence for every non-"ok" outcome (``None``
+    for "ok"). Deliberately returns a GENERIC classification, never a `key`-
+    specific qid or an `ops.ask` call -- what a given outcome MEANS (park the
+    ticket in awaiting-human? silently retry next sweep?) is the CALLER's
+    decision, and the two callers disagree on purpose: the main loop asks
+    (parks) for "unregistered"/"disabled"/"model_unavailable", while
+    `sync_post_qa_skill` never moves a ticket's phase for ANY outcome (see its
+    own docstring) -- so this classifier can't bake that decision in.
+
+    *state* is a per-CALL-SITE-SCOPE mutable cache dict (keys
+    ``"probe_cache"``, ``"active_counts"``, ``"claims_by_key"``) -- the exact
+    memoization shape ("probe once per sweep per runner name, never once per
+    key") the main loop already built inline before this ticket existed. Each
+    caller owns and passes its OWN fresh `state` dict -- nothing here is
+    shared BETWEEN the main loop's whole sweep and a single
+    `sync_post_qa_skill`/`trigger_post_qa_skill` call, so a pi ticket handled
+    by one never steals the other's cached probe or counts against the other's
+    view of the concurrency cap seed (both still converge on the same real
+    `claims.all_claims(home)` truth, just read independently).
+
+    *active* is the caller's already-fetched set of active keys, consulted
+    only by the concurrency-cap branch's claim-scan seed.
+    """
+    if runner not in _REGISTERED_RUNNERS:
+        return ("unregistered",
+                f"spec names runner {runner!r}, which has no registered SessionManager "
+                f"(registered: {sorted(_REGISTERED_RUNNERS)}) -- fix the spec's `runner:` "
+                "line or register the runner")
+    if runner not in cfg.runner_enabled:
+        return ("disabled",
+                f"runner {runner!r} is not enabled on this board "
+                f"(runner_enabled={sorted(cfg.runner_enabled)}) -- flip the board config's "
+                "`runner_enabled` or fix the spec's `runner:` line")
+    probe_cache = state.setdefault("probe_cache", {})
+    probe_fn = runner_probe or _make_default_runner_probe(cfg)
+    if runner not in probe_cache:
+        probe_cache[runner] = probe_fn(runner)
+    probed = probe_cache[runner]
+    if not probed.get("binary_ok"):
+        return "binary_missing", f"{runner!r} binary not found on PATH"
+    if probed.get("models") is None:
+        return ("daemon_unreachable",
+                f"{runner!r} daemon unreachable: {probed.get('daemon_reason')}")
+    if not runner_model:
+        verdict, vreason = "missing", "no runner_model configured"
+    else:
+        verdict_resolver = runner_verdict or _make_default_runner_verdict(cfg)
+        verdict_fn = verdict_resolver(runner)
+        verdict, vreason = verdict_fn(probed["models"], probed.get("daemon_reason"), runner_model)
+    if verdict != "ok":
+        return ("model_unavailable",
+                f"runner {runner!r} model {runner_model!r} unavailable: {vreason} -- fix "
+                "the spec's `runner_model:` line or install/pull the model")
+    cap = _runner_concurrency_cap(cfg, runner)
+    if cap is not None:
+        active_counts = state.setdefault("active_counts", {})
+        if runner not in active_counts:
+            if state.get("claims_by_key") is None:
+                state["claims_by_key"] = claims.all_claims(home)
+            claims_by_key = state["claims_by_key"]
+            active_counts[runner] = sum(
+                1 for k in active
+                if (claims_by_key.get(k) or {}).get("runner", "claude") == runner)
+        if active_counts[runner] >= cap:
+            return "capped", f"runner {runner!r} at its concurrency cap ({cap})"
+        active_counts[runner] += 1
+    return "ok", None
 
 
 def _worker_cwd(cfg: Config, key: str) -> Path:

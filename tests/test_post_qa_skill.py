@@ -13,15 +13,30 @@ all 5 spec ACs:
   AC4: with the knob unset, the sweep is byte-identical (no event, no spawn).
   AC5 (doc) is covered by tests/test_diagram.py's drift guard on the
        generated docs/dispatch-gates.md, not here.
+
+T-117: `post_qa_skill_runner`/`post_qa_skill_runner_model` -- lets
+`post_qa_skill` fire under a non-claude runner, through the exact same
+`_runner_preflight` (OC-2/OC-3/OC-4/PI-3) the main spawn loop uses, but
+reacting to a non-"ok" outcome by silently skipping this sweep rather than
+`_ask_park`-ing a human (the hook must never move phase). Also covers the
+`trigger_post_qa_skill`/`maestro trigger-post-qa` manual escape hatch, which
+bypasses every gate the automatic hook applies and RAISES on preflight
+failure instead of skipping silently.
 """
 from __future__ import annotations
 
+import io
+import json
+import sys
+
 import pytest
 
-from maestro import config as config_mod, dispatcher as disp, event_log, ops
+from maestro import cli, config as config_mod, dispatcher as disp, event_log, ops
 from maestro import repos as repos_mod, snapshot as snap_mod, store
-from maestro.sessions import DryRunSessions
+from maestro.sessions import DryRunSessions, RoutingSessions
 from maestro.statemachine import Phase
+
+from test_runner_preflight import _counting_probe, _register, _enable
 
 AC_TEXT = "- [ ] the widget works"
 
@@ -123,6 +138,62 @@ def test_config_unset_post_qa_skill_is_none(home):
     cfg = config_mod.load(str(home))
     assert cfg.post_qa_skill is None
     assert repos_mod.implicit_default(cfg).post_qa_skill is None
+
+
+# ---------------------------------------------------------------------------
+# T-117: post_qa_skill_runner / post_qa_skill_runner_model precedence --
+# board-wide, per-repo override, unset-inherits -- same "table wins, unset
+# inherits" shape as post_qa_skill itself, unvalidated at config.load() (same
+# posture as runner/runner_model, not post_qa_skill's own regex validation).
+# ---------------------------------------------------------------------------
+
+def test_config_accepts_post_qa_skill_runner_board_wide(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\npost_qa_skill_runner = "pi"\n'
+        'post_qa_skill_runner_model = "glm-5.2"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.post_qa_skill_runner == "pi"
+    assert cfg.post_qa_skill_runner_model == "glm-5.2"
+    binding = repos_mod.implicit_default(cfg)
+    assert binding.post_qa_skill_runner == "pi"
+    assert binding.post_qa_skill_runner_model == "glm-5.2"
+
+
+def test_config_accepts_post_qa_skill_runner_repo_override(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\npost_qa_skill_runner = "pi"\n'
+        'post_qa_skill_runner_model = "board-wide-model"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\npost_qa_skill_runner = "opencode"\n'
+        'post_qa_skill_runner_model = "repo-specific-model"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.post_qa_skill_runner == "opencode"
+    assert binding.post_qa_skill_runner_model == "repo-specific-model"
+
+
+def test_config_repo_table_post_qa_skill_runner_unset_inherits_board_wide(home):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\npost_qa_skill_runner = "pi"\n'
+        'post_qa_skill_runner_model = "board-wide-model"\n\n'
+        '[repos.alpha]\npath = "/repo/alpha"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    store.atomic_write(store.spec_path(home, "T-1"),
+                       "# T-1\napproval_tier: 1\nrepo: alpha\n\n## Intent\nx\n")
+    binding = repos_mod.resolve(cfg, home, "T-1")
+    assert binding.post_qa_skill_runner == "pi"
+    assert binding.post_qa_skill_runner_model == "board-wide-model"
+
+
+def test_config_unset_post_qa_skill_runner_is_none(home):
+    (home / "config.toml").write_text('[maestro]\nrepo_path = "/repo/default"\n', encoding="utf-8")
+    cfg = config_mod.load(str(home))
+    assert cfg.post_qa_skill_runner is None
+    assert cfg.post_qa_skill_runner_model is None
+    binding = repos_mod.implicit_default(cfg)
+    assert binding.post_qa_skill_runner is None
+    assert binding.post_qa_skill_runner_model is None
 
 
 # ---------------------------------------------------------------------------
@@ -238,3 +309,206 @@ def test_unset_knob_produces_no_event_and_no_spawn(home, cfg):
     after = event_log.read(home, "T-1")
     assert [e["type"] for e in after] == [e["type"] for e in before]
     assert not any(e["type"] == "PostQaSkillSpawned" for e in after)
+
+
+# ---------------------------------------------------------------------------
+# T-117: a non-claude post_qa_skill_runner runs through the exact same
+# `_runner_preflight` the main spawn loop uses, but a non-"ok" outcome is a
+# silent skip-and-retry-next-sweep, never an `_ask_park`.
+# ---------------------------------------------------------------------------
+
+def _pi_probe(models):
+    return _counting_probe({"binary_ok": True, "models": models, "daemon_reason": None})
+
+
+def test_pi_routing_healthy_sweep_spawns_recorded_under_pi_runner(home, cfg):
+    _enable(cfg, "pi")
+    cfg.post_qa_skill = "/my-pr-polish"
+    cfg.post_qa_skill_runner = "pi"
+    cfg.post_qa_skill_runner_model = "glm-5.2"
+    _seed_ticket(home, "T-1")
+    _qa_pass_to_awaiting_ci(cfg, "T-1")
+
+    claude_arm = DryRunSessions()
+    pi_arm = DryRunSessions()
+    sessions = RoutingSessions({"claude": claude_arm, "pi": pi_arm})
+    probe = _pi_probe([{"model": "glm-5.2"}])
+
+    disp.dispatch(cfg, sessions, now=1000, runner_probe=probe)
+
+    assert [s[0] for s in pi_arm.spawned] == ["T-1"]
+    assert not any(s[1].split(" ", 1)[0] == "/my-pr-polish" for s in claude_arm.spawned)
+    key, prompt, cwd, model, effort, disallowed_tools, allowed_tools, env_overlay, runner, runner_model = (
+        pi_arm.spawned[0])
+    assert prompt == "/my-pr-polish T-1"
+    assert runner == "pi"
+    assert runner_model == "glm-5.2"
+
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert len(spawned_events) == 1
+
+
+def test_pi_preflight_failure_skips_silently_then_fires_once_a_later_sweep_is_healthy(home, cfg):
+    _enable(cfg, "pi")
+    cfg.post_qa_skill = "/my-pr-polish"
+    cfg.post_qa_skill_runner = "pi"
+    cfg.post_qa_skill_runner_model = "glm-5.2"
+    _seed_ticket(home, "T-1")
+    _qa_pass_to_awaiting_ci(cfg, "T-1")
+
+    claude_arm = DryRunSessions()
+    pi_arm = DryRunSessions()
+    sessions = RoutingSessions({"claude": claude_arm, "pi": pi_arm})
+    bad_probe = _counting_probe({"binary_ok": True, "models": None, "daemon_reason": "refused"})
+
+    disp.dispatch(cfg, sessions, now=1000, runner_probe=bad_probe)
+
+    assert pi_arm.spawned == []
+    assert not any(e["type"] == "PostQaSkillSpawned" for e in event_log.read(home, "T-1"))
+    snap = snap_mod.load(home, "T-1")
+    assert snap.phase == Phase.AWAITING_CI.value  # never parked, unlike the main loop's reaction
+
+    good_probe = _pi_probe([{"model": "glm-5.2"}])
+    disp.dispatch(cfg, sessions, now=2000, runner_probe=good_probe)
+
+    assert [s[0] for s in pi_arm.spawned] == ["T-1"]
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert len(spawned_events) == 1  # fired exactly once, on the healthy sweep
+
+
+# ---------------------------------------------------------------------------
+# T-117: tool-grant composition -- narrower than the main loop's own
+# phase_verb_grant-based composition, deliberately.
+# ---------------------------------------------------------------------------
+
+def test_spawn_tool_grants_are_maestro_show_plus_resolved_allowed_tools_and_merge_denylist(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    cfg.reconcile_allowed_tools = ["Bash(some-extra-tool:*)"]
+    _seed_ticket(home, "T-1")
+    _qa_pass_to_awaiting_ci(cfg, "T-1")
+
+    sessions = DryRunSessions()
+    disp.dispatch(cfg, sessions, now=1000)
+
+    spawn = next(s for s in sessions.spawned if s[1].split(" ", 1)[0] == "/my-pr-polish")
+    _, _, _, _, _, disallowed_tools, allowed_tools, *_ = spawn
+    assert allowed_tools == ["Bash(maestro show:*)", "Bash(some-extra-tool:*)"]
+    assert disallowed_tools == disp.MERGE_DENYLIST
+
+
+# ---------------------------------------------------------------------------
+# T-117: `trigger_post_qa_skill` -- the manual escape hatch. Bypasses phase,
+# qa_all_passing, and the QA-fingerprint dedup; raises loudly on a bad
+# preflight or missing config, instead of `sync_post_qa_skill`'s silent skip.
+# ---------------------------------------------------------------------------
+
+def test_trigger_post_qa_skill_fires_regardless_of_phase_or_verdict_state(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_ticket(home, "T-1")  # no QA pass at all -- not even in a QA-adjacent phase
+
+    sessions = RoutingSessions({"claude": DryRunSessions()})
+    result = disp.trigger_post_qa_skill(cfg, sessions, "T-1")
+
+    assert result == {"key": "T-1", "skill": "/my-pr-polish", "runner": "claude", "pid": None}
+    spawned = sessions.delegates["claude"].spawned
+    assert len(spawned) == 1
+    assert spawned[0][1] == "/my-pr-polish T-1"
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert len(spawned_events) == 1
+
+
+def test_trigger_post_qa_skill_raises_if_no_post_qa_skill_configured(home, cfg):
+    assert cfg.post_qa_skill is None
+    _seed_ticket(home, "T-1")
+
+    sessions = RoutingSessions({"claude": DryRunSessions()})
+    with pytest.raises(store.MaestroError, match="post_qa_skill"):
+        disp.trigger_post_qa_skill(cfg, sessions, "T-1")
+
+
+def test_trigger_post_qa_skill_raises_if_key_already_has_an_active_session(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_ticket(home, "T-1")
+
+    sessions = RoutingSessions({"claude": DryRunSessions(active={"T-1"})})
+    with pytest.raises(store.MaestroError, match="active session"):
+        disp.trigger_post_qa_skill(cfg, sessions, "T-1")
+
+
+def test_trigger_post_qa_skill_fires_again_with_no_dedup_across_two_calls(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_ticket(home, "T-1")
+
+    # Two independent manual triggers, as if the first spawned session had
+    # already exited by the time of the second (a fresh DryRunSessions, same
+    # "no in-memory state carried over" trick the automatic-hook tests above
+    # use) -- the QA-fingerprint dedup a sweep would apply must NOT apply here.
+    sessions1 = RoutingSessions({"claude": DryRunSessions()})
+    disp.trigger_post_qa_skill(cfg, sessions1, "T-1")
+
+    sessions2 = RoutingSessions({"claude": DryRunSessions()})
+    disp.trigger_post_qa_skill(cfg, sessions2, "T-1")
+
+    assert len(sessions1.delegates["claude"].spawned) == 1
+    assert len(sessions2.delegates["claude"].spawned) == 1
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert len(spawned_events) == 2
+    assert spawned_events[0]["step_id"] != spawned_events[1]["step_id"]
+
+
+def test_trigger_post_qa_skill_raises_on_pi_preflight_failure_with_reason(home, cfg):
+    _enable(cfg, "pi")
+    cfg.post_qa_skill = "/my-pr-polish"
+    cfg.post_qa_skill_runner = "pi"
+    cfg.post_qa_skill_runner_model = "glm-5.2"
+    _seed_ticket(home, "T-1")
+    bad_probe = _counting_probe({"binary_ok": True, "models": None, "daemon_reason": "refused"})
+
+    sessions = RoutingSessions({"claude": DryRunSessions(), "pi": DryRunSessions()})
+    with pytest.raises(store.MaestroError, match="daemon_unreachable"):
+        disp.trigger_post_qa_skill(cfg, sessions, "T-1")
+
+    assert not any(e["type"] == "PostQaSkillSpawned" for e in event_log.read(home, "T-1"))
+
+
+# ---------------------------------------------------------------------------
+# T-117: `maestro trigger-post-qa <key>` CLI verb.
+# ---------------------------------------------------------------------------
+
+def _run_cli_trigger_post_qa(home, key):
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        code = cli.main(["--home", str(home), "trigger-post-qa", key])
+    finally:
+        sys.stdout = old
+    return code, buf.getvalue()
+
+
+def test_cli_trigger_post_qa_happy_path(home, monkeypatch):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\npost_qa_skill = "/my-pr-polish"\n',
+        encoding="utf-8")
+    _seed_ticket(home, "T-1")
+    sessions = DryRunSessions()
+    monkeypatch.setattr("maestro.cli.ClaudeCliSessions", lambda *a, **kw: sessions)
+
+    code, out = _run_cli_trigger_post_qa(home, "T-1")
+
+    assert code == 0
+    result = json.loads(out)
+    assert result == {"key": "T-1", "skill": "/my-pr-polish", "runner": "claude", "pid": None}
+    assert len(sessions.spawned) == 1
+
+
+def test_cli_trigger_post_qa_no_post_qa_skill_configured_errors_cleanly(home, capsys):
+    (home / "config.toml").write_text('[maestro]\nrepo_path = "/repo/default"\n', encoding="utf-8")
+    _seed_ticket(home, "T-1")
+
+    code = cli.main(["--home", str(home), "trigger-post-qa", "T-1"])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "post_qa_skill" in err
