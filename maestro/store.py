@@ -203,6 +203,13 @@ def session_pi_path(home: Path, key: str, session_id: str) -> Path:
     return home / "agent-logs" / validate_key(key) / f"{session_id}.pi.jsonl"
 
 
+def heartbeat_path(home: Path) -> Path:
+    """The dispatcher's last-sweep verdict. Deliberately a helper like every
+    other derived artifact here -- four modules hardcoded this path before
+    anything else needed to read it."""
+    return home / "derived" / ".heartbeat.json"
+
+
 def deadletter_path(home: Path, key: str) -> Path:
     return home / "tickets" / "_deadletter" / f"{validate_key(key)}.md"
 

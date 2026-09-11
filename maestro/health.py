@@ -144,7 +144,7 @@ def stale_threshold(home: Path | None = None, *, plist=None) -> int:
 
 def check_heartbeat(cfg: Config, now: float, *, plist=None) -> dict:
     home = cfg.home
-    hb = store.read_json(home / "derived" / ".heartbeat.json", {})
+    hb = store.read_json(store.heartbeat_path(home), {})
     age = round(now - hb["epoch"]) if hb.get("epoch") else None
     threshold = stale_threshold(home, plist=plist)
     stale = age is not None and age > threshold
@@ -1774,7 +1774,7 @@ def report(cfg: Config, now: float, *, plist=None) -> dict:
             "paused": False,
             "checks": [check_home_structure(cfg, now)],
         }
-    hb = store.read_json(home / "derived" / ".heartbeat.json", {})
+    hb = store.read_json(store.heartbeat_path(home), {})
     age = round(now - hb["epoch"]) if hb.get("epoch") else None
     dl_dir = home / "tickets" / "_deadletter"
     dead = list(dl_dir.glob("*.md")) if dl_dir.exists() else []

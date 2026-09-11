@@ -3443,7 +3443,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     # `maestro why` can't report a spawn that never happened either.
     _write_heartbeat(home, now, 0 if dry_run else len(spawned), len(active),
                      len(throttled), len(due),
-                     repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo)
+                     repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo,
+                     # repo_blockers IS computed under dry_run (repo_preflight_all
+                     # sits outside the split) but the runner preflight is not, so
+                     # these two carry forward instead of being blanked.
+                     runner_blockers=None if dry_run else runner_blockers,
+                     hook_errors=hook_errors,
+                     blocked=None if dry_run else blocked_keys(decisions))
     _append_dispatch_ledger(home, {
         "ts": store.iso_now(), "epoch": now,
         "hook_errors": hook_errors, "decisions": decisions,
@@ -3953,13 +3959,69 @@ def _ensure_scratch_dir(home: Path, key: str, repo_path: Path) -> Path:
     return scratch
 
 
+# The decision outcomes that append NOTHING anywhere -- no event, no
+# attempts-ledger spend, no ask-park -- AND mean the dispatcher wanted to act
+# on a due ticket and couldn't. You cannot detect a non-event by reading a log
+# of events, which is why a board can sit frozen while every surface a human
+# looks at reports healthy.
+#
+# Deliberately excluded, though they are equally event-free:
+#   not_due          -- the overwhelmingly common, entirely healthy case.
+#   claimed          -- a live reconciler already holds the key. Working.
+#   throttled        -- min_spawn_interval doing its job.
+#   capacity_skipped / runner_capped -- a concurrency cap self-resolves on the
+#                       next sweep; surfacing it as "blocked" would train a
+#                       human to ignore the section.
+#   would_spawn      -- a dry-run artifact, never a real sweep's verdict.
+# The permanent runner outcomes (unregistered/disabled/model_unavailable) are
+# absent for the opposite reason: they `_ask_park` the ticket, so they already
+# appear under NEEDS-YOU's own `## Questions` and would double-report here.
+_SILENT_SKIP_OUTCOMES = frozenset({
+    "runner_binary_missing", "runner_daemon_unreachable", "repo_blocked",
+})
+
+
+def blocked_keys(decisions: dict) -> dict[str, str]:
+    """`{key: outcome}` for every ticket this sweep silently could not act on."""
+    return {key: d["outcome"] for key, d in sorted(decisions.items())
+            if isinstance(d, dict) and d.get("outcome") in _SILENT_SKIP_OUTCOMES}
+
+
 def _write_heartbeat(home: Path, now: float, spawned: int, active: int,
                      throttled: int = 0, due: int = 0, *, paused: bool = False,
                      repo_blockers: list[str] | None = None,
-                     repo_blockers_by_repo: dict | None = None) -> None:
-    store.write_json(home / "derived" / ".heartbeat.json",
+                     repo_blockers_by_repo: dict | None = None,
+                     runner_blockers: dict | None = None,
+                     hook_errors: dict | None = None,
+                     blocked: dict | None = None) -> None:
+    """Write the last-sweep verdict.
+
+    `runner_blockers`, `hook_errors` and `blocked` are passed as None by the
+    callers that genuinely did not compute them -- the fleet-pause kill switch,
+    RB-17's board_refused guard, and any `--dry-run` sweep (which skips the
+    runner preflight entirely, by design: `dispatch` promises to touch nothing
+    outside the home, and the preflight shells out). For those, the previous
+    value is CARRIED FORWARD rather than overwritten with an empty one.
+
+    Without that, `make dry` -- or one sweep of a paused board -- would erase a
+    blocker the last real sweep correctly recorded, which is precisely the
+    class of bug this field exists to end. Carrying forward is also honest
+    about what the heartbeat is: the last verdict, not live truth
+    (`health.check_repo_preflight`'s docstring and
+    tests/test_repo_preflight.py say so explicitly), and the `ts`/`epoch`
+    beside it is what dates it.
+    """
+    previous = store.read_json(store.heartbeat_path(home), {}) if (
+        runner_blockers is None or hook_errors is None or blocked is None) else {}
+    store.write_json(store.heartbeat_path(home),
                      {"ts": store.iso_now(), "epoch": now,
                       "spawned": spawned, "active": active,
                       "throttled": throttled, "due": due, "paused": paused,
                       "repo_blockers": repo_blockers or [],
-                      "repo_blockers_by_repo": repo_blockers_by_repo or {}})
+                      "repo_blockers_by_repo": repo_blockers_by_repo or {},
+                      "runner_blockers": (previous.get("runner_blockers", {})
+                                          if runner_blockers is None else runner_blockers),
+                      "hook_errors": (previous.get("hook_errors", {})
+                                      if hook_errors is None else hook_errors),
+                      "blocked": (previous.get("blocked", {})
+                                  if blocked is None else blocked)})
