@@ -2040,7 +2040,7 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
                 ops.set_phase(cfg, key, Phase.QA, reason=reason, actor="dispatcher")
                 continue
             cwd = _worker_cwd(cfg, key)
-            tree_key = ops._tree_state_key(cwd)
+            tree_key = ops._tree_state_key(cwd, timeout=binding.worktree_timeout)
             cached = snap.test_runs.get(tree_key)
             if cached is not None:
                 _route_test_run(cfg, key, cached, actor="dispatcher", cwd=cwd)
@@ -2107,11 +2107,11 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
     cwd = claim.get("cwd") or str(_worker_cwd(cfg, key))
     from . import ops, repos as repos_mod
 
-    tree_key = ops._tree_state_key(Path(cwd))
     # T-83: the same per-key resolved command `_start_test_run` was launched
     # with -- never `cfg.test_command` directly, so a mid-flight config change
     # can never record a DIFFERENT command than the one that actually ran.
     binding = repos_mod.resolve(cfg, home, key)
+    tree_key = ops._tree_state_key(Path(cwd), timeout=binding.worktree_timeout)
     try:
         exit_code = int(result_path.read_text(encoding="utf-8").strip())
         output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
@@ -2233,7 +2233,7 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
             return
         deleted = _diff_deleted_test_names(cwd, binding.base_branch or "main", profile)
         if deleted:
-            tree_key = ops._tree_state_key(cwd)
+            tree_key = ops._tree_state_key(cwd, timeout=binding.worktree_timeout)
             qid = f"test-deletion-{key}-{content_hash(tree_key)[:8]}"
             if not _question_answered(cfg.home, key, qid):
                 shown = ", ".join(deleted[:10]) + (" …" if len(deleted) > 10 else "")
