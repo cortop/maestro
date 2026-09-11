@@ -44,8 +44,10 @@ class Config:
     # every single call, forever, since dead-lettering never sets a backoff
     # timer the way the non-dead-letter branch does. `max_failures` was doing
     # exactly what it says (parking the ticket); the respawn loop feeding it
-    # was `statemachine.SLEEPING_PHASES` missing DEGRADED, not this knob -- see
-    # the comment there.
+    # was `statemachine.SLEEPING_PHASES` missing DEGRADED plus the STALLED fold
+    # arm leaving that elapsed backoff timer behind, which kept `is_due`
+    # answering "timer" above the sleeping gate -- not this knob. See the
+    # comments in `statemachine.PHASE_CLASS` and `snapshot`'s STALLED arm.
     max_failures: int = 4
     max_impl_turns: int = 20               # ralph-loop circuit breaker
     # RB-15: NOT max_impl_turns -- that counter is self-reported (a session that

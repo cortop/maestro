@@ -603,6 +603,18 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 s.burning = p.get("kind") == "burn"
                 s.last_error_kind = p.get("kind")
                 s.last_error_state = p.get("state")
+                # Clear the stale backoff timer, as PHASE_CHANGED and FINALIZED
+                # (the other two phase-moving arms) already do. A ticket
+                # arriving here through the ordinary max_failures path carries
+                # the RequeueScheduled from its previous backoff, necessarily
+                # already elapsed -- it had to wake past that timer to fail the
+                # final time -- and `ops.fail`'s dead-letter branch sets no new
+                # one by design. Left in place it makes T-65's
+                # `PHASE_CLASS[DEGRADED] = "sleeping"` unreachable, because
+                # `is_due` answers "timer" above the SLEEPING_PHASES gate.
+                # Dogfood board, 2026-09-11: 218 no-op Checked events on
+                # degraded keys, every one of them woken by an expired timer.
+                s.next_requeue_at = None
         elif t == E.FINALIZED:
             s.phase = Phase.DONE.value
             s.next_requeue_at = None
