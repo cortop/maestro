@@ -171,8 +171,43 @@ def render(home: Path) -> dict[str, str]:
     degraded_all = by_phase.get(Phase.DEGRADED.value, [])
     burning = [s for s in degraded_all if s.burning]
     degraded = [s for s in degraded_all if not s.burning]
-    if not awaiting and not degraded and not burning:
+    # ---- Blocked: what the dispatcher wanted to do and couldn't -------------
+    # Read from the heartbeat, never recomputed: `render` takes only `home` (no
+    # Config, no `now`) and is called with no sweep at all by the TUI's rebuild
+    # action and by `maestro restore`, so probing git/gh/a runner daemon from
+    # here would shell out on every projection write and re-introduce the
+    # projection -> dispatcher/health import cycle the lazy imports exist to
+    # avoid.
+    hb = store.read_json(store.heartbeat_path(home), {})
+    blocked = hb.get("blocked") or {}
+    runner_blockers = hb.get("runner_blockers") or {}
+    repo_blockers = hb.get("repo_blockers") or []
+    hook_errors = hb.get("hook_errors") or {}
+    has_blockers = bool(blocked or runner_blockers or repo_blockers or hook_errors)
+
+    if not awaiting and not degraded and not burning and not has_blockers:
         nlines.append("\nNothing is waiting on you. 🎉\n")
+    if has_blockers:
+        age = ""
+        if hb.get("epoch"):
+            age = f" · as of {hb.get('ts', '?')}"
+        nlines.append(f"\n## Blocked — maestro cannot act{age}\n")
+        for runner, reason in sorted(runner_blockers.items()):
+            keys = sorted(k for k, o in blocked.items() if o.startswith("runner_"))
+            nlines.append(f"- **runner `{runner}`** — {reason}")
+            if keys:
+                nlines.append(f"  - blocking: {', '.join(keys)}")
+            nlines.append(f"  - check: `maestro doctor` (runner_binary) · "
+                          f"set `[runner.{runner}] bin` and `maestro fleet up`")
+        for repo in sorted(repo_blockers):
+            keys = sorted(k for k, o in blocked.items() if o == "repo_blocked")
+            nlines.append(f"- **repo `{repo}`** — preflight refuses to spawn into it")
+            if keys:
+                nlines.append(f"  - blocking: {', '.join(keys)}")
+            nlines.append("  - check: `maestro doctor` (repo_preflight)")
+        for hook, err in sorted(hook_errors.items()):
+            nlines.append(f"- **hook `{hook}`** — {err}")
+        nlines.append("")
     if awaiting:
         nlines.append("\n## Questions\n")
         for s in sorted(awaiting, key=lambda x: split_key(x.key)):

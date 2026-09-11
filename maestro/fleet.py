@@ -293,7 +293,7 @@ def status(home: Path, *, run=subprocess.run, plist=None) -> dict:
         loaded = p.returncode == 0 and _any_label_loaded(labels_to_check, p.stdout or "")
     except FileNotFoundError:
         loaded = False
-    hb = store.read_json(home / "derived" / ".heartbeat.json", {})
+    hb = store.read_json(store.heartbeat_path(home), {})
     age = round(store.now_epoch() - hb["epoch"]) if hb.get("epoch") else None
     pause = pause_state(home, store.now_epoch())
     return {"loaded": loaded, "heartbeat_age_s": age,
