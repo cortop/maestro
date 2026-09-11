@@ -250,7 +250,8 @@ def _annotations_active(cfg: Config, key: str) -> bool:
 def _current_tree_key(cfg: Config, key: str) -> str:
     from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
 
-    return _tree_state_key(_worker_cwd(cfg, key))
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    return _tree_state_key(_worker_cwd(cfg, key), timeout=binding.worktree_timeout)
 
 
 def _refuse_if_missing_acs(cfg: Config, key: str, phase: Phase) -> None:
@@ -342,7 +343,7 @@ def _tests_stale_reason(cfg: Config, key: str, snap) -> str | None:
         return None
     from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
 
-    tree_key = _tree_state_key(_worker_cwd(cfg, key))
+    tree_key = _tree_state_key(_worker_cwd(cfg, key), timeout=binding.worktree_timeout)
     if snap.tests_passing(tree_key):
         return None
     rec = snap.test_runs.get(tree_key)
@@ -1124,7 +1125,7 @@ def qa_brief(cfg: Config, key: str) -> dict:
     base = binding.base_branch
     cwd = _worker_cwd(cfg, key)
     diff, base_ref, ahead, stderr = _qa_diff(cwd, base)
-    tree_key = _tree_state_key(cwd)
+    tree_key = _tree_state_key(cwd, timeout=binding.worktree_timeout)
     snap = snap_mod.load(cfg.home, key)
     return {
         "key": key,
@@ -1228,7 +1229,7 @@ def _untracked_diff(_git) -> str:
 _TEST_RUN_TIMEOUT = 1800  # seconds
 
 
-def _tree_state_key(cwd: Path) -> str:
+def _tree_state_key(cwd: Path, *, timeout: int = _GIT_TIMEOUT) -> str:
     """"<HEAD sha>:<hash of the dirty tree>" at *cwd* -- the RB-12 gate's
     binding key, chosen so it changes exactly when the code does (the spec's
     "bind the record to the tree, not the ticket" note): a passing capture
@@ -1239,10 +1240,16 @@ def _tree_state_key(cwd: Path) -> str:
     fails) degrades to an all-empty key rather than raising -- `capture_tests`
     is never called for a `mode: local` binding, so this is a defensive
     fallback, not an expected path.
+
+    *timeout* defaults to the short plumbing `_GIT_TIMEOUT`, but `git diff
+    HEAD` plus the untracked-file walk are real tree-walking work, not the
+    fast rev-parse/status this default was sized for -- a caller with a repo
+    binding in hand should pass its `worktree_timeout` (same posture as
+    `worktree_health`/MTO-1: a large monorepo measured well past 30s here).
     """
     def _git(*args):
         return subprocess.run(["git", "-C", str(cwd), *args],
-                              capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+                              capture_output=True, text=True, timeout=timeout)
 
     head = _git("rev-parse", "HEAD")
     sha = head.stdout.strip() if head.returncode == 0 else ""
@@ -1316,7 +1323,7 @@ def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
     from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
 
     cwd = _worker_cwd(cfg, key)
-    tree_key = _tree_state_key(cwd)
+    tree_key = _tree_state_key(cwd, timeout=binding.worktree_timeout)
     snap = snap_mod.load(cfg.home, key)
     cached = snap.test_runs.get(tree_key)
     if cached is not None:
@@ -1498,7 +1505,7 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
     if binding.mode == "local":  # defensive -- verifying never reaches mode:local
         return {"all_passed": True, "checked": [], "summary": "", "unsupported": []}
     base = binding.base_branch
-    tree_key = _tree_state_key(cwd)
+    tree_key = _tree_state_key(cwd, timeout=binding.worktree_timeout)
     snap = snap_mod.load(cfg.home, key)
     cached = snap.ac_checks.get(tree_key, {})
 
