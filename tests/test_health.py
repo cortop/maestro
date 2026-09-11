@@ -734,7 +734,8 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
-                      "pi_version", "worktree_health", "worktree_witness", "provider_availability",
+                      "pi_version", "worktree_health", "worktree_branch", "worktree_witness",
+                      "provider_availability",
                       "missing_acs", "ac_annotation_parse"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
@@ -797,13 +798,14 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     `worktree_witness` -- same treatment. T-96 grew it by one more still --
     `language_binding` -- same treatment. T-98 grew it by one more still --
     `ac_annotation_parse` -- same treatment. T-99 grew it by one more still --
-    `home_structure` -- same treatment.)"""
+    `home_structure` -- same treatment. This ticket grew it by one more still
+    -- `worktree_branch` -- same treatment.)"""
     baseline_names = {
         "home_structure", "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "language_binding", "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
-        "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_witness",
+        "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_branch", "worktree_witness",
         "provider_availability", "burn", "missing_acs", "ac_annotation_parse",
     }
     code, out = _sweep(home)
@@ -1982,3 +1984,65 @@ def test_check_language_binding_registered_in_doctor(home):
     code, out = _sweep(home)
     assert code == 0
     assert next(c for c in out["checks"] if c["name"] == "language_binding")["status"] == "ok"
+
+
+# --- worktree_branch: a detached worktree has no branch to commit onto --------
+
+def _real_worktree(tmp_path, name, *, detach=False):
+    """A real git worktree, optionally detached at an unrelated commit -- the
+    exact live shape: staged work sitting on a foreign HEAD."""
+    from conftest import git, make_origin_and_repo
+    _origin, repo = make_origin_and_repo(tmp_path, name=f"{name}-repo")
+    (repo / "other.txt").write_text("upstream\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "unrelated upstream work", cwd=repo)
+    foreign = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                             capture_output=True, text=True, check=True).stdout.strip()
+    wt = tmp_path / "worktrees" / name
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    if detach:
+        git("worktree", "add", "--detach", str(wt), foreign, cwd=repo)
+        (wt / "staged.txt").write_text("uncommitted\n")
+        git("add", "-A", cwd=wt)
+    else:
+        git("worktree", "add", "-b", f"maestro/{name}", str(wt), cwd=repo)
+    return wt
+
+
+def test_worktree_branch_warns_on_a_detached_worktree(tmp_path, cfg):
+    """The live shape doctor used to call healthy: LINEAR-BDA-325 sat detached
+    at a foreign commit with four staged files for 16.5 hours while its
+    reconciler settled without appending on every spawn."""
+    _real_worktree(cfg.home, "T-1", detach=True)
+    check = health.check_worktree_branch(cfg, 1000)
+    assert check["status"] == "warn"
+    assert check["detached"][0]["key"] == "T-1"
+    assert "HEAD is detached" in check["detached"][0]["reason"]
+    assert "retry" in check["detached"][0]["reason"]
+
+
+def test_worktree_branch_ok_when_on_a_branch(tmp_path, cfg):
+    _real_worktree(cfg.home, "T-1", detach=False)
+    check = health.check_worktree_branch(cfg, 1000)
+    assert check["status"] == "ok"
+    assert check["detached"] == []
+    assert check["detail"] == "every worktree is on a branch"
+
+
+def test_a_detached_worktree_still_passes_worktree_health(tmp_path, cfg):
+    """Why this needed its own check: both existing probes (index present,
+    status not a mass deletion) pass on a detached worktree, so
+    check_worktree_health reports 'a valid index and clean status'."""
+    _real_worktree(cfg.home, "T-1", detach=True)
+    assert health.check_worktree_health(cfg, 1000)["status"] == "ok"
+    assert health.check_worktree_branch(cfg, 1000)["status"] == "warn"
+
+
+def test_worktree_branch_does_not_change_the_ensure_verdict(tmp_path, cfg):
+    """`worktree_ensure` REFUSES on an unhealthy worktree, and the adopt path
+    is what re-attaches a detached one -- so detachment must never reach
+    `ops.worktree_health`, or the one working recovery becomes a refusal."""
+    from maestro import ops
+    wt = _real_worktree(cfg.home, "T-1", detach=True)
+    assert ops.worktree_health(wt, timeout=cfg.worktree_timeout)["healthy"] is True
+    assert ops.worktree_branch(wt, timeout=cfg.worktree_timeout) is None

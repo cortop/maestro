@@ -1643,6 +1643,49 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
     return {"name": "worktree_health", "status": status, "detail": detail, "broken": broken}
 
 
+def check_worktree_branch(cfg: Config, now: float) -> dict:
+    """WARN on a worktree whose HEAD is DETACHED -- it has no branch to commit
+    onto, so the reconciler it is handed to cannot finish its step.
+
+    `check_worktree_health` beside this one probes for an index and for a
+    mass-deletion `git status`, and calls everything else "a valid index and
+    clean status". A worktree detached at some unrelated upstream commit with
+    staged work sitting on it passes both probes. Measured on the dogfood
+    board: LINEAR-BDA-325 sat detached at a foreign commit with four staged
+    files for 16.5 hours, its reconciler re-derived the situation and settled
+    without appending anything on every spawn, and the watchdog charged four
+    no-progress failures to the ticket until it dead-lettered -- while doctor
+    reported every worktree healthy. Its sibling LINEAR-BDA-308 escaped the
+    same fate only because a human sent `retry`, whose `ready` pass re-adopts
+    the branch deterministically.
+
+    Detective only, and deliberately NOT part of `ops.worktree_health`: that
+    verdict drives `worktree_ensure`'s refusal, and the adopt path is what
+    heals this. Turning it into a refusal would break the one recovery that
+    works.
+    """
+    from . import ops
+
+    worktrees_dir = cfg.home / "worktrees"
+    detached = []
+    if worktrees_dir.is_dir():
+        for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
+            try:
+                branch = ops.worktree_branch(wt, timeout=cfg.worktree_timeout)
+            except store.MaestroError as exc:
+                detached.append({"key": wt.name, "reason": f"branch probe error: {exc}"})
+                continue
+            if branch is None:
+                detached.append({"key": wt.name, "reason": (
+                    "HEAD is detached -- no branch to commit onto; "
+                    f"`maestro cmd {wt.name} retry` re-adopts it")})
+    status = "warn" if detached else "ok"
+    detail = (", ".join(f"{d['key']}: {d['reason']}" for d in detached)
+              if detached else "every worktree is on a branch")
+    return {"name": "worktree_branch", "status": status, "detail": detail,
+            "detached": detached}
+
+
 def check_home_structure(cfg: Config, now: float) -> dict:
     """FIRST entry in ``CHECKS`` (T-99): ``fail`` when *home* is
     missing/uninitialized (nothing else here can mean anything -- ``report``
@@ -1722,7 +1765,8 @@ CHECKS = (check_home_structure, check_heartbeat, check_backup_age, check_claim_a
           check_language_binding, check_missing_reconcile_skill,
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
           check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
-          check_runner_binary, check_pi_version, check_worktree_health, check_worktree_witness,
+          check_runner_binary, check_pi_version, check_worktree_health, check_worktree_branch,
+          check_worktree_witness,
           check_provider_availability)
 
 
