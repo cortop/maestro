@@ -606,6 +606,24 @@ def worktree_health(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
     return {"healthy": True, "reason": None}
 
 
+def worktree_branch(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> str | None:
+    """The branch *wt* has checked out, or None when HEAD is DETACHED.
+
+    Deliberately NOT folded into `worktree_health`. That verdict drives
+    `worktree_ensure`'s refusal, and refusing is the wrong answer here: the
+    adopt path is exactly what re-attaches a detached worktree to the ticket's
+    own branch, so a human's `maestro cmd <KEY> retry` heals this today.
+    Making it "unhealthy" would turn the one working recovery into a refusal.
+    This is a read-only accessor for the detective check beside it.
+    """
+    try:
+        p = subprocess.run(["git", "-C", str(wt), "symbolic-ref", "--quiet", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise store.MaestroError(f"worktree_branch({wt}): {type(exc).__name__}: {exc}") from exc
+    return (p.stdout or "").strip() or None
+
+
 def _cleanup_partial_worktree(repo: str, wt: Path, *, branch: str | None = None,
                               base: str | None = None, timeout: int) -> None:
     """Tear down *wt* regardless of how far its creation got -- git may or may
