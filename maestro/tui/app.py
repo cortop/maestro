@@ -403,7 +403,7 @@ class MaestroTUI(App):
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
-        cfg = Config(home=self._home)
+        cfg = config_mod.load(str(self._home))
         sessions = RoutingSessions({
             "claude": ClaudeCliSessions(
                 cfg.home, model=cfg.reconcile_model, permission_mode=cfg.permission_mode,
