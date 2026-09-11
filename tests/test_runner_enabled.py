@@ -12,7 +12,7 @@ runner names happen to be registered.
 
 ## Notes
 The first real bring-up (spec AC4) ran against a **scratch** MAESTRO_HOME --
-`/tmp/maestro-oc3-brief-obTcDC` -- never `~/.maestro/maestro-dev`: `maestro
+`/tmp/maestro-oc3-brief-obTcDC` -- never `~/.maestro`: `maestro
 --home <scratch> init` + `maestro --home <scratch> env` printed the effective
 default (`"runner_enabled": ["claude"]`) for real; a hand-seeded `BAD-1`
 ticket with `runner: opencode` in `implementing` then got a real (non-dry-run)

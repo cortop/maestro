@@ -51,7 +51,7 @@ def test_validate_key_does_not_touch_the_filesystem(monkeypatch):
 
 # --- AC: every existing key on the dogfood board still validates -----------
 
-# The literal key set on the live self-dev board (`~/.maestro/maestro-dev/tickets`)
+# The literal key set on the live self-dev board (`~/.maestro/tickets`)
 # as of 2026-08-09. Enumerated here rather than scanned live -- tests must
 # never touch a real MAESTRO_HOME (CLAUDE.md) -- so this must not break any of
 # them.

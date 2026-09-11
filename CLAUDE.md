@@ -41,16 +41,25 @@ the board as a Petri net.
 
 ## ⚠️ MAESTRO_HOME (read this before any `maestro` command)
 
-Bare `maestro` resolves home to `~/.maestro`. **The dogfood home this project drives is
-`~/.maestro/maestro-dev`.** The `Makefile` exports `MAESTRO_HOME=$(HOME)/.maestro/maestro-dev`,
-so `make` targets are correct — but a raw `maestro <cmd>` in the shell will hit the wrong home.
-Always `export MAESTRO_HOME=~/.maestro/maestro-dev` (or use a `make` target) when inspecting or
-mutating the self-dev board. `maestro env` prints the resolved paths. See `DOGFOOD.md`.
+**The dogfood home this project drives is `~/.maestro`** — which is also where bare `maestro`
+resolves home, so a raw `maestro <cmd>` in the shell hits the right board. The `Makefile`
+exports `MAESTRO_HOME=$(HOME)/.maestro` to make that explicit rather than implicit.
+`maestro env` prints the resolved paths; `maestro status` exits 2 and names a nearby `ok`
+board if you ever point it at an empty one. See `DOGFOOD.md`.
+
+There is no `~/.maestro/maestro-dev`. It was the home once, and this file, `DOGFOOD.md`, the
+`Makefile` and the `maestro-task` skill all went on naming it after the board moved — so every
+`make status` / `make dry` / `make doctor` / `make backup` silently drove an empty phantom
+home, and every agent that read this file inherited the wrong path. A doc that names a home
+nobody runs is worse than no doc: `maestro` happily initialises the phantom and reports it
+healthy. If you ever move the home, grep the whole repo for the old path before you finish —
+`tests/test_maestro_task_skill.py` pins every documented `MAESTRO_HOME` to the `Makefile`'s
+export so this particular drift fails the suite instead of the board.
 
 ## ⚠️ NEVER delete the state home / event logs
 
 **Do not run `rm -rf` (or any delete/move/`git clean`) against a MAESTRO_HOME, its `events/`,
-`tickets/`, `inbox/`, or `config.toml` — not the dogfood/dev home (`~/.maestro/maestro-dev`),
+`tickets/`, `inbox/`, or `config.toml` — not the dogfood/dev home (`~/.maestro`),
 not any home.** The event logs are the sole source of truth and have no other copy; deleting them
 is unrecoverable. "It's only the dev/dogfood board" is **not** a reason to delete it — that board
 is real work-in-progress (this is exactly how it was lost on 2026-07-18). If a home genuinely

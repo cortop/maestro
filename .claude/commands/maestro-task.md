@@ -11,8 +11,8 @@ You help the user create a well-formed maestro ticket. Your job is to **enforce 
 bar** before any file is written: the description must be clear and self-contained, and the
 ticket must carry at least one concrete, verifiable acceptance criterion.
 
-The dogfood home is `~/.maestro/maestro-dev`.
-Always run: `export MAESTRO_HOME=~/.maestro/maestro-dev` before any `maestro` command.
+The dogfood home is `~/.maestro`.
+Always run: `export MAESTRO_HOME=~/.maestro` before any `maestro` command.
 
 ---
 
@@ -70,12 +70,12 @@ it, or tell me what to change."** Do not proceed until they confirm.
 Once confirmed:
 
 ```bash
-export MAESTRO_HOME=~/.maestro/maestro-dev
+export MAESTRO_HOME=~/.maestro
 
 # Find the next available T-N key
 KEY=$(python3 -c "
 import os, re
-home = os.path.expanduser('~/.maestro/maestro-dev/tickets')
+home = os.path.expanduser('~/.maestro/tickets')
 nums = [int(m.group(1)) for d in os.listdir(home) for m in [re.match(r'^T-(\d+)$', d)] if m]
 print('T-' + str(max(nums, default=0) + 1))
 ")
@@ -115,14 +115,14 @@ priority: <priority>
 Then queue the ticket so the dispatcher sees it:
 
 ```bash
-export MAESTRO_HOME=~/.maestro/maestro-dev
+export MAESTRO_HOME=~/.maestro
 maestro create --key "$KEY" --priority <priority> --no-nudge "<title>"
 ```
 
 Finally, report success:
 
 ```
-Created ticket $KEY at ~/.maestro/maestro-dev/tickets/$KEY/spec.md
+Created ticket $KEY at ~/.maestro/tickets/$KEY/spec.md
 The dispatcher will pick it up on the next sweep.
 ```
 
@@ -136,6 +136,7 @@ The dispatcher will pick it up on the next sweep.
 - Never add front-matter fields beyond `priority`, `dependsOn`.
 - The `dependsOn` line must be omitted (not left as `dependsOn: []`) unless there are
   real dependencies.
-- Target the dogfood home (`~/.maestro/maestro-dev`), not the default `~/.maestro`.
+- Target the dogfood home (`~/.maestro`) explicitly, so the command is copy-pasteable
+  into a shell that has no `MAESTRO_HOME` exported.
 - After writing spec.md, always run `maestro create --key ... --no-nudge` so the
   dispatcher event-log picks up the ticket.

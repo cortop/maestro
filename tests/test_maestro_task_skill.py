@@ -30,12 +30,50 @@ def test_skill_file_exists_in_commands_dir():
     assert (REPO_ROOT / ".claude" / "commands" / "maestro-task.md").is_file()
 
 
+# The Makefile's export is the single source of truth for the dogfood home.
+# Everything that tells a human or an agent which home to drive must agree with
+# it, because a doc that names a home nobody runs is worse than no doc: every
+# `make` target and every agent that read CLAUDE.md silently drove an empty
+# phantom `~/.maestro/maestro-dev` for weeks after the home moved.
+_HOME_DOCS = (
+    "CLAUDE.md",
+    "DOGFOOD.md",
+    "skills/maestro-task.md",
+    ".claude/commands/maestro-task.md",
+)
+
+
+def _makefile_home() -> str:
+    line = next(l for l in (REPO_ROOT / "Makefile").read_text().splitlines()
+                if l.startswith("export MAESTRO_HOME"))
+    return line.split("=", 1)[1].strip().replace("$(HOME)", "~")
+
+
+def test_makefile_declares_the_dogfood_home():
+    assert _makefile_home().startswith("~/"), _makefile_home()
+
+
+def test_every_documented_maestro_home_matches_the_makefile():
+    """No doc or skill may name a MAESTRO_HOME the Makefile does not export."""
+    home = _makefile_home()
+    drift = []
+    for rel in _HOME_DOCS:
+        for n, line in enumerate((REPO_ROOT / rel).read_text().splitlines(), 1):
+            for m in re.finditer(r"MAESTRO_HOME=(\S+)", line):
+                named = m.group(1).rstrip("`\"'),.").replace("$(HOME)", "~")
+                if named != home:
+                    drift.append(f"{rel}:{n} exports {named!r}, Makefile has {home!r}")
+    assert not drift, "documented MAESTRO_HOME drifted from the Makefile:\n" + "\n".join(drift)
+
+
 def test_skill_targets_dogfood_home():
-    """The skill must reference the dogfood home, not the default ~/.maestro."""
-    skill_text = (REPO_ROOT / "skills" / "maestro-task.md").read_text()
-    assert "maestro-dev" in skill_text, "skill must reference the dogfood MAESTRO_HOME"
-    assert "~/.maestro\n" not in skill_text and "~/.maestro'" not in skill_text, \
-        "skill must not use bare ~/.maestro (wrong home)"
+    """The skill must name the home explicitly rather than relying on the
+    ambient default, so its commands are copy-pasteable into a bare shell."""
+    home = _makefile_home()
+    for rel in ("skills/maestro-task.md", ".claude/commands/maestro-task.md"):
+        text = (REPO_ROOT / rel).read_text()
+        assert f"export MAESTRO_HOME={home}" in text, \
+            f"{rel} must export the dogfood MAESTRO_HOME ({home})"
 
 
 def test_skill_mentions_quality_rubric():
