@@ -892,7 +892,10 @@ def test_dispatch_spawn_tuple_byte_identical_to_pre_rf1_baseline(home, cfg):
         "sonnet",
         None,
         ["Bash(gh pr merge:*)"] + disp.phase_verb_denylist(Phase.READY.value),
-        disp.phase_verb_grant(Phase.READY.value),
+        # The grant now also names the one reconcile command this spawn will
+        # invoke, so the Skill call that loads it is not permission-denied.
+        disp.phase_verb_grant(Phase.READY.value)
+        + disp.skill_grant("/maestro-reconcile-ready"),
         {},
         "claude",  # RF-2: READY forces "claude" regardless of any spec runner: override
         None,      # OC-4: no non-claude runner in play here

@@ -160,7 +160,11 @@ def test_full_sweep_spawn_argv_matches_phase_grant_exactly(home, cfg, phase, suf
     seed_ticket(home, "T-1", "t", phase=phase.value)
     allowed, disallowed = _spawned_tools(cfg, "T-1")
 
-    expected_allowed = set(disp.phase_verb_grant(phase.value))
+    expected_allowed = (set(disp.phase_verb_grant(phase.value))
+                        # ...plus the ONE reconcile command this spawn invokes,
+                        # so the Skill call that loads it is not denied. Still
+                        # exact: no other phase's skill, and never bare `Skill`.
+                        | set(disp.skill_grant(f"/maestro-reconcile-{suffix}")))
     expected_denied = ({"Bash(gh pr merge:*)"} | set(disp.phase_denylist(phase.value))
                         | set(disp.phase_verb_denylist(phase.value)))
     assert allowed == expected_allowed
@@ -182,7 +186,8 @@ def test_awaiting_human_spawn_grants_only_its_own_verbs(home, cfg):
                 questions={"q1": "ok?"})
     inbox.append_command(home, "T-1", "ans", {"text": "yes", "qid": "q1"})
     allowed, disallowed = _spawned_tools(cfg, "T-1")
-    assert allowed == set(disp.phase_verb_grant(Phase.AWAITING_HUMAN.value))
+    assert allowed == (set(disp.phase_verb_grant(Phase.AWAITING_HUMAN.value))
+                       | {"Skill(maestro-reconcile-awaiting-human)"})
     assert "Bash(maestro finalize:*)" in allowed       # research-ticket mint path needs it
     assert "Bash(maestro verify-ac:*)" not in allowed
     assert "Bash(maestro verify-ac:*)" in disallowed
@@ -211,3 +216,50 @@ def test_out_of_phase_verb_explicitly_denied_despite_repos_own_coarse_grant(home
     seed_ticket(home, "T-1", "t", phase=Phase.QA.value)
     _allowed, disallowed = _spawned_tools(cfg, "T-1")
     assert "Bash(maestro finalize:*)" in disallowed
+
+
+# --- the Skill grant -----------------------------------------------------------
+#
+# A reconciler is told to load `/maestro-reconcile-<phase>` and reaches for the
+# `Skill` tool. Those files are installed as slash COMMANDS, never as registry
+# skills, and a Skill call whose target is a command is permission-gated --
+# auto-declined in headless `-p`. Measured: 249 sessions, one denial each, 142
+# on the session's literal first turn. The reconciler recovers, so the cost is
+# a burnt turn per session, every session, every phase.
+
+
+@pytest.mark.parametrize("phase,suffix", [
+    (Phase.READY, "ready"),
+    (Phase.IMPLEMENTING, "implementing"),
+    (Phase.QA, "qa"),
+    (Phase.RESEARCHING, "researching"),
+])
+def test_every_phase_spawn_grants_its_own_reconcile_command(home, cfg, phase, suffix):
+    """Real sweep, real argv: the grant names the command actually resolved."""
+    seed_ticket(home, "T-1", "t", phase=phase.value)
+    allowed, _disallowed = _spawned_tools(cfg, "T-1")
+    # Exactly one Skill rule, for this phase's own command, never bare `Skill`.
+    assert {r for r in allowed if r.startswith("Skill")} == {
+        f"Skill(maestro-reconcile-{suffix})"}
+
+
+def test_the_grant_is_never_the_bare_skill_rule():
+    """A bare `Skill` would admit every skill and slash command resolvable from
+    the worktree -- 80 and 142 in a dd-source checkout, including ones that
+    delete caches or implement tickets. Same self-widening AD-1 forbids for
+    `Bash(maestro:*)`."""
+    for command in ("/maestro-reconcile-passive", "/post-qa-polish",
+                    "maestro-reconcile-qa"):
+        rules = disp.skill_grant(command)
+        assert len(rules) == 1
+        assert rules[0] != "Skill"
+        assert rules[0].startswith("Skill(") and rules[0].endswith(")")
+        assert "*" not in rules[0]
+    assert disp.skill_grant("") == []
+
+
+def test_grant_is_phase_scoped_not_the_whole_reconcile_family():
+    """One spawn must not be able to invoke another phase's skill."""
+    granted = disp.skill_grant("/maestro-reconcile-qa")
+    for other in ("implementing", "passive", "ready", "triaging"):
+        assert f"Skill(maestro-reconcile-{other})" not in granted

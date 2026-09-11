@@ -392,7 +392,11 @@ def test_spawn_tool_grants_are_maestro_show_plus_resolved_allowed_tools_and_merg
 
     spawn = next(s for s in sessions.spawned if s[1].split(" ", 1)[0] == "/my-pr-polish")
     _, _, _, _, _, disallowed_tools, allowed_tools, *_ = spawn
-    assert allowed_tools == ["Bash(maestro show:*)", "Bash(some-extra-tool:*)"]
+    # The Skill grant for the configured post-QA command rides along, so the
+    # Skill call that loads it is not permission-denied (same fix as the
+    # reconcile path; latent here only because pi discards allowedTools).
+    assert allowed_tools == ["Bash(maestro show:*)", "Skill(my-pr-polish)",
+                             "Bash(some-extra-tool:*)"]
     assert disallowed_tools == disp.MERGE_DENYLIST
 
 
