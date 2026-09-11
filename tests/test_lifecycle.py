@@ -92,6 +92,60 @@ def test_failure_backoff_then_deadletter(cfg):
     assert store.deadletter_path(home, "T-1").exists()
 
 
+def test_deadletter_clears_the_backoff_timer_so_degraded_actually_sleeps(cfg):
+    """A dead-lettered ticket must sleep, not respawn on every sweep forever.
+
+    `ops.fail`'s dead-letter branch deliberately sets no new backoff timer, so
+    the snapshot arrives at DEGRADED carrying the RequeueScheduled from the
+    PREVIOUS backoff -- a timestamp already in the past, since the ticket had
+    to wake past it to fail the final time. `is_due` tests that timer above the
+    SLEEPING_PHASES gate, so while the STALLED fold arm left it in place,
+    T-65's `PHASE_CLASS[DEGRADED] = "sleeping"` was never reached and the
+    passive reconciler (which has no `requeue` verb, so it cannot re-arm the
+    timer that woke it) got respawned indefinitely.
+
+    This drives the REAL backoff-then-dead-letter path on purpose: every
+    dispatcher `_seed` helper sets its phase with a raw PhaseChanged, whose
+    fold arm clears the timer, so a test written on one of those cannot
+    observe this bug at all.
+    """
+    home = cfg.home
+    _create(cfg, "T-1")
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING)
+    ops.fail(cfg, "T-1", "boom")      # backoff -> appends RequeueScheduled
+    ops.fail(cfg, "T-1", "boom")      # backoff -> appends another
+    assert snap_mod.load(home, "T-1").next_requeue_at is not None
+    assert ops.fail(cfg, "T-1", "boom") == "dead-letter"
+
+    snap = snap_mod.load(home, "T-1")
+    assert snap.phase == Phase.DEGRADED.value
+    assert snap.next_requeue_at is None
+
+    # Far past any backoff the ticket could have scheduled: sleeping, not "timer".
+    verdict = disp.is_due(home, "T-1", snap, inbox_pending=False,
+                          current_spec_hash=disp.spec_hash_on_disk(home, "T-1"),
+                          now=store.now_epoch() + 86_400)
+    assert (verdict.due, verdict.reason) == (False, "sleeping")
+
+
+def test_a_human_still_revives_a_dead_lettered_ticket(cfg):
+    """The clear must not cost the revival path: `inbox_pending` sits above the
+    timer branch in `is_due`, so `maestro cmd <KEY> retry` still wakes it."""
+    home = cfg.home
+    _create(cfg, "T-1")
+    ops.set_phase(cfg, "T-1", Phase.IMPLEMENTING)
+    for _ in range(3):
+        ops.fail(cfg, "T-1", "boom")
+    snap = snap_mod.load(home, "T-1")
+    assert snap.phase == Phase.DEGRADED.value
+
+    inbox.append_command(home, "T-1", "cmd", {"text": "retry"})
+    verdict = disp.is_due(home, "T-1", snap, inbox_pending=inbox.has_pending(home, "T-1"),
+                          current_spec_hash=disp.spec_hash_on_disk(home, "T-1"),
+                          now=store.now_epoch() + 86_400)
+    assert (verdict.due, verdict.reason) == (True, "inbox")
+
+
 def test_fail_dead_letter_skips_backoff_on_first_offense(cfg):
     """T-45: `dead_letter=True` dead-letters on THIS call, ignoring
     `max_failures` entirely -- for a structural failure a retry can't fix."""

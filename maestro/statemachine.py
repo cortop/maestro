@@ -87,6 +87,15 @@ PHASE_CLASS: dict[Phase, PhaseClass] = {
     # (`current_spec_hash` mismatch, same mechanism). No new revival path
     # needed -- both already exist in `dispatcher.is_due` above the
     # SLEEPING_PHASES check and are unaffected by this classification.
+    # This row was inert for its first month: `is_due`'s requeue-timer branch
+    # ALSO sits above the SLEEPING_PHASES check, and the STALLED fold arm used
+    # to leave the pre-dead-letter backoff timer in place, so every degraded
+    # ticket short-circuited to (True, "timer") and never reached this
+    # classification -- the very loop described above, at the
+    # `min_spawn_interval` floor instead of every sweep. The fold now clears
+    # the timer (snapshot.py's STALLED arm), which is what makes this row
+    # load-bearing. Keep those two facts together: classifying a phase
+    # "sleeping" only bites if nothing above the gate can still say "due".
     # `TRANSITIONS[Phase.DEGRADED]` allows READY/TRIAGING/TERMINATING, i.e. it
     # is reachable again given the right human signal, so it belongs here
     # (parked, revivable) rather than in TERMINAL_PHASES (permanently swept
