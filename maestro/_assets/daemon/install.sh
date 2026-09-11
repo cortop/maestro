@@ -63,7 +63,16 @@ if [[ -z "$CLAUDE_BIN" ]]; then
   echo "warning: 'claude' not on PATH — the dispatcher will fail to spawn reconcilers." >&2
   CLAUDE_BIN="$HOME/.local/bin/claude"
 fi
-LAUNCHD_PATH="$(dirname "$MAESTRO_BIN"):$(dirname "$CLAUDE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# MAESTRO_RUNNER_PATH carries every `[runner.<name>] bin` dir (fleet.up sets it
+# from config; this script has no TOML parser). Without it a runner installed
+# outside the system dirs -- a volta/asdf shim under $HOME, say -- resolves in
+# the installing shell and is invisible to the daemon, which skips those
+# tickets silently and forever.
+LAUNCHD_PATH="$(dirname "$MAESTRO_BIN"):$(dirname "$CLAUDE_BIN")"
+if [[ -n "${MAESTRO_RUNNER_PATH:-}" ]]; then
+  LAUNCHD_PATH="${LAUNCHD_PATH}:${MAESTRO_RUNNER_PATH}"
+fi
+LAUNCHD_PATH="${LAUNCHD_PATH}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$MAESTRO_HOME/agent-logs"
 sed -e "s#@MAESTRO_BIN@#${MAESTRO_BIN}#g" \

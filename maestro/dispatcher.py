@@ -26,6 +26,7 @@ from typing import Callable, Iterable
 
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
+from . import config as config_mod
 from .config import Config
 from .gates import backend_interlock_reason, parse_spec_overrides, spec_priority, spec_runner  # noqa: F401 (re-export)
 from .idempotency import content_hash
@@ -3667,7 +3668,7 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     return runner, runner_model
 
 
-def _default_runner_probe(runner: str) -> dict:
+def _default_runner_probe(runner: str, cfg: Config | None = None) -> dict:
     """OC-2's real preflight probe for a non-``claude`` *runner*: is its own CLI
     binary on ``PATH`` (``shutil.which`` -- covers "missing" and "unexecutable"
     in one check, since ``which`` already applies ``os.X_OK``), and, separately,
@@ -3683,8 +3684,31 @@ def _default_runner_probe(runner: str) -> dict:
     from .providers import ollama as ollama_mod
 
     models, daemon_reason = ollama_mod.fetch_models()
-    return {"binary_ok": shutil.which(runner) is not None,
+    binary_ok = (resolve_binary(cfg, runner) is not None if cfg is not None
+                 else shutil.which(runner) is not None)
+    return {"binary_ok": binary_ok,
             "models": models, "daemon_reason": daemon_reason}
+
+def resolve_binary(cfg: Config, name: str) -> str | None:
+    """Absolute path to the executable *name*, or None if it cannot be found.
+
+    Checks `[runner.<name>] bin` first, then falls back to a PATH lookup --
+    against a PATH already extended by every configured runner dir, so a
+    daemon whose plist PATH predates the runner still resolves it.
+
+    Keyed on the BINARY name, never on the runner whose spawn is being gated:
+    `_ollama_probe` below probes `ollama` while gating the `opencode` runner,
+    and a resolver keyed on the runner name would silently change what that
+    probe means. A configured `bin` is checked for executability here (the
+    config layer validates only shape, on purpose -- see
+    `config._validate_runner_bin`), so a path that is set but wrong reports
+    missing instead of passing preflight and dying at Popen.
+    """
+    configured = config_mod.runner_bin(cfg, name)
+    if configured:
+        return configured if os.access(configured, os.X_OK) else None
+    return shutil.which(name, path=config_mod.runner_path(cfg))
+
 
 def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
     """Creates a closure that builds the default runner probe function.
@@ -3705,7 +3729,7 @@ def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
         def _ollama_probe() -> dict:
             from .providers import ollama as ollama_mod
             models, daemon_reason = ollama_mod.fetch_models()
-            return {"binary_ok": shutil.which("ollama") is not None,
+            return {"binary_ok": resolve_binary(cfg, "ollama") is not None,
                     "models": models, "daemon_reason": daemon_reason}
 
         def _pi_probe() -> dict:
@@ -3718,15 +3742,16 @@ def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
             # less/unreachable pi is TRANSIENT with no special-casing here.
             from . import store as store_mod
             from .providers import pi as pi_mod
-            models, reason = pi_mod.fetch_models(store_mod.pi_agent_dir(cfg.home))
-            return {"binary_ok": shutil.which("pi") is not None,
+            models, reason = pi_mod.fetch_models(store_mod.pi_agent_dir(cfg.home),
+                                                 path=config_mod.runner_path(cfg))
+            return {"binary_ok": resolve_binary(cfg, "pi") is not None,
                     "models": models, "daemon_reason": reason}
 
         def _generic_probe() -> dict:
             # For runners like opencode that don't have special support yet
             # we use the existing ollama probe for compatibility, but this would
             # be the place to add true runner-specific probing in future
-            return _default_runner_probe(runner)
+            return _default_runner_probe(runner, cfg)
 
         # Dispatch table for different runner types
         probe_dispatch = {

@@ -56,7 +56,8 @@ _NO_MODELS_MARKER = "No models available"
 
 
 def fetch_models(
-    pi_agent_dir: Path | str | None = None, *, run: Callable | None = None
+    pi_agent_dir: Path | str | None = None, *, run: Callable | None = None,
+    path: str | None = None,
 ) -> tuple[list[dict] | None, str | None]:
     """List every model pi can currently resolve via ``pi --list-models
     --offline``, run under *pi_agent_dir* (``$PI_CODING_AGENT_DIR``, PI-4's
@@ -90,15 +91,21 @@ def fetch_models(
     run = run or subprocess.run
     argv = ["pi", "--list-models", "--offline"]
     env = None
-    if pi_agent_dir is not None:
+    if pi_agent_dir is not None or path is not None:
         import os
         env = dict(os.environ)
-        env["PI_CODING_AGENT_DIR"] = str(pi_agent_dir)
-        try:
-            from .. import pi_guard
-            argv += pi_guard.spawn_argv(Path(pi_agent_dir))
-        except OSError:
-            pass
+        if path is not None:
+            # The probe has to resolve `pi` the same way the spawn will, and pi
+            # in turn shells out for its own api_key resolver -- so the PATH it
+            # inherits, not just argv[0], is what has to carry the runner dir.
+            env["PATH"] = path
+        if pi_agent_dir is not None:
+            env["PI_CODING_AGENT_DIR"] = str(pi_agent_dir)
+            try:
+                from .. import pi_guard
+                argv += pi_guard.spawn_argv(Path(pi_agent_dir))
+            except OSError:
+                pass
     try:
         proc = run(argv, capture_output=True, text=True, timeout=TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired:

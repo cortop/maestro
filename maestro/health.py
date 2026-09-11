@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import backup as backup_mod
 from . import claims, credentials, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, spend as spend_mod, store
+from . import config as config_mod
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
 from .config import Config
@@ -1119,21 +1120,34 @@ def _spec_runner_fields(spec_text: str) -> tuple[str | None, str | None]:
     return runner, model
 
 
-def check_runner_binary(cfg: Config, now: float, *, which=None) -> dict:
+def check_runner_binary(cfg: Config, now: float, *, which=None, plist=None) -> dict:
     """WARN (never blocks a spawn) when a current ticket's spec names a
-    non-claude ``runner:`` whose CLI binary isn't on ``PATH`` -- OC-2's spawn
-    preflight (``dispatcher._default_runner_probe``, the identical
-    ``shutil.which`` check, cached once per sweep there) is the actual
-    refusal point; this is board-wide visibility only, same shape as
-    ``check_ollama_models`` beside it -- one WARN a human can act on before
-    it ever surfaces as a spawn skip.
+    non-claude ``runner:`` whose CLI binary the DISPATCHER cannot resolve.
 
-    Skips the check entirely (``ok``, empty ``tickets``) when no current
-    ticket names a non-claude runner. Injectable ``which``, as
-    ``check_gh_credential_reachability``'s ``run`` kwarg already does, so
-    tests never depend on what's actually installed on the machine running
-    them."""
+    Resolves against the installed LaunchAgent plist's own
+    ``EnvironmentVariables`` PATH -- the environment the daemon actually runs
+    with -- and not against whatever shell typed ``maestro doctor``. That
+    distinction is the entire point of this check. It previously used
+    ``shutil.which`` against the invoking shell while its docstring claimed to
+    run "the identical check" as the spawn preflight; on a board whose runner
+    lived on a PATH entry only the interactive shell had, it reported "all
+    resolve ok" through a total freeze -- 16 tickets blocked for hours behind a
+    green light, which is worse than no light, because a green first
+    diagnostic confirms the wrong hypothesis.
+
+    A binary that resolves in the shell but NOT in the daemon PATH is reported
+    as exactly that, since the remedy (add the dir to
+    ``fleet.launchd_path``/``[runner.<name>] bin`` and reinstall) differs from
+    the remedy for genuinely-not-installed.
+
+    Falls back to the shell lookup when no plist is installed -- there is no
+    daemon to diverge from. Skips entirely (``ok``, empty ``tickets``) when no
+    current ticket names a non-claude runner. Injectable ``which`` (the shell
+    seam, as ``check_gh_credential_reachability``'s ``run`` kwarg does) and
+    ``plist`` (the daemon seam) so tests never depend on what is installed on
+    the machine running them."""
     which = which or shutil.which
+    daemon_path = fleet.plist_env_path(plist, home=cfg.home)
     home = cfg.home
     candidates: dict[str, str] = {}
     for key in dispatcher.list_keys(home):
@@ -1150,11 +1164,28 @@ def check_runner_binary(cfg: Config, now: float, *, which=None) -> dict:
 
     tickets = {}
     for key, runner in candidates.items():
-        if which(runner) is None:
-            tickets[key] = {"runner": runner, "reason": f"{runner!r} not found on PATH"}
+        configured = config_mod.runner_bin(cfg, runner)
+        if configured:
+            if not os.access(configured, os.X_OK):
+                tickets[key] = {"runner": runner,
+                                "reason": f"[runner.{runner}] bin {configured!r} is not executable"}
+            continue
+        in_shell = which(runner) is not None
+        if daemon_path is None:
+            if not in_shell:
+                tickets[key] = {"runner": runner, "reason": f"{runner!r} not found on PATH"}
+            continue
+        if shutil.which(runner, path=daemon_path) is None:
+            tickets[key] = {"runner": runner, "reason": (
+                f"{runner!r} resolves in this shell but NOT on the dispatcher's own "
+                f"PATH -- set [runner.{runner}] bin and re-run `maestro fleet up`"
+                if in_shell else
+                f"{runner!r} not found on the dispatcher's PATH")}
     status = "warn" if tickets else "ok"
-    detail = (f"{len(tickets)} ticket(s) name a runner whose binary is missing from PATH"
-              if tickets else f"{len(candidates)} ticket(s) using a non-claude runner, all resolve ok")
+    where = "PATH" if daemon_path is None else "the dispatcher's PATH"
+    detail = (f"{len(tickets)} ticket(s) name a runner whose binary is missing from {where}"
+              if tickets else
+              f"{len(candidates)} ticket(s) using a non-claude runner, all resolve ok on {where}")
     return {"name": "runner_binary", "status": status, "detail": detail, "tickets": tickets}
 
 
@@ -1178,7 +1209,8 @@ def check_pi_version(cfg: Config, now: float, *, run=None) -> dict:
         return {"name": "pi_version", "status": "ok",
                 "detail": "no [runner.pi].version pinned", "pinned": None, "installed": None}
     try:
-        p = run(["pi", "--version"], capture_output=True, text=True, timeout=15)
+        p = run(["pi", "--version"], capture_output=True, text=True, timeout=15,
+                env={**os.environ, "PATH": config_mod.runner_path(cfg)})
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"name": "pi_version", "status": "warn",
                 "detail": f"pi --version failed: {type(e).__name__}: {e}",
@@ -1282,7 +1314,8 @@ def check_pi_models(cfg: Config, now: float, *, run=None) -> dict:
         return {"name": "pi_models", "status": "ok", "detail": "no ticket uses runner: pi",
                 "tickets": {}}
 
-    models, reason = pi_mod.fetch_models(store.pi_agent_dir(home), run=run)
+    models, reason = pi_mod.fetch_models(store.pi_agent_dir(home), run=run,
+                                         path=config_mod.runner_path(cfg))
     if models is None:
         return {
             "name": "pi_models", "status": "warn",
@@ -1693,8 +1726,13 @@ CHECKS = (check_home_structure, check_heartbeat, check_backup_age, check_claim_a
           check_provider_availability)
 
 
+# The checks that take a `plist=` override: both need the INSTALLED LaunchAgent
+# rather than the invoking shell -- one for its sweep interval, one for its PATH.
+_PLIST_AWARE_CHECKS = (check_heartbeat, check_runner_binary)
+
+
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
-    return [check(cfg, now, plist=plist) if check is check_heartbeat else check(cfg, now)
+    return [check(cfg, now, plist=plist) if check in _PLIST_AWARE_CHECKS else check(cfg, now)
             for check in CHECKS]
 
 

@@ -38,7 +38,7 @@ from textual.worker import WorkerFailed  # noqa: E402
 from rich.text import Text  # noqa: E402
 
 from conftest import seed_ticket  # noqa: E402
-from maestro import claims, config as config_mod, event_log, inbox  # noqa: E402
+from maestro import claims, config as config_mod, event_log, fleet as fleet_mod, inbox  # noqa: E402
 from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
 from maestro.cli import main as cli_main  # noqa: E402
 from maestro.tui import (  # noqa: E402
@@ -3316,3 +3316,52 @@ def test_trigger_post_qa_action_real_not_configured_error_notify(seeded_home):
             assert "no post_qa_skill configured" in list(app._notifications)[-1].message
 
     asyncio.run(_inner())
+
+
+def test_fleet_up_worker_loads_config_and_passes_it_through(seeded_home, monkeypatch):
+    """`fleet up` from the TUI must reach `fleet.up` with a loaded Config.
+
+    The call happens inside a `run_worker` thread lambda, where a raise is a
+    silent no-op at runtime -- nothing surfaces, the fleet just never comes up.
+    So this drives the real binding through the real worker and asserts the
+    kwargs that arrived. `fleet_mod.up` itself is the one mocked boundary: it
+    shells `install.sh` and `launchctl`, which a test must never do.
+    """
+    seen = {}
+
+    def _fake_up(home, interval=300, **kw):
+        seen["home"] = home
+        seen["interval"] = interval
+        seen["cfg"] = kw.get("cfg")
+        return {"action": "up", "interval": interval, "rc": 0, "stdout": "", "label": "x"}
+
+    monkeypatch.setattr(fleet_mod, "up", _fake_up)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], FleetScreen)
+            await pilot.press("u")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _IntervalModal)
+            await pilot.press("2", "0", "0", "enter")   # submit a real interval
+            await pilot.pause()
+            for _ in range(20):
+                if "cfg" in seen:
+                    break
+                await pilot.pause(0.05)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+    assert seen.get("interval") == 200
+    cfg = seen.get("cfg")
+    assert cfg is not None, "fleet.up was called without a Config"
+    from maestro.config import Config
+    assert isinstance(cfg, Config)
+    # The whole point: the runner dirs it needs come off this Config.
+    from maestro import fleet as _f
+    assert isinstance(_f.config_runner_dirs(cfg), list)

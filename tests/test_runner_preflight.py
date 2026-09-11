@@ -306,3 +306,224 @@ def test_no_runner_fields_board_calls_probe_zero_times(home, cfg):
     disp.dispatch(cfg, DryRunSessions(), now=1000, runner_probe=probe)
 
     assert probe.calls == []
+
+
+# --- `[runner.<name>] bin`: resolve the runner the DAEMON sees ----------------
+#
+# The fault these cover: maestro built the LaunchAgent PATH from the maestro
+# dir, the claude dir and the system dirs, with no notion that [runner.*]
+# exists. A runner living anywhere else (a volta shim under $HOME) was
+# unreachable from the daemon while resolving perfectly in the installing
+# shell -- and the health check resolved against that same shell, so it
+# reported "all resolve ok" straight through a total freeze.
+
+
+def _installed_plist(tmp_path, path_value: str):
+    """A minimal LaunchAgent plist carrying just an EnvironmentVariables PATH."""
+    p = tmp_path / "com.maestro.dispatcher.plist"
+    p.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n'
+        "<key>EnvironmentVariables</key><dict>\n"
+        f"<key>PATH</key><string>{path_value}</string>\n"
+        "</dict>\n</dict></plist>\n", encoding="utf-8")
+    return p
+
+
+def _stub_binary(directory, name):
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    exe.chmod(0o755)
+    return exe
+
+
+def test_doctor_warns_when_the_runner_resolves_in_the_shell_but_not_the_daemon(
+        home, cfg, tmp_path):
+    """The exact freeze shape, and the one this check used to call healthy."""
+    _seed(home, "PI-1", phase=Phase.IMPLEMENTING, runner="pi", runner_model="glm-5.2")
+    shell_only = tmp_path / "shell-only"
+    _stub_binary(shell_only, "pi")
+    plist = _installed_plist(tmp_path, "/usr/bin:/bin")  # daemon cannot see it
+
+    result = health.check_runner_binary(
+        cfg, 1000, which=lambda name: str(shell_only / name), plist=plist)
+
+    assert result["status"] == "warn"
+    reason = result["tickets"]["PI-1"]["reason"]
+    assert "resolves in this shell but NOT on the dispatcher's own PATH" in reason
+    assert "[runner.pi] bin" in reason
+
+
+def test_doctor_ok_once_the_runner_dir_is_on_the_daemon_path(home, cfg, tmp_path):
+    _seed(home, "PI-1", phase=Phase.IMPLEMENTING, runner="pi", runner_model="glm-5.2")
+    runner_dir = tmp_path / "volta" / "bin"
+    _stub_binary(runner_dir, "pi")
+    plist = _installed_plist(tmp_path, f"{runner_dir}:/usr/bin:/bin")
+
+    result = health.check_runner_binary(
+        cfg, 1000, which=lambda name: str(runner_dir / name), plist=plist)
+
+    assert result["status"] == "ok"
+    assert result["tickets"] == {}
+    assert "the dispatcher's PATH" in result["detail"]
+
+
+def test_doctor_warns_when_a_configured_bin_is_not_executable(home, cfg, tmp_path):
+    """A `bin` that is set but wrong must report missing, not pass preflight
+    and die at Popen."""
+    _seed(home, "PI-1", phase=Phase.IMPLEMENTING, runner="pi", runner_model="glm-5.2")
+    ghost = tmp_path / "nowhere" / "pi"
+    (cfg.home / "config.toml").write_text(
+        f'[runner.pi]\nbin = "{ghost}"\n', encoding="utf-8")
+    from maestro import config as config_mod
+    fresh = config_mod.load(str(cfg.home))
+
+    result = health.check_runner_binary(fresh, 1000, which=lambda name: None)
+
+    assert result["status"] == "warn"
+    assert "is not executable" in result["tickets"]["PI-1"]["reason"]
+
+
+def test_a_configured_bin_reaches_the_spawn_preflight(home, cfg, tmp_path):
+    """`resolve_binary` is what the preflight's `binary_ok` consults, so a
+    configured bin must satisfy it even when the bare name is nowhere on PATH
+    -- otherwise the fix stops at config and the board stays frozen."""
+    runner_dir = tmp_path / "volta" / "bin"
+    _stub_binary(runner_dir, "pi")
+    (cfg.home / "config.toml").write_text(
+        f'[runner.pi]\nbin = "{runner_dir / "pi"}"\n', encoding="utf-8")
+    from maestro import config as config_mod
+    fresh = config_mod.load(str(cfg.home))
+
+    assert disp.resolve_binary(fresh, "pi") == str(runner_dir / "pi")
+    # Nothing named `definitely-not-installed` exists anywhere.
+    assert disp.resolve_binary(fresh, "definitely-not-installed") is None
+
+
+def test_launchd_path_carries_every_configured_runner_dir(cfg, tmp_path):
+    """`fleet up` regenerates the plist, so the runner dir has to come from
+    config -- otherwise each reinstall drops a hand-added entry again."""
+    from maestro import config as config_mod, fleet
+    runner_dir = tmp_path / "volta" / "bin"
+    _stub_binary(runner_dir, "pi")
+    (cfg.home / "config.toml").write_text(
+        f'[runner.pi]\nbin = "{runner_dir / "pi"}"\n', encoding="utf-8")
+    fresh = config_mod.load(str(cfg.home))
+
+    path = fleet.launchd_path(fresh, maestro_bin="/opt/m/bin/maestro",
+                              claude_bin="/opt/c/bin/claude")
+    entries = path.split(":")
+    assert str(runner_dir) in entries
+    assert entries.index("/opt/m/bin") < entries.index(str(runner_dir))
+    assert entries[-4:] == ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+
+
+def test_launchd_path_unchanged_when_no_runner_bin_is_configured(cfg):
+    """Ships dark: a board configuring nothing gets the original three sources."""
+    from maestro import fleet
+    path = fleet.launchd_path(cfg, maestro_bin="/opt/m/bin/maestro",
+                              claude_bin="/opt/c/bin/claude")
+    assert path == ("/opt/m/bin:/opt/c/bin:/opt/homebrew/bin:/usr/local/bin"
+                    ":/usr/bin:/bin")
+
+
+def test_spawn_env_prepends_the_configured_runner_dir(cfg, tmp_path):
+    """The reconciler's own PATH -- what lets the runner resolve the tools IT
+    shells out for, which pinning argv[0] would not fix."""
+    from maestro import config as config_mod, sessions
+    runner_dir = tmp_path / "volta" / "bin"
+    _stub_binary(runner_dir, "pi")
+    (cfg.home / "config.toml").write_text(
+        f'[runner.pi]\nbin = "{runner_dir / "pi"}"\n', encoding="utf-8")
+
+    env = sessions._spawn_env(cfg.home, None)
+    assert env["PATH"].split(":")[0] == str(runner_dir)
+    assert env["MAESTRO_HOME"] == str(cfg.home)
+
+    # And a board with no `bin` keeps its PATH byte-identical.
+    (cfg.home / "config.toml").write_text("[runner.pi]\nprovider = \"zai\"\n",
+                                          encoding="utf-8")
+    import os
+    assert sessions._spawn_env(cfg.home, None)["PATH"] == os.environ["PATH"]
+
+
+def test_bin_must_be_named_after_the_runner(cfg, tmp_path):
+    """Only the DIRECTORY reaches PATH and argv[0] stays the bare name, so a
+    versioned filename would put its dir on PATH and then never be found."""
+    from maestro import config as config_mod
+    (cfg.home / "config.toml").write_text(
+        f'[runner.pi]\nbin = "{tmp_path / "pi-1.2"}"\n', encoding="utf-8")
+    try:
+        config_mod.load(str(cfg.home))
+        raise AssertionError("a mismatched basename must fail config.load")
+    except store.MaestroError as e:
+        assert "must be named 'pi'" in str(e)
+        assert "Symlink it" in str(e)
+
+
+def test_bin_rejects_characters_that_would_corrupt_the_plist(cfg, tmp_path):
+    """install.sh substitutes the PATH with `sed -e "s#@PATH@#...#g"` into XML."""
+    from maestro import config as config_mod
+    for bad in ("/opt/we#ird/pi", "/opt/a&b/pi"):
+        (cfg.home / "config.toml").write_text(
+            f'[runner.pi]\nbin = "{bad}"\n', encoding="utf-8")
+        try:
+            config_mod.load(str(cfg.home))
+            raise AssertionError(f"{bad!r} must fail config.load")
+        except store.MaestroError as e:
+            assert "would corrupt it" in str(e), str(e)
+
+
+def test_every_pi_executor_resolves_through_the_configured_bin(cfg, tmp_path, monkeypatch):
+    """Not just the spawn path: `doctor`'s pi checks, `maestro runners` and
+    `set-runner` each shell their own `pi`. Leaving any of them on the invoking
+    shell's PATH reproduces the false-green this whole change exists to end,
+    one layer up -- a board where only the daemon's PATH is wrong would still
+    be told everything resolves.
+    """
+    from maestro import config as config_mod, health, ops
+    runner_dir = tmp_path / "volta" / "bin"
+    _stub_binary(runner_dir, "pi")
+    (cfg.home / "config.toml").write_text(
+        f'[runner.pi]\nbin = "{runner_dir / "pi"}"\nversion = "9.9.9"\n', encoding="utf-8")
+    fresh = config_mod.load(str(cfg.home))
+
+    seen = {}
+
+    def _recording_run(argv, **kw):
+        seen["argv"] = argv
+        seen["path"] = (kw.get("env") or {}).get("PATH")
+        class P:
+            returncode = 0
+            stdout = "9.9.9"
+            stderr = ""
+        return P()
+
+    health.check_pi_version(fresh, 1000, run=_recording_run)
+    assert seen["argv"] == ["pi", "--version"]
+    assert seen["path"] is not None, "check_pi_version shelled pi with no env"
+    assert seen["path"].split(":")[0] == str(runner_dir)
+
+    # suggest_acs shells `claude`, which is equally configurable now.
+    seen.clear()
+    (cfg.home / "config.toml").write_text(
+        f'[runner.claude]\nbin = "{runner_dir / "claude"}"\n', encoding="utf-8")
+    _stub_binary(runner_dir, "claude")
+    fresh2 = config_mod.load(str(cfg.home))
+    store.atomic_write(store.spec_path(fresh2.home, "S-1"),
+                       "# S-1\n\n## Acceptance criteria\n")
+
+    def _acs_run(argv, **kw):
+        seen["path"] = (kw.get("env") or {}).get("PATH")
+        class P:
+            returncode = 0
+            stdout = '{"result": "[]"}'
+            stderr = ""
+        return P()
+
+    try:
+        ops.suggest_acs(fresh2, "S-1", run=_acs_run)
+    except Exception:
+        pass  # the parse path is not what this asserts
+    assert seen.get("path"), "suggest_acs shelled claude with no env"
+    assert seen["path"].split(":")[0] == str(runner_dir)
