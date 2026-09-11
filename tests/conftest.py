@@ -11,10 +11,26 @@ from maestro.config import Config  # noqa: E402
 from fault_injection import FaultInjector  # noqa: E402
 
 
+# The suite performs ~200 real commits per run (159 `make_origin_and_repo`
+# call sites plus 47 explicit `git("commit", ...)` calls). Inheriting the
+# developer's `commit.gpgsign` made every one of them depend on an unlocked
+# signing agent, which is not a property of the code under test: a locked
+# 1Password/YubiKey turned the suite red in an unrelated-looking place
+# (`test_check_language_binding_ok_for_a_python_board`), as a 61-second stall
+# ending in `git commit` exit 128.
+#
+# `-c` on the command line outranks system, global, repo AND `GIT_CONFIG_*`
+# env config, so this holds whatever the host is configured to do. It is also
+# the only scope that writes nothing: `git -C <worktree> config ...` would
+# rewrite the MAIN checkout's shared `.git/config`.
+_GIT_TEST_CONFIG = ("-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false")
+
+
 def git(*args, cwd):
     """Run a real git command (never mocked) -- shared by worktree/preflight/
-    multi-repo dispatcher tests."""
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    multi-repo dispatcher tests. Signing is forced off; see _GIT_TEST_CONFIG."""
+    subprocess.run(["git", *_GIT_TEST_CONFIG, *args],
+                   cwd=cwd, check=True, capture_output=True, text=True)
 
 
 def make_origin_and_repo(tmp_path, name="repo", base_branch="main"):
