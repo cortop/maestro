@@ -50,7 +50,7 @@ def test_init_config_has_bounded_prune_defaults(tmp_path):
 
 
 def test_preexisting_home_with_blank_maestro_block_still_bounded(tmp_path):
-    """A pre-existing home (like ~/.maestro/maestro-dev) whose config.toml names
+    """A pre-existing home (like ~/.maestro) whose config.toml names
     none of the three new knobs is still protected without an edit."""
     (tmp_path / "config.toml").write_text("[maestro]\nmax_concurrency = 5\n", encoding="utf-8")
     cfg = load(str(tmp_path))

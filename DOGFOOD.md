@@ -9,8 +9,8 @@ PRs against the ticket's bound repo (see below) for you to review and merge.
 | Piece | Where |
 |-------|-------|
 | `maestro` CLI | `~/.local/bin/maestro` → `.venv/bin/maestro` (editable install) |
-| State home | `~/.maestro/maestro-dev/` (outside the repo, so worktrees don't nest) |
-| Config | `~/.maestro/maestro-dev/config.toml` — `repo_path` = this repo, `vcs = github_cli` (`cortop/maestro`) |
+| State home | `~/.maestro/` (outside the repo, so worktrees don't nest) |
+| Config | `~/.maestro/config.toml` — `repo_path` = this repo, `vcs = github_cli` (`cortop/maestro`) |
 | Reconcile command | `.claude/commands/maestro-reconcile-<phase>.md`, one per phase (tracked → every worktree inherits them) |
 | Permissions | `.claude/settings.json` — allowlist so unattended reconcilers don't stall |
 | Seed backlog | `M-1` (fleet CLI), `M-2` (log compaction), `M-3` (dependsOn gating) |
@@ -48,7 +48,7 @@ make reconcile KEY=M-1      # triages M-1 -> asks a pickup question
 maestro answer                 # interactive walkthrough of all open questions
 maestro answer M-1             # or scope to one ticket
 maestro ans M-1 "yes — go ahead"  # non-interactive fallback
-cat ~/.maestro/maestro-dev/derived/NEEDS-YOU.md
+cat ~/.maestro/derived/NEEDS-YOU.md
 
 # then let it run on its own:
 make dispatch               # one real sweep (spawns reconcilers for all due tickets)
@@ -63,7 +63,7 @@ maestro fleet status        # loaded? heartbeat age? interval?
 maestro create              # interactive: title → priority → $EDITOR opens spec template
 maestro create "Short title" --intent "What done looks like + AC."  # non-interactive
 # edit the richer spec by hand any time — it's yours, append-only-safe:
-$EDITOR ~/.maestro/maestro-dev/tickets/<KEY>/spec.md
+$EDITOR ~/.maestro/tickets/<KEY>/spec.md
 ```
 
 You can edit specs and answer questions **while reconcilers are running** — your writes go
@@ -75,7 +75,7 @@ to human-owned/append-only files, never the ones agents rewrite.
 maestro show M-1            # snapshot + event log for one ticket
 maestro doctor             # heartbeat age, dead-letters
 claude agents --json       # live agent-view sessions
-ls ~/.maestro/maestro-dev/worktrees/   # per-ticket worktrees (always under the home, even
+ls ~/.maestro/worktrees/   # per-ticket worktrees (always under the home, even
                                         # for tickets bound to a different [repos.*] entry)
 ```
 
@@ -156,7 +156,7 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
 
 The dispatcher auto-snapshots the irreplaceable state (`events/` + `tickets/` + `inbox/` +
 `config.toml`) on a timer — `backup_interval = 3600` by default (0 disables). Snapshots land
-in a **sibling** of the home (`~/.maestro/maestro-dev-backups/` by default, overridable with
+in a **sibling** of the home (`~/.maestro-backups/` by default, overridable with
 `backup_dir`), so a `rm -rf` of the home leaves them intact. Only the most-recent
 `backup_retention` (24) tarballs are kept.
 

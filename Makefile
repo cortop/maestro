@@ -1,6 +1,6 @@
 # maestro — dev + dogfood targets.
 # MAESTRO_HOME defaults to the self-dev home; override on the CLI if you like.
-export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
+export MAESTRO_HOME ?= $(HOME)/.maestro
 
 PY := .venv/bin/python
 
