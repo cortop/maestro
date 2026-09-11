@@ -295,6 +295,36 @@ def phase_verb_grant(phase: str) -> list[str]:
     return maestro_verb_grant(phase_verbs_by_suffix(_phase_verb_suffix(phase)))
 
 
+def skill_grant(command: str) -> list[str]:
+    """The ``Skill(<name>)`` ALLOW rule for the ONE reconcile command this
+    spawn is about to invoke.
+
+    A reconciler is told to load ``/maestro-reconcile-<phase>``, and the model
+    reaches for the ``Skill`` tool to do it. Those files are installed as slash
+    COMMANDS (``skills_install``), never as registry skills, and a Skill call
+    whose target is a command is permission-gated -- which in headless ``-p``
+    is auto-declined. Measured on the dogfood board: 249 sessions, one denial
+    each, 142 of them on the session's literal first turn. The reconciler then
+    recovers (it reads the file or improvises the step), so the cost is a burnt
+    turn per session rather than a lost step -- but it is burnt every session,
+    every phase.
+
+    Scoped to the single resolved command on purpose. A bare ``Skill`` rule
+    would admit every skill and slash command resolvable from the worktree --
+    80 and 142 respectively in a dd-source checkout, including ones that delete
+    caches or implement tickets -- the same self-widening AD-1 forbids for
+    ``Bash(maestro:*)``.
+
+    Not in ``cli._reconciler_tool_grants``: that is built once per sweep before
+    the per-key loop, so it structurally cannot vary by phase (RB-16 moved the
+    verb grant out for the same reason). Not in ``.claude/settings.json``
+    either: 57 of the 249 ran with a cwd under ``derived``-adjacent scratch,
+    which carries only a ``.claude/commands`` symlink and no settings file.
+    """
+    name = command.lstrip("/")
+    return [f"Skill({name})"] if name else []
+
+
 def phase_verb_denylist(phase: str) -> list[str]:
     """The ``Bash(maestro <verb>:*)`` DENY rules for every verb `phase_verb_grant`
     does NOT grant *phase* -- the enforcement half of RB-16's narrowing.
@@ -1771,11 +1801,16 @@ def _spawn_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, skill:
     test surface); every other maestro verb stays withheld, per T-115's own
     "must never move the ticket's phase" intent. `disallowed_tools` is the
     flat `MERGE_DENYLIST` -- merging is always a human decision (AD-7),
-    unconditionally.
+    unconditionally. `skill_grant` rides along for the same reason it does on
+    the reconcile path: `post_qa_skill` names a slash command, so invoking it
+    through the Skill tool is permission-gated. That is latent rather than live
+    today only because `post_qa_skill_runner` is pi, which discards
+    allowedTools -- flip it back to claude and the denial appears.
     """
     cwd = _worker_cwd(cfg, key)
     model, effort = _resolve_model_effort(cfg, key)
-    allowed_tools = ["Bash(maestro show:*)"] + resolved_allowed_tools(cfg, binding)
+    allowed_tools = (["Bash(maestro show:*)"] + skill_grant(skill)
+                     + resolved_allowed_tools(cfg, binding))
     return sessions.spawn(key, skill, cwd, model=model, effort=effort,
                           allowed_tools=allowed_tools, disallowed_tools=MERGE_DENYLIST,
                           runner=runner, runner_model=runner_model)
@@ -3387,7 +3422,8 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                     # explicit deny is required, not just an allowedTools omission.
                     disallowed_tools = (MERGE_DENYLIST + phase_denylist(phase_here)
                                         + phase_verb_denylist(phase_here))
-                    allowed_tools = phase_verb_grant(phase_here) + resolved_allowed_tools(cfg, binding)
+                    allowed_tools = (phase_verb_grant(phase_here) + skill_grant(command)
+                                     + resolved_allowed_tools(cfg, binding))
                     # RF-1: hand the resolved command and key to spawn() as separate
                     # arguments -- each backend composes its own invocation (the Claude
                     # CLI concatenates "<command> <key>" into one prompt string; a

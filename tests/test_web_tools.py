@@ -81,11 +81,14 @@ def test_config_repos_table_parses_reconcile_allowed_tools(home):
 def _expected_grant(*, web_tools: bool, phase: str = Phase.READY.value) -> str:
     # Argv order mirrors ClaudeCliSessions.spawn's own merge: the process-wide
     # base (web tools) first, then the per-key additions (RB-16's phase verb
-    # grant, then GA-10's resolved_allowed_tools).
+    # grant, this ticket's `Skill(<reconcile command>)` grant, then GA-10's
+    # resolved_allowed_tools).
     rules: list[str] = []
     if web_tools:
         rules += ["WebSearch", "WebFetch"]
     rules += disp.phase_verb_grant(phase)
+    rules += disp.skill_grant(
+        f"/maestro-reconcile-{disp._PHASE_COMMAND_SUFFIX[Phase(phase)]}")
     return ",".join(rules)
 
 
