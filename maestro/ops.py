@@ -1869,7 +1869,8 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
     if runner and runner != "claude" and runner_model:
         if runner == "pi":
             from .providers import pi as pi_mod
-            models, reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home))
+            models, reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home),
+                                                 path=config_mod.runner_path(cfg))
             verdict, vreason = pi_mod.verdict_for_model(models, reason, runner_model)
             source = "pi"
             suggestions = pi_mod.model_names(models) if models else []
@@ -1988,7 +1989,8 @@ def suggest_acs(cfg: Config, key: str, *, run=subprocess.run) -> list[str]:
     )
     cmd = ["claude", "-p", prompt, "--model", cfg.reconcile_model, "--output-format", "json"]
     try:
-        proc = run(cmd, capture_output=True, text=True, timeout=_SUGGEST_ACS_TIMEOUT)
+        proc = run(cmd, capture_output=True, text=True, timeout=_SUGGEST_ACS_TIMEOUT,
+                   env={**os.environ, "PATH": config_mod.runner_path(cfg)})
     except FileNotFoundError as e:
         raise store.MaestroError(f"{key}: claude not found: {e}") from e
     except subprocess.TimeoutExpired as e:

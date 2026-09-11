@@ -123,7 +123,8 @@ def _migrate_legacy_plist(home: Path, lbl: str, *, run) -> dict | None:
                        f"({baked_home!r}); left untouched"}
 
 
-def up(home: Path, interval: int = 300, *, run=subprocess.run, script=None) -> dict:
+def up(home: Path, interval: int = 300, *, run=subprocess.run, script=None,
+       cfg=None) -> dict:
     script = Path(script) if script else _script_path()
     requested = interval
     interval = clamp_interval(interval)
@@ -132,6 +133,15 @@ def up(home: Path, interval: int = 300, *, run=subprocess.run, script=None) -> d
     env = dict(os.environ)
     env["MAESTRO_HOME"] = str(home)
     env["MAESTRO_LABEL"] = lbl
+    # Hand the script the runner dirs it cannot work out for itself -- it has no
+    # TOML parser, and `[runner.<name>] bin` is the only place a runner living
+    # outside the system dirs is declared. Unset (no configured bin) leaves the
+    # script on its original three-source PATH, so nothing changes for a board
+    # that needs nothing.
+    if cfg is not None:
+        runner_dirs = os.pathsep.join(config_runner_dirs(cfg))
+        if runner_dirs:
+            env["MAESTRO_RUNNER_PATH"] = runner_dirs
     p = run([str(script), "up", "--interval", str(interval)],
             env=env, capture_output=True, text=True)
     out = {"action": "up", "interval": interval, "rc": p.returncode,
@@ -181,6 +191,59 @@ def _throttle_from_plist(plist=None, *, home=None) -> int | None:
     if not plist.exists():
         return None
     return _plist_integer(plist.read_text(encoding="utf-8"), "ThrottleInterval")
+
+
+def config_runner_dirs(cfg) -> list[str]:
+    """The runner bin dirs `install.sh` needs, read through config so fleet
+    stays the only module that knows plist shape."""
+    from . import config as config_mod
+    return config_mod.runner_path_entries(cfg)
+
+
+def plist_env_path(plist=None, *, home=None) -> str | None:
+    """The ``PATH`` baked into the installed plist's ``EnvironmentVariables``,
+    or None when no plist is installed (or it declares no PATH).
+
+    This is THE environment the dispatcher actually runs with. Nothing in the
+    package read it before: every health check resolved binaries against
+    whatever shell typed `maestro doctor`, so any shell-vs-daemon divergence
+    was invisible by construction -- a board frozen on a runner the daemon
+    could not see reported 26 OK / 2 WARN / 0 FAIL.
+    """
+    plist = Path(plist) if plist else _plist_path(home)
+    if not plist.exists():
+        return None
+    text = plist.read_text(encoding="utf-8")
+    m = re.search(r"<key>PATH</key>\s*<string>(.*?)</string>", text, re.S)
+    return m.group(1) if m else None
+
+
+def launchd_path(cfg=None, *, maestro_bin: str | None = None,
+                 claude_bin: str | None = None) -> str:
+    """The PATH a freshly installed LaunchAgent should carry.
+
+    ``install.sh`` used to build this from exactly three sources -- the maestro
+    dir, the claude dir, and the system dirs -- with no notion that
+    ``[runner.*]`` exists. A runner installed anywhere else (a volta or asdf
+    shim under $HOME, say) was therefore unreachable from the daemon while
+    resolving perfectly in the installing shell, and every `fleet up` that
+    regenerated the plist dropped a hand-added entry again.
+    """
+    entries: list[str] = []
+    for binary in (maestro_bin, claude_bin):
+        if binary:
+            parent = str(Path(binary).expanduser().parent)
+            if parent not in entries:
+                entries.append(parent)
+    if cfg is not None:
+        from . import config as config_mod
+        for entry in config_mod.runner_path_entries(cfg):
+            if entry not in entries:
+                entries.append(entry)
+    for system in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"):
+        if system not in entries:
+            entries.append(system)
+    return os.pathsep.join(entries)
 
 
 _LAST_EXIT_RE = re.compile(r'"LastExitStatus"\s*=\s*(-?\d+);')

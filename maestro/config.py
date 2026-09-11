@@ -382,7 +382,7 @@ _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
 # code scraping ticket specs for whatever model tag happens to be in use.
 # `models` unset falls back to the board-wide `runner_model` default (see that
 # function's own docstring).
-_RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
+_RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host", "bin"})
 
 
 # T-56/T-60: [runner.pi]'s whole recognized key set. Same validation posture as
@@ -408,8 +408,113 @@ _RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host"})
 # (verbatim, never resolved -- see that function's own docstring).
 _RUNNER_PI_KEYS = frozenset({
     "provider", "base_url", "api", "compat", "models", "api_key", "version",
-    "concurrency", "phases", "headers",
+    "concurrency", "phases", "headers", "bin",
 })
+
+
+def _validate_runner_bin(runner: str, value) -> None:
+    """Fail closed on a malformed ``[runner.<name>] bin``, the same posture
+    ``[repos.<name>] language`` takes: a typo must not reach a spawn.
+
+    Deliberately checks SHAPE only -- a non-empty absolute path string -- and
+    not whether the file exists or is executable. `config.load` runs for every
+    verb, `maestro doctor` included, and doctor is precisely the tool you reach
+    for when a runner binary has gone missing; raising here would make the
+    diagnostic unavailable in exactly the situation it exists to diagnose.
+    Existence and executability are a board-HEALTH fact, not a config-syntax
+    one, so they surface in `health.check_runner_binary` as a warning and in
+    the dispatcher's own preflight as `binary_missing`.
+
+    Relative paths are refused rather than resolved: the value's whole job is
+    to be meaningful to a launchd daemon whose cwd is not yours.
+    """
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip():
+        raise store.MaestroError(
+            f"config.toml: [runner.{runner}] bin must be a non-empty string")
+    if not value.startswith("/") and not value.startswith("~"):
+        raise store.MaestroError(
+            f"config.toml: [runner.{runner}] bin must be an absolute path "
+            f"(got {value!r}) -- it has to resolve for the launchd dispatcher, "
+            "whose working directory and PATH are not your shell's")
+    # The mechanism contributes the DIRECTORY to PATH and leaves argv[0] as the
+    # bare runner name, so a differently-named file would put its dir on PATH
+    # and then never be found. Refuse it here rather than let the preflight
+    # call the path fine while every spawn looks for a sibling that isn't there.
+    if Path(value).name != runner:
+        raise store.MaestroError(
+            f"config.toml: [runner.{runner}] bin must be named {runner!r} "
+            f"(got {Path(value).name!r}) -- its directory is what goes on PATH, "
+            f"and the runner is still invoked as {runner!r}. Symlink it if your "
+            "install uses a versioned filename.")
+    # The path is substituted into the LaunchAgent plist through install.sh's
+    # `sed -e "s#@PATH@#...#g"` and lands in XML, so `#` breaks the delimiter
+    # and `&`/`<`/`>`/`"` corrupt the rendered plist.
+    bad = [c for c in '#&<>"' if c in value]
+    if bad:
+        raise store.MaestroError(
+            f"config.toml: [runner.{runner}] bin must not contain "
+            f"{', '.join(repr(c) for c in bad)} -- the path is substituted into "
+            "the LaunchAgent plist and would corrupt it")
+
+
+def runner_bin(cfg: "Config", runner: str) -> str | None:
+    """The absolute path configured for *runner*, or None when unset.
+
+    Pure config read -- no subprocess, no filesystem -- so it is safe on
+    `maestro env --key`'s hot path beside `resolve_runner`. Unset is the
+    default and means "resolve the bare name on PATH", exactly as before this
+    key existed.
+    """
+    table = (cfg.provider_config.get("runner") or {}).get(runner)
+    if not isinstance(table, dict):
+        return None
+    raw = table.get("bin")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return str(Path(raw.strip()).expanduser())
+
+
+def runner_path_entries(cfg: "Config") -> list[str]:
+    """The directories holding every configured runner binary, in stable
+    config order, de-duplicated.
+
+    This -- not substituting argv[0] -- is the lever that actually fixes a
+    daemon that cannot see its runner. A runner resolves tools of its own from
+    its inherited PATH: `[runner.pi] api_key` is a resolver expression pi
+    executes ITSELF (see `store.generate_pi_models_json`), so pointing argv[0]
+    at an absolute path leaves that child failing on the same minimal PATH.
+    Extending PATH fixes the binary and everything it goes on to spawn, and
+    keeps maestro's argv literals intact for the static guards that read them
+    (`tests/test_runner_permissions.py` scopes its no-`--approve` sweep to
+    argv lists whose first element is the literal runner name).
+    """
+    out: list[str] = []
+    table = cfg.provider_config.get("runner") or {}
+    if not isinstance(table, dict):
+        return out
+    for runner in table:
+        resolved = runner_bin(cfg, runner)
+        if not resolved:
+            continue
+        parent = str(Path(resolved).parent)
+        if parent and parent not in out:
+            out.append(parent)
+    return out
+
+
+def runner_path(cfg: "Config", base: str | None = None) -> str:
+    """*base* (default: the ambient ``PATH``) with every configured runner's
+    directory prepended. Returns *base* unchanged when nothing is configured,
+    so a board that sets no ``bin`` is byte-identical to before."""
+    import os as _os
+    base = _os.environ.get("PATH", "") if base is None else base
+    entries = runner_path_entries(cfg)
+    if not entries:
+        return base
+    existing = base.split(_os.pathsep) if base else []
+    return _os.pathsep.join(entries + [e for e in existing if e not in entries])
 
 
 # T-115: the shape a `post_qa_skill` value must have -- a leading `/`, then a
@@ -719,6 +824,9 @@ def load(home_arg: str | None = None) -> Config:
                     raise store.MaestroError(
                         "config.toml: [runner.pi.headers] must be a table of "
                         "string->string pairs")
+            for _rname, _rtable in raw_runner_table.items():
+                if isinstance(_rtable, dict):
+                    _validate_runner_bin(_rname, _rtable.get("bin"))
         cfg.provider_config = {
             k: v for k, v in data.items()
             if k not in {"maestro", "providers"}
@@ -1071,6 +1179,24 @@ implementer = "claude_skill"
 # host = "127.0.0.1:11434"          # OC-6: optional OLLAMA_HOST override for that same
                                      # provider's baseURL; unset resolves the ambient
                                      # OLLAMA_HOST env var same as `maestro runners` does
+# bin = "~/.volta/bin/pi"           # absolute path to the runner binary. Its DIRECTORY is
+                                     # prepended to the PATH of every spawned reconciler, of
+                                     # the spawn preflight's own probe, and of the LaunchAgent
+                                     # plist `maestro fleet up` writes -- which is the point:
+                                     # launchd runs with a minimal PATH, so a runner installed
+                                     # under $HOME (a volta/asdf shim) resolves in your shell
+                                     # and is invisible to the daemon, which then skips those
+                                     # tickets silently, forever. Extending PATH rather than
+                                     # just pinning argv[0] also covers the tools the runner
+                                     # itself shells out for -- `api_key` below is a resolver
+                                     # expression pi executes on its own. Only the SHAPE is
+                                     # validated at load (non-empty, absolute); whether it
+                                     # exists is a health fact, so `maestro doctor` reports it
+                                     # rather than config.load refusing to run the diagnostic.
+                                     # The FILENAME must match the runner name -- only the
+                                     # directory goes on PATH, and the runner is still invoked
+                                     # by bare name -- so symlink a versioned install.
+                                     # Unset = resolve the bare name on PATH, exactly as before.
 
 # [runner.pi]                       # T-56 (PI-4): pi's own maestro-owned agent home --
                                      # unknown keys here fail config.load (fail-closed, see
@@ -1079,6 +1205,24 @@ implementer = "claude_skill"
                                      # table before every spawn (sessions.RoutingSessions.spawn,
                                      # its one call site), so no developer's real ~/.pi config
                                      # can ever shadow what a reconciler resolves.
+# bin = "~/.volta/bin/pi"           # absolute path to the runner binary. Its DIRECTORY is
+                                     # prepended to the PATH of every spawned reconciler, of
+                                     # the spawn preflight's own probe, and of the LaunchAgent
+                                     # plist `maestro fleet up` writes -- which is the point:
+                                     # launchd runs with a minimal PATH, so a runner installed
+                                     # under $HOME (a volta/asdf shim) resolves in your shell
+                                     # and is invisible to the daemon, which then skips those
+                                     # tickets silently, forever. Extending PATH rather than
+                                     # just pinning argv[0] also covers the tools the runner
+                                     # itself shells out for -- `api_key` below is a resolver
+                                     # expression pi executes on its own. Only the SHAPE is
+                                     # validated at load (non-empty, absolute); whether it
+                                     # exists is a health fact, so `maestro doctor` reports it
+                                     # rather than config.load refusing to run the diagnostic.
+                                     # The FILENAME must match the runner name -- only the
+                                     # directory goes on PATH, and the runner is still invoked
+                                     # by bare name -- so symlink a versioned install.
+                                     # Unset = resolve the bare name on PATH, exactly as before.
 # provider = "zai"                  # the `providers.<name>` key models.json registers under
                                      # (default "zai" -- the vendor whose bundled catalogue this
                                      # ticket's models table extends)

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import backup, claims, credentials, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
-from .config import Config, DEFAULT_CONFIG_TOML, config_path, load
+from .config import Config, DEFAULT_CONFIG_TOML, config_path, load, runner_path
 from .providers import ollama as ollama_mod
 from .providers import pi as pi_mod
 from .sessions import (ClaudeCliSessions, DryRunSessions, OpencodeCliSessions,
@@ -242,7 +242,7 @@ def _stdin_intent() -> str | None:
     return "\n".join(lines).strip() or None
 
 
-def _warn_runner_model(home, runner, runner_model) -> None:
+def _warn_runner_model(home, runner, runner_model, *, cfg=None) -> None:
     """UX-1: WARN-only, never gates creation -- prints when a non-claude
     `runner_model` is absent from its runner's catalogue / not tool-capable,
     or that runner's own daemon/binary is unreachable. Mirrors the exact
@@ -259,7 +259,9 @@ def _warn_runner_model(home, runner, runner_model) -> None:
     if not runner or runner == "claude" or not runner_model:
         return
     if runner == "pi":
-        models, reason = pi_mod.fetch_models(store.pi_agent_dir(home))
+        models, reason = pi_mod.fetch_models(
+            store.pi_agent_dir(home),
+            path=runner_path(cfg) if cfg is not None else None)
         verdict, vreason = pi_mod.verdict_for_model(models, reason, runner_model)
         source = "pi"
         suggestions = pi_mod.model_names(models) if models else []
@@ -391,7 +393,7 @@ def cmd_create(args) -> int:
         _print({"key": key})
         # UX-1 AC4: never gates creation on a model being locally installed/reachable
         # -- WARN only, after the ticket is already minted.
-        _warn_runner_model(cfg.home, runner, runner_model)
+        _warn_runner_model(cfg.home, runner, runner_model, cfg=cfg)
         # T-80: same WARN-only posture -- read back the spec `mint_one` just wrote,
         # since `a` never carries acceptance criteria (there's no `--ac` flag; a
         # fresh mint always seeds the same dangling "- [ ] " until a human fills
@@ -406,7 +408,7 @@ def cmd_create(args) -> int:
     _print(f"queued create: {args.key or '(auto-key)'} — {title}")
     # UX-1 AC4: never gates creation on a model being locally installed/reachable
     # -- WARN only, after the ticket is already queued.
-    _warn_runner_model(cfg.home, runner, runner_model)
+    _warn_runner_model(cfg.home, runner, runner_model, cfg=cfg)
     if not args.no_nudge and cfg.nudge_on_human_input:
         _nudge(cfg)
     return 0
@@ -565,7 +567,8 @@ def cmd_runners(args) -> int:
     else:
         opencode = {"status": "ok", "models": ollama_mod.model_names(models, tool_capable_only=True),
                     "reason": None}
-    pi_models, pi_reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home))
+    pi_models, pi_reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home),
+                                               path=runner_path(cfg))
     if pi_models is None:
         pi = {"status": "unreachable", "models": None, "reason": pi_reason}
     else:
@@ -792,7 +795,7 @@ def _parse_until(value: str) -> float:
 def cmd_fleet(args) -> int:
     cfg = _cfg(args)
     if args.action == "up":
-        _print(fleet.up(cfg.home, interval=args.interval))
+        _print(fleet.up(cfg.home, interval=args.interval, cfg=cfg))
     elif args.action == "down":
         _print(fleet.down(cfg.home))
     elif args.action == "pause":

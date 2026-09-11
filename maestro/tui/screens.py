@@ -243,7 +243,8 @@ class FleetScreen(Screen):
             if interval is None:
                 return
             self.run_worker(
-                lambda: fleet_mod.up(self._home, interval=interval),
+                lambda: fleet_mod.up(self._home, interval=interval,
+                                     cfg=config_mod.load(str(self._home))),
                 thread=True, name="fleet-up",
             )
             self._log(f"fleet up --interval {interval} … ")

@@ -78,7 +78,7 @@ def test_end_to_end_create_runner_opencode_through_sweeps_to_awaiting_ci(
     # No repo_path configured -- _worker_cwd falls back to `home` itself (a real
     # dir), so a real Popen spawn needs no git worktree machinery -- orthogonal
     # to what this AC proves (runner routing per phase, over a REAL sweep/CLI).
-    monkeypatch.setattr(disp, "_default_runner_probe", lambda runner: {
+    monkeypatch.setattr(disp, "_default_runner_probe", lambda runner, cfg=None: {
         "binary_ok": True, "models": [{"name": "a:1b", "capabilities": ["tools"]}],
         "daemon_reason": None})
 

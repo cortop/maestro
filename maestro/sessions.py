@@ -19,6 +19,28 @@ from typing import Callable, Protocol
 from . import claims, config, pi_guard, store
 from .store import generate_pi_models_json
 
+
+def _spawn_env(home, env_overlay: dict | None) -> dict:
+    """The complete replacement environment every backend hands ``Popen``.
+
+    One definition for all three backends: ``Popen(..., env=env)`` REPLACES the
+    child's environment wholesale, so a PATH fix applied to only one of them
+    silently leaves the others broken.
+
+    ``config.runner_path`` prepends each configured ``[runner.<name>] bin``
+    directory. That is what lets a launchd dispatcher -- whose PATH is the
+    minimal plist one, not your shell's -- both find the runner AND satisfy the
+    tools the runner itself shells out for (``[runner.pi] api_key`` is a
+    resolver expression pi executes on its own). Boards that configure no
+    ``bin`` get their PATH back unchanged.
+    """
+    env = dict(os.environ)
+    env["MAESTRO_HOME"] = str(home)  # pin the home for the worker
+    env["PATH"] = config.runner_path(config.load(home), env.get("PATH", ""))
+    if env_overlay:
+        env.update(env_overlay)
+    return env
+
 RECONCILE_PREFIX = "reconcile-"
 
 # OC-6: the opencode provider id `OpencodeCliSessions` composes its `ollama/<tag>`
@@ -249,15 +271,12 @@ class ClaudeCliSessions:
             cmd += ["--allowedTools", ",".join(merged_allowed)]
         cmd += self.extra_args
         assert cmd.count("--allowedTools") <= 1, "spawn argv must carry at most one --allowedTools flag"
-        env = dict(os.environ)
-        env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
-        # GA-17: this key's resolved gh credential wins over whatever's ambient --
-        # it's an explicit, already-fail-closed-checked resolution, not a guess.
-        # T-56: also where PI_CODING_AGENT_DIR (if RoutingSessions prepared it)
-        # rides in -- see that class's spawn() docstring for why it belongs there
-        # and not duplicated in each backend.
-        if env_overlay:
-            env.update(env_overlay)
+        # GA-17: this key's resolved gh credential (carried in env_overlay) wins
+        # over whatever's ambient -- it's an explicit, already-fail-closed-checked
+        # resolution, not a guess. T-56: also where PI_CODING_AGENT_DIR (if
+        # RoutingSessions prepared it) rides in -- see that class's spawn()
+        # docstring for why it belongs there and not duplicated in each backend.
+        env = _spawn_env(self.home, env_overlay)
 
         log_path: str | None = None
         if self.capture_session_logs:
@@ -468,12 +487,9 @@ class OpencodeCliSessions:
                "--agent", name,
                key]
 
-        env = dict(os.environ)
-        env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
         # T-56: PI_CODING_AGENT_DIR (if RoutingSessions prepared it) rides in via
         # env_overlay -- see that class's spawn() docstring.
-        if env_overlay:
-            env.update(env_overlay)
+        env = _spawn_env(self.home, env_overlay)
 
         log_path: str | None = None
         if self.capture_session_logs:
@@ -695,12 +711,9 @@ class PiCliSessions:
             cmd += ["--no-context-files"]
         cmd += guard_argv
 
-        env = dict(os.environ)
-        env["MAESTRO_HOME"] = str(self.home)  # pin the home for the worker
         # T-56: PI_CODING_AGENT_DIR (if RoutingSessions prepared it) rides in
         # via env_overlay -- see RoutingSessions._prep_pi_env's docstring.
-        if env_overlay:
-            env.update(env_overlay)
+        env = _spawn_env(self.home, env_overlay)
 
         log_path: str | None = None
         if self.capture_session_logs:
