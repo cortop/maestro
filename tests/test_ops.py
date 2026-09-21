@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from maestro import event_log, ops, snapshot as snap_mod, store
+from maestro import config as config_mod, event_log, ops, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
 
 SPEC = (
@@ -229,6 +229,51 @@ def test_suggest_acs_includes_reconcile_model_and_spec_in_prompt(home, cfg):
     assert "Do the thing." in cmd[2]  # the spec text rode along in the prompt
     assert cfg.reconcile_model in cmd
     assert "--output-format" in cmd and "json" in cmd
+
+
+def _capture_cmd(cfg, home):
+    _seed_ticket(home, "T-1", spec=NO_AC_SECTION_SPEC)
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=json.dumps(["ok"]))
+
+    ops.suggest_acs(cfg, "T-1", run=run)
+    return seen["cmd"]
+
+
+def test_suggest_acs_defaults_unchanged_prompt_and_model(home, cfg):
+    """T-118 AC1: neither knob set -> the pre-change prompt text and reconcile_model."""
+    cmd = _capture_cmd(cfg, home)
+    legacy = (
+        "Given this ticket spec (which currently has no acceptance criteria), "
+        "draft 3-6 concrete, testable acceptance criteria for its "
+        "`## Acceptance criteria` section. Reply with ONLY a JSON array of "
+        "strings, one per suggested AC line -- no leading '- [ ]', no "
+        "markdown, no commentary. Example: [\"...\", \"...\"].\n\n" + NO_AC_SECTION_SPEC
+    )
+    assert cmd == ["claude", "-p", legacy, "--model", cfg.reconcile_model,
+                   "--output-format", "json"]
+
+
+def test_suggest_acs_model_knob_overrides_only_suggest_model(home, cfg):
+    """T-118 AC2: [maestro] suggest_acs_model = "opus" -> --model opus, reconcile_model untouched."""
+    (home / "config.toml").write_text('[maestro]\nsuggest_acs_model = "opus"\n', encoding="utf-8")
+    loaded = config_mod.load(str(home))
+    assert loaded.reconcile_model != "opus"
+    cmd = _capture_cmd(loaded, home)
+    assert cmd[cmd.index("--model") + 1] == "opus"
+    assert loaded.reconcile_model == "sonnet"
+
+
+def test_suggest_acs_prompt_knob_substitutes_spec(home, cfg):
+    """T-118 AC3: a custom template gets the spec.md text substituted; {{ }} survive as literals."""
+    (home / "config.toml").write_text(
+        '[maestro]\nsuggest_acs_prompt = "Draft ACs as {{json}}:\\n{spec}"\n', encoding="utf-8")
+    loaded = config_mod.load(str(home))
+    cmd = _capture_cmd(loaded, home)
+    assert cmd[2] == "Draft ACs as {json}:\n" + NO_AC_SECTION_SPEC
 
 
 def test_suggest_acs_raises_on_nonzero_exit(home, cfg):

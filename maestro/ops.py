@@ -1971,6 +1971,16 @@ def add_ac(cfg: Config, key: str, text: str) -> dict:
 
 _SUGGEST_ACS_TIMEOUT = 120  # seconds; a bounded, synchronous claude -p capture call
 
+# T-118: the default prompt, a format string over `{spec}` -- overridable board-wide
+# via `[maestro] suggest_acs_prompt` (validated at `config.load()`).
+SUGGEST_ACS_PROMPT = (
+    "Given this ticket spec (which currently has no acceptance criteria), "
+    "draft 3-6 concrete, testable acceptance criteria for its "
+    "`## Acceptance criteria` section. Reply with ONLY a JSON array of "
+    "strings, one per suggested AC line -- no leading '- [ ]', no "
+    "markdown, no commentary. Example: [\"...\", \"...\"].\n\n{spec}"
+)
+
 
 def suggest_acs(cfg: Config, key: str, *, run=subprocess.run) -> list[str]:
     """[human] Draft candidate acceptance criteria for *key* via a bounded,
@@ -1998,14 +2008,9 @@ def suggest_acs(cfg: Config, key: str, *, run=subprocess.run) -> list[str]:
     if not spec_file.exists():
         raise store.MaestroError(f"{key}: no spec.md to suggest ACs for")
     spec_text = spec_file.read_text(encoding="utf-8")
-    prompt = (
-        "Given this ticket spec (which currently has no acceptance criteria), "
-        "draft 3-6 concrete, testable acceptance criteria for its "
-        "`## Acceptance criteria` section. Reply with ONLY a JSON array of "
-        "strings, one per suggested AC line -- no leading '- [ ]', no "
-        "markdown, no commentary. Example: [\"...\", \"...\"].\n\n" + spec_text
-    )
-    cmd = ["claude", "-p", prompt, "--model", cfg.reconcile_model, "--output-format", "json"]
+    prompt = (cfg.suggest_acs_prompt or SUGGEST_ACS_PROMPT).format(spec=spec_text)
+    cmd = ["claude", "-p", prompt, "--model", cfg.suggest_acs_model or cfg.reconcile_model,
+           "--output-format", "json"]
     try:
         proc = run(cmd, capture_output=True, text=True, timeout=_SUGGEST_ACS_TIMEOUT,
                    env={**os.environ, "PATH": config_mod.runner_path(cfg)})

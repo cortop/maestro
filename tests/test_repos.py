@@ -571,3 +571,22 @@ def test_board_wide_language_unsupported_fails_config_load_closed(home):
         '[maestro]\nrepo_path = "/repo/default"\nlanguage = "cobol"\n', encoding="utf-8")
     with pytest.raises(store.MaestroError, match="language must be one of"):
         config_mod.load(str(home))
+
+
+# --- T-118: `[maestro] suggest_acs_prompt` fails config.load() closed ------------
+
+@pytest.mark.parametrize("template", [
+    "no placeholder here",
+    "{spec} and {bogus}",
+    "{spec} {unbalanced",
+])
+def test_suggest_acs_prompt_invalid_template_fails_config_load_closed(home, template):
+    (home / "config.toml").write_text(
+        f'[maestro]\nsuggest_acs_prompt = {json.dumps(template)}\n', encoding="utf-8")
+    with pytest.raises(store.MaestroError, match="suggest_acs_prompt"):
+        config_mod.load(str(home))
+
+
+def test_suggest_acs_knobs_unset_default_to_none(home):
+    cfg = config_mod.load(str(home))
+    assert cfg.suggest_acs_model is None and cfg.suggest_acs_prompt is None
