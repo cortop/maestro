@@ -112,6 +112,52 @@ class LogsScreen(Screen):
     def on_unmount(self) -> None:
         self._stop = True
 
+    def _write(self, log_widget: RichLog, text: str) -> None:
+        self.app.call_from_thread(log_widget.write, text)
+
+    def _render_history(self, log_widget: RichLog, sessions_list: list[dict],
+                        skip_path: Path | None) -> None:
+        """T-119: render every captured session oldest-first under a header, one file at a
+        time. *skip_path* (the live session) is left for the tail loop to render."""
+        from .. import steplog
+        for sess in reversed(sessions_list):
+            path = Path(sess["path"])
+            if self._stop or (skip_path is not None and path == skip_path):
+                continue
+            if not path.exists():
+                self._write(log_widget, f"(session {sess['session_id']}: log file missing, skipped)")
+                continue
+            try:
+                outcome = steplog.session_outcome(path)["outcome"]
+                self._write(log_widget, _session_header(sess, outcome))
+                self._render_file(log_widget, path)
+            except OSError:
+                self._write(log_widget, f"(session {sess['session_id']}: log file missing, skipped)")
+
+    def _render_file(self, log_widget: RichLog, path: Path) -> None:
+        is_pi = path.name.endswith(".pi.jsonl")
+        is_opencode = path.name.endswith(".opencode.jsonl")
+        structured = is_pi or is_opencode or path.name.endswith(".stream.jsonl")
+        render_line = (render_pi_log_line if is_pi
+                       else render_opencode_log_line if is_opencode
+                       else render_log_line)
+        with path.open(encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                if self._stop:
+                    return
+                if not structured:
+                    self._write(log_widget, raw)
+                    continue
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                for rendered in render_line(obj):
+                    self._write(log_widget, rendered)
+
     def _tail(self) -> None:
         log_widget = self.query_one("#logs-view", RichLog)
 
@@ -120,18 +166,26 @@ class LogsScreen(Screen):
         log_path_str = claim.get("log_path") if claim else None
         verdict = claims.verify_claim(self._home, self._key) if claim else "unknown"
 
+        sessions_list = list_sessions(self._home, self._key)
         if log_path_str:
             log_path = Path(log_path_str)
         else:
-            sessions_list = list_sessions(self._home, self._key)
             if not sessions_list:
                 self.app.call_from_thread(log_widget.write, "(no session logs found)")
                 return
             log_path = Path(sessions_list[0]["path"])
 
+        # Every earlier session first (oldest-first), then the live one is tailed below.
+        self._render_history(log_widget, sessions_list, skip_path=log_path)
+
         if not log_path.exists():
             self.app.call_from_thread(log_widget.write, f"(log not found: {log_path.name})")
             return
+
+        live = next((x for x in sessions_list if Path(x["path"]) == log_path), None)
+        if live is not None:
+            from .. import steplog
+            self._write(log_widget, _session_header(live, steplog.session_outcome(log_path)["outcome"]))
 
         is_stream = log_path.name.endswith(".stream.jsonl")
         is_opencode = log_path.name.endswith(".opencode.jsonl")
@@ -168,6 +222,13 @@ class LogsScreen(Screen):
                     if not live_pid:
                         break
                     time.sleep(0.25)
+
+
+def _session_header(sess: dict, outcome: str) -> str:
+    """One-line per-session banner: id, start ts, format, outcome (markup-escaped)."""
+    from rich.markup import escape
+    return escape(f"=== session {sess['session_id']} | {sess['ts']} | "
+                  f"{sess['format']} | {outcome} ===")
 
 
 class FleetScreen(Screen):

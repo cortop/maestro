@@ -1172,8 +1172,13 @@ def cmd_logs(args) -> int:
             print(f"Session {args.session!r} not found.", file=sys.stderr)
             return 1
         sess = matches[0]
+    elif args.follow:
+        sess = sessions[0]  # newest -- the live one
     else:
-        sess = sessions[0]  # newest
+        # T-119: the whole story, oldest-first, one file at a time.
+        for s in reversed(sessions):
+            _render_session(s, as_json=args.json, header=not args.json)
+        return 0
 
     log_path = Path(sess["path"])
     is_stream = sess["format"] == "stream-json"
@@ -1224,14 +1229,37 @@ def cmd_logs(args) -> int:
                     time.sleep(0.25)
         return 0
 
-    if args.json or not (is_stream or is_opencode):
-        with log_path.open(encoding="utf-8", errors="replace") as f:
-            sys.stdout.write(f.read())
-    elif is_opencode:
-        _render_opencode_jsonl(log_path)
-    else:
-        _render_stream_jsonl(log_path)
+    _render_session(sess, as_json=args.json, header=False)
     return 0
+
+
+def _render_session(sess: dict, *, as_json: bool, header: bool) -> None:
+    """Render one captured session with its own format's renderer (T-119).
+
+    A log pruned/deleted since ``list_sessions`` is skipped with a one-line notice on
+    stderr -- never a traceback. ``header`` prefixes id / start ts / format / outcome.
+    """
+    from . import steplog
+    log_path = Path(sess["path"])
+    try:
+        if not log_path.exists():
+            raise FileNotFoundError(log_path)
+        outcome = steplog.session_outcome(log_path)["outcome"] if header else None
+        if header:
+            print(f"=== session {sess['session_id']} | {sess['ts']} | "
+                  f"{sess['format']} | {outcome} ===")
+        if as_json or sess["format"] not in ("stream-json", "opencode"):
+            with log_path.open(encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            sys.stdout.write(text)
+            if text and not text.endswith("\n"):
+                sys.stdout.write("\n")  # keep the next session off this one's last line
+        elif sess["format"] == "opencode":
+            _render_opencode_jsonl(log_path)
+        else:
+            _render_stream_jsonl(log_path)
+    except FileNotFoundError:
+        print(f"(session {sess['session_id']}: log file missing, skipped)", file=sys.stderr)
 
 
 def cmd_tui(args) -> int:

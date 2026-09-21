@@ -1039,6 +1039,48 @@ def test_logs_screen_shows_third_format_log_not_blank(seeded_home):
     asyncio.run(_inner())
 
 
+def test_logs_screen_renders_every_session_oldest_first_then_tails_live(seeded_home):
+    """T-119: the Logs screen renders all captured sessions oldest-first under headers,
+    then tails the live (claimed) one -- in the real mounted app."""
+    import json as _json
+    from textual.widgets import RichLog
+
+    log_dir = seeded_home / "agent-logs" / "T-3"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    def _stream(word):
+        return _json.dumps({"type": "assistant", "message": {"id": word, "role": "assistant",
+                            "content": [{"type": "text", "text": word}]}}) + "\n"
+
+    (log_dir / "reconcile-T-3-1000.000000.stream.jsonl").write_text(_stream("said-old"), encoding="utf-8")
+    (log_dir / "reconcile-T-3-2000.000000.stream.jsonl").write_text(_stream("said-mid"), encoding="utf-8")
+    live = log_dir / "reconcile-T-3-3000.000000.stream.jsonl"
+    live.write_text(_stream("said-live"), encoding="utf-8")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("view_logs")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], LogsScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            log_widget = app.screen.query_one("#logs-view", RichLog)
+            rendered = "\n".join(strip.text for strip in log_widget.lines)
+            assert rendered.index("said-old") < rendered.index("said-mid") < rendered.index("said-live")
+            for sid in ("reconcile-T-3-1000.000000", "reconcile-T-3-2000.000000", "reconcile-T-3-3000.000000"):
+                assert f"=== session {sid} | " in rendered
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_logs_screen_renders_opencode_tool_use_and_text(seeded_home):
     """AC4 (OC-5/T-41): opencode's own verified vocabulary (step_start/tool_use/
     text/step_finish) renders as structured content in the real logs pane, not
