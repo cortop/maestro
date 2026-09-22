@@ -1630,6 +1630,20 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
                       expect=fresh.observed_seq)
 
 
+def _review_noise_match(cfg: Config, body: str, author: str | None) -> str | None:
+    """T-125: the matched pattern (or ``author:<login>``) if *body*/*author* is
+    configured noise, else ``None``. A pattern must FULLMATCH the body (not
+    search) -- a substring match would silently swallow a real comment that
+    merely starts or ends with boilerplate. Called for every state except
+    CHANGES_REQUESTED, which the caller never subjects to this check at all."""
+    for pat in cfg.review_noise_patterns:
+        if re.fullmatch(pat, body or ""):
+            return pat
+    if author and author in cfg.review_noise_authors:
+        return f"author:{author}"
+    return None
+
+
 def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None,
                      env: dict | None = None) -> None:
     changes_requested_body: str | None = None
@@ -1660,14 +1674,27 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
             continue
         state = r.get("state")
         body = r.get("body", "")
+        author = r.get("author")
+        # T-125: CHANGES_REQUESTED is never filtered -- everything else is
+        # checked. A noise match nulls only this item's CONTRIBUTION to the
+        # routing reason below (never appended to changes_requested_body);
+        # ReviewFeedbackReceived above is already recorded regardless.
+        noise = None if state == "CHANGES_REQUESTED" else _review_noise_match(cfg, body, author)
+        if noise is not None:
+            event_log.append(
+                cfg.home, key, E.NOTE,
+                {"text": f"review comment skipped as noise ({noise}): {body[:200]}"},
+                actor="dispatcher", step_id=f"review-noise-{key}-{cid}",
+            )
         if state == "CHANGES_REQUESTED":
             changes_requested_body = body
-        elif state == "COMMENTED" and body:
+        elif state == "COMMENTED" and body and noise is None:
             commented_body = body
         elif state == "APPROVED":
             approved_new = True
-            approved_body = body
-        elif state == "INLINE_COMMENT" and body:
+            if noise is None:
+                approved_body = body
+        elif state == "INLINE_COMMENT" and body and noise is None:
             where = f"{r['path']}:{r['line']}: " if r.get("path") and r.get("line") else (
                 f"{r['path']}: " if r.get("path") else "")
             inline_new.append(f"{where}{body}")

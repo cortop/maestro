@@ -345,6 +345,19 @@ class Config:
     # re-probing on every doctor sweep/badge refresh. 0 disables caching (always
     # probes fresh), same convention as no_output_timeout/backup_interval.
     provider_probe_interval_s: int = 300
+    # T-125: review-comment noise pre-filter for `dispatcher._observe_reviews` --
+    # a COMMENTED/APPROVED/INLINE_COMMENT body that fullmatches one of these
+    # regexes, or whose author is listed in `review_noise_authors` (exact login,
+    # e.g. "github-actions[bot]"), is still recorded as ReviewFeedbackReceived
+    # (history stays complete) but contributes nothing to the routing reason --
+    # CHANGES_REQUESTED is never filtered, regardless of either list. Empty by
+    # default: ships byte-identical to before this ticket until a board opts in,
+    # so the moment real review-comment volume appears its go/no-go can be
+    # measured instead of guessed. Regexes are compiled fail-closed at
+    # config.load() (see _validate_review_noise_patterns) -- a malformed pattern
+    # refuses to start, naming the knob, rather than raising later mid-poll.
+    review_noise_patterns: list = field(default_factory=list)
+    review_noise_authors: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -555,6 +568,26 @@ def _validate_suggest_acs_prompt(template) -> None:
     if "spec" not in fields:
         raise store.MaestroError(
             "config.toml: [maestro] suggest_acs_prompt must contain the {spec} placeholder")
+
+
+def _validate_review_noise_patterns(patterns) -> None:
+    """T-125: fail `config.load()` closed on a malformed `review_noise_patterns` --
+    same posture as `test_selector`/`language` above: a bad regex must be a loud
+    config error, never a silent never-match discovered only later mid-poll."""
+    if not isinstance(patterns, list):
+        raise store.MaestroError(
+            "config.toml: [maestro] review_noise_patterns must be a list of strings")
+    for pat in patterns:
+        if not isinstance(pat, str):
+            raise store.MaestroError(
+                f"config.toml: [maestro] review_noise_patterns entries must be "
+                f"strings, got {pat!r}")
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            raise store.MaestroError(
+                f"config.toml: [maestro] review_noise_patterns has a malformed "
+                f"regex {pat!r}: {exc}") from exc
 
 
 def _validate_skill_name(value, *, where: str) -> None:
@@ -825,6 +858,15 @@ def load(home_arg: str | None = None) -> Config:
         cfg.alarm_cooldown_s = int(al.get("cooldown_s", cfg.alarm_cooldown_s))
         cfg.provider_probe_interval_s = int(
             m.get("provider_probe_interval_s", cfg.provider_probe_interval_s))
+        raw_noise_patterns = m.get("review_noise_patterns", cfg.review_noise_patterns)
+        _validate_review_noise_patterns(raw_noise_patterns)
+        cfg.review_noise_patterns = raw_noise_patterns
+        raw_noise_authors = m.get("review_noise_authors", cfg.review_noise_authors)
+        if not isinstance(raw_noise_authors, list) or not all(
+                isinstance(a, str) for a in raw_noise_authors):
+            raise store.MaestroError(
+                "config.toml: [maestro] review_noise_authors must be a list of strings")
+        cfg.review_noise_authors = raw_noise_authors
         if "providers" in data:
             cfg.providers.update(data["providers"])
         # OC-4: [runner.opencode] is the one provider_config table this module
@@ -1073,6 +1115,13 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
 # ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
 # ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
+# review_noise_patterns = []      # T-125: regexes (fullmatch); a matching COMMENTED/APPROVED/
+                                  # INLINE_COMMENT review body still records ReviewFeedbackReceived
+                                  # but routes nothing (CHANGES_REQUESTED is never filtered).
+                                  # Empty by default -- ships dark. A malformed regex fails
+                                  # config load closed.
+# review_noise_authors = []       # T-125: exact review-author logins (e.g. "github-actions[bot]")
+                                  # filtered the same way as review_noise_patterns above.
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom
