@@ -529,6 +529,103 @@ def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool
     return DueResult(True, "active")
 
 
+# T-122: the small literal allowlist an answer_fast_path route recognizes as
+# an unambiguous human approval. Deliberately narrow and approval-only (no
+# "no"/"reject"/etc) -- the fast path can only ever route TOWARD `ready`,
+# never toward a rejection/discard the dispatcher has no business deciding
+# on its own; every other answer keeps today's spawn so a real reconciler
+# reads it.
+_FAST_PATH_LITERAL_ANSWERS = frozenset({
+    "ok", "okay", "yes", "y", "approve", "approved", "go", "go ahead",
+    "proceed", "lgtm", "sounds good",
+})
+# ops.ask's own qid default (idempotency.content_hash) -- excludes every
+# named qid (`conflict-*`, `research-approval-*`, `missing-acs-*`,
+# `blocked-*`, `runner-*`, `test-deletion-*`, ...), where a plain "ok"
+# means something other than "route to ready".
+_FAST_PATH_QID_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _normalize_fast_path_answer(text: str) -> str:
+    return re.sub(r"[\s.,!?;:]+$", "", text.strip().lower())
+
+
+def _fast_path_answer_source(home: Path, key: str,
+                             snap: snap_mod.Snapshot) -> dict[str, str] | None:
+    """``{qid: verbatim answer text}`` an answer_fast_path route would act on,
+    or ``None`` if the ticket's pending inbox / already-folded answer doesn't
+    have the single-answer shape the fast path requires.
+
+    Two shapes, matching ``is_due``'s own ``"inbox"``/``"answered-pending"``
+    reasons: exactly one pending ``ans``/``answer`` inbox command (never
+    more -- a second pending entry, e.g. an "ok" followed by a rejection in
+    the same fold as on T-72, always falls through here); or, when nothing
+    is pending (the ``answered-pending`` crash-recovery shape: a reconciler
+    folded the inbox and died before the phase transition), the already-
+    folded ``answered_questions``.
+    """
+    pend = inbox.pending(home, key)
+    if pend:
+        if len(pend) != 1:
+            return None
+        cmd = pend[0]
+        if cmd.get("command") not in ("ans", "answer"):
+            return None
+        text = cmd.get("args", {}).get("text", cmd.get("command"))
+        target = cmd.get("args", {}).get("qid")
+        qids = [target] if target else list(snap.open_questions.keys())
+        if not qids:
+            return None
+        return {qid: text for qid in qids}
+    if snap.answered_questions:
+        return dict(snap.answered_questions)
+    return None
+
+
+def _answer_fast_path_eligible(home: Path, key: str, snap: snap_mod.Snapshot,
+                               due_reason: str) -> str | None:
+    """The verbatim literal answer text an answer_fast_path route would act
+    on, or ``None`` if *key* isn't eligible right now -- see T-122's spec
+    Notes for the full eligibility list this enforces. Pure/read-only, so
+    it's safe to call under ``shadow`` or a ``dry_run`` preview -- only the
+    caller decides whether to actually apply what this predicts.
+    """
+    if snap.phase != Phase.AWAITING_HUMAN.value:
+        return None
+    if due_reason not in ("inbox", "answered-pending"):
+        return None
+    if snap.kind == "research":
+        return None
+    answers = _fast_path_answer_source(home, key, snap)
+    if not answers:
+        return None
+    # Every currently OPEN question must get answered by this round -- a
+    # partially answered frontier round (one of several open qids left
+    # untouched) keeps today's spawn instead of routing early.
+    if set(snap.open_questions) - set(answers):
+        return None
+    if not all(_FAST_PATH_QID_RE.match(qid) for qid in answers):
+        return None
+    normalized = {_normalize_fast_path_answer(t) for t in answers.values()}
+    if len(normalized) != 1 or next(iter(normalized)) not in _FAST_PATH_LITERAL_ANSWERS:
+        return None
+    return next(iter(answers.values()))
+
+
+def _apply_answer_fast_path(cfg: Config, key: str, reason: str, *, actor: str) -> None:
+    """Execute an eligible fast-path route: fold the inbox, advance straight
+    to `ready` with *reason* (``"approved: <verbatim answer>"``), then ack --
+    the same fold -> set_phase -> ack sequence the `awaiting-human` reconciler
+    itself would run, just performed inline in the sweep instead of spawning
+    a session to do it."""
+    from . import ops
+    ops.fold_inbox(cfg, key)
+    fresh = snap_mod.load(cfg.home, key)
+    ops.set_phase(cfg, key, Phase.READY, reason=reason, actor=actor,
+                  expect=fresh.observed_seq)
+    inbox.ack(cfg.home, key)
+
+
 def list_keys(home: Path) -> list[str]:
     """All known ticket keys (union of ticket dirs, event logs, snapshots),
     excluding archived/dead-letter."""
@@ -3228,6 +3325,46 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                 claimed.append(key)        # per-key serialization: one reconciler per key
                 decisions[key] = {"outcome": "claimed", "reason": res.reason}
                 continue
+
+            # T-122: route an exact-literal human approval straight to `ready`
+            # in this same sweep instead of spawning a full awaiting-human
+            # reconciler whose only job would be to read "ok" and call
+            # set-phase. `off` (default) never even computes this --
+            # `_answer_fast_path_eligible` is skipped entirely, so this
+            # branch is byte-identical to before this knob existed.
+            fast_path_answer = (_answer_fast_path_eligible(home, key, snap, res.reason)
+                                 if cfg.answer_fast_path != "off" else None)
+            if fast_path_answer is not None and cfg.answer_fast_path == "on" and not dry_run:
+                reason = f"approved: {fast_path_answer}"
+                try:
+                    _apply_answer_fast_path(cfg, key, reason, actor="dispatcher")
+                except Exception as e:  # noqa: BLE001 -- a lost race must not abort the sweep
+                    hook_errors[f"answer_fast_path:{key}"] = f"{type(e).__name__}: {e}"
+                    fast_path_answer = None  # fall through below, as if never eligible
+                else:
+                    decisions[key] = {"outcome": "answer_routed", "reason": reason}
+                    refreshed = snap_mod.load(home, key)
+                    observed_seq_by_key[key] = refreshed.observed_seq
+                    phase_by_key[key] = refreshed.phase
+                    # Re-evaluate due-ness against the just-routed `ready`
+                    # snapshot so the `ready` reconciler spawns THIS sweep
+                    # instead of waiting for the next launchd interval.
+                    res2 = is_due(home, key, refreshed,
+                                  inbox_pending=inbox.has_pending(home, key),
+                                  current_spec_hash=spec_hash_on_disk(home, key),
+                                  now=now, blocked_dep=_has_unmet_deps(home, key))
+                    if res2.due:
+                        due.append((key, res2.reason))
+                    continue
+            if fast_path_answer is not None:
+                # `shadow`, or `on` previewed under a strictly-read-only
+                # `dry_run` sweep (GA-4): predict only, never write -- the
+                # ticket spawns exactly like today.
+                decisions[key] = {"outcome": "would_route_answer",
+                                  "reason": f"would approve: {fast_path_answer}"}
+                due.append((key, res.reason))
+                continue
+
             due.append((key, res.reason))
             decisions[key] = {"outcome": "due", "reason": res.reason}
 
@@ -3577,7 +3714,13 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
                                    disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
                                    env_overlay=cred.env, runner=runner, runner_model=runner_model)
                     spawned.append(key)
-                    decisions[key]["outcome"] = "spawned"
+                    # T-122: a fast-pathed key's own outcome (`would_route_answer` in
+                    # shadow, `answer_routed` on a routed-but-still-due key) is the
+                    # more specific fact for THIS key's ledger entry -- a real spawn
+                    # still launches (`spawned` above, unconditional) either way, so
+                    # this is cosmetic-only, never a gate.
+                    if decisions[key]["outcome"] not in ("would_route_answer", "answer_routed"):
+                        decisions[key]["outcome"] = "spawned"
                     if cap is not None:
                         per_repo_spawn_count[binding.name] = per_repo_spawn_count.get(binding.name, 0) + 1
                     # T-63 (MTO-9 defect 4b): remember this key as the last one
