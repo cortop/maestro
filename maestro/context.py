@@ -15,7 +15,10 @@ from pathlib import Path
 
 from . import events as E
 from . import event_log, store
+from . import locate as locate_mod
+from . import repos as repos_mod
 from . import snapshot as snap_mod
+from .config import Config
 from .dispatcher import parse_depends_on
 
 _BANNER = (
@@ -29,6 +32,9 @@ MAX_ANSWERED_QUESTIONS = 15
 MAX_FAILURES = 10
 MAX_CI_OBSERVATIONS = 10
 MAX_IMPL_STEPS = 15
+MAX_LOCATE_HINTS = 15
+MAX_SYMBOL_ROWS = 30
+MAX_PRIOR_EDIT_FILES = 15
 
 
 def _tail(items: list, cap: int) -> tuple[list, int]:
@@ -38,8 +44,12 @@ def _tail(items: list, cap: int) -> tuple[list, int]:
     return items[-cap:], len(items) - cap
 
 
-def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str, str]) -> str:
-    """Pure fold: identical (key, title, events, dep_phases) -> byte-identical text."""
+def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str, str],
+           locate: dict | None = None) -> str:
+    """Pure fold: identical (key, title, events, dep_phases, locate) -> byte-identical
+    text. *locate* is `None` (the default) unless the ticket's repo binding has
+    `file_hints` on -- with it `None`, output is byte-identical to before T-124
+    (`tests/test_context.py::test_render_is_byte_identical_for_the_same_events`)."""
     asked: dict[str, str] = {}
     phase_changes: list[tuple[str, str, str]] = []
     answered: list[tuple[str, str, str, str]] = []
@@ -133,6 +143,43 @@ def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str
         lines.append("_none_")
     lines.append("")
 
+    if locate:
+        hints = locate.get("hints") or []
+        lines.append("## Suggested starting points")
+        shown, dropped = _tail(hints, MAX_LOCATE_HINTS)
+        if dropped:
+            lines.append(f"_({dropped} earlier hint(s) omitted)_")
+        for h in shown:
+            lines.append(f"- `{h['path']}` ({h['provenance']})")
+        if not hints:
+            lines.append("_none_")
+        lines.append("")
+
+        symbols = locate.get("symbols") or []
+        lines.append("## Symbol map")
+        shown, dropped = _tail(symbols, MAX_SYMBOL_ROWS)
+        if dropped:
+            lines.append(f"_({dropped} earlier symbol(s) omitted)_")
+        for s in shown:
+            doc_suffix = f" — {s['docstring']}" if s.get("docstring") else ""
+            lines.append(
+                f"- `{s['path']}:{s['line_start']}-{s['line_end']}` "
+                f"{s['name']} ({s['kind']}){doc_suffix}")
+        if not symbols:
+            lines.append("_none_")
+        lines.append("")
+
+        prior = locate.get("prior_edits") or []
+        lines.append("## Files edited in prior sessions")
+        shown, dropped = _tail(prior, MAX_PRIOR_EDIT_FILES)
+        if dropped:
+            lines.append(f"_({dropped} earlier file(s) omitted)_")
+        for f in shown:
+            lines.append(f"- `{f}`")
+        if not prior:
+            lines.append("_none_")
+        lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
@@ -140,17 +187,26 @@ def context_path(home: Path, key: str) -> Path:
     return home / "derived" / "context" / f"{store.validate_key(key)}.md"
 
 
-def regenerate(home: Path, key: str) -> Path:
+def regenerate(cfg: Config, key: str) -> Path:
     """Fold the full log (archive included) into the dossier and atomically
     persist it beside the snapshot. Called from ``ops._append`` so the dossier
     is always current after every event — no separate regeneration step.
+
+    T-124: when *key*'s resolved repo binding has ``file_hints`` on, also folds
+    in the cached (never recomputed here -- see ``ops.locate``/``maestro
+    locate <KEY>``) locate hints; ships dark (``locate=None``, byte-identical
+    output) for every binding that hasn't opted in.
     """
+    home = cfg.home
     events = event_log.read(home, key)
     spec_path = store.spec_path(home, key)
     spec_text = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
     dep_phases = {dep: snap_mod.load(home, dep).phase for dep in parse_depends_on(spec_text)}
     title = next((e["payload"].get("title") for e in events if e.get("type") == E.TICKET_CREATED), None)
-    text = render(key, title, events, dep_phases)
+    locate = None
+    if repos_mod.resolve(cfg, home, key).file_hints:
+        locate = locate_mod.load_cached(home, key)
+    text = render(key, title, events, dep_phases, locate)
     path = context_path(home, key)
     store.atomic_write(path, text)
     return path

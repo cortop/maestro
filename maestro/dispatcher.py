@@ -180,11 +180,11 @@ def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution
 # switch), or any other human-only verb here -- and never collapse this to
 # the bare wildcard "maestro:*", which grants all of those at once.
 AGENT_TOOL_VERBS = (
-    # The 23 "[agent]"-tagged verbs registered in build_parser().
+    # The 24 "[agent]"-tagged verbs registered in build_parser().
     "local-backup", "snapshot", "events", "append", "set-phase", "ask",
     "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
     "verify-ac", "qa-brief", "qa-verdict", "capture-tests", "finalize", "checked", "release",
-    "check-conflicts", "check-merged", "fold-steps", "worktree",
+    "check-conflicts", "check-merged", "fold-steps", "worktree", "locate",
     # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
     "env",     # every phase preamble's first command, all phase files
     "show",    # maestro-reconcile-passive.md reads pending_inbox through it
@@ -243,16 +243,16 @@ def maestro_verb_grant(verbs=AGENT_TOOL_VERBS) -> list[str]:
 # has no current skill caller at all -- granting a verb nothing calls is
 # exactly the surplus surface this ticket exists to remove.
 _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
-    "triaging": ("ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
+    "triaging": ("ask", "env", "fold-inbox", "locate", "observe-spec", "release", "snapshot"),
     "awaiting-human": ("append", "create", "env", "finalize", "fold-inbox", "inbox-ack",
                         "observe-spec", "release", "set-phase", "snapshot"),
     "ready": ("ask", "env", "fold-inbox", "observe-spec", "release", "requeue", "set-phase",
               "snapshot", "worktree"),
     "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
     "implementing": ("append", "ask", "env", "fail", "finalize", "fold-inbox", "impl-turn",
-                      "local-backup", "observe-spec", "release", "set-phase", "snapshot",
+                      "local-backup", "locate", "observe-spec", "release", "set-phase", "snapshot",
                       "verify-ac", "worktree"),
-    "qa": ("append", "ask", "env", "fold-inbox", "observe-spec", "qa-brief", "qa-verdict",
+    "qa": ("append", "ask", "env", "fold-inbox", "locate", "observe-spec", "qa-brief", "qa-verdict",
            "release", "set-phase", "snapshot"),
     "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",
                 "observe-spec", "release", "set-phase", "show", "snapshot"),

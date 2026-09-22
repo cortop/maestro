@@ -74,7 +74,7 @@ def _append(cfg: Config, key: str, type: str, payload: dict, *, actor: str,
     ev = event_log.append(cfg.home, key, type, payload, actor=actor,
                           step_id=sid, expected_last_seq=expect)
     snap_mod.rebuild(cfg.home, key)
-    context_mod.regenerate(cfg.home, key)
+    context_mod.regenerate(cfg, key)
     return ev
 
 
@@ -2050,6 +2050,29 @@ def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | N
         return None
     _append(cfg, key, E.SPEC_OBSERVED, {"spec_hash": h}, actor=actor, sid=f"spec-{key}-{h}")
     return h
+
+
+def locate(cfg: Config, key: str) -> dict:
+    """T-124: (re)compute *key*'s locate hints and refresh both the on-disk
+    cache and the context dossier -- a derived cache, not a log event, so this
+    never funnels through `_append`/`_refuse_unminted` (there is nothing to
+    fence: a stale hint is merely a worse suggestion, never a correctness bug,
+    and `maestro locate` is meant to be idempotently re-runnable even before a
+    ticket's first real event).
+    """
+    from . import locate as locate_mod
+    result = locate_mod.compute(cfg, key, force=True)
+    context_mod.regenerate(cfg, key)
+    return result
+
+
+def locate_eval(cfg: Config, key: str | None = None, *, n: int | None = None) -> dict:
+    """T-124: read-only replay of the locate ranker against merged tickets'
+    real changed files -- see `locate.run_eval` for the full contract. Never
+    mutates the board.
+    """
+    from . import locate as locate_mod
+    return locate_mod.run_eval(cfg, cfg.home, key, n=n)
 
 
 def requeue(cfg: Config, key: str, seconds: int, *, actor: str = "reconciler") -> None:

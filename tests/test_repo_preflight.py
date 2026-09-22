@@ -209,10 +209,11 @@ def _repo_table(path, *, base_branch="main", default=False):
             "branch_prefix": "maestro/", "default": default, "max_spawns_per_sweep": None}
 
 
-def _seed_bound_ticket(home, key, repo_name, phase=Phase.IMPLEMENTING):
+def _seed_bound_ticket(home, key, repo_name, phase=Phase.IMPLEMENTING, *, intent=None):
+    intent_section = f"\n## Intent\n{intent}\n" if intent else ""
     store.atomic_write(store.spec_path(home, key),
                        f"# {key}\napproval_tier: 0\nrepo: {repo_name}\n"
-                       f"\n## Acceptance criteria\n- [ ] ok\n")
+                       f"{intent_section}\n## Acceptance criteria\n- [ ] ok\n")
     event_log.append(home, key, "TicketCreated",
                      {"title": key, "repo": repo_name,
                       "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")

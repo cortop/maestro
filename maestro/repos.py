@@ -113,6 +113,11 @@ class RepoBinding:
     ci_auto_rerun: bool = False
     ci_rerun_grace: int = 900
     ci_failure_excerpt: bool = False
+    # T-124: this repo's file_hints override, already resolved against the
+    # board-wide [maestro] file_hints default -- see resolve(), the sole
+    # reader `maestro/locate.py`/`context.regenerate` go through. False
+    # (default) means `maestro/locate.py` computes nothing (ships dark).
+    file_hints: bool = False
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -174,6 +179,12 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
             table["ci_failure_excerpt"] if table.get("ci_failure_excerpt") is not None
             else cfg.ci_failure_excerpt
         ),
+        # T-124: same "table wins, unset inherits" shape as prime_timeout above --
+        # bool-valued, so `or` (which would treat a configured `false` as unset)
+        # isn't the right check.
+        file_hints=(
+            table["file_hints"] if table.get("file_hints") is not None else cfg.file_hints
+        ),
     )
 
 
@@ -220,6 +231,8 @@ def implicit_default(cfg: Config) -> RepoBinding:
         ci_auto_rerun=cfg.ci_auto_rerun,
         ci_rerun_grace=cfg.ci_rerun_grace,
         ci_failure_excerpt=cfg.ci_failure_excerpt,
+        # T-124: ditto.
+        file_hints=cfg.file_hints,
     )
 
 
