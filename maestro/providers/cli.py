@@ -189,6 +189,37 @@ class GitHubCliVCS:
                 "body": r.get("body", ""),
                 "author": (r.get("author") or {}).get("login"),
             })
+        result.extend(self._inline_review_comments(pr_number, repo, env))
+        return result
+
+    def _inline_review_comments(self, pr_number: int, repo: str | None,
+                                env: dict | None) -> list[dict]:
+        """T-117: inline review-thread comments (`gh api .../pulls/<n>/comments`),
+        which `gh pr view --json reviews` never returns. Each gets state
+        `INLINE_COMMENT` and an `inline-<id>` id (numeric ids must not collide
+        with the review node ids). A failed/garbled fetch yields none."""
+        slug = repo or "{owner}/{repo}"
+        rc, out, _ = _run(["gh", "api", "--paginate", f"repos/{slug}/pulls/{pr_number}/comments"],
+                          env=env)
+        if rc != 0 or not out.strip():
+            return []
+        try:
+            comments = json.loads(out)
+        except ValueError:
+            return []
+        result = []
+        for c in comments if isinstance(comments, list) else []:
+            cid = c.get("id")
+            if not cid or not (c.get("body") or "").strip():
+                continue
+            result.append({
+                "id": f"inline-{cid}",
+                "state": "INLINE_COMMENT",
+                "body": c["body"],
+                "author": (c.get("user") or {}).get("login"),
+                "path": c.get("path"),
+                "line": c.get("line") or c.get("original_line"),
+            })
         return result
 
     def pr_ready(self, pr_number: int, repo: str | None = None,

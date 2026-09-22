@@ -41,7 +41,7 @@ with the **Read** tool — never `cat`/`sed`, this preamble reads no file via th
   from a fresh implementation** — if the most recent phase-history line reads `qa -> implementing`
   with a reason citing a failing AC, `qa` sent you back; see step 1 below. If instead it reads
   `in-review -> implementing` or `awaiting-ci -> implementing` with a reason starting `changes
-  requested:` or `review comment:`, a PR reviewer's feedback sent you back — see the review-
+  requested:`, `review comment:` or `approved with comments:`, a PR reviewer's feedback sent you back — see the review-
   feedback case in step 1 below, a different fix round from the `qa` one.
 
 If the snapshot shows pending inbox commands, fold them before deciding:
@@ -138,7 +138,8 @@ Otherwise implement the spec's Acceptance criteria:
    5).
    **If a PR reviewer sent you back instead** (the most recent phase-history transition is
    `in-review -> implementing` or `awaiting-ci -> implementing`, reason `changes requested: <body>`
-   or `review comment: <body>` — the verbatim comment text is right there in the reason): this is
+   `review comment: <body>` or `approved with comments: <body / path:line: inline comments>` — the
+   verbatim comment text is right there in the reason): this is
    a **review-feedback round**, a third case alongside the `qa` fix round and a fresh
    implementation. Evaluate the comment on its merits — address it with a real code change where
    it's warranted, or, if no change is warranted, say why:
@@ -147,7 +148,12 @@ Otherwise implement the spec's Acceptance criteria:
    (or, if you recorded a Note and made no code change, just the Note — nothing to push) and
    `set-phase awaiting-ci` instead of `set-phase qa`: a human is already reviewing this PR
    directly on GitHub, so this pass hands back to CI/that review rather than routing through
-   `qa` again. Otherwise, make the change fresh.
+   `qa` again. **`approved with comments:`** means the reviewer already APPROVED the PR but left
+   feedback with it: the approval is NOT blocking, so never treat it as a reason to stop or
+   escalate. Evaluate EACH comment (the approval body and every `path:line:` inline comment,
+   separated by ` | `) — address what is warranted with a real change, and for every comment you
+   skip append a `Note` (`approved with comments: <that comment> -- no change: <why>`) so the human
+   sees the evaluation. Otherwise, make the change fresh.
 2. **Tests are the proof — QA against the real app, not mocks.** Every change ships with a test
    that exercises the actual surface and shows the feature working end-to-end: drive the real
    `maestro` CLI / a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`) over a temp

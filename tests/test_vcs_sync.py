@@ -8,6 +8,8 @@ verbatim comment body. Retires the reconciler's own `gh pr checks` shelling.
 """
 import json
 
+import pytest
+
 from maestro import dispatcher as disp
 from maestro import event_log, providers, snapshot as snap_mod, store
 from maestro.cli import main
@@ -550,12 +552,12 @@ def test_commented_review_does_not_route_twice_for_same_comment(cfg, monkeypatch
     assert snap_mod.load(cfg.home, "T-5").phase == Phase.IN_REVIEW.value
 
 
-def test_approved_review_and_empty_commented_review_leave_phase_unchanged(cfg, monkeypatch):
+def test_bare_approved_review_and_empty_commented_review_leave_phase_unchanged(cfg, monkeypatch):
     fake = FakeVCS(
         statuses={42: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha6",
                        "ci_state": "passing", "failing_checks": []}},
         reviews={42: [
-            {"id": "ap-1", "state": "APPROVED", "body": "great work", "author": "reviewer3"},
+            {"id": "ap-1", "state": "APPROVED", "body": "", "author": "reviewer3"},
             {"id": "cm-2", "state": "COMMENTED", "body": "", "author": "reviewer4"},
         ]},
     )
@@ -682,3 +684,90 @@ def test_observe_reviews_lands_on_correct_ticket_for_same_numbered_prs_in_two_re
     evs_b = [e for e in event_log.read(cfg.home, "B") if e["type"] == "ReviewFeedbackReceived"]
     assert len(evs_a) == 1 and evs_a[0]["payload"]["comment_id"] == "a-1"
     assert len(evs_b) == 1 and evs_b[0]["payload"]["comment_id"] == "b-1"
+
+
+# --- T-117: an APPROVED review that carries comment content earns one pass -----
+
+def _approval_fake(reviews):
+    return FakeVCS(
+        statuses={42: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha9",
+                       "ci_state": "passing", "failing_checks": []}},
+        reviews={42: reviews},
+    )
+
+
+def _impl_reasons(cfg, key="T-5"):
+    return [e["payload"]["reason"] for e in event_log.read(cfg.home, key)
+            if e["type"] == "PhaseChanged"
+            and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+
+
+@pytest.mark.parametrize("phase", [Phase.IN_REVIEW, Phase.AWAITING_CI])
+def test_approved_with_body_routes_once_with_body_in_reason(cfg, monkeypatch, phase):
+    fake = _approval_fake([{"id": "ap-1", "state": "APPROVED",
+                            "body": "LGTM, two nits", "author": "r"}])
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed(cfg, "T-5", phase)
+
+    disp.sync_vcs(cfg, now=1000)
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IMPLEMENTING.value
+    assert _impl_reasons(cfg) == ["approved with comments: LGTM, two nits"]
+
+
+def test_approved_with_inline_comments_routes_with_them_in_reason(cfg, monkeypatch):
+    fake = _approval_fake([
+        {"id": "ap-1", "state": "APPROVED", "body": "", "author": "r"},
+        {"id": "inline-7", "state": "INLINE_COMMENT", "body": "rename x",
+         "author": "r", "path": "a.py", "line": 3},
+    ])
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+
+    disp.sync_vcs(cfg, now=1000)
+    assert _impl_reasons(cfg) == ["approved with comments: a.py:3: rename x"]
+    kinds = [e["payload"]["comment_id"] for e in event_log.read(cfg.home, "T-5")
+             if e["type"] == "ReviewFeedbackReceived"]
+    assert kinds == ["ap-1", "inline-7"]
+
+
+def test_bare_approval_and_inline_without_approval_never_route_and_never_reroute(cfg, monkeypatch):
+    fake = _approval_fake([{"id": "ap-1", "state": "APPROVED", "body": "", "author": "r"}])
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+    disp.sync_vcs(cfg, now=1000)
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IN_REVIEW.value
+
+    # inline comments arriving without a new approval are recorded, not routed
+    fake.reviews[42].append({"id": "inline-8", "state": "INLINE_COMMENT", "body": "nit",
+                             "author": "r", "path": "a.py", "line": 1})
+    disp.sync_vcs(cfg, now=2000)
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IN_REVIEW.value
+    assert _impl_reasons(cfg) == []
+
+
+def test_approved_with_comments_does_not_reroute_on_later_sweeps(cfg, monkeypatch):
+    fake = _approval_fake([{"id": "ap-1", "state": "APPROVED", "body": "nit", "author": "r"}])
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+    disp.sync_vcs(cfg, now=1000)
+    assert len(_impl_reasons(cfg)) == 1
+    # back in review after the pass; the same approval is observed again
+    event_log.append(cfg.home, "T-5", "PhaseChanged", {"phase": Phase.IN_REVIEW.value}, actor="r")
+    snap_mod.rebuild(cfg.home, "T-5")
+    disp.sync_vcs(cfg, now=2000)
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IN_REVIEW.value
+    assert len(_impl_reasons(cfg)) == 1
+
+
+def test_changes_requested_outranks_approval_with_comments(cfg, monkeypatch):
+    fake = _approval_fake([
+        {"id": "ap-1", "state": "APPROVED", "body": "looks fine", "author": "r1"},
+        {"id": "cr-1", "state": "CHANGES_REQUESTED", "body": "fix the bug", "author": "r2"},
+        {"id": "inline-9", "state": "INLINE_COMMENT", "body": "nit",
+         "author": "r1", "path": "a.py", "line": 2},
+    ])
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed(cfg, "T-5", Phase.IN_REVIEW)
+
+    disp.sync_vcs(cfg, now=1000)
+    assert _impl_reasons(cfg) == ["changes requested: fix the bug"]
