@@ -476,6 +476,62 @@ def _opencode_session_outcome(path: Path) -> dict:
     return {"outcome": outcome, "result": {"reason": reason}, "rate_limit_info": None}
 
 
+_RUNNER_BY_SUFFIX = ((".stream.jsonl", "claude"), (".opencode.jsonl", "opencode"), (".pi.jsonl", "pi"))
+
+
+def _model_str(v) -> str | None:
+    """A model id as a non-empty string; opencode may nest it as ``{providerID, modelID}``."""
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    if isinstance(v, dict):
+        return _model_str(v.get("modelID") or v.get("id") or v.get("model"))
+    return None
+
+
+def _record_model(obj: dict) -> str | None:
+    """The model a single log record names, across the claude / opencode / pi shapes."""
+    if obj.get("type") == "system" and obj.get("subtype") == "init":
+        m = _model_str(obj.get("model"))
+        if m:
+            return m
+    part = obj.get("part") if isinstance(obj.get("part"), dict) else {}
+    for holder in (obj.get("message"), part, obj.get("info"), obj):
+        if isinstance(holder, dict):
+            m = _model_str(holder.get("model")) or _model_str(holder.get("modelID"))
+            if m:
+                return m
+    return None
+
+
+def format_session_header(sess: dict, outcome: str, info: dict) -> str:
+    """The one-line per-session banner shared by ``maestro logs`` and the TUI (T-119/T-120)."""
+    return (f"=== session {sess['session_id']} | {sess['ts']} | {sess['format']} | {outcome} | "
+            f"runner: {info['runner']} | model: {info['model']} ===")
+
+
+def session_model(path: Path) -> dict:
+    """What actually ran a session, read from its log: ``{"model": ..., "runner": ...}``.
+
+    ``runner`` follows the log's format (``claude`` / ``opencode`` / ``pi``; ``unknown`` for
+    plain text). ``model`` is a Claude log's ``system``/``init`` model, falling back to the
+    first record carrying one (an assistant ``message.model``); opencode/pi likewise. A
+    log with no model information, an unreadable one, or a malformed/truncated line yields
+    ``unknown`` -- this never raises.
+    """
+    name = path.name
+    runner = next((r for suffix, r in _RUNNER_BY_SUFFIX if name.endswith(suffix)), "unknown")
+    model = None
+    if runner != "unknown":
+        try:
+            for _offset, obj in iter_records(path):
+                model = _record_model(obj) if isinstance(obj, dict) else None
+                if model:
+                    break
+        except (OSError, ValueError):
+            model = None
+    return {"model": model or "unknown", "runner": runner}
+
+
 def session_outcome(stream_path: Path, *, pid: int | None = None) -> dict:
     """Tail-scan *stream_path* for its terminal ``result`` and any ``rate_limit_event``.
 

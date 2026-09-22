@@ -129,7 +129,7 @@ class LogsScreen(Screen):
                 continue
             try:
                 outcome = steplog.session_outcome(path)["outcome"]
-                self._write(log_widget, _session_header(sess, outcome))
+                self._write(log_widget, _session_header(sess, outcome, steplog.session_model(path)))
                 self._render_file(log_widget, path)
             except OSError:
                 self._write(log_widget, f"(session {sess['session_id']}: log file missing, skipped)")
@@ -185,7 +185,8 @@ class LogsScreen(Screen):
         live = next((x for x in sessions_list if Path(x["path"]) == log_path), None)
         if live is not None:
             from .. import steplog
-            self._write(log_widget, _session_header(live, steplog.session_outcome(log_path)["outcome"]))
+            self._write(log_widget, _session_header(live, steplog.session_outcome(log_path)["outcome"],
+                                                      steplog.session_model(log_path)))
 
         is_stream = log_path.name.endswith(".stream.jsonl")
         is_opencode = log_path.name.endswith(".opencode.jsonl")
@@ -224,11 +225,11 @@ class LogsScreen(Screen):
                     time.sleep(0.25)
 
 
-def _session_header(sess: dict, outcome: str) -> str:
-    """One-line per-session banner: id, start ts, format, outcome (markup-escaped)."""
+def _session_header(sess: dict, outcome: str, info: dict) -> str:
+    """One-line per-session banner: id, start ts, format, outcome, runner, model (markup-escaped)."""
     from rich.markup import escape
-    return escape(f"=== session {sess['session_id']} | {sess['ts']} | "
-                  f"{sess['format']} | {outcome} ===")
+    from .. import steplog
+    return escape(steplog.format_session_header(sess, outcome, info))
 
 
 class FleetScreen(Screen):

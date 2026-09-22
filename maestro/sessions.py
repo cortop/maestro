@@ -76,7 +76,7 @@ def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[d
     Each dict has: ``session_id``, ``path``, ``format`` ('text'|'stream-json'|
     'opencode'|'pi'), ``epoch`` (float), ``ts`` (ISO string). ``with_outcome`` is
     opt-in — it tail-scans each log via :func:`maestro.steplog.session_outcome` to
-    add an ``outcome`` field, so the default (filename-only) call opens no log
+    add ``outcome`` plus ``model``/``runner`` (T-120) fields, so the default (filename-only) call opens no log
     files, keeping callers like ``ops.prune_session_logs`` and the TUI's log
     tailer cheap.
 
@@ -109,6 +109,7 @@ def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[d
         if with_outcome:
             from . import steplog
             entry["outcome"] = steplog.session_outcome(f)["outcome"]
+            entry.update(steplog.session_model(f))
         out.append(entry)
     out.sort(key=lambda d: d["epoch"], reverse=True)
     return out

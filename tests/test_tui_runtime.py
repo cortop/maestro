@@ -1081,6 +1081,37 @@ def test_logs_screen_renders_every_session_oldest_first_then_tails_live(seeded_h
     asyncio.run(_inner())
 
 
+def test_logs_screen_header_names_model(seeded_home):
+    """T-120: each session's header in the mounted Logs screen names its model."""
+    import json as _json
+    from textual.widgets import RichLog
+
+    log_dir = seeded_home / "agent-logs" / "T-3"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "reconcile-T-3-1000.000000.stream.jsonl").write_text(
+        _json.dumps({"type": "system", "subtype": "init", "model": "claude-sonnet-5"}) + "\n", encoding="utf-8")
+    (log_dir / "reconcile-T-3-2000.000000.log").write_text("plain\n", encoding="utf-8")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await app.run_action("view_logs")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            rendered = "\n".join(strip.text for strip in app.screen.query_one("#logs-view", RichLog).lines)
+            assert "runner: claude | model: claude-sonnet-5 ===" in rendered
+            assert "model: unknown ===" in rendered
+            assert app._exception is None
+            await pilot.press("escape")
+            await pilot.pause()
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_logs_screen_renders_opencode_tool_use_and_text(seeded_home):
     """AC4 (OC-5/T-41): opencode's own verified vocabulary (step_start/tool_use/
     text/step_finish) renders as structured content in the real logs pane, not
