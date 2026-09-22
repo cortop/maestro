@@ -1191,12 +1191,16 @@ def cmd_logs(args) -> int:
         claim = claims.read_claim(cfg.home, key)
         live_pid = claim.get("pid") if claim else None
         verdict = claims.verify_claim(cfg.home, key) if claim else "unknown"
+        header_done = args.json
         with log_path.open(encoding="utf-8", errors="replace") as f:
             buf = ""
             while True:
                 chunk = f.read(4096)
                 if chunk:
                     buf += chunk
+                    if not header_done and not (is_stream or is_opencode):
+                        header_done = True
+                        _print_follow_header(sess, log_path)
                     if (is_stream or is_opencode) and not args.json:
                         # Emit complete lines only, rendered human-readable
                         while "\n" in buf:
@@ -1208,6 +1212,9 @@ def cmd_logs(args) -> int:
                                 obj = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
+                            if not header_done and steplog.session_model(log_path)["model"] != "unknown":
+                                header_done = True
+                                _print_follow_header(sess, log_path)
                             if is_opencode:
                                 _print_opencode_part(obj)
                             elif obj.get("type") == "assistant":
@@ -1227,10 +1234,18 @@ def cmd_logs(args) -> int:
                     if not live_pid:
                         break
                     time.sleep(0.25)
+        if not header_done:  # log ended without ever naming a model
+            _print_follow_header(sess, log_path)
         return 0
 
     _render_session(sess, as_json=args.json, header=False)
     return 0
+
+
+def _print_follow_header(sess: dict, log_path: Path) -> None:
+    """T-120: the session banner for ``--follow``, printed once the log names its model."""
+    print(steplog.format_session_header(sess, steplog.session_outcome(log_path)["outcome"],
+                                        steplog.session_model(log_path)))
 
 
 def _render_session(sess: dict, *, as_json: bool, header: bool) -> None:
@@ -1246,8 +1261,7 @@ def _render_session(sess: dict, *, as_json: bool, header: bool) -> None:
             raise FileNotFoundError(log_path)
         outcome = steplog.session_outcome(log_path)["outcome"] if header else None
         if header:
-            print(f"=== session {sess['session_id']} | {sess['ts']} | "
-                  f"{sess['format']} | {outcome} ===")
+            print(steplog.format_session_header(sess, outcome, steplog.session_model(log_path)))
         if as_json or sess["format"] not in ("stream-json", "opencode"):
             with log_path.open(encoding="utf-8", errors="replace") as f:
                 text = f.read()

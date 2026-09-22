@@ -542,3 +542,68 @@ def test_cli_logs_missing_session_file_skipped_with_notice(home, capsys):
     assert "said-first" in cap.out and "said-third" in cap.out and "said-second" not in cap.out
     assert "reconcile-T-1-2000.000000: log file missing, skipped" in cap.err
     assert "Traceback" not in cap.err
+
+
+# ---------------------------------------------------------------------------
+# T-120: which model ran each session
+# ---------------------------------------------------------------------------
+
+def _init(model):
+    return {"type": "system", "subtype": "init", "model": model}
+
+
+def test_cli_logs_list_carries_model_and_runner(home, capsys):
+    d = home / "agent-logs" / "T-1"
+    _write_stream_jsonl(d / "reconcile-T-1-1000.000000.stream.jsonl",
+                        [_init("claude-sonnet-5")] + _make_stream_events(text_blocks=["hi"]))
+    _write_stream_jsonl(d / "reconcile-T-1-2000.000000.pi.jsonl",
+                        [{"type": "message_end", "message": {"role": "assistant", "model": "qwen3"}}])
+    _make_text_log(d / "reconcile-T-1-3000.000000.log", "plain")
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1", "--list"]) == 0
+    rows = {r["session_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert (rows["reconcile-T-1-1000.000000"]["model"], rows["reconcile-T-1-1000.000000"]["runner"]) == ("claude-sonnet-5", "claude")
+    assert (rows["reconcile-T-1-2000.000000"]["model"], rows["reconcile-T-1-2000.000000"]["runner"]) == ("qwen3", "pi")
+    assert (rows["reconcile-T-1-3000.000000"]["model"], rows["reconcile-T-1-3000.000000"]["runner"]) == ("unknown", "unknown")
+
+
+def test_list_sessions_default_has_no_model(home):
+    _make_text_log(home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.log", "x")
+    assert "model" not in list_sessions(home, "T-1")[0]
+
+
+def test_cli_logs_header_names_model_and_runner(home, capsys):
+    d = home / "agent-logs" / "T-1"
+    _write_stream_jsonl(d / "reconcile-T-1-1000.000000.stream.jsonl",
+                        [_init("claude-opus-5")] + _make_stream_events(text_blocks=["a"]))
+    # no init line: falls back to the first assistant message.model
+    ev = _make_stream_events(text_blocks=["b"])
+    ev[0]["message"]["model"] = "claude-haiku-4-5"
+    _write_stream_jsonl(d / "reconcile-T-1-2000.000000.stream.jsonl", ev)
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1"]) == 0
+    out = capsys.readouterr().out
+    assert "runner: claude | model: claude-opus-5 ===" in out
+    assert "runner: claude | model: claude-haiku-4-5 ===" in out
+
+
+def test_cli_logs_follow_header_names_model(home, capsys):
+    path = home / "agent-logs" / "T-1" / "reconcile-T-1-1000.000000.stream.jsonl"
+    _write_stream_jsonl(path, [_init("claude-sonnet-5")] + _make_stream_events(text_blocks=["live-said"]))
+    from maestro import claims
+    claims.write_claim(home, "T-1", pid=999999999, name="reconcile-T-1", log_path=str(path))
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1", "--follow"]) == 0
+    out = capsys.readouterr().out
+    assert "model: claude-sonnet-5 ===" in out
+    assert out.index("model: claude-sonnet-5") < out.index("live-said")
+
+
+def test_cli_logs_text_and_truncated_report_unknown_model(home, capsys):
+    d = home / "agent-logs" / "T-1"
+    _make_text_log(d / "reconcile-T-1-1000.000000.log", "plain\n")
+    _make_text_log(d / "reconcile-T-1-2000.000000.stream.jsonl", '{"type": "system", "subty')
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("model: unknown ===") == 2
