@@ -1545,7 +1545,9 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                 continue
 
             _observe_pr_draft(cfg, key, status, snap)
-            _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number)
+            _observe_ci(cfg, key, status, phase, repo_slug=repo_slug, pr_number=snap.pr_number,
+                       snap=snap, binding=binding, vcs=vcs, env=(cred.env if cred.ok else None),
+                       now=now)
             if cred.ok:
                 _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env)
                 _maybe_undraft(cfg, key, status, vcs, repo_slug=repo_slug,
@@ -1588,7 +1590,9 @@ def _route_if_merged(cfg: Config, key: str, status: dict,
 
 
 def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
-                repo_slug: str | None = None, pr_number: int | None = None) -> None:
+                repo_slug: str | None = None, pr_number: int | None = None,
+                snap=None, binding=None, vcs=None, env: dict | None = None,
+                now: float | None = None) -> None:
     error = status.get("error")
     if error == "transient":
         # A retryable gh-side blip (timeout, network hiccup): not observed at
@@ -1600,18 +1604,62 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
     ci_state = status.get("ci_state", "unknown")
     failing = sorted(status.get("failing_checks") or [])
     head_sha = status.get("head_sha") or "unknown"
+
+    # T-123: opt-in CI auto-rerun-once-per-head -- resolved per-repo the same
+    # "table wins, unset inherits" way as test_command/prime_timeout. `binding`
+    # is None only for a caller that predates this ticket (e.g. a direct test
+    # of `_observe_ci` with no repo binding); such a caller gets the
+    # board-wide default, same as an unbound key always has.
+    auto_rerun = binding.ci_auto_rerun if binding is not None else cfg.ci_auto_rerun
+    grace = binding.ci_rerun_grace if binding is not None else cfg.ci_rerun_grace
+    excerpt_on = binding.ci_failure_excerpt if binding is not None else cfg.ci_failure_excerpt
+
+    existing_rerun = (snap.ci_reruns.get(head_sha) if snap is not None else None) if auto_rerun else None
+    now = now if now is not None else store.now_epoch()
+    in_grace = False
+    if existing_rerun is not None:
+        in_grace = (now - (existing_rerun.get("at") or 0)) < grace
+
+    # The existing content-only check-key is the dedup trap the spec calls
+    # out: a post-rerun poll with the SAME failing set as the pre-rerun one
+    # would otherwise hash identically and never produce the "fresh"
+    # CiObserved the routing branch needs once the grace window elapses. The
+    # marker folds the rerun/grace state in -- but ONLY when auto_rerun is on,
+    # so an unset knob stays byte-identical (AC1).
+    marker = ""
+    if auto_rerun and existing_rerun is not None:
+        marker = ":rerun-pending" if in_grace else ":rerun-elapsed"
     # `error` participates in the check-key so a genuine auth/not_found result
     # is never deduped against a pre-existing bare {"state": "unknown"}
     # CiObserved (minted before this classification existed, or by an
     # "unknown"-class result) — it always hashes differently and so always
     # gets a fresh event to route on. Repeats of the SAME error still dedupe
     # by construction (same hash in -> same step-id -> `ops.fail` runs once).
-    check_key = content_hash(ci_state + ":" + ",".join(failing) + ":" + (error or ""))
+    check_key = content_hash(ci_state + ":" + ",".join(failing) + ":" + (error or "") + marker)
     sid = f"ci-{key}-{head_sha}-{check_key}"
     detail = f"{len(failing)} check(s) failing: {', '.join(failing)}" if failing else ""
     payload = {"state": ci_state, "failing_checks": failing, "detail": detail}
     if error:
         payload["error"] = error
+
+    # T-123: the excerpt only makes sense on the observation that will
+    # actually route to `implementing` -- capturing it on the rerun-triggering
+    # poll (whose failure text is about to be superseded by the rerun) or on
+    # an in-grace poll (not yet trusted as the rerun's real outcome) would
+    # label a stale/pending run as the "rerun outcome". A routing observation
+    # is: ci_state == "failing" AND (auto_rerun is off, OR this head has
+    # already had its rerun and grace has elapsed).
+    will_route_failing = (
+        ci_state == "failing" and not error
+        and (not auto_rerun or (existing_rerun is not None and not in_grace))
+    )
+    failure_excerpt = None
+    if excerpt_on and will_route_failing and vcs is not None:
+        run_ids = (existing_rerun or {}).get("run_ids") or []
+        failure_excerpt = _ci_failure_excerpt(vcs, run_ids, repo_slug, env)
+        if failure_excerpt:
+            payload["failure_excerpt"] = failure_excerpt
+
     ev = event_log.append(cfg.home, key, E.CI_OBSERVED, payload,
                           actor="dispatcher", step_id=sid)
     if ev is None:
@@ -1622,12 +1670,63 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
         where = f"{repo_slug or '?'}#{pr_number if pr_number is not None else '?'}"
         ops.fail(cfg, key, f"gh {error}: could not read PR {where}", actor="dispatcher")
     elif ci_state == "failing":
-        ops.set_phase(cfg, key, Phase.IMPLEMENTING,
-                      reason=f"CI failing: {', '.join(failing)}", actor="dispatcher",
+        if auto_rerun and existing_rerun is None:
+            # First failing observation for this head SHA -- request the one
+            # rerun instead of routing. A resolution/rerun failure (ok=False)
+            # falls straight through to the routing branch below instead,
+            # exactly as if auto_rerun were unset for this poll.
+            if _trigger_ci_rerun(cfg, key, head_sha, pr_number, repo_slug, vcs, env, now):
+                return
+        elif auto_rerun and in_grace:
+            # Still waiting out the post-rerun grace window -- recorded above,
+            # not routed.
+            return
+        reason = f"CI failing: {', '.join(failing)}"
+        if failure_excerpt:
+            reason += f"\n{failure_excerpt}"
+        ops.set_phase(cfg, key, Phase.IMPLEMENTING, reason=reason, actor="dispatcher",
                       expect=fresh.observed_seq)
     elif ci_state == "passing" and phase == Phase.AWAITING_CI:
         ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher",
                       expect=fresh.observed_seq)
+
+
+def _trigger_ci_rerun(cfg: Config, key: str, head_sha: str, pr_number: int | None,
+                      repo_slug: str | None, vcs, env: dict | None, now: float) -> bool:
+    """T-123: request the one rerun for *head_sha* and record it. Returns
+    True (and appends CiRerunRequested) only when the VCS confirms it
+    actually requested a rerun -- False leaves no record, so the caller
+    treats this poll exactly as if ci_auto_rerun were unset."""
+    if vcs is None or pr_number is None:
+        return False
+    result = vcs.rerun_failed(pr_number, head_sha, repo=repo_slug, env=env)
+    if not result.get("ok"):
+        return False
+    event_log.append(cfg.home, key, E.CI_RERUN_REQUESTED,
+                     {"head_sha": head_sha, "run_ids": result.get("run_ids", []), "at": now},
+                     actor="dispatcher", step_id=f"cirerun-{key}-{head_sha}")
+    # The CiObserved append just above already rebuilt the persisted snapshot
+    # (`fresh` in the caller) -- but that was BEFORE this event landed, so
+    # `ci_reruns` wouldn't reach disk without this second rebuild. Nothing
+    # here goes through `ops._append`, which would otherwise do this for us.
+    snap_mod.rebuild(cfg.home, key)
+    return True
+
+
+def _ci_failure_excerpt(vcs, run_ids: list, repo_slug: str | None, env: dict | None,
+                        max_bytes: int = 2048) -> str:
+    """T-123: concatenate `failed_log_tail` for each of *run_ids* (the ones
+    resolved when the rerun was requested), capped at *max_bytes* total."""
+    parts = []
+    budget = max_bytes
+    for run_id in run_ids:
+        if budget <= 0:
+            break
+        tail = vcs.failed_log_tail(run_id, max_bytes=budget, repo=repo_slug, env=env)
+        if tail:
+            parts.append(tail)
+            budget -= len(tail.encode("utf-8", errors="replace"))
+    return "\n".join(parts)[:max_bytes] if parts else ""
 
 
 def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None,

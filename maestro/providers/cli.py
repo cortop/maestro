@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 
@@ -58,6 +59,11 @@ _TRANSIENT_MARKERS = (
     "could not resolve host",
     "temporary failure in name resolution",
 )
+
+# T-123: a check's `statusCheckRollup[].detailsUrl` for a GitHub Actions check
+# looks like ".../actions/runs/<run id>/job/<job id>" -- this is what
+# `GitHubCliVCS.rerun_failed` resolves a run id from, per failing check.
+_RUN_ID_RE = re.compile(r"/actions/runs/(\d+)")
 
 
 def classify_gh_failure(rc: int, stdout: str, stderr: str) -> str:
@@ -232,6 +238,57 @@ class GitHubCliVCS:
         if rc != 0:
             return {"ok": False, "error": classify_gh_failure(rc, out, err)}
         return {"ok": True}
+
+    def rerun_failed(self, pr_number: int, head_sha: str, repo: str | None = None,
+                     env: dict | None = None) -> dict:
+        repo = repo or (self.repos[0] if self.repos else None)
+        cmd = ["gh", "pr", "view", str(pr_number), "--json", "headRefOid,statusCheckRollup"]
+        if repo:
+            cmd += ["--repo", repo]
+        rc, out, _ = _run(cmd, env=env)
+        if rc != 0 or not out.strip():
+            return {"ok": False}
+        try:
+            data = json.loads(out)
+        except ValueError:
+            return {"ok": False}
+        if data.get("headRefOid") != head_sha:
+            # The PR advanced since the poll that triggered this call -- a
+            # rerun against the wrong head would waste a request and record a
+            # CiRerunRequested for a SHA nothing actually reran.
+            return {"ok": False}
+        run_ids: list[str] = []
+        for c in data.get("statusCheckRollup") or []:
+            conclusion = (c.get("conclusion") or c.get("state") or "").upper()
+            if conclusion not in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"}:
+                continue
+            m = _RUN_ID_RE.search(c.get("detailsUrl") or "")
+            if m and m.group(1) not in run_ids:
+                run_ids.append(m.group(1))
+        if not run_ids:
+            return {"ok": False}
+        ok = False
+        for run_id in run_ids:
+            rcmd = ["gh", "run", "rerun", run_id, "--failed"]
+            if repo:
+                rcmd += ["--repo", repo]
+            rrc, _, _ = _run(rcmd, env=env)
+            ok = ok or rrc == 0
+        if not ok:
+            return {"ok": False}
+        return {"ok": True, "run_ids": run_ids}
+
+    def failed_log_tail(self, run_id: str, max_bytes: int = 2048, repo: str | None = None,
+                        env: dict | None = None) -> str:
+        repo = repo or (self.repos[0] if self.repos else None)
+        cmd = ["gh", "run", "view", str(run_id), "--log-failed"]
+        if repo:
+            cmd += ["--repo", repo]
+        rc, out, _ = _run(cmd, env=env)
+        if rc != 0 or not out:
+            return ""
+        data = out.encode("utf-8", errors="replace")
+        return data[-max_bytes:].decode("utf-8", errors="replace")
 
 
 class CommandFetcher:
