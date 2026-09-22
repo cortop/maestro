@@ -315,6 +315,22 @@ class Config:
     # only blocked a recorded fail; zero verdicts silently passed). Default ON; OFF reverts to
     # HEAD's weaker check -- see ops._refuse_if_qa_incomplete.
     awaiting_ci_qa_gate: bool = True
+    # T-122: whether the dispatcher's own due loop routes an exact-literal
+    # human approval (a pending "ok"/"yes"/etc paired with an `ops.ask`
+    # content-hash qid, non-research ticket -- see dispatcher's
+    # `_answer_fast_path_eligible`) straight to `ready` itself, in the same
+    # sweep, instead of spawning a full `awaiting-human` reconciler whose only
+    # job in most cases is to read that literal answer and call `set-phase
+    # ready`. "off" (default): byte-identical to before this knob existed.
+    # "shadow": records a `would_route_answer` decision but still spawns the
+    # reconciler -- the go/no-go signal for flipping to "on". "on": folds the
+    # inbox, appends `PhaseChanged ready` with reason `approved: <verbatim
+    # answer>` by actor "dispatcher", acks the inbox, and records
+    # `answer_routed` -- every other answer (non-literal, a `kind: research`
+    # ticket, a named qid, a partially-answered frontier round, two pending
+    # answers for one key) keeps today's spawn. An unrecognized value fails
+    # `config.load()` closed -- see `_ANSWER_FAST_PATH_MODES`.
+    answer_fast_path: str = "off"
     # Maintenance ticks (dispatcher.run_compact_tick / run_archive_tick).
     compact_interval: int = 0          # seconds between dispatcher-driven compact sweeps (0 disables)
     compact_min_events: int = 200      # only compact a key once its folded log reaches this many events
@@ -367,6 +383,11 @@ _REPO_TABLE_KEYS = frozenset({
 # naming this set in the error, rather than silently falling back to a mode
 # that can livelock a fast-moving base branch.
 _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
+
+# T-122: the whole recognized answer_fast_path value set -- fails closed
+# (raises at config.load, naming the knob) on anything outside it, same
+# posture as _BASE_DRIFT_POLICIES just above.
+_ANSWER_FAST_PATH_MODES = frozenset({"off", "shadow", "on"})
 
 # OC-4/T-54: [runner.opencode]'s whole recognized key set. Unlike every other
 # [runner.<name>] table (free-form, riding cfg.provider_config with zero
@@ -805,6 +826,12 @@ def load(home_arg: str | None = None) -> Config:
         cfg.qa_standards_axis = bool(m.get("qa_standards_axis", cfg.qa_standards_axis))
         cfg.qa_phase_gate = bool(m.get("qa_phase_gate", cfg.qa_phase_gate))
         cfg.awaiting_ci_qa_gate = bool(m.get("awaiting_ci_qa_gate", cfg.awaiting_ci_qa_gate))
+        raw_fast_path = m.get("answer_fast_path", cfg.answer_fast_path)
+        if raw_fast_path not in _ANSWER_FAST_PATH_MODES:
+            raise store.MaestroError(
+                f"config.toml: answer_fast_path must be one of "
+                f"{sorted(_ANSWER_FAST_PATH_MODES)}, got {raw_fast_path!r}")
+        cfg.answer_fast_path = raw_fast_path
         cfg.compact_interval = int(m.get("compact_interval", cfg.compact_interval))
         cfg.compact_min_events = int(m.get("compact_min_events", cfg.compact_min_events))
         raw_archive_after = m.get("archive_after", cfg.archive_after)
@@ -1073,6 +1100,18 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
 # ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
 # ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
+# answer_fast_path = "off"         # T-122: "off" | "shadow" | "on" -- whether the dispatcher's
+                                  # due loop routes an exact-literal human approval ("ok"/"yes"/
+                                  # "approve"/etc, paired with an ops.ask content-hash qid, on a
+                                  # non-research ticket) straight to `ready` itself, in the same
+                                  # sweep, instead of spawning a full awaiting-human reconciler.
+                                  # Default "off": byte-identical to today. "shadow" records a
+                                  # would_route_answer decision but still spawns the reconciler --
+                                  # the go/no-go signal for "on". "on" folds the inbox, sets phase
+                                  # ready with reason "approved: <verbatim answer>" by actor
+                                  # "dispatcher", acks, and records answer_routed; every other
+                                  # answer shape keeps today's spawn. Unknown value fails config
+                                  # load closed (see _ANSWER_FAST_PATH_MODES).
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom

@@ -11,9 +11,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import fleet, snapshot as snap_mod, store
+from . import event_log, fleet, snapshot as snap_mod, store
 from .dispatcher import list_keys, split_key
 from .statemachine import Phase
+
+# T-122: the window `render()`'s "Routed without a reconciler" section looks
+# back over -- a fast-pathed ticket's own PhaseChanged event ages out of
+# visibility after this long, same as the ticket's own answer_fast_path
+# action itself is a one-time thing, not an ongoing state.
+_FAST_PATH_VISIBILITY_WINDOW_S = 86400
 
 # A row predicate: (home, snapshot) -> bool. Wider than a bare phase-set
 # filter, so a caller can express a derived predicate too, not only phase
@@ -119,6 +125,32 @@ def ticket_rows(home: Path, phases: frozenset | None = None, *,
     if predicate is not None:
         snaps = [s for s in snaps if predicate(home, s)]
     return rows_from_snapshots(home, snaps)
+
+
+def _recent_fast_path_routes(home: Path, now_epoch: float) -> list[tuple[str, str]]:
+    """``(key, verbatim answer)`` for every ticket whose MOST RECENT
+    ``PhaseChanged`` was a T-122 answer_fast_path route (``actor ==
+    "dispatcher"``, ``reason`` starting ``"approved: "``) within the last
+    ``_FAST_PATH_VISIBILITY_WINDOW_S``. Only the latest ``PhaseChanged`` per
+    key counts -- once a reconciler (or a human) has moved the ticket on
+    again, the fast-path route is no longer "recent", so it drops out on its
+    own without needing a separate expiry mechanism."""
+    routed = []
+    for key in list_keys(home):
+        for ev in reversed(event_log.read(home, key)):
+            if ev.get("type") != "PhaseChanged":
+                continue
+            payload = ev.get("payload") or {}
+            reason = payload.get("reason", "")
+            if ev.get("actor") == "dispatcher" and reason.startswith("approved: "):
+                try:
+                    ts = datetime.fromisoformat(ev["ts"]).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    break
+                if now_epoch - ts <= _FAST_PATH_VISIBILITY_WINDOW_S:
+                    routed.append((key, reason[len("approved: "):]))
+            break
+    return sorted(routed)
 
 
 def render(home: Path) -> dict[str, str]:
@@ -228,6 +260,14 @@ def render(home: Path) -> dict[str, str]:
                           f"(failures: {s.failure_count})")
             nlines.append(f"  - revive: `maestro cmd {s.key} retry` · "
                           f"drop: `maestro cmd {s.key} discard`")
+    # T-122: visibility into the answer_fast_path dispatcher-authored routes
+    # -- what got approved with no reconciler ever reading it, and the undo.
+    routed = _recent_fast_path_routes(home, store.now_epoch())
+    if routed:
+        nlines.append("\n## Routed without a reconciler (24h)\n")
+        for key, verbatim in routed:
+            nlines.append(f"- **{key}** — approved: {verbatim}")
+            nlines.append(f"  - undo: `maestro cmd {key} discard` (or edit the spec)")
     needs_you = "\n".join(nlines) + "\n"
     return {"WORKSTATE.md": workstate, "NEEDS-YOU.md": needs_you}
 
