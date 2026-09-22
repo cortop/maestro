@@ -345,6 +345,30 @@ class Config:
     # re-probing on every doctor sweep/badge refresh. 0 disables caching (always
     # probes fresh), same convention as no_output_timeout/backup_interval.
     provider_probe_interval_s: int = 300
+    # T-123: opt-in CI auto-rerun-once-per-head. On a failing `pr_status` poll,
+    # `dispatcher._observe_ci` requests one `gh run rerun --failed` for the
+    # head SHA instead of immediately routing to `implementing` -- measured on
+    # the dogfood board: 19 of 33 CI-failing episodes went green on a re-run
+    # with no code change (two known flaky tests), each already having cost a
+    # median $0.57 implementing spawn, a push and a CI cycle. False (default)
+    # is byte-identical to before this knob existed. Per-[repos.<name>]
+    # override wins, same "table wins, unset inherits" precedence as
+    # `test_command` -- see `repos.RepoBinding.ci_auto_rerun`.
+    ci_auto_rerun: bool = False
+    # T-123: seconds a still-failing poll withholds routing after the one
+    # rerun request for a head SHA, bridging the gap before GitHub's rollup
+    # reflects the rerun having actually started -- a still-failing poll past
+    # this window is trusted as the rerun's real, final outcome and routes to
+    # `implementing`. Same precedence as `ci_auto_rerun` above.
+    ci_rerun_grace: int = 900
+    # T-123: capture <= 2KB of the failed job's log tail (via the VCS's
+    # `failed_log_tail`) into `CiObserved.payload.failure_excerpt` on the
+    # observation that actually routes to `implementing` after a rerun --
+    # surfaced in the routing reason and `derived/context/<KEY>.md` so the
+    # next reconciler starts from the real failure text instead of
+    # re-deriving it from scratch. False (default) is byte-identical. Same
+    # precedence as `ci_auto_rerun` above.
+    ci_failure_excerpt: bool = False
     # T-125: review-comment noise pre-filter for `dispatcher._observe_reviews` --
     # a COMMENTED/APPROVED/INLINE_COMMENT body that fullmatches one of these
     # regexes, or whose author is listed in `review_noise_authors` (exact login,
@@ -373,6 +397,9 @@ _REPO_TABLE_KEYS = frozenset({
     "prime_timeout", "worktree_timeout",
     "language", "test_selector", "post_qa_skill",
     "post_qa_skill_runner", "post_qa_skill_runner_model",
+    # T-123: per-repo overrides of the board-wide [maestro] CI auto-rerun
+    # defaults above -- same "table wins, unset inherits" precedence.
+    "ci_auto_rerun", "ci_rerun_grace", "ci_failure_excerpt",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -655,6 +682,9 @@ def load(home_arg: str | None = None) -> Config:
             m.get("max_turn_wallclock_seconds", cfg.max_turn_wallclock_seconds))
         cfg.worktree_timeout = int(m.get("worktree_timeout", cfg.worktree_timeout))
         cfg.prime_timeout = int(m.get("prime_timeout", cfg.prime_timeout))
+        cfg.ci_auto_rerun = bool(m.get("ci_auto_rerun", cfg.ci_auto_rerun))
+        cfg.ci_rerun_grace = int(m.get("ci_rerun_grace", cfg.ci_rerun_grace))
+        cfg.ci_failure_excerpt = bool(m.get("ci_failure_excerpt", cfg.ci_failure_excerpt))
         raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
         cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
         raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
@@ -748,6 +778,14 @@ def load(home_arg: str | None = None) -> Config:
                 raw_post_qa_skill = table.get("post_qa_skill") or None
                 if raw_post_qa_skill is not None:
                     _validate_skill_name(raw_post_qa_skill, where=f"[repos.{name}] post_qa_skill")
+                # T-123: None (unset) inherits cfg.ci_auto_rerun/ci_rerun_grace/
+                # ci_failure_excerpt -- same "table wins, unset inherits" shape
+                # as prime_timeout/worktree_timeout above (bool-valued too, so
+                # `or` -- which would treat a configured False as unset -- isn't
+                # the right check here either).
+                raw_ci_auto_rerun = table.get("ci_auto_rerun")
+                raw_ci_rerun_grace = table.get("ci_rerun_grace")
+                raw_ci_failure_excerpt = table.get("ci_failure_excerpt")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -796,6 +834,16 @@ def load(home_arg: str | None = None) -> Config:
                     # repos.RepoBinding.post_qa_skill_runner).
                     "post_qa_skill_runner": table.get("post_qa_skill_runner") or None,
                     "post_qa_skill_runner_model": table.get("post_qa_skill_runner_model") or None,
+                    # T-123: this repo's CI auto-rerun overrides -- None (unset)
+                    # inherits cfg.ci_auto_rerun/ci_rerun_grace/ci_failure_excerpt
+                    # (see repos._binding_from_table).
+                    "ci_auto_rerun": bool(raw_ci_auto_rerun) if raw_ci_auto_rerun is not None else None,
+                    "ci_rerun_grace": (
+                        int(raw_ci_rerun_grace) if raw_ci_rerun_grace is not None else None
+                    ),
+                    "ci_failure_excerpt": (
+                        bool(raw_ci_failure_excerpt) if raw_ci_failure_excerpt is not None else None
+                    ),
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -1115,6 +1163,23 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
 # ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
 # ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
+# ci_auto_rerun = true             # T-123: on a failing PR poll, request one `gh run
+                                  # rerun --failed` for the head SHA instead of
+                                  # immediately routing to `implementing` -- measured:
+                                  # 19/33 CI-failing episodes on this board went green
+                                  # on a re-run with no code change. False (default) is
+                                  # byte-identical. Per-[repos.<name>] override wins.
+# ci_rerun_grace = 900             # T-123: seconds a still-failing poll withholds
+                                  # routing after the one rerun request for a head SHA,
+                                  # bridging the gap before GitHub's rollup reflects the
+                                  # rerun -- past this window a still-failing poll is
+                                  # trusted as the rerun's real outcome and routes.
+# ci_failure_excerpt = true        # T-123: capture <= 2KB of the failed job's log tail
+                                  # into CiObserved.payload.failure_excerpt on the
+                                  # observation that routes to `implementing` after a
+                                  # rerun -- surfaced in the routing reason and
+                                  # derived/context/<KEY>.md. False (default) is
+                                  # byte-identical.
 # review_noise_patterns = []      # T-125: regexes (fullmatch); a matching COMMENTED/APPROVED/
                                   # INLINE_COMMENT review body still records ReviewFeedbackReceived
                                   # but routes nothing (CHANGES_REQUESTED is never filtered).
@@ -1249,6 +1314,15 @@ implementer = "claude_skill"
                                      # post_qa_skill_runner -- unset inherits the board-wide default.
 # post_qa_skill_runner_model = "baseten/zai-org/GLM-5.3"  # T-117: ditto, for
                                      # post_qa_skill_runner_model.
+# ci_auto_rerun = true               # T-123: this repo's override of [maestro]
+                                     # ci_auto_rerun above -- unset inherits the
+                                     # board-wide default.
+# ci_rerun_grace = 900               # T-123: this repo's override of [maestro]
+                                     # ci_rerun_grace above -- unset inherits the
+                                     # board-wide default.
+# ci_failure_excerpt = true          # T-123: this repo's override of [maestro]
+                                     # ci_failure_excerpt above -- unset inherits the
+                                     # board-wide default.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see

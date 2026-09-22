@@ -221,6 +221,81 @@ def test_classify_never_keys_on_exit_code_alone():
     assert classify_gh_failure(1, "", "some unrelated error") == "unknown"
 
 
+# --- T-123: rerun_failed/failed_log_tail -- resolve run ids from
+# statusCheckRollup.detailsUrl (never `gh run list --branch`), rerun each,
+# then fetch a bounded log tail.
+
+def _queue_run(monkeypatch, results):
+    """`results`: a list of (rc, out, err) tuples, one per `_run` call in order."""
+    calls = []
+
+    def fake_run(cmd, timeout=60, env=None):
+        calls.append(cmd)
+        return results[len(calls) - 1]
+
+    monkeypatch.setattr(cli_mod, "_run", fake_run)
+    return calls
+
+
+_ROLLUP_ONE_FAILING = (
+    '{"headRefOid": "sha1", "statusCheckRollup": ['
+    '{"name": "unit", "conclusion": "FAILURE", '
+    '"detailsUrl": "https://github.com/acme/beta/actions/runs/111/job/222"},'
+    '{"name": "lint", "conclusion": "SUCCESS", '
+    '"detailsUrl": "https://github.com/acme/beta/actions/runs/333/job/444"}'
+    ']}'
+)
+
+
+def test_rerun_failed_resolves_run_id_from_details_url_and_reruns_only_failing(monkeypatch):
+    calls = _queue_run(monkeypatch, [(0, _ROLLUP_ONE_FAILING, ""), (0, "", "")])
+    vcs = GitHubCliVCS({"repos": ["acme/beta"]})
+    result = vcs.rerun_failed(7, "sha1")
+    assert result == {"ok": True, "run_ids": ["111"]}
+    assert calls[0] == ["gh", "pr", "view", "7", "--json", "headRefOid,statusCheckRollup",
+                        "--repo", "acme/beta"]
+    assert calls[1] == ["gh", "run", "rerun", "111", "--failed", "--repo", "acme/beta"]
+
+
+def test_rerun_failed_refuses_when_head_sha_has_moved(monkeypatch):
+    """The PR advanced since the poll that triggered this call -- rerunning
+    against the wrong head would waste a request and mislabel a SHA that was
+    never actually reran."""
+    calls = _queue_run(monkeypatch, [(0, _ROLLUP_ONE_FAILING, "")])
+    vcs = GitHubCliVCS({"repos": ["acme/beta"]})
+    assert vcs.rerun_failed(7, "sha-stale") == {"ok": False}
+    assert len(calls) == 1  # never even attempts a rerun call
+
+
+def test_rerun_failed_no_resolvable_run_id_is_ok_false(monkeypatch):
+    rollup = '{"headRefOid": "sha1", "statusCheckRollup": [' \
+             '{"name": "unit", "conclusion": "FAILURE", "detailsUrl": "not-a-run-url"}]}'
+    calls = _queue_run(monkeypatch, [(0, rollup, "")])
+    vcs = GitHubCliVCS({"repos": ["acme/beta"]})
+    assert vcs.rerun_failed(7, "sha1") == {"ok": False}
+    assert len(calls) == 1
+
+
+def test_rerun_failed_gh_rerun_call_failure_is_ok_false(monkeypatch):
+    _queue_run(monkeypatch, [(0, _ROLLUP_ONE_FAILING, ""), (1, "", "some gh error")])
+    vcs = GitHubCliVCS({"repos": ["acme/beta"]})
+    assert vcs.rerun_failed(7, "sha1") == {"ok": False}
+
+
+def test_failed_log_tail_returns_last_max_bytes(monkeypatch):
+    calls = _queue_run(monkeypatch, [(0, "x" * 100, "")])
+    vcs = GitHubCliVCS({"repos": ["acme/beta"]})
+    tail = vcs.failed_log_tail("111", max_bytes=10)
+    assert tail == "x" * 10
+    assert calls[0] == ["gh", "run", "view", "111", "--log-failed", "--repo", "acme/beta"]
+
+
+def test_failed_log_tail_gh_failure_is_empty_string(monkeypatch):
+    _queue_run(monkeypatch, [(1, "", "not found")])
+    vcs = GitHubCliVCS({"repos": ["acme/beta"]})
+    assert vcs.failed_log_tail("111") == ""
+
+
 def test_classify_saml_enforcement_wins_over_accidental_not_found_reading():
     """The SAML message is textually adjacent to a 404 (a human might call it
     "not found") but it's actually an auth problem -- must classify as auth."""

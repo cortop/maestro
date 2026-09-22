@@ -106,6 +106,13 @@ class RepoBinding:
     # spawn with no spec override.
     post_qa_skill_runner: str | None = None
     post_qa_skill_runner_model: str | None = None
+    # T-123: this repo's CI auto-rerun-once-per-head overrides, already
+    # resolved against the board-wide [maestro] defaults -- see resolve(),
+    # the sole reader `dispatcher._observe_ci` goes through. Same "table
+    # wins, unset inherits" precedence as prime_timeout/worktree_timeout.
+    ci_auto_rerun: bool = False
+    ci_rerun_grace: int = 900
+    ci_failure_excerpt: bool = False
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -153,6 +160,20 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         post_qa_skill_runner=table.get("post_qa_skill_runner") or cfg.post_qa_skill_runner,
         post_qa_skill_runner_model=(
             table.get("post_qa_skill_runner_model") or cfg.post_qa_skill_runner_model),
+        # T-123: same "table wins, unset inherits" precedence as
+        # prime_timeout/worktree_timeout above -- bool-valued, so a plain
+        # `table.get(...) or cfg....` (which would treat a configured False
+        # as unset) is not the right check.
+        ci_auto_rerun=(
+            table["ci_auto_rerun"] if table.get("ci_auto_rerun") is not None else cfg.ci_auto_rerun
+        ),
+        ci_rerun_grace=(
+            table["ci_rerun_grace"] if table.get("ci_rerun_grace") is not None else cfg.ci_rerun_grace
+        ),
+        ci_failure_excerpt=(
+            table["ci_failure_excerpt"] if table.get("ci_failure_excerpt") is not None
+            else cfg.ci_failure_excerpt
+        ),
     )
 
 
@@ -195,6 +216,10 @@ def implicit_default(cfg: Config) -> RepoBinding:
         # T-117: ditto.
         post_qa_skill_runner=cfg.post_qa_skill_runner,
         post_qa_skill_runner_model=cfg.post_qa_skill_runner_model,
+        # T-123: same board-wide-default precedence as test_command above.
+        ci_auto_rerun=cfg.ci_auto_rerun,
+        ci_rerun_grace=cfg.ci_rerun_grace,
+        ci_failure_excerpt=cfg.ci_failure_excerpt,
     )
 
 

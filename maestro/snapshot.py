@@ -292,6 +292,15 @@ class Snapshot:
     # reset by a phase change; a corrupt log stays visible for as long as the
     # corrupt event remains in the log (a compaction doesn't remove it).
     fold_warnings: list[str] = field(default_factory=list)
+    # T-123: head_sha -> {"at": epoch, "run_ids": [...]}, from CiRerunRequested
+    # events -- one entry per head SHA, ever (idempotent by step_id), so
+    # `dispatcher._observe_ci` can ask "was this SHA already re-run, and how
+    # long ago?" to gate the ci_rerun_grace window and to fold a marker into
+    # the CiObserved step-id so a post-rerun poll still produces a fresh event
+    # even when its content is byte-identical to the pre-rerun one. Never
+    # reset by a phase change -- a head SHA's one rerun stays recorded across
+    # a fix-round bounce as long as the SHA itself hasn't moved.
+    ci_reruns: dict[str, dict] = field(default_factory=dict)
 
     @property
     def question_open(self) -> bool:
@@ -526,6 +535,10 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.CI_OBSERVED:
             s.ci_state = p.get("state", s.ci_state)
             s.failing_checks = p.get("failing_checks", [])
+        elif t == E.CI_RERUN_REQUESTED:
+            head_sha = p.get("head_sha")
+            if head_sha:
+                s.ci_reruns[head_sha] = {"at": p.get("at"), "run_ids": p.get("run_ids", [])}
         elif t == E.REVIEW_FEEDBACK_RECEIVED:
             if p.get("state") == "CHANGES_REQUESTED":
                 s.unresolved_reviews += 1
