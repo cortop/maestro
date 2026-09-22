@@ -19,13 +19,29 @@ COMMAND_RECEIVED = "CommandReceived"    # {command, args}  folded from the inbox
 # Implementation / VCS
 PR_OPENED = "PrOpened"                  # {number, url, draft}
 PR_UPDATED = "PrUpdated"                # {number, draft, merged}
-CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, error?}  state: "passing"|"failing"|"pending"|"unknown"
+CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, error?, failure_excerpt?}  state:
+                                         # "passing"|"failing"|"pending"|"unknown"
                                          # error (optional): "auth"|"not_found"|"unknown" -- WHY a poll couldn't read
                                          # the PR (state stays "unknown"); a "transient" classification is a free
                                          # retry and appends no event at all. See providers/base.py VCS.pr_status.
+                                         # failure_excerpt (T-123, optional): <= 2KB tail of the failed job's log
+                                         # (ci_failure_excerpt=true), present only on the observation that actually
+                                         # routes to `implementing` after a ci_auto_rerun rerun -- see
+                                         # dispatcher._observe_ci and CiRerunRequested below.
 REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body, author}  one PR review; idempotent per comment_id
 IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-off
 IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
+
+# T-123: opt-in CI auto-rerun-once-per-head. Recorded the moment
+# `dispatcher._observe_ci` calls the VCS's `rerun_failed` successfully --
+# idempotent per head SHA, ever (step_id `cirerun-<key>-<head_sha>`), so a
+# re-spawned dispatcher sweep never requests a second rerun for the same head.
+# `at` (epoch seconds) is what `Snapshot.ci_reruns`'s grace-window math
+# (`ci_rerun_grace`) anchors on -- a still-failing poll for this head SHA
+# withholds routing until `at` is more than `ci_rerun_grace` seconds in the
+# past, at which point the next failing observation is trusted as the
+# rerun's real outcome.
+CI_RERUN_REQUESTED = "CiRerunRequested"  # {head_sha, run_ids, at}
 
 # Self-review
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  evidence: {what, where, result}; content-hash keyed

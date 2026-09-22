@@ -44,7 +44,7 @@ def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str
     phase_changes: list[tuple[str, str, str]] = []
     answered: list[tuple[str, str, str, str]] = []
     failures: list[tuple[str, str]] = []
-    ci_observed: list[tuple[str, str]] = []
+    ci_observed: list[tuple[str, str, str]] = []
     impl_steps: list[tuple[str, object, str, str, str, str]] = []
 
     for ev in events:
@@ -61,7 +61,7 @@ def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str
         elif t == E.FAILED:
             failures.append((ts, p.get("error", "")))
         elif t == E.CI_OBSERVED:
-            ci_observed.append((ts, p.get("state", "")))
+            ci_observed.append((ts, p.get("state", ""), p.get("failure_excerpt", "")))
         elif t == E.IMPL_STEP:
             if p.get("summary"):
                 impl_steps.append((ts, p.get("turn"), p.get("role", ""), p.get("kind", ""),
@@ -105,8 +105,10 @@ def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str
     shown, dropped = _tail(ci_observed, MAX_CI_OBSERVATIONS)
     if dropped:
         lines.append(f"_({dropped} earlier observation(s) omitted)_")
-    for ts, state in shown:
+    for ts, state, excerpt in shown:
         lines.append(f"- {ts}: {state}")
+        if excerpt:
+            lines.append(f"  ```\n  {excerpt}\n  ```")
     if not ci_observed:
         lines.append("_none_")
     lines.append("")

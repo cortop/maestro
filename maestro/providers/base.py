@@ -90,6 +90,36 @@ class VCS(Protocol):
         on a later sweep. ``env`` (GA-17): see ``pr_status``."""
         ...
 
+    def rerun_failed(self, pr_number: int, head_sha: str, repo: str | None = None,
+                     env: dict | None = None) -> dict:
+        """T-123: request one ``gh run rerun --failed`` for *head_sha*'s
+        currently-failing checks, having resolved their run ids from each
+        failing check's own ``statusCheckRollup.detailsUrl`` (NOT ``gh run
+        list --branch``, which takes a branch name rather than a SHA and can
+        pick an older head's run on a fast-moving branch).
+
+        Returns ``{"ok": True, "run_ids": [str, ...]}`` when at least one
+        rerun request succeeded, or ``{"ok": False}`` when no run id could be
+        resolved, the head SHA has since moved, or every rerun request
+        failed. The caller (``dispatcher._observe_ci``) only records a
+        ``CiRerunRequested`` -- and so only withholds routing -- when ``ok``
+        is True; a False result falls straight through to routing exactly as
+        if ``ci_auto_rerun`` were unset, so a resolution failure can never
+        silently wedge a ticket in the grace window forever. ``env`` (GA-17):
+        see ``pr_status``.
+        """
+        ...
+
+    def failed_log_tail(self, run_id: str, max_bytes: int = 2048, repo: str | None = None,
+                        env: dict | None = None) -> str:
+        """T-123: the tail (<= *max_bytes*) of *run_id*'s failed job log
+        (``gh run view <run_id> --log-failed``), for ``CiObserved.payload.
+        failure_excerpt`` when ``ci_failure_excerpt = true``. Empty string on
+        any failure to fetch -- never raises. ``env`` (GA-17): see
+        ``pr_status``.
+        """
+        ...
+
 
 class Fetcher(Protocol):
     """Imports external work into maestro by writing to the ``_new`` inbox."""
@@ -119,6 +149,12 @@ class NullVCS:
     def pr_ready(self, pr_number: int, repo: str | None = None,
                 env: dict | None = None) -> dict:
         return {"ok": False, "error": "unknown"}
+    def rerun_failed(self, pr_number: int, head_sha: str, repo: str | None = None,
+                     env: dict | None = None) -> dict:
+        return {"ok": False}
+    def failed_log_tail(self, run_id: str, max_bytes: int = 2048, repo: str | None = None,
+                        env: dict | None = None) -> str:
+        return ""
 
 
 class NullFetcher:
