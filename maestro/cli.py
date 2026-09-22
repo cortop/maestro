@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, credentials, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
+from . import backup, claims, credentials, decision_labels, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
 from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load, runner_path
 from .providers import ollama as ollama_mod
@@ -1010,6 +1010,24 @@ def cmd_why(args) -> int:
     return 0
 
 
+def cmd_scorecard(args) -> int:
+    """Regenerate + print the answer->route label scorecard
+    (`derived/labels/answers.jsonl`) -- counts by label, plus, when the
+    dispatch ledger holds any `would_route_answer`/`answer_routed` outcome
+    (T-122's shadow/live routing ledger), the agreement rate and current
+    consecutive-agreement streak against them. Read-only: never appends an
+    event."""
+    cfg = _cfg(args)
+    rows = decision_labels.regenerate(cfg.home)
+    out = {"rows": len(rows), "by_label": decision_labels.label_counts(rows),
+           "path": str(decision_labels.answers_path(cfg.home))}
+    agree = decision_labels.agreement(rows, cfg.home)
+    if agree is not None:
+        out["agreement"] = agree
+    _print(out)
+    return 0
+
+
 def cmd_checked(args) -> int:
     """[agent] record that this reconcile step ran to completion and correctly
     found nothing due -- so the no-progress watchdog (`_allow_spawn`) does not
@@ -1523,6 +1541,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("why", cmd_why, "recent dispatcher decisions for one key (derived/dispatch.jsonl tail)")
     sp.add_argument("key")
     sp.add_argument("--tail", type=int, default=20, help="how many recent sweep decisions to show")
+
+    sp = add("scorecard", cmd_scorecard,
+             "regenerate + print the answer->route label scorecard (derived/labels/answers.jsonl)")
+    sp.add_argument("kind", choices=["answers"], nargs="?", default="answers",
+                    help="only 'answers' is supported today")
 
     sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
     sp.add_argument("--clear", action="store_true", help="remove any active pause")
