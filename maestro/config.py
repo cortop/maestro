@@ -8,6 +8,7 @@ or a pure-local todo list.
 from __future__ import annotations
 
 import re
+import string
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -239,6 +240,10 @@ class Config:
     research_model: str = "opus"       # model for kind=research tickets
     research_effort: str = "high"      # effort for kind=research tickets
     default_effort: str | None = None  # global effort default; None = omit --effort entirely
+    # T-118: `ops.suggest_acs` knobs. None = today's behaviour (reconcile_model / the
+    # built-in `ops.SUGGEST_ACS_PROMPT`). The prompt is a format string over {spec}.
+    suggest_acs_model: str | None = None
+    suggest_acs_prompt: str | None = None
     # RF-2: board-wide fallback for the implementation-spawn runner, when a spec carries
     # no `runner:`/`runner_model:` override (dispatcher.resolve_runner). "claude" and
     # "opencode" (OC-4) are the registered runners -- see dispatcher._REGISTERED_RUNNERS.
@@ -526,6 +531,32 @@ def runner_path(cfg: "Config", base: str | None = None) -> str:
 _SKILL_NAME_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*$")
 
 
+SUGGEST_ACS_PLACEHOLDERS = frozenset({"spec"})
+
+
+def _validate_suggest_acs_prompt(template) -> None:
+    """T-118: fail `config.load()` closed on a `suggest_acs_prompt` that is
+    malformed, names a placeholder outside `SUGGEST_ACS_PLACEHOLDERS`, or lacks
+    `{spec}` -- same posture as `test_selector` above, so a typo never yields a
+    silent prompt with no spec in it. Literal braces are written `{{`/`}}`."""
+    if not isinstance(template, str):
+        raise store.MaestroError("config.toml: [maestro] suggest_acs_prompt must be a string")
+    try:
+        fields = {name for _, name, _, _ in string.Formatter().parse(template)
+                  if name is not None}
+    except ValueError as exc:
+        raise store.MaestroError(
+            f"config.toml: [maestro] suggest_acs_prompt is malformed: {exc}") from exc
+    unknown = sorted(fields - SUGGEST_ACS_PLACEHOLDERS)
+    if unknown:
+        raise store.MaestroError(
+            f"config.toml: [maestro] suggest_acs_prompt has unrecognized placeholder(s): "
+            f"{', '.join(unknown)} -- supported: {', '.join(sorted(SUGGEST_ACS_PLACEHOLDERS))}")
+    if "spec" not in fields:
+        raise store.MaestroError(
+            "config.toml: [maestro] suggest_acs_prompt must contain the {spec} placeholder")
+
+
 def _validate_skill_name(value, *, where: str) -> None:
     """T-115: fail `config.load()` closed on a malformed `post_qa_skill` value --
     same posture as `language` (`testlang.SUPPORTED`) and `test_selector`
@@ -746,6 +777,10 @@ def load(home_arg: str | None = None) -> Config:
         cfg.research_model = m.get("research_model", cfg.research_model)
         cfg.research_effort = m.get("research_effort", cfg.research_effort)
         cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
+        cfg.suggest_acs_model = m.get("suggest_acs_model", cfg.suggest_acs_model) or None
+        cfg.suggest_acs_prompt = m.get("suggest_acs_prompt", cfg.suggest_acs_prompt) or None
+        if cfg.suggest_acs_prompt is not None:
+            _validate_suggest_acs_prompt(cfg.suggest_acs_prompt)
         cfg.runner = m.get("runner", cfg.runner)
         cfg.runner_model = m.get("runner_model", cfg.runner_model) or None
         cfg.runner_enabled = _normalize_runner_enabled(m.get("runner_enabled"), cfg.runner_enabled)
@@ -850,6 +885,15 @@ max_concurrency = 12              # one COUNTED spawn: sizing the fleet at N con
                                    # separately-counted dispatcher spawns bouncing between
                                    # `implementing` and `qa` (RF-7), not in-session fan-out.
 reconcile_steady_interval = 300
+# suggest_acs_model = "opus"      # T-118: model `ops.suggest_acs` (the TUI's suggest-ACs
+                                  # action) passes to `claude -p` -- default: unset, falls
+                                  # back to reconcile_model.
+# suggest_acs_prompt = "Draft 3-6 ACs as a JSON array of strings:\\n\\n{spec}"
+                                  # T-118: prompt template over the {spec} placeholder (the
+                                  # ticket's spec.md text; write a literal brace as {{ }}) --
+                                  # default: unset, uses the built-in prompt in
+                                  # ops.SUGGEST_ACS_PROMPT. A template lacking {spec}, or
+                                  # naming another placeholder, fails config load closed.
 # min_spawn_interval = 300        # hard floor between two spawns of the SAME key
                                   # (default: reconcile_steady_interval). Bounds the
                                   # fleet even if the dispatcher is fired too often.
