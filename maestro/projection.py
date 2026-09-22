@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import event_log, fleet, snapshot as snap_mod, store
+from . import event_log, events as E, fleet, snapshot as snap_mod, store
 from .dispatcher import list_keys, split_key
 from .statemachine import Phase
 
@@ -20,6 +20,12 @@ from .statemachine import Phase
 # visibility after this long, same as the ticket's own answer_fast_path
 # action itself is a one-time thing, not an ongoing state.
 _FAST_PATH_VISIBILITY_WINDOW_S = 86400
+
+# T-125: how far back `## Suppressed review comments` looks -- an audit
+# window, not a retention policy (the underlying Note events live in the log
+# forever; this just bounds how much of NEEDS-YOU they occupy).
+_SUPPRESSED_REVIEW_WINDOW_S = 24 * 3600
+_SUPPRESSED_REVIEW_NOTE_PREFIX = "review comment skipped as noise ("
 
 # A row predicate: (home, snapshot) -> bool. Wider than a bare phase-set
 # filter, so a caller can express a derived predicate too, not only phase
@@ -268,8 +274,44 @@ def render(home: Path) -> dict[str, str]:
         for key, verbatim in routed:
             nlines.append(f"- **{key}** — approved: {verbatim}")
             nlines.append(f"  - undo: `maestro cmd {key} discard` (or edit the spec)")
+    # T-125: audit-only -- these never needed a human (the filter already
+    # routed nothing), shown so review-noise volume is visible the moment it
+    # appears rather than measured only "by eye" over raw events.
+    suppressed = _suppressed_review_notes(home, snaps, store.now_epoch())
+    if suppressed:
+        nlines.append("\n## Suppressed review comments (24h)\n")
+        for s_key, ts, text in suppressed:
+            nlines.append(f"- **{s_key}** — {ts}: {text}")
     needs_you = "\n".join(nlines) + "\n"
     return {"WORKSTATE.md": workstate, "NEEDS-YOU.md": needs_you}
+
+
+def _suppressed_review_notes(home: Path, snaps, now: float) -> list[tuple[str, str, str]]:
+    """T-125: ``(key, ts, text)`` for every review-noise-skip ``Note`` appended
+    in the last 24h, across tickets that ever carried a PR -- scoped that way
+    (not every key in the home) since `dispatcher._observe_reviews` only ever
+    appends one for a ticket with an open `pr_number`, so a key that never had
+    a PR can never hold one."""
+    cutoff = now - _SUPPRESSED_REVIEW_WINDOW_S
+    out: list[tuple[str, str, str]] = []
+    for s in snaps:
+        if not s.pr_number:
+            continue
+        for ev in event_log.read(home, s.key):
+            if ev.get("type") != E.NOTE:
+                continue
+            text = (ev.get("payload") or {}).get("text", "")
+            if not text.startswith(_SUPPRESSED_REVIEW_NOTE_PREFIX):
+                continue
+            ts = ev.get("ts", "")
+            try:
+                ts_epoch = datetime.fromisoformat(ts).timestamp()
+            except (TypeError, ValueError):
+                continue
+            if ts_epoch >= cutoff:
+                out.append((s.key, ts, text))
+    out.sort(key=lambda row: row[1])
+    return out
 
 
 def write(home: Path) -> list[str]:

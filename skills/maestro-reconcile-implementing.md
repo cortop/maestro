@@ -164,7 +164,9 @@ Otherwise implement the spec's Acceptance criteria:
    test invocation below needs no `cd`. Its dependency tree (including the `tui` extra, so TUI
    runtime tests run instead of skipping) is already installed — `maestro worktree ensure` (GA-20,
    the `ready` phase file) ran the repo's declared `prime` once when this worktree was first
-   created, so this step only runs the tests:
+   created, so this step only runs the tests. Run the suite as a single **foreground** Bash call
+   with an explicit timeout (at most 600000ms) — never `run_in_background`, never
+   `ScheduleWakeup`/`Monitor`, and never a sleep/tail poll loop on a test log:
    ```bash
    .venv/bin/python -m pytest -q
    ```
@@ -175,8 +177,12 @@ Otherwise implement the spec's Acceptance criteria:
    (`maestro/dispatcher.py:1369`) already runs this session with `<WT>` as cwd — so the relative
    form is both correct and the only one that avoids a permission prompt. Do not "fix" this back
    to an absolute path.
-   If red, fix and re-run — stay on this step until green. If you exceed ~`max_impl_turns`
-   edit/test cycles without converging: `maestro fail "$KEY" "non-converging: <why>"` and exit.
+   If red, fix and re-run — stay on this step until green. If the suite cannot complete inside
+   that foreground timeout budget, do not exit to wait for it — run
+   `maestro fail "$KEY" "suite exceeds tool timeout: <why>"` and exit; the dispatcher-owned
+   `verifying` stage (once `test_command` is armed) is the place for long runs, not this
+   session. If you exceed ~`max_impl_turns` edit/test cycles without converging: `maestro fail
+   "$KEY" "non-converging: <why>"` and exit.
 3. **If step 1 was a fix round, record it now** — the counterpart to the QA fail that sent you
    back, and the thing that bounds the implementing↔qa ping-pong:
    ```bash
