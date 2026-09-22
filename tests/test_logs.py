@@ -464,3 +464,81 @@ def test_cli_logs_follow_stops_on_denied_pid_instead_of_blocking(home, capsys):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# T-119: default render shows every session oldest-first
+# ---------------------------------------------------------------------------
+
+def _three_sessions(home):
+    d = home / "agent-logs" / "T-1"
+    paths = {}
+    for epoch, word in (("3000.000000", "third"), ("1000.000000", "first"), ("2000.000000", "second")):
+        p = d / f"reconcile-T-1-{epoch}.stream.jsonl"
+        _write_stream_jsonl(p, _make_stream_events(text_blocks=[f"said-{word}"]))
+        paths[word] = p
+    return paths
+
+
+def test_cli_logs_renders_all_sessions_oldest_first_with_headers(home, capsys):
+    _three_sessions(home)
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("said-first") < out.index("said-second") < out.index("said-third")
+    for sid in ("reconcile-T-1-1000.000000", "reconcile-T-1-2000.000000", "reconcile-T-1-3000.000000"):
+        assert f"=== session {sid} | " in out
+    assert out.index("reconcile-T-1-1000.000000") < out.index("said-first")
+    assert out.index("reconcile-T-1-2000.000000") < out.index("said-second")
+
+
+def test_cli_logs_mixed_formats_use_own_renderer(home, capsys):
+    d = home / "agent-logs" / "T-1"
+    _make_text_log(d / "reconcile-T-1-1000.000000.log", "plain-text-line")
+    _write_stream_jsonl(d / "reconcile-T-1-2000.000000.stream.jsonl", _make_stream_events(text_blocks=["stream-said"]))
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("plain-text-line") < out.index("stream-said")
+    assert "| text |" in out and "| stream-json |" in out
+
+
+def test_cli_logs_json_emits_every_session_raw_oldest_first(home, capsys):
+    paths = _three_sessions(home)
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1", "--json"]) == 0
+    out = capsys.readouterr().out
+    expected = "".join(paths[w].read_text() for w in ("first", "second", "third"))
+    assert out == expected
+
+
+def test_cli_logs_session_flag_renders_only_that_session(home, capsys):
+    _three_sessions(home)
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1", "--session", "reconcile-T-1-2000.000000"]) == 0
+    out = capsys.readouterr().out
+    assert "said-second" in out and "said-first" not in out and "said-third" not in out
+    assert "=== session" not in out
+
+
+def test_cli_logs_follow_tails_only_newest(home, capsys):
+    _three_sessions(home)
+    from maestro.cli import main
+    assert main(["--home", str(home), "logs", "T-1", "--follow"]) == 0
+    out = capsys.readouterr().out
+    assert "said-third" in out and "said-first" not in out and "said-second" not in out
+
+
+def test_cli_logs_missing_session_file_skipped_with_notice(home, capsys):
+    paths = _three_sessions(home)
+    from maestro import sessions as sessions_mod
+    real = sessions_mod.list_sessions
+    listed = real(home, "T-1")
+    paths["second"].unlink()  # pruned between list_sessions and the read
+    with patch("maestro.cli.list_sessions", return_value=listed):
+        from maestro.cli import main
+        assert main(["--home", str(home), "logs", "T-1"]) == 0
+    cap = capsys.readouterr()
+    assert "said-first" in cap.out and "said-third" in cap.out and "said-second" not in cap.out
+    assert "reconcile-T-1-2000.000000: log file missing, skipped" in cap.err
+    assert "Traceback" not in cap.err
