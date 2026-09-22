@@ -57,14 +57,15 @@ def test_review_feedback_passes_explicit_repo_regardless_of_repos_ordering(monke
     calls = _stub_run(monkeypatch)
     vcs = GitHubCliVCS({"repos": ["owner/other1", "owner/other2"]})
     vcs.review_feedback(9, repo="acme/beta")
-    assert calls == [["gh", "pr", "view", "9", "--json", "reviews", "--repo", "acme/beta"]]
+    assert calls[0] == ["gh", "pr", "view", "9", "--json", "reviews", "--repo", "acme/beta"]
+    assert calls[1] == ["gh", "api", "--paginate", "repos/acme/beta/pulls/9/comments"]
 
 
 def test_review_feedback_repo_none_is_byte_identical_to_todays_repos0_behavior(monkeypatch):
     calls = _stub_run(monkeypatch)
     vcs = GitHubCliVCS({"repos": ["owner/first"]})
     vcs.review_feedback(9)
-    assert calls == [["gh", "pr", "view", "9", "--json", "reviews", "--repo", "owner/first"]]
+    assert calls[0] == ["gh", "pr", "view", "9", "--json", "reviews", "--repo", "owner/first"]
 
 
 def test_pr_for_branch_with_repo_queries_only_that_repo(monkeypatch):
@@ -285,3 +286,32 @@ def test_pr_status_success_has_no_error_key(monkeypatch):
     calls = _stub_run(monkeypatch)
     status = GitHubCliVCS({}).pr_status(7)
     assert "error" not in status
+
+
+def test_review_feedback_fetches_inline_review_thread_comments(monkeypatch):
+    """T-117: inline comments come from `gh api .../pulls/<n>/comments`, keyed
+    `inline-<id>`; empty-body and malformed entries are dropped, and a failed
+    or garbled inline fetch never breaks the top-level reviews."""
+    import json as _json
+    reviews = _json.dumps({"reviews": [{"id": "PRR_1", "state": "APPROVED", "body": "",
+                                        "author": {"login": "rev"}}]})
+    inline = _json.dumps([
+        {"id": 11, "body": "rename this", "path": "a.py", "line": 3, "user": {"login": "rev"}},
+        {"id": 12, "body": "  ", "path": "a.py", "line": 4, "user": {"login": "rev"}},
+        {"id": 13, "body": "old", "path": "b.py", "line": None, "original_line": 9,
+         "user": {"login": "rev"}},
+    ])
+    outs = {"pr": reviews, "api": inline}
+
+    def fake_run(cmd, timeout=60, env=None):
+        return 0, outs[cmd[1]], ""
+
+    monkeypatch.setattr(cli_mod, "_run", fake_run)
+    got = GitHubCliVCS({}).review_feedback(9, repo="acme/beta")
+    assert [r["id"] for r in got] == ["PRR_1", "inline-11", "inline-13"]
+    assert got[1] == {"id": "inline-11", "state": "INLINE_COMMENT", "body": "rename this",
+                      "author": "rev", "path": "a.py", "line": 3}
+    assert got[2]["line"] == 9
+
+    outs["api"] = "not json"
+    assert [r["id"] for r in GitHubCliVCS({}).review_feedback(9, repo="acme/beta")] == ["PRR_1"]

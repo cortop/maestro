@@ -1639,6 +1639,12 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
     # routes once, on the CHANGES_REQUESTED reason. An APPROVED review, or a
     # COMMENTED review with an empty body, stays a no-op exactly like today.
     commented_body: str | None = None
+    # T-117: an APPROVED review that carries a body and/or new inline
+    # review-thread comments is the lowest-priority reason. Inline comments
+    # alone (no approval in the same round) never route.
+    approved_new = False
+    approved_body = ""
+    inline_new: list[str] = []
     for r in vcs.review_feedback(pr_number, repo=repo, env=env):
         cid = r.get("id")
         if not cid:
@@ -1646,7 +1652,8 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
         ev = event_log.append(
             cfg.home, key, E.REVIEW_FEEDBACK_RECEIVED,
             {"comment_id": cid, "state": r.get("state"), "body": r.get("body", ""),
-             "author": r.get("author")},
+             "author": r.get("author"),
+             **({"path": r["path"], "line": r.get("line")} if r.get("path") else {})},
             actor="dispatcher", step_id=f"review-{key}-{cid}",
         )
         if ev is None:
@@ -1657,10 +1664,20 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
             changes_requested_body = body
         elif state == "COMMENTED" and body:
             commented_body = body
+        elif state == "APPROVED":
+            approved_new = True
+            approved_body = body
+        elif state == "INLINE_COMMENT" and body:
+            where = f"{r['path']}:{r['line']}: " if r.get("path") and r.get("line") else (
+                f"{r['path']}: " if r.get("path") else "")
+            inline_new.append(f"{where}{body}")
     if changes_requested_body is not None:
         reason = f"changes requested: {changes_requested_body}"
     elif commented_body is not None:
         reason = f"review comment: {commented_body}"
+    elif approved_new and (approved_body or inline_new):
+        parts = ([approved_body] if approved_body else []) + inline_new
+        reason = f"approved with comments: {' | '.join(parts)}"
     else:
         return
     fresh = snap_mod.rebuild(cfg.home, key)
