@@ -124,7 +124,7 @@ def test_render_output_is_stable_across_regenerate_calls(cfg):
 
     path = context.context_path(cfg.home, "T-1")
     first = path.read_text(encoding="utf-8")
-    context.regenerate(cfg.home, "T-1")  # no new events since
+    context.regenerate(cfg, "T-1")  # no new events since
     second = path.read_text(encoding="utf-8")
 
     assert first == second

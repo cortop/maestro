@@ -25,7 +25,7 @@ from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
              "derived/snapshots", "derived/cursors", "derived/claims", "derived/context",
-             "agent-logs"]
+             "derived/locate", "agent-logs"]
 
 
 def _cfg(args) -> Config:
@@ -910,6 +910,18 @@ def cmd_observe_spec(args) -> int:
     return 0
 
 
+def cmd_locate(args) -> int:
+    cfg = _cfg(args)
+    if args.eval:
+        _print(ops.locate_eval(cfg, args.key, n=args.n))
+        return 0
+    if not args.key:
+        print("error: a ticket key is required (or pass --eval)", file=sys.stderr)
+        return 2
+    _print(ops.locate(cfg, args.key))
+    return 0
+
+
 def cmd_requeue(args) -> int:
     ops.requeue(_cfg(args), args.key, args.seconds, actor=args.actor)
     _print({"requeued_in_s": args.seconds})
@@ -1692,6 +1704,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("inbox-ack", cmd_inbox_ack, "[agent] advance inbox cursor (after phase advance)")
     sp.add_argument("key")
     sp = add("observe-spec", cmd_observe_spec, "[agent] record current spec hash"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
+    sp = add("locate", cmd_locate,
+             "[agent] compute/refresh file+symbol hints for a ticket, or --eval the ranker against merged tickets")
+    sp.add_argument("key", nargs="?", default=None,
+                     help="ticket key (required unless --eval); also --eval's optional repo-binding key")
+    sp.add_argument("--eval", action="store_true", help="read-only replay against merged-commit history")
+    sp.add_argument("--n", type=int, default=None, help="--eval: cap the number of merged commits replayed")
     sp = add("requeue", cmd_requeue, "[agent] schedule a re-wake")
     sp.add_argument("key"); sp.add_argument("seconds", type=int); sp.add_argument("--actor", default="reconciler")
     sp = add("fail", cmd_fail, "[agent] record failure (backoff or dead-letter)")

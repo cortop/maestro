@@ -198,6 +198,13 @@ class Config:
     # `resolve_runner` gives a real reconciler spawn with no spec override.
     # Unvalidated at load, same posture as `post_qa_skill_runner` just above.
     post_qa_skill_runner_model: str | None = None
+    # T-124: board-wide DEFAULT for `[repos.<name>] file_hints` -- same "table
+    # wins, unset inherits" precedence as test_command/language above. False
+    # (default) ships dark: `context.regenerate` computes no locate hints and
+    # the dossier is byte-identical to before this knob existed. True makes
+    # `derived/context/<KEY>.md` grow "## Suggested starting points"/"## Symbol
+    # map"/"## Files edited in prior sessions" sections from `maestro/locate.py`.
+    file_hints: bool = False
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -400,6 +407,7 @@ _REPO_TABLE_KEYS = frozenset({
     # T-123: per-repo overrides of the board-wide [maestro] CI auto-rerun
     # defaults above -- same "table wins, unset inherits" precedence.
     "ci_auto_rerun", "ci_rerun_grace", "ci_failure_excerpt",
+    "file_hints",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -719,6 +727,9 @@ def load(home_arg: str | None = None) -> Config:
         cfg.post_qa_skill_runner = m.get("post_qa_skill_runner", cfg.post_qa_skill_runner) or None
         cfg.post_qa_skill_runner_model = m.get(
             "post_qa_skill_runner_model", cfg.post_qa_skill_runner_model) or None
+        # T-124: no validation needed -- a bool never fails closed, same posture
+        # as test_deletion_gate above.
+        cfg.file_hints = bool(m.get("file_hints", cfg.file_hints))
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.opencode_user_commands_dir = m.get(
             "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
@@ -786,6 +797,9 @@ def load(home_arg: str | None = None) -> Config:
                 raw_ci_auto_rerun = table.get("ci_auto_rerun")
                 raw_ci_rerun_grace = table.get("ci_rerun_grace")
                 raw_ci_failure_excerpt = table.get("ci_failure_excerpt")
+                # T-124: bool, no validation needed -- None (absent from the table)
+                # inherits cfg.file_hints (see repos.RepoBinding.file_hints).
+                raw_file_hints = table.get("file_hints")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -844,6 +858,9 @@ def load(home_arg: str | None = None) -> Config:
                     "ci_failure_excerpt": (
                         bool(raw_ci_failure_excerpt) if raw_ci_failure_excerpt is not None else None
                     ),
+                    # T-124: this repo's file_hints override -- None (unset) inherits
+                    # cfg.file_hints (see repos.RepoBinding.file_hints).
+                    "file_hints": bool(raw_file_hints) if raw_file_hints is not None else None,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -1122,6 +1139,15 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # test_command on a non-python repo with language left unset
                                   # (here AND per-table) fails a test:-annotated AC closed, once,
                                   # legibly -- see [repos.<name>] language below.
+# file_hints = true                # T-124: board-wide DEFAULT for [repos.<name>] file_hints
+                                  # (below) -- same "table wins, unset inherits" precedence as
+                                  # test_command above. false (default) ships dark: the context
+                                  # dossier is byte-identical to before this knob existed. true
+                                  # adds "## Suggested starting points"/"## Symbol map"/"## Files
+                                  # edited in prior sessions" sections computed by
+                                  # maestro/locate.py -- run `maestro locate --eval` first and
+                                  # confirm its merged-list recall@5 at least matches the
+                                  # MENTION-only baseline before turning this on for real.
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
@@ -1323,6 +1349,8 @@ implementer = "claude_skill"
 # ci_failure_excerpt = true          # T-123: this repo's override of [maestro]
                                      # ci_failure_excerpt above -- unset inherits the
                                      # board-wide default.
+# file_hints = true                 # T-124: this repo's override of [maestro] file_hints
+                                     # above -- unset inherits the board-wide default.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see
