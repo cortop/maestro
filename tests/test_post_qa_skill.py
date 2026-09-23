@@ -27,13 +27,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from maestro import cli, config as config_mod, dispatcher as disp, event_log, ops
 from maestro import repos as repos_mod, snapshot as snap_mod, store
-from maestro.sessions import DryRunSessions, RoutingSessions
+from maestro.sessions import DryRunSessions, PiCliSessions, RoutingSessions
 from maestro.statemachine import Phase
 
 from test_runner_preflight import _counting_probe, _register, _enable
@@ -346,6 +348,34 @@ def test_pi_routing_healthy_sweep_spawns_recorded_under_pi_runner(home, cfg):
 
     spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
     assert len(spawned_events) == 1
+
+
+def test_pi_sweep_hands_pi_the_user_owned_skill_as_a_prompt_template(home, cfg, tmp_path, monkeypatch):
+    """The skill lives in ~/.claude/commands, outside maestro's payload -- a
+    real PiCliSessions spawn must load it explicitly, or pi sends
+    `/my-pr-polish T-1` to the model as literal text."""
+    user_dir = tmp_path / "user-commands"
+    template = user_dir / "my-pr-polish.md"
+    store.atomic_write(template, "# polish `$1`\n")
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+    _enable(cfg, "pi")
+    cfg.post_qa_skill = "/my-pr-polish"
+    cfg.post_qa_skill_runner = "pi"
+    cfg.post_qa_skill_runner_model = "glm-5.2"
+    _seed_ticket(home, "T-1")
+    _qa_pass_to_awaiting_ci(cfg, "T-1")
+
+    pi_arm = PiCliSessions(home=home, capture_session_logs=False)
+    sessions = RoutingSessions({"claude": DryRunSessions(), "pi": pi_arm})
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        disp.dispatch(cfg, sessions, now=1000, runner_probe=_pi_probe([{"model": "glm-5.2"}]))
+
+    [call] = popen.call_args_list
+    argv = call.args[0]
+    assert argv[0:3] == ["pi", "-p", "/my-pr-polish T-1"]
+    assert argv[argv.index(str(template)) - 1] == "--prompt-template"
 
 
 def test_pi_preflight_failure_skips_silently_then_fires_once_a_later_sweep_is_healthy(home, cfg):

@@ -382,6 +382,42 @@ def check_ac_annotation_parse(cfg: Config, now: float) -> dict:
     return {"name": "ac_annotation_parse", "status": status, "detail": detail, "flagged": flagged}
 
 
+def check_unresolvable_spec_hints(cfg: Config, now: float) -> dict:
+    """T-124: WARN naming each non-terminal ticket whose spec text resolves to
+    no repo file, stem, or symbol via `locate.extract_mentions`/
+    `resolve_mentions` (the MENTION stage `maestro/locate.py` also uses to
+    build the context dossier's "Suggested starting points") -- the T-115
+    shape: a spec with zero grounding in the actual codebase, the thing that
+    made T-115 cost 44 discovery tool calls against T-116's 8. Skips a
+    terminal ticket (`check_missing_acs`'s own posture) and any binding this
+    check cannot judge: `mode: local` (no git repo to resolve against) or a
+    `[repos.<name>] path` that isn't actually a git checkout yet."""
+    from . import locate as locate_mod
+    from . import repos as repos_mod  # lazy: repos imports dispatcher at module load time
+
+    home = cfg.home
+    flagged = []
+    for key in dispatcher.list_keys(home):
+        if Phase(snap_mod.load(home, key).phase) in TERMINAL_PHASES:
+            continue
+        spec_file = store.spec_path(home, key)
+        if not spec_file.exists():
+            continue
+        binding = repos_mod.resolve(cfg, home, key)
+        if binding.mode == "local" or not binding.path:
+            continue
+        repo = Path(binding.path)
+        if not (repo / ".git").exists():
+            continue
+        candidates = locate_mod.extract_mentions(spec_file.read_text(encoding="utf-8"))
+        if not candidates or not locate_mod.resolve_mentions(repo, candidates):
+            flagged.append(key)
+    status = "warn" if flagged else "ok"
+    detail = (f"{len(flagged)} non-terminal ticket(s) name no file/stem/symbol resolvable "
+              f"in their bound repo: " + ", ".join(flagged)) if flagged else "none"
+    return {"name": "unresolvable_spec_hints", "status": status, "detail": detail, "keys": flagged}
+
+
 # 2+ already means the exact same automated no-progress path tripped for the
 # same key more than once -- the shape of the 2026-08-14 degraded-respawn-
 # forever incident (OC-7, T-65), where it happened dozens of times per key.
@@ -1760,6 +1796,7 @@ def check_worktree_witness(cfg: Config, now: float) -> dict:
 # the one check with a caller-supplied kwarg to thread through.
 CHECKS = (check_home_structure, check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
           check_dead_letters, check_phantom_keys, check_missing_acs, check_ac_annotation_parse,
+          check_unresolvable_spec_hints,
           check_watchdog_loops,
           check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
           check_language_binding, check_missing_reconcile_skill,

@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from maestro import backup, cli, claims, dispatcher as disp, health, ops, store
+from maestro import backup, cli, claims, dispatcher as disp, event_log, health, ops, snapshot as snap_mod, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
@@ -736,7 +736,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
                       "pi_version", "worktree_health", "worktree_branch", "worktree_witness",
                       "provider_availability",
-                      "missing_acs", "ac_annotation_parse"}
+                      "missing_acs", "ac_annotation_parse", "unresolvable_spec_hints"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -798,15 +798,16 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     `worktree_witness` -- same treatment. T-96 grew it by one more still --
     `language_binding` -- same treatment. T-98 grew it by one more still --
     `ac_annotation_parse` -- same treatment. T-99 grew it by one more still --
-    `home_structure` -- same treatment. This ticket grew it by one more still
-    -- `worktree_branch` -- same treatment.)"""
+    `home_structure` -- same treatment. Another ticket grew it by one more
+    still -- `worktree_branch` -- same treatment. T-124 grew it by one more
+    still -- `unresolvable_spec_hints` -- same treatment.)"""
     baseline_names = {
         "home_structure", "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "language_binding", "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
         "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_branch", "worktree_witness",
-        "provider_availability", "burn", "missing_acs", "ac_annotation_parse",
+        "provider_availability", "burn", "missing_acs", "ac_annotation_parse", "unresolvable_spec_hints",
     }
     code, out = _sweep(home)
     assert code == 0
@@ -1228,7 +1229,9 @@ def test_doctor_strict_flag_gates_on_unsatisfied_checks(home, tmp_path, monkeypa
     (home / "config.toml").write_text(
         f'[maestro]\ndaily_spend_ceiling_usd = 50.0\n\n'
         f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
-    _seed_bound_ticket(home, "T-1", "alpha")
+    # T-124: names a real repo file so `unresolvable_spec_hints` reads `ok` --
+    # this test is about reconciler_permissions, not locate.
+    _seed_bound_ticket(home, "T-1", "alpha", intent="Update `f.txt`.")
     assert cli.main(["--home", str(home), "backup"]) == 0
     capsys.readouterr()
 
@@ -1286,7 +1289,9 @@ def test_doctor_strict_exits_0_with_narrower_gh_pr_style_grant(home, tmp_path, m
     (home / "config.toml").write_text(
         f'[maestro]\ndaily_spend_ceiling_usd = 50.0\n\n'
         f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
-    _seed_bound_ticket(home, "T-1", "alpha")
+    # T-124: names a real repo file so `unresolvable_spec_hints` reads `ok` --
+    # this test is about reconciler_permissions, not locate.
+    _seed_bound_ticket(home, "T-1", "alpha", intent="Update `f.txt`.")
     # T-101: this seeded ticket holds real state, so backup_age now needs a
     # real tarball to read `ok` -- take one so this test stays isolated to
     # reconciler_permissions, the thing it's actually exercising.
@@ -1490,7 +1495,9 @@ def test_doctor_strict_gates_on_partial_reconcile_skill_install(home, tmp_path, 
     (home / "config.toml").write_text(
         f'[maestro]\nbackup_interval = 0\ndaily_spend_ceiling_usd = 50.0\n\n'
         f'[repos.alpha]\npath = "{repo}"\ndefault = true\n')
-    _seed_bound_ticket(home, "T-1", "alpha")
+    # T-124: names a real repo file so `unresolvable_spec_hints` reads `ok` --
+    # this test is about missing_reconcile_skill, not locate.
+    _seed_bound_ticket(home, "T-1", "alpha", intent="Update `f.txt`.")
 
     rc = cli.main(["--home", str(home), "doctor"])
     assert rc == 0
@@ -1984,6 +1991,87 @@ def test_check_language_binding_registered_in_doctor(home):
     code, out = _sweep(home)
     assert code == 0
     assert next(c for c in out["checks"] if c["name"] == "language_binding")["status"] == "ok"
+
+
+# --- unresolvable_spec_hints: T-124's "no file/stem/symbol resolvable" WARN ----
+
+def _seed_spec_only(home, key, *, intent, phase=Phase.READY):
+    store.atomic_write(store.spec_path(home, key),
+                       f"# {key}\napproval_tier: 0\n\n## Intent\n{intent}\n\n"
+                       f"## Acceptance criteria\n- [ ] it works\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def test_check_unresolvable_spec_hints_warns_when_spec_names_nothing_real(home, tmp_path):
+    from conftest import git, make_origin_and_repo
+
+    _origin, repo = make_origin_and_repo(tmp_path, name="target")
+    (repo / "widget.py").write_text("def build_widget():\n    return 1\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "widget.py", cwd=repo)
+    git("push", "-q", "origin", "main", cwd=repo)
+
+    _seed_spec_only(home, "T-1", intent="Do something entirely unrelated to any file in the repo.")
+
+    cfg = Config(home=home, repos={"default": {"path": str(repo), "default": True}})
+    result = health.check_unresolvable_spec_hints(cfg, now=1_000_000)
+    assert result["status"] == "warn"
+    assert result["keys"] == ["T-1"]
+
+
+def test_check_unresolvable_spec_hints_ok_when_spec_names_a_real_file(home, tmp_path):
+    from conftest import git, make_origin_and_repo
+
+    _origin, repo = make_origin_and_repo(tmp_path, name="target")
+    (repo / "widget.py").write_text("def build_widget():\n    return 1\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "widget.py", cwd=repo)
+    git("push", "-q", "origin", "main", cwd=repo)
+
+    _seed_spec_only(home, "T-1", intent="Update `widget.py` to add a new field.")
+
+    cfg = Config(home=home, repos={"default": {"path": str(repo), "default": True}})
+    result = health.check_unresolvable_spec_hints(cfg, now=1_000_000)
+    assert result["status"] == "ok"
+    assert result["keys"] == []
+
+
+def test_check_unresolvable_spec_hints_skips_terminal_and_local_mode(home, tmp_path):
+    from conftest import git, make_origin_and_repo
+
+    _origin, repo = make_origin_and_repo(tmp_path, name="target")
+    (repo / "widget.py").write_text("def build_widget():\n    return 1\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "widget.py", cwd=repo)
+    git("push", "-q", "origin", "main", cwd=repo)
+
+    _seed_spec_only(home, "T-done", intent="Nothing repo-related.", phase=Phase.DONE)
+    store.atomic_write(store.spec_path(home, "T-local"),
+                       "# T-local\napproval_tier: 0\nrepo: notes\n\n## Intent\nNothing repo-related.\n\n"
+                       "## Acceptance criteria\n- [ ] it works\n")
+    event_log.append(home, "T-local", "TicketCreated",
+                     {"title": "T-local", "spec_hash": disp.spec_hash_on_disk(home, "T-local")}, actor="d")
+    event_log.append(home, "T-local", "PhaseChanged", {"phase": Phase.READY.value}, actor="r")
+    snap_mod.rebuild(home, "T-local")
+
+    cfg = Config(home=home, repos={
+        "default": {"path": str(repo), "default": True},
+        "notes": {"path": str(tmp_path / "notes"), "mode": "local"},
+    })
+    result = health.check_unresolvable_spec_hints(cfg, now=1_000_000)
+    assert result["status"] == "ok"
+    assert result["keys"] == []
+
+
+def test_check_unresolvable_spec_hints_registered_in_doctor(home):
+    assert health.check_unresolvable_spec_hints in health.CHECKS
+    code, out = _sweep(home)
+    assert code == 0
+    assert next(c for c in out["checks"]
+               if c["name"] == "unresolvable_spec_hints")["status"] == "ok"
 
 
 # --- worktree_branch: a detached worktree has no branch to commit onto --------

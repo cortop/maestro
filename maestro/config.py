@@ -212,6 +212,13 @@ class Config:
     # `resolve_runner` gives a real reconciler spawn with no spec override.
     # Unvalidated at load, same posture as `post_qa_skill_runner` just above.
     post_qa_skill_runner_model: str | None = None
+    # T-124: board-wide DEFAULT for `[repos.<name>] file_hints` -- same "table
+    # wins, unset inherits" precedence as test_command/language above. False
+    # (default) ships dark: `context.regenerate` computes no locate hints and
+    # the dossier is byte-identical to before this knob existed. True makes
+    # `derived/context/<KEY>.md` grow "## Suggested starting points"/"## Symbol
+    # map"/"## Files edited in prior sessions" sections from `maestro/locate.py`.
+    file_hints: bool = False
     # GA-15: override for `maestro install-commands --user` / the doctor check's
     # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
     # env var takes precedence over this when set -- see skills_install.user_commands_dir).
@@ -329,6 +336,22 @@ class Config:
     # only blocked a recorded fail; zero verdicts silently passed). Default ON; OFF reverts to
     # HEAD's weaker check -- see ops._refuse_if_qa_incomplete.
     awaiting_ci_qa_gate: bool = True
+    # T-122: whether the dispatcher's own due loop routes an exact-literal
+    # human approval (a pending "ok"/"yes"/etc paired with an `ops.ask`
+    # content-hash qid, non-research ticket -- see dispatcher's
+    # `_answer_fast_path_eligible`) straight to `ready` itself, in the same
+    # sweep, instead of spawning a full `awaiting-human` reconciler whose only
+    # job in most cases is to read that literal answer and call `set-phase
+    # ready`. "off" (default): byte-identical to before this knob existed.
+    # "shadow": records a `would_route_answer` decision but still spawns the
+    # reconciler -- the go/no-go signal for flipping to "on". "on": folds the
+    # inbox, appends `PhaseChanged ready` with reason `approved: <verbatim
+    # answer>` by actor "dispatcher", acks the inbox, and records
+    # `answer_routed` -- every other answer (non-literal, a `kind: research`
+    # ticket, a named qid, a partially-answered frontier round, two pending
+    # answers for one key) keeps today's spawn. An unrecognized value fails
+    # `config.load()` closed -- see `_ANSWER_FAST_PATH_MODES`.
+    answer_fast_path: str = "off"
     # Maintenance ticks (dispatcher.run_compact_tick / run_archive_tick).
     compact_interval: int = 0          # seconds between dispatcher-driven compact sweeps (0 disables)
     compact_min_events: int = 200      # only compact a key once its folded log reaches this many events
@@ -414,6 +437,7 @@ _REPO_TABLE_KEYS = frozenset({
     # T-123: per-repo overrides of the board-wide [maestro] CI auto-rerun
     # defaults above -- same "table wins, unset inherits" precedence.
     "ci_auto_rerun", "ci_rerun_grace", "ci_failure_excerpt",
+    "file_hints",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -421,6 +445,11 @@ _REPO_TABLE_KEYS = frozenset({
 # naming this set in the error, rather than silently falling back to a mode
 # that can livelock a fast-moving base branch.
 _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
+
+# T-122: the whole recognized answer_fast_path value set -- fails closed
+# (raises at config.load, naming the knob) on anything outside it, same
+# posture as _BASE_DRIFT_POLICIES just above.
+_ANSWER_FAST_PATH_MODES = frozenset({"off", "shadow", "on"})
 
 # OC-4/T-54: [runner.opencode]'s whole recognized key set. Unlike every other
 # [runner.<name>] table (free-form, riding cfg.provider_config with zero
@@ -754,6 +783,9 @@ def load(home_arg: str | None = None) -> Config:
         cfg.post_qa_skill_runner = m.get("post_qa_skill_runner", cfg.post_qa_skill_runner) or None
         cfg.post_qa_skill_runner_model = m.get(
             "post_qa_skill_runner_model", cfg.post_qa_skill_runner_model) or None
+        # T-124: no validation needed -- a bool never fails closed, same posture
+        # as test_deletion_gate above.
+        cfg.file_hints = bool(m.get("file_hints", cfg.file_hints))
         cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
         cfg.opencode_user_commands_dir = m.get(
             "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
@@ -821,6 +853,9 @@ def load(home_arg: str | None = None) -> Config:
                 raw_ci_auto_rerun = table.get("ci_auto_rerun")
                 raw_ci_rerun_grace = table.get("ci_rerun_grace")
                 raw_ci_failure_excerpt = table.get("ci_failure_excerpt")
+                # T-124: bool, no validation needed -- None (absent from the table)
+                # inherits cfg.file_hints (see repos.RepoBinding.file_hints).
+                raw_file_hints = table.get("file_hints")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -879,6 +914,9 @@ def load(home_arg: str | None = None) -> Config:
                     "ci_failure_excerpt": (
                         bool(raw_ci_failure_excerpt) if raw_ci_failure_excerpt is not None else None
                     ),
+                    # T-124: this repo's file_hints override -- None (unset) inherits
+                    # cfg.file_hints (see repos.RepoBinding.file_hints).
+                    "file_hints": bool(raw_file_hints) if raw_file_hints is not None else None,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -921,6 +959,12 @@ def load(home_arg: str | None = None) -> Config:
         cfg.qa_standards_axis = bool(m.get("qa_standards_axis", cfg.qa_standards_axis))
         cfg.qa_phase_gate = bool(m.get("qa_phase_gate", cfg.qa_phase_gate))
         cfg.awaiting_ci_qa_gate = bool(m.get("awaiting_ci_qa_gate", cfg.awaiting_ci_qa_gate))
+        raw_fast_path = m.get("answer_fast_path", cfg.answer_fast_path)
+        if raw_fast_path not in _ANSWER_FAST_PATH_MODES:
+            raise store.MaestroError(
+                f"config.toml: answer_fast_path must be one of "
+                f"{sorted(_ANSWER_FAST_PATH_MODES)}, got {raw_fast_path!r}")
+        cfg.answer_fast_path = raw_fast_path
         cfg.compact_interval = int(m.get("compact_interval", cfg.compact_interval))
         cfg.compact_min_events = int(m.get("compact_min_events", cfg.compact_min_events))
         raw_archive_after = m.get("archive_after", cfg.archive_after)
@@ -1167,6 +1211,15 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # test_command on a non-python repo with language left unset
                                   # (here AND per-table) fails a test:-annotated AC closed, once,
                                   # legibly -- see [repos.<name>] language below.
+# file_hints = true                # T-124: board-wide DEFAULT for [repos.<name>] file_hints
+                                  # (below) -- same "table wins, unset inherits" precedence as
+                                  # test_command above. false (default) ships dark: the context
+                                  # dossier is byte-identical to before this knob existed. true
+                                  # adds "## Suggested starting points"/"## Symbol map"/"## Files
+                                  # edited in prior sessions" sections computed by
+                                  # maestro/locate.py -- run `maestro locate --eval` first and
+                                  # confirm its merged-list recall@5 at least matches the
+                                  # MENTION-only baseline before turning this on for real.
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
@@ -1208,6 +1261,18 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
 # ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
 # ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
 # ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
+# answer_fast_path = "off"         # T-122: "off" | "shadow" | "on" -- whether the dispatcher's
+                                  # due loop routes an exact-literal human approval ("ok"/"yes"/
+                                  # "approve"/etc, paired with an ops.ask content-hash qid, on a
+                                  # non-research ticket) straight to `ready` itself, in the same
+                                  # sweep, instead of spawning a full awaiting-human reconciler.
+                                  # Default "off": byte-identical to today. "shadow" records a
+                                  # would_route_answer decision but still spawns the reconciler --
+                                  # the go/no-go signal for "on". "on" folds the inbox, sets phase
+                                  # ready with reason "approved: <verbatim answer>" by actor
+                                  # "dispatcher", acks, and records answer_routed; every other
+                                  # answer shape keeps today's spawn. Unknown value fails config
+                                  # load closed (see _ANSWER_FAST_PATH_MODES).
 # ci_auto_rerun = true             # T-123: on a failing PR poll, request one `gh run
                                   # rerun --failed` for the head SHA instead of
                                   # immediately routing to `implementing` -- measured:
@@ -1368,6 +1433,8 @@ implementer = "claude_skill"
 # ci_failure_excerpt = true          # T-123: this repo's override of [maestro]
                                      # ci_failure_excerpt above -- unset inherits the
                                      # board-wide default.
+# file_hints = true                 # T-124: this repo's override of [maestro] file_hints
+                                     # above -- unset inherits the board-wide default.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see
