@@ -166,7 +166,9 @@ Otherwise implement the spec's Acceptance criteria:
    runtime tests run instead of skipping) is already installed — `maestro worktree ensure` (GA-20,
    the `ready` phase file) ran the repo's declared `prime` once when this worktree was first
    created, so this step only runs the tests. Run the suite as a single **foreground** Bash call
-   with an explicit timeout (at most 600000ms) — never `run_in_background`, never
+   with an explicit timeout of 1800000ms (30 min — the dispatcher exports `BASH_MAX_TIMEOUT_MS`
+   from `[maestro] bash_max_timeout` so the Bash tool accepts it; the stock 600000ms ceiling
+   is too short for this suite) — never `run_in_background`, never
    `ScheduleWakeup`/`Monitor`, and never a sleep/tail poll loop on a test log:
    ```bash
    .venv/bin/python -m pytest -q

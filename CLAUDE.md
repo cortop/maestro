@@ -216,6 +216,12 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
   (bounds the repo's `prime` command) are separate, board-wide-default budgets; either
   can be overridden per `[repos.<name>]` for a repo whose checkout or dependency install
   legitimately runs longer.
+- `bash_max_timeout` (default 1800s) is exported to every spawned reconciler as
+  `BASH_MAX_TIMEOUT_MS`, lifting Claude Code's stock 600s Bash-tool ceiling so the implementing
+  skill's single foreground test run fits. A session is silent for the whole call, so the
+  watchdog's `no_output_timeout` (default now 1800s) must cover it: `config.load()` fails
+  closed when both are set and the silence budget is shorter, and an unset ceiling shrinks to
+  an explicitly shorter silence budget instead of refusing to load.
 
 ## Git
 

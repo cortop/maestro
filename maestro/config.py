@@ -78,7 +78,13 @@ class Config:
     # clock above (a fresh no-progress log resets this even past claim epoch age).
     # Exempt when the claim has no `log_path` (capture_session_logs = false --
     # missing data, never reap on it; falls back to the age-based rule only).
-    no_output_timeout: int = 600
+    # Must be >= bash_max_timeout (below) when non-zero: a reconciler emits NOTHING to
+    # its stream log for the whole of a foreground Bash call (the test suite), so a
+    # silence budget shorter than the Bash ceiling reaps a healthy session mid-suite.
+    # `load()` fails closed on an explicit inconsistency rather than letting it bite
+    # at 3am; an UNSET bash_max_timeout shrinks to this value instead (so a board
+    # that set only this knob before the ceiling existed keeps loading).
+    no_output_timeout: int = 1800
     # RB-15: a THIRD, independent watchdog clock -- the dispatcher-side backstop
     # for `max_session_turns` above. Deliberately separate from
     # `max_session_seconds` (which stays a generous ceiling so a legitimate
@@ -105,6 +111,14 @@ class Config:
     # way as `prime` itself: a `[repos.<name>]` table's own `prime_timeout` wins,
     # unset inherits this board-wide default -- see `repos.RepoBinding.prime_timeout`.
     prime_timeout: int = 600
+    # Ceiling (seconds) on a single foreground Bash call inside a reconciler session,
+    # exported to every spawned runner as `BASH_MAX_TIMEOUT_MS` (Claude Code's own
+    # knob; the built-in ceiling is 600s, which maestro's own ~2700-test suite cannot
+    # finish inside). The implementing skill runs the suite as ONE foreground call
+    # bounded by this, so it is the budget the suite must fit in. 0 = don't export
+    # (runner default). Not per-repo: the env is fixed at spawn, before the ticket's
+    # repo binding is consulted by the skill.
+    bash_max_timeout: int = 1800
     # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
     # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
     # by `maestro doctor` and the TUI fleet panel alongside today's actual spend.
@@ -682,6 +696,27 @@ def load(home_arg: str | None = None) -> Config:
             m.get("max_turn_wallclock_seconds", cfg.max_turn_wallclock_seconds))
         cfg.worktree_timeout = int(m.get("worktree_timeout", cfg.worktree_timeout))
         cfg.prime_timeout = int(m.get("prime_timeout", cfg.prime_timeout))
+        raw_bash = m.get("bash_max_timeout")
+        if raw_bash is None and cfg.no_output_timeout and cfg.bash_max_timeout > cfg.no_output_timeout:
+            # Unset ceiling on a board that deliberately reaps silence sooner than
+            # the default ceiling: shrink the ceiling to fit rather than refuse a
+            # config that was valid before this knob existed. Only an EXPLICIT
+            # contradiction (both keys set) fails closed below.
+            cfg.bash_max_timeout = cfg.no_output_timeout
+        elif raw_bash is not None:
+            cfg.bash_max_timeout = int(raw_bash)
+        if cfg.bash_max_timeout < 0:
+            raise store.MaestroError(
+                f"config.toml: [maestro] bash_max_timeout must be >= 0 (got {cfg.bash_max_timeout})")
+        if cfg.no_output_timeout and cfg.bash_max_timeout > cfg.no_output_timeout:
+            # Fail closed: a session is legitimately SILENT for the whole of a
+            # foreground Bash call, so the watchdog's silence budget must cover the
+            # Bash ceiling or it kills a healthy session mid-test-suite.
+            raise store.MaestroError(
+                f"config.toml: [maestro] no_output_timeout ({cfg.no_output_timeout}s) is shorter "
+                f"than bash_max_timeout ({cfg.bash_max_timeout}s) -- the watchdog would reap a "
+                "reconciler mid-way through its foreground test run. Raise no_output_timeout "
+                "(or set it to 0), or lower bash_max_timeout.")
         cfg.ci_auto_rerun = bool(m.get("ci_auto_rerun", cfg.ci_auto_rerun))
         cfg.ci_rerun_grace = int(m.get("ci_rerun_grace", cfg.ci_rerun_grace))
         cfg.ci_failure_excerpt = bool(m.get("ci_failure_excerpt", cfg.ci_failure_excerpt))
@@ -1008,10 +1043,20 @@ max_impl_turns = 20
                                   # sessions legitimately run 30-60+ min.
 # max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
                                   # zero progress (observed_seq unchanged)
-# no_output_timeout = 600         # kill+fail a claim whose session LOG hasn't been written
+# no_output_timeout = 1800        # kill+fail a claim whose session LOG hasn't been written
                                   # to in this many seconds (0 disables); independent of
                                   # max_session_seconds above. Exempt when the claim has no
                                   # log_path (capture_session_logs = false).
+                                  # Must be >= bash_max_timeout below when non-zero (a
+                                  # foreground Bash call writes nothing to the log while it
+                                  # runs) -- config.load refuses an explicit shorter value;
+                                  # with bash_max_timeout unset, the ceiling shrinks to fit.
+# bash_max_timeout = 1800         # ceiling on ONE foreground Bash call inside a reconciler
+                                  # (exported as BASH_MAX_TIMEOUT_MS to the spawned runner;
+                                  # Claude Code's built-in ceiling is 600s). This is the
+                                  # budget the implementing skill's single foreground test
+                                  # run must fit in -- raise it for a slower suite, and raise
+                                  # no_output_timeout above with it. 0 = don't export.
 # max_turn_wallclock_seconds = 900  # RB-15: dispatcher-side backstop for max_session_turns
                                   # (0 disables) -- a wall-clock approximation ("this session
                                   # has almost certainly blown its turn budget by now"),

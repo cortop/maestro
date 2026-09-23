@@ -1751,6 +1751,65 @@ def test_watchdog_knobs_documented_in_sample_config():
     assert "max_session_seconds" in DEFAULT_CONFIG_TOML
     assert "max_spawn_attempts" in DEFAULT_CONFIG_TOML
     assert "no_output_timeout" in DEFAULT_CONFIG_TOML
+    assert "bash_max_timeout" in DEFAULT_CONFIG_TOML
+
+
+def test_config_parses_bash_max_timeout(home):
+    from maestro import config as config_mod
+    store.atomic_write(home / "config.toml",
+                       "[maestro]\nbash_max_timeout = 2400\nno_output_timeout = 2400\n")
+    assert config_mod.load(str(home)).bash_max_timeout == 2400
+
+
+def test_config_default_silence_budget_covers_bash_ceiling():
+    """A reconciler writes nothing to its stream log for the whole of a foreground
+    Bash call, so the default no_output_timeout must not be shorter than the
+    default Bash ceiling or a healthy session is reaped mid-test-suite."""
+    from maestro.config import Config
+    cfg = Config(home=Path("/nonexistent"))
+    assert cfg.bash_max_timeout == 1800
+    assert cfg.no_output_timeout >= cfg.bash_max_timeout
+
+
+def test_config_unset_bash_ceiling_shrinks_to_explicit_silence_budget(home):
+    """A board that set no_output_timeout before bash_max_timeout existed keeps
+    loading: the unset ceiling shrinks to the silence budget (so the exported
+    Bash ceiling never outlives the watchdog) instead of failing closed."""
+    from maestro import config as config_mod
+    store.atomic_write(home / "config.toml", "[maestro]\nno_output_timeout = 600\n")
+    cfg = config_mod.load(str(home))
+    assert cfg.no_output_timeout == 600
+    assert cfg.bash_max_timeout == 600
+
+
+@pytest.mark.parametrize("toml", [
+    "[maestro]\nbash_max_timeout = 3600\n",                      # explicit ceiling > default 1800
+    "[maestro]\nbash_max_timeout = 900\nno_output_timeout = 899\n",
+])
+def test_config_refuses_silence_budget_shorter_than_bash_ceiling(home, toml):
+    from maestro import config as config_mod
+    store.atomic_write(home / "config.toml", toml)
+    with pytest.raises(store.MaestroError, match="no_output_timeout.*bash_max_timeout"):
+        config_mod.load(str(home))
+
+
+@pytest.mark.parametrize("toml", [
+    "[maestro]\nno_output_timeout = 0\n",                        # 0 disables the silence rule
+    "[maestro]\nbash_max_timeout = 600\nno_output_timeout = 600\n",
+    "[maestro]\nbash_max_timeout = 0\nno_output_timeout = 60\n",
+])
+def test_config_accepts_consistent_silence_budget(home, toml):
+    from maestro import config as config_mod
+    config_mod.load(str(home))  # baseline
+    store.atomic_write(home / "config.toml", toml)
+    config_mod.load(str(home))
+
+
+def test_config_refuses_negative_bash_max_timeout(home):
+    from maestro import config as config_mod
+    store.atomic_write(home / "config.toml", "[maestro]\nbash_max_timeout = -1\n")
+    with pytest.raises(store.MaestroError, match="bash_max_timeout must be >= 0"):
+        config_mod.load(str(home))
 
 
 def test_max_concurrency_documents_sub_agent_amplification():

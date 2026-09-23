@@ -253,3 +253,42 @@ def test_dryrun_records_none_when_not_provided():
     s.spawn("T-1", "prompt", Path("/tmp"))
     assert s.spawned[0][3] is None  # model
     assert s.spawned[0][4] is None  # effort
+
+
+# --- bash_max_timeout: lift Claude Code's 600s Bash-tool ceiling for the test suite ---
+
+def _capture_env(home, key="T-1"):
+    """Spawn with a mock Popen and return the exact env dict handed to it."""
+    sess = ClaudeCliSessions(home=home, capture_session_logs=False)
+    fake_proc = MagicMock()
+    fake_proc.pid = os.getpid()
+    captured = {}
+    def capture_popen(cmd, **kwargs):
+        captured.update(kwargs["env"])
+        return fake_proc
+    with patch("subprocess.Popen", side_effect=capture_popen):
+        sess.spawn(key, "prompt", cwd=home)
+    return captured
+
+
+def test_spawn_env_exports_bash_max_timeout_ms_by_default(home):
+    """The implementing skill runs the suite as ONE foreground Bash call; the
+    runner's built-in 600s ceiling can't hold it, so the spawn env carries
+    BASH_MAX_TIMEOUT_MS from the board-wide default (seconds x1000)."""
+    from maestro import config as config_mod
+    env = _capture_env(home)
+    assert env["BASH_MAX_TIMEOUT_MS"] == str(config_mod.load(home).bash_max_timeout * 1000)
+    assert env["BASH_MAX_TIMEOUT_MS"] == "1800000"
+    assert env["MAESTRO_HOME"] == str(home)  # the rest of the env is untouched
+
+
+def test_spawn_env_bash_max_timeout_follows_config(home):
+    store.atomic_write(home / "config.toml",
+                       "[maestro]\nbash_max_timeout = 2400\nno_output_timeout = 2400\n")
+    assert _capture_env(home)["BASH_MAX_TIMEOUT_MS"] == "2400000"
+
+
+def test_spawn_env_bash_max_timeout_zero_leaves_runner_default(home, monkeypatch):
+    monkeypatch.delenv("BASH_MAX_TIMEOUT_MS", raising=False)
+    store.atomic_write(home / "config.toml", "[maestro]\nbash_max_timeout = 0\n")
+    assert "BASH_MAX_TIMEOUT_MS" not in _capture_env(home)

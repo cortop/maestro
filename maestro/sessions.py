@@ -27,6 +27,10 @@ def _spawn_env(home, env_overlay: dict | None) -> dict:
     child's environment wholesale, so a PATH fix applied to only one of them
     silently leaves the others broken.
 
+    ``BASH_MAX_TIMEOUT_MS`` carries ``[maestro] bash_max_timeout`` (seconds, so
+    x1000) -- the ceiling the runner's Bash tool will accept for one foreground
+    call, i.e. the budget the implementing skill's test run must fit in.
+
     ``config.runner_path`` prepends each configured ``[runner.<name>] bin``
     directory. That is what lets a launchd dispatcher -- whose PATH is the
     minimal plist one, not your shell's -- both find the runner AND satisfy the
@@ -34,9 +38,15 @@ def _spawn_env(home, env_overlay: dict | None) -> dict:
     resolver expression pi executes on its own). Boards that configure no
     ``bin`` get their PATH back unchanged.
     """
+    cfg = config.load(home)
     env = dict(os.environ)
     env["MAESTRO_HOME"] = str(home)  # pin the home for the worker
-    env["PATH"] = config.runner_path(config.load(home), env.get("PATH", ""))
+    env["PATH"] = config.runner_path(cfg, env.get("PATH", ""))
+    # Lift Claude Code's 600s Bash-tool ceiling so the implementing skill's single
+    # foreground test run fits (`[maestro] bash_max_timeout`; 0 = leave the runner's
+    # own default). Harmless to the other runners, which ignore the variable.
+    if cfg.bash_max_timeout > 0:
+        env["BASH_MAX_TIMEOUT_MS"] = str(cfg.bash_max_timeout * 1000)
     if env_overlay:
         env.update(env_overlay)
     return env

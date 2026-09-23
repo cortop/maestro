@@ -1038,3 +1038,18 @@ def test_docs_state_dry_run_is_a_read_only_preview():
     assert "mints" not in dry_line
     assert "read-only" in dry_line
     assert "would_mint" in dry_line and "would_spawn" in dry_line
+
+
+def test_implementing_skill_test_step_timeout_matches_exported_bash_ceiling():
+    """T-121 pinned the suite to ONE foreground Bash call; the number the skill
+    tells the reconciler to pass must be what the dispatcher actually exports
+    (`[maestro] bash_max_timeout` -> BASH_MAX_TIMEOUT_MS), not the runner's
+    stock 600000ms ceiling the suite can't finish inside."""
+    from maestro.config import Config
+    body = _strip_frontmatter(_commands_path("implementing").read_text())
+    ceiling_ms = Config(home=Path("/nonexistent")).bash_max_timeout * 1000
+    assert f"{ceiling_ms}ms" in body
+    assert "BASH_MAX_TIMEOUT_MS" in body
+    assert "at most 600000ms" not in body
+    # T-121's fail-on-timeout phrase must survive on one line for its AC check.
+    assert 'maestro fail "$KEY" "suite exceeds tool timeout: <why>"' in body
