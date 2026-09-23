@@ -661,7 +661,8 @@ class PiCliSessions:
                 "the preflight must run before a spawn reaches this backend")
 
         pi_dir = store.pi_agent_dir(self.home)
-        pi_config = (config.load(self.home).provider_config.get("runner") or {}).get("pi") or {}
+        cfg = config.load(self.home)
+        pi_config = (cfg.provider_config.get("runner") or {}).get("pi") or {}
         provider = store.pi_model_provider(pi_config)
 
         from . import dispatcher  # lazy: avoids the load-time cycle dispatcher -> sessions -> dispatcher
@@ -706,8 +707,19 @@ class PiCliSessions:
                "--model", f"{provider}/{runner_model}",
                "--mode", "json",
                "--no-skills",
-               "--prompt-template", str(payload_dir),
-               "--no-prompt-templates"]
+               "--prompt-template", str(payload_dir)]
+        # A command outside the payload (a user-owned `post_qa_skill` in
+        # ~/.claude/commands) must be loaded explicitly too, or pi sends
+        # `/<name> <KEY>` to the model as literal text.
+        name = command.lstrip("/")
+        if not (payload_dir / f"{name}.md").exists():
+            user_template = skills_install.user_commands_dir(cfg) / f"{name}.md"
+            if not user_template.exists():
+                raise store.MaestroError(
+                    f"PiCliSessions.spawn({key!r}): no prompt template for {command!r} "
+                    f"in {payload_dir} or {user_template.parent}")
+            cmd += ["--prompt-template", str(user_template)]
+        cmd += ["--no-prompt-templates"]
         if self.disable_context_files:
             cmd += ["--no-context-files"]
         cmd += guard_argv

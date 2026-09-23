@@ -28,7 +28,7 @@ def _make_sessions(home: Path, clock_val: float = 1_000_000.0, **kw):
 
 
 def _capture_cmd(home, key="T-1", cwd=None, runner_model="glm-5.2",
-                  clock_val=1_000_000.0, **sess_kw):
+                  clock_val=1_000_000.0, command="/maestro-reconcile-implementing", **sess_kw):
     sess = _make_sessions(home, clock_val=clock_val, capture_session_logs=False, **sess_kw)
     fake_proc = MagicMock()
     fake_proc.pid = os.getpid()
@@ -41,8 +41,7 @@ def _capture_cmd(home, key="T-1", cwd=None, runner_model="glm-5.2",
         return fake_proc
 
     with patch("subprocess.Popen", side_effect=capture_popen):
-        sess.spawn(key, "/maestro-reconcile-implementing", cwd=cwd or home,
-                  runner_model=runner_model)
+        sess.spawn(key, command, cwd=cwd or home, runner_model=runner_model)
     return captured_cmd, captured_kwargs
 
 
@@ -151,6 +150,31 @@ def test_spawn_raises_when_guard_extension_missing(home, monkeypatch):
         with pytest.raises(store.MaestroError, match="guard extension missing"):
             sess.spawn("T-1", "/maestro-reconcile-implementing", cwd=home,
                        runner_model="glm-5.2")
+    mock_popen.assert_not_called()
+    assert claims.read_claim(home, "T-1") is None
+
+
+# --- a user-owned command (e.g. post_qa_skill) outside the payload ----------
+
+def test_user_command_is_loaded_as_its_own_prompt_template(home, monkeypatch, tmp_path):
+    user_dir = tmp_path / "user-commands"
+    template = user_dir / "my-pr-polish.md"
+    store.atomic_write(template, "# polish `$1`\n")
+    monkeypatch.setenv("MAESTRO_USER_COMMANDS_DIR", str(user_dir))
+
+    cmd, _ = _capture_cmd(home, key="T-7", command="/my-pr-polish")
+
+    assert cmd[0:3] == ["pi", "-p", "/my-pr-polish T-7"]
+    i = cmd.index("--no-prompt-templates")
+    assert cmd[i - 4:i] == ["--prompt-template", str(_payload_dir()),
+                            "--prompt-template", str(template)]
+
+
+def test_spawn_raises_when_command_has_no_template_anywhere(home):
+    sess = _make_sessions(home, capture_session_logs=False)
+    with patch("subprocess.Popen") as mock_popen:
+        with pytest.raises(store.MaestroError, match="no prompt template for '/missing'"):
+            sess.spawn("T-1", "/missing", cwd=home, runner_model="glm-5.2")
     mock_popen.assert_not_called()
     assert claims.read_claim(home, "T-1") is None
 
