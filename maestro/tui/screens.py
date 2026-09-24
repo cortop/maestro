@@ -17,7 +17,7 @@ from ..dispatcher import schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line
-from .modals import _IntervalModal, _ScheduleModal
+from .modals import _ConfirmModal, _IntervalModal, _ScheduleModal
 from .render import _fmt_epoch, _render_env, _render_fleet
 
 
@@ -240,6 +240,7 @@ class FleetScreen(Screen):
         ("u", "fleet_up", "Up"),
         ("d", "fleet_down", "Down"),
         ("s", "dispatch_sweep", "Sweep"),
+        ("S", "dispatch_real", "Real sweep"),
         ("p", "project_rebuild", "Project"),
         ("P", "toggle_pause", "Pause/Resume"),
         ("r", "refresh_status", "Refresh"),
@@ -290,7 +291,7 @@ class FleetScreen(Screen):
                 self.query_one("#fleet-status", Static).update(
                     _render_fleet(self._status, self._doctor)
                 )
-            elif event.worker.name in ("dispatch-sweep", "project-rebuild"):
+            elif event.worker.name in ("dispatch-sweep", "dispatch-sweep-real", "project-rebuild"):
                 self._log(str(event.worker.result))
         elif event.state == WorkerState.ERROR:
             self._log(f"[red]{event.worker.name} failed: {event.worker.error}[/red]")
@@ -337,6 +338,28 @@ class FleetScreen(Screen):
         try:
             p = subprocess.run(
                 ["maestro", "--home", str(self._home), "dispatch", "--dry-run"],
+                capture_output=True, text=True, timeout=30,
+            )
+            return (p.stdout or p.stderr or "done").strip()
+        except Exception as exc:
+            return str(exc)
+
+    def action_dispatch_real(self) -> None:
+        def _on_confirm(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self._log("dispatching (real sweep) … ")
+            self.run_worker(self._run_dispatch_real, thread=True, name="dispatch-sweep-real")
+
+        self.app.push_screen(
+            _ConfirmModal("Run a [bold]real[/bold] dispatch sweep? This may mint and spawn sessions."),
+            _on_confirm,
+        )
+
+    def _run_dispatch_real(self) -> str:
+        try:
+            p = subprocess.run(
+                ["maestro", "--home", str(self._home), "dispatch"],
                 capture_output=True, text=True, timeout=30,
             )
             return (p.stdout or p.stderr or "done").strip()
