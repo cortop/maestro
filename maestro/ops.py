@@ -1404,6 +1404,65 @@ def _path_diff(cwd: Path, base: str, rel_path: str) -> str:
     return d.stdout if d.returncode <= 1 else ""
 
 
+def _diff_numstat_total(cwd: Path, base: str) -> int:
+    """Lines changed (additions + deletions) in *cwd*'s committed diff against
+    *base* -- ``git diff --numstat <ref>...HEAD`` (the spec's own literal
+    recommendation; the ``...`` form already diffs from the merge-base, same
+    anchor `_qa_diff`/`_path_diff` compute by hand). Prefers ``origin/<base>``,
+    falling back to the local ``<base>`` when it isn't fetched. Fails OPEN
+    (returns 0, i.e. "never exceeds") on any git failure -- this is a UX gate
+    on top of PR creation, not a correctness invariant, so a broken git must
+    never block `implementing` from opening its PR."""
+    def _git(*args: str):
+        try:
+            return subprocess.run(["git", "-C", str(cwd), *args],
+                                  capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    proc = None
+    for ref in (f"origin/{base}", base):
+        proc = _git("diff", "--numstat", f"{ref}...HEAD")
+        if proc is not None and proc.returncode == 0:
+            break
+    if proc is None or proc.returncode != 0:
+        return 0
+    total = 0
+    for line in proc.stdout.splitlines():
+        added, removed = (line.split("\t", 2) + ["", ""])[:2]
+        try:
+            total += int(added) + int(removed)
+        except ValueError:
+            continue  # a binary file renders "-\t-\t<path>" -- not a line count
+    return total
+
+
+def pr_size(cfg: Config, key: str) -> dict:
+    """T-126: *key*'s worktree diff size vs its resolved base branch, and
+    whether it exceeds the resolved `pr_split_threshold` -- the deterministic
+    measurement the `implementing` skill checks before `gh pr create` (and
+    before pushing further commits to an already-open PR) instead of
+    eyeballing the diff itself. threshold 0 means the check is disabled:
+    `exceeds` is always False regardless of size. `tree` is a short hash of
+    the current tree state (same `_tree_state_key` + `content_hash[:8]` idiom
+    as the H4 test-deletion gate's own qid) -- the skill binds a split
+    proposal's `--qid` to it so an already-answered proposal for this exact
+    tree passes straight through and a new tree (a further commit)
+    re-evaluates from scratch."""
+    from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    cwd = _worker_cwd(cfg, key)
+    lines_changed = _diff_numstat_total(cwd, binding.base_branch or "main")
+    threshold = binding.pr_split_threshold
+    tree_key = _tree_state_key(cwd, timeout=binding.worktree_timeout)
+    return {
+        "lines_changed": lines_changed,
+        "threshold": threshold,
+        "exceeds": bool(threshold) and lines_changed > threshold,
+        "tree": content_hash(tree_key)[:8],
+    }
+
+
 def _diff_added_test_names(cwd: Path, base: str, rel_path: str,
                            profile: "testlang.LanguageProfile") -> set[str]:
     """Test names newly introduced (an added line matching *profile*'s own

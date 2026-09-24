@@ -184,7 +184,7 @@ AGENT_TOOL_VERBS = (
     "local-backup", "snapshot", "events", "append", "set-phase", "ask",
     "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
     "verify-ac", "qa-brief", "qa-verdict", "capture-tests", "finalize", "checked", "release",
-    "check-conflicts", "check-merged", "fold-steps", "worktree", "locate",
+    "check-conflicts", "check-merged", "fold-steps", "worktree", "locate", "pr-size",
     # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
     "env",     # every phase preamble's first command, all phase files
     "show",    # maestro-reconcile-passive.md reads pending_inbox through it
@@ -250,8 +250,8 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
               "snapshot", "worktree"),
     "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
     "implementing": ("append", "ask", "env", "fail", "finalize", "fold-inbox", "impl-turn",
-                      "local-backup", "locate", "observe-spec", "release", "set-phase", "snapshot",
-                      "verify-ac", "worktree"),
+                      "local-backup", "locate", "observe-spec", "pr-size", "release", "set-phase",
+                      "snapshot", "verify-ac", "worktree"),
     "qa": ("append", "ask", "env", "fold-inbox", "locate", "observe-spec", "qa-brief", "qa-verdict",
            "release", "set-phase", "snapshot"),
     "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",
