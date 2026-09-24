@@ -186,3 +186,26 @@ def test_pr_stack_empty_for_a_non_split_ticket(cfg):
     finalized = ops.check_merged(cfg, "T-1", "MERGED")
     assert finalized is True
     assert snap_mod.load(cfg.home, "T-1").phase == Phase.DONE.value
+
+
+def test_pr_stack_entry_status_survives_the_cascade_past_it(cfg):
+    """T-126 review feedback: each stack entry is tracked like its own
+    subticket -- entry 0's own ci_state/qa_verdict must still be readable
+    after `check_merged` advances the mirror to entry 1, not just while
+    entry 0 was the active poll target."""
+    _create_stack(cfg, "T-1", n=2)
+    event_log.append(cfg.home, "T-1", "CiObserved", {"state": "passing"}, actor="d")
+    event_log.append(cfg.home, "T-1", "PhaseChanged",
+                     {"phase": "awaiting-ci", "reason": "qa: all ACs pass"}, actor="r")
+    snap_mod.rebuild(cfg.home, "T-1")
+
+    changed = ops.check_merged(cfg, "T-1", "MERGED")  # entry 0 -> entry 1
+    assert changed is True
+    snap = snap_mod.load(cfg.home, "T-1")
+    assert snap.pr_number == 101
+    entry0 = next(e for e in snap.pr_stack if e["index"] == 0)
+    entry1 = next(e for e in snap.pr_stack if e["index"] == 1)
+    assert entry0["ci_state"] == "passing"
+    assert entry0["qa_verdict"] == "pass"
+    assert entry1["ci_state"] is None
+    assert entry1["qa_verdict"] is None

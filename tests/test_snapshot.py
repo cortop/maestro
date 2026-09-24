@@ -212,3 +212,96 @@ def test_from_dict_ignores_legacy_tier_field(home):
     assert snap.key == "T-1"
     assert snap.phase == "ready"
     assert not hasattr(snap, "tier")
+
+
+# ---------------------------------------------------------------------------
+# T-126: a PrUpdated must only mutate the ticket-wide pr_draft/pr_state
+# mirror when it's actually about the CURRENTLY-mirrored PR -- otherwise a
+# stray/late update about a PR that isn't (or is no longer) the active poll
+# target corrupts the mirror. Root cause of the 2026-09-24 "tip PR got
+# undrafted instead of root" incident: an older, non-stack-aware fold
+# advanced `pr_number` to whichever PrOpened was folded LAST (the stack's
+# tip) instead of stopping at index 0, so a poll of that (wrong) active PR
+# appended an unscoped PrUpdated that this test guards against regardless.
+# ---------------------------------------------------------------------------
+
+def test_pr_updated_ignored_for_a_non_active_pr_number(home):
+    event_log.append(home, "T-1", "PrOpened", {"number": 7, "url": "u", "draft": True}, actor="r")
+    event_log.append(home, "T-1", "PrUpdated", {"number": 999, "draft": False}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert snap.pr_draft is True  # unrelated PR's update never touched the mirror
+    assert snap.pr_number == 7
+
+
+def test_pr_updated_applies_for_the_active_pr_number(home):
+    event_log.append(home, "T-1", "PrOpened", {"number": 7, "url": "u", "draft": True}, actor="r")
+    event_log.append(home, "T-1", "PrUpdated", {"number": 7, "draft": False}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert snap.pr_draft is False
+
+
+def test_pr_updated_missing_number_still_matches_the_mirror(home):
+    """The plain finalize-on-merge fallback (`ops.check_merged`'s
+    `pr-merged-<key>` event) never carried a "number" field even before this
+    ticket -- every non-split ticket's history relies on that still applying
+    unconditionally, so a missing "number" must default to matching."""
+    event_log.append(home, "T-1", "PrOpened", {"number": 7, "url": "u", "draft": True}, actor="r")
+    event_log.append(home, "T-1", "PrUpdated", {"merged": True}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert snap.pr_state == "merged"
+
+
+# ---------------------------------------------------------------------------
+# T-126: each pr_stack entry tracks its own ci_state/qa_verdict as it becomes
+# the active poll target, so a human reading `pr_stack` can see an earlier
+# entry's status even after the mirror has advanced past it (treating each
+# stacked PR as its own subticket, per review feedback on this very ticket).
+# ---------------------------------------------------------------------------
+
+def _open_stack(home, key, n=2):
+    for i in range(n):
+        pr = 100 + i
+        base = "main" if i == 0 else f"maestro/{key}-{i}"
+        event_log.append(home, key, "PrOpened", {
+            "number": pr, "url": f"https://example.com/pull/{pr}", "draft": True,
+            "stack": {"index": i, "total": n, "branch": f"maestro/{key}-{i+1}", "base": base},
+        }, actor="r")
+
+
+def test_ci_observed_stamps_only_the_active_stack_entry(home):
+    _open_stack(home, "T-1")
+    event_log.append(home, "T-1", "CiObserved", {"state": "passing"}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    entry0 = next(e for e in snap.pr_stack if e["index"] == 0)
+    entry1 = next(e for e in snap.pr_stack if e["index"] == 1)
+    assert entry0["ci_state"] == "passing"
+    assert entry1["ci_state"] is None  # never polled -- not the active target yet
+
+
+def test_qa_gated_awaiting_ci_stamps_qa_verdict_on_active_stack_entry(home):
+    _open_stack(home, "T-1")
+    event_log.append(home, "T-1", "PhaseChanged",
+                     {"phase": "awaiting-ci", "reason": "qa: all ACs pass"}, actor="r")
+    snap = snap_mod.rebuild(home, "T-1")
+    entry0 = next(e for e in snap.pr_stack if e["index"] == 0)
+    entry1 = next(e for e in snap.pr_stack if e["index"] == 1)
+    assert entry0["qa_verdict"] == "pass"
+    assert entry1["qa_verdict"] is None
+
+
+def test_awaiting_ci_without_qa_reason_does_not_stamp_qa_verdict(home):
+    """Only the qa skill's own literal "qa: ..." reason means a QA verdict was
+    actually recorded -- e.g. a CONFLICTING-PR reroute or any other path into
+    awaiting-ci must not be mistaken for one."""
+    _open_stack(home, "T-1")
+    event_log.append(home, "T-1", "PhaseChanged",
+                     {"phase": "awaiting-ci", "reason": "CI passing"}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    entry0 = next(e for e in snap.pr_stack if e["index"] == 0)
+    assert entry0["qa_verdict"] is None
+
+
+def test_pr_stack_entries_default_ci_state_and_qa_verdict_to_none(home):
+    _open_stack(home, "T-1")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert all(e["ci_state"] is None and e["qa_verdict"] is None for e in snap.pr_stack)
