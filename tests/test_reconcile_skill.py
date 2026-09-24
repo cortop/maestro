@@ -190,14 +190,17 @@ def test_implementing_skill_fetches_and_ff_only_merges_pr_branch_before_rebasing
 
 def test_gh_pr_calls_use_repo_slug_and_base():
     # gh calls only live in the implementing file (PR create/view) now. GA-12: SLUG/BASE are
-    # substituted as the literal <SLUG>/<BASE> tokens the agent types, never $SLUG/$BASE.
+    # substituted as the literal <SLUG>/<BASE> tokens the agent types, never $SLUG/$BASE. T-126
+    # adds a second `gh pr create` for stack entry 1 (also based on <BASE> -- entry 1 of an
+    # approved split has no dependency beyond it, same as the single-PR case), so the counts grew
+    # by one create's worth of both flags versus before this ticket.
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         assert '$SLUG' not in text, f'{path} should hold SLUG as the literal <SLUG>, not $SLUG'
-        assert text.count('--repo "<SLUG>"') == 3, \
-            f'{path}: expected exactly 3 gh calls (1 create + 2 view) carrying --repo "<SLUG>"'
-        assert text.count('--base "<BASE>"') == 1, \
-            f'{path}: expected exactly 1 --base "<BASE>" (on gh pr create only)'
+        assert text.count('--repo "<SLUG>"') == 4, \
+            f'{path}: expected exactly 4 gh calls (2 create + 2 view) carrying --repo "<SLUG>"'
+        assert text.count('--base "<BASE>"') == 2, \
+            f'{path}: expected exactly 2 --base "<BASE>" (the single-PR create and stack entry 1)'
         create_line = next(l for l in text.splitlines() if "gh pr create" in l)
         assert '--repo "<SLUG>"' in create_line and '--base "<BASE>"' in create_line
 
@@ -1053,3 +1056,42 @@ def test_implementing_skill_test_step_timeout_matches_exported_bash_ceiling():
     assert "at most 600000ms" not in body
     # T-121's fail-on-timeout phrase must survive on one line for its AC check.
     assert 'maestro fail "$KEY" "suite exceeds tool timeout: <why>"' in body
+
+
+# ---------------------------------------------------------------------------
+# T-126: the implementing skill checks pr_split_threshold before opening or
+# growing a PR, proposing a stack under a split-<KEY>-<tree> qid on exceed.
+# ---------------------------------------------------------------------------
+
+def test_implementing_checks_pr_size_before_every_gh_pr_create():
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        body = _strip_frontmatter(path.read_text())
+        assert "maestro pr-size" in body
+        size_idx = body.index("maestro pr-size")
+        create_indices = [m.start() for m in re.finditer(r"gh pr create", body)]
+        assert create_indices, f"{path}: expected at least one gh pr create"
+        assert all(i > size_idx for i in create_indices), \
+            f"{path}: a gh pr create appears before the pr-size threshold check"
+
+
+def test_implementing_proposes_a_split_under_qid_on_exceed():
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        body = _strip_frontmatter(path.read_text())
+        assert "exceeds: true" in body.lower() or "`exceeds: true`" in body
+        assert 'maestro ask "$KEY"' in body
+        assert '--qid "split-$KEY-<tree>"' in body
+
+
+def test_implementing_records_stack_entries_via_pr_opened_with_stack_metadata():
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        body = _strip_frontmatter(path.read_text())
+        assert '\\"stack\\":{\\"index\\":0' in body
+        assert '\\"stack\\":{\\"index\\":1' in body
+        assert "ops.check_merged" in body
+
+
+def test_awaiting_human_routes_split_qid_back_to_implementing():
+    for path in (_commands_path("awaiting-human"), _skills_path("awaiting-human")):
+        body = _strip_frontmatter(path.read_text())
+        assert "qid starts with `split-`" in body
+        assert 'maestro set-phase "$KEY" implementing --reason "pr split decision:' in body
