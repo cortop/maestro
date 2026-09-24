@@ -450,10 +450,11 @@ MAESTRO_OWN_REPO_EXTRA_TOOLS = (
 #     skills/maestro-reconcile-implementing.md -- the only reconciler skill
 #     that invokes ``gh`` at all).
 #   - git: fetch/merge/rebase/log/add/commit/push (same skill's rebase +
-#     commit flow) plus diff (skills/maestro-reconcile-qa.md's read-only
-#     ``git diff --no-index``, T-94's rewritten test grants only the 7
-#     implementing-side subcommands and confirms it still WARNs on the
-#     missing ``diff`` one). test_dispatcher.py's
+#     commit flow) plus branch (T-126's stacked-PR split: one label per stack
+#     entry on the existing linear commit history, no rewrite) plus diff
+#     (skills/maestro-reconcile-qa.md's read-only ``git diff --no-index``,
+#     T-94's rewritten test grants only the 7 implementing-side subcommands
+#     and confirms it still WARNs on the missing ``diff`` one). test_dispatcher.py's
 #     test_reconciler_literal_coverage_matches_skills keeps this whole table
 #     honest against a fresh grep of every skills/maestro-reconcile-*.md, so
 #     a future skill invoking e.g. ``gh run view`` or ``git stash`` doesn't
@@ -471,7 +472,7 @@ MAESTRO_OWN_REPO_EXTRA_TOOLS = (
 RECONCILER_LITERAL_COVERAGE: dict[str, tuple[str, ...]] = {
     "Bash(gh:*)": ("Bash(gh pr:*)",),
     "Bash(git:*)": (
-        "Bash(git add:*)", "Bash(git commit:*)", "Bash(git diff:*)",
+        "Bash(git add:*)", "Bash(git branch:*)", "Bash(git commit:*)", "Bash(git diff:*)",
         "Bash(git fetch:*)", "Bash(git log:*)", "Bash(git merge:*)",
         "Bash(git push:*)", "Bash(git rebase:*)",
     ),
@@ -1664,10 +1665,19 @@ def sync_vcs(cfg: Config, now: float) -> dict:
 
 def _route_if_merged(cfg: Config, key: str, status: dict,
                      worktree_removal_errors: dict | None = None) -> bool:
+    """True iff `ops.check_merged` changed *key*'s state this poll -- callers
+    must treat that as "the `snap`/`status` this loop iteration was holding
+    are now stale, stop using them" in both of its two shapes (T-126): a
+    finalize (the ticket is DONE, its worktree is removed below) OR a stacked
+    PR's pointer advancing to the next entry (the ticket is NOT done -- the
+    worktree stays, and the caller must re-poll the new `pr_number` fresh next
+    sweep rather than keep going with this tick's now-superseded status)."""
     from . import ops
     from . import repos as repos_mod
     if not ops.check_merged(cfg, key, status.get("state", ""), actor="dispatcher"):
         return False
+    if snap_mod.load(cfg.home, key).phase != Phase.DONE.value:
+        return True  # advanced to the next stack entry -- not finalized, no worktree removal
     import subprocess
     wt = store.worktree_path(cfg.home, key)
     if wt.exists():

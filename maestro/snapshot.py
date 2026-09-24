@@ -301,6 +301,16 @@ class Snapshot:
     # reset by a phase change -- a head SHA's one rerun stays recorded across
     # a fix-round bounce as long as the SHA itself hasn't moved.
     ci_reruns: dict[str, dict] = field(default_factory=dict)
+    # T-126: an approved PR split's ordered stack, from PrOpened events whose
+    # payload carries a "stack" sub-dict ({index, total, number, url, branch,
+    # base}) -- a plain (non-split) PrOpened carries no such field and this
+    # stays empty, so a threshold-0/under-threshold ticket is byte-identical
+    # to before this field existed. Each entry: {index, total, number, url,
+    # branch, base, merged}. `pr_number`/`pr_url`/`pr_state`/`pr_draft` above
+    # always mirror whichever PR is CURRENTLY being polled -- entry 0 at open
+    # time, advancing to the next unmerged entry as `ops.check_merged` folds
+    # a further PrOpened each time one merges (see that function's docstring).
+    pr_stack: list[dict] = field(default_factory=list)
 
     @property
     def question_open(self) -> bool:
@@ -523,15 +533,48 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             if qid:
                 s.answered_questions[qid] = p.get("answer", "")
         elif t == E.PR_OPENED:
-            s.pr_number = p.get("number", s.pr_number)
-            s.pr_url = p.get("url", s.pr_url)
-            s.pr_draft = p.get("draft", True)
-            s.pr_state = "open"
+            # T-126: a split-approved open also carries stack metadata --
+            # record/replace this entry in pr_stack. A plain (non-split) open
+            # carries no "stack" key, so pr_stack stays untouched (empty) for
+            # every ticket that never split -- ships dark. Only index 0 (or a
+            # plain, non-stack open) mirrors into the ticket-wide pr_number/
+            # pr_url/pr_draft/pr_state fields below -- those always track
+            # whichever PR is CURRENTLY the active poll target, and every
+            # later stack entry is opened well before it becomes that (see
+            # ops.check_merged, which fires a further, stack-metadata-free
+            # PrOpened to advance the mirror once the active entry merges).
+            stack_meta = p.get("stack")
+            is_stack_entry = isinstance(stack_meta, dict) and isinstance(stack_meta.get("index"), int)
+            if is_stack_entry:
+                entry = {
+                    "index": stack_meta["index"], "total": stack_meta.get("total"),
+                    "number": p.get("number"), "url": p.get("url"),
+                    "branch": stack_meta.get("branch"), "base": stack_meta.get("base"),
+                    "merged": False,
+                }
+                s.pr_stack = [e for e in s.pr_stack if e.get("index") != entry["index"]] + [entry]
+            if not is_stack_entry or stack_meta.get("index") == 0:
+                s.pr_number = p.get("number", s.pr_number)
+                s.pr_url = p.get("url", s.pr_url)
+                s.pr_draft = p.get("draft", True)
+                s.pr_state = "open"
         elif t == E.PR_UPDATED:
-            if p.get("merged"):
-                s.pr_state = "merged"
-            if "draft" in p:
-                s.pr_draft = p["draft"]
+            # T-126: a stack-bookkeeping update (one non-final stack entry
+            # merging) is scoped to ITS OWN entry only -- it must never touch
+            # the ticket-wide pr_state/pr_draft mirror below, which always
+            # reflects whichever PR is currently the active poll target (a
+            # plain PrOpened advances that mirror separately, see check_merged).
+            stack_idx = p.get("stack_index")
+            if isinstance(stack_idx, int):
+                for e in s.pr_stack:
+                    if e.get("index") == stack_idx:
+                        e["merged"] = bool(p.get("merged", e.get("merged")))
+                        break
+            else:
+                if p.get("merged"):
+                    s.pr_state = "merged"
+                if "draft" in p:
+                    s.pr_draft = p["draft"]
         elif t == E.CI_OBSERVED:
             s.ci_state = p.get("state", s.ci_state)
             s.failing_checks = p.get("failing_checks", [])
