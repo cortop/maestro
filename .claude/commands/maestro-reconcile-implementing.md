@@ -42,7 +42,9 @@ with the **Read** tool — never `cat`/`sed`, this preamble reads no file via th
   with a reason citing a failing AC, `qa` sent you back; see step 1 below. If instead it reads
   `in-review -> implementing` or `awaiting-ci -> implementing` with a reason starting `changes
   requested:`, `review comment:` or `approved with comments:`, a PR reviewer's feedback sent you back — see the review-
-  feedback case in step 1 below, a different fix round from the `qa` one.
+  feedback case in step 1 below, a different fix round from the `qa` one. A third shape,
+  `awaiting-human -> implementing` with a reason starting `pr split decision:`, means a PR-split
+  proposal (T-126) was just answered — see step 1's fourth case.
 
 If the snapshot shows pending inbox commands, fold them before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
@@ -153,7 +155,14 @@ Otherwise implement the spec's Acceptance criteria:
    escalate. Evaluate EACH comment (the approval body and every `path:line:` inline comment,
    separated by ` | `) — address what is warranted with a real change, and for every comment you
    skip append a `Note` (`approved with comments: <that comment> -- no change: <why>`) so the human
-   sees the evaluation. Otherwise, make the change fresh.
+   sees the evaluation.
+   **If a PR-split proposal was answered instead** (the most recent phase-history transition is
+   `awaiting-human -> implementing` with a reason starting `pr split decision:` — the verbatim
+   answer is right there in the reason): this is a **split-decision round** (T-126), not a fresh
+   implementation or a fix — the code was already fully implemented and tests were already green
+   before you asked. Skip straight to step 5's size-gated PR step below, which reads this same
+   answer to decide between the approved stack and the single PR you deferred.
+   Otherwise, make the change fresh.
 2. **Tests are the proof — QA against the real app, not mocks.** Every change ships with a test
    that exercises the actual surface and shows the feature working end-to-end: drive the real
    `maestro` CLI / a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`) over a temp
@@ -207,13 +216,28 @@ Otherwise implement the spec's Acceptance criteria:
    the real evidence (a test name, a diff hunk), never rubber-stamp it. The enforced gates
    (unverified ACs, a failing spec-axis QA verdict) live on `qa`'s own `set-phase awaiting-ci`
    call, in its phase file — verify every AC here so that gate passes cleanly there.
-5. Commit, push, open a **draft** PR with an AC-to-evidence table, and record it idempotently —
-   or, on a fix round, just push the fix (the block below already no-ops the PR creation once one
-   exists). The body's table is sourced from the `verify-ac` calls above (or `maestro snapshot
-   "$KEY"` -> `ac_verified` for the what/where/result):
+5. Commit your work — then, before opening a fresh PR or pushing further commits to one already
+   open, check whether the branch's diff against `<BASE>` has grown past the configured size
+   threshold (T-126), measured deterministically rather than eyeballed:
    ```bash
    git -C <WT> add -A
    git -C <WT> commit -q -m "$KEY: <subject>"
+   ```
+   **If this is a split-decision round** (step 1's fourth case): there is nothing new to commit —
+   the commit above is a no-op — so skip the `pr-size` check below and act on the verbatim answer
+   from the phase-history reason instead: an approving answer means open the approved stack (see
+   "Approved split" below); anything else means push and open the single PR exactly as the
+   `exceeds: false` case below.
+
+   **Otherwise**, measure the diff and act on `exceeds`:
+   ```bash
+   maestro pr-size "$KEY"   # -> {lines_changed, threshold, exceeds, tree}
+   ```
+   **`exceeds: false`** (including threshold `0`, which disables the check entirely — byte-identical
+   to before this ticket) — push and open (or update) the PR exactly as today, with an
+   AC-to-evidence table sourced from the `verify-ac` calls above (or `maestro snapshot "$KEY"` ->
+   `ac_verified`):
+   ```bash
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
    gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY" --draft --title "$KEY: <subject>" --body "<motivation/changes> ## AC-to-evidence
 
@@ -243,21 +267,61 @@ Otherwise implement the spec's Acceptance criteria:
    --requeue 300` instead of `qa` — a human is already reviewing this PR directly on GitHub, so
    this hands back to CI/that review rather than an internal re-review; push the commit first if
    you made a code change, or skip the push entirely if this round only recorded a Note.
+
+   **`exceeds: true`** — do not push or open/grow the PR yet. Split the diff into an ordered stack
+   of smaller PRs instead, by file: each entry names which files it touches, which spec ACs it
+   covers, and which entry it's based on (entry 1 depends on nothing beyond `<BASE>`; entry *n*
+   depends on entry *n-1*). Propose it — `--qid` binds the proposal to this exact tree state, so an
+   already-answered proposal for it passes straight through on a later pass and any new tree (a
+   further commit) re-evaluates from scratch, same idiom as the H4 test-deletion gate:
+   ```bash
+   maestro ask "$KEY" "$KEY: this diff is <lines_changed> lines changed (threshold <threshold>) -- proposing a stack instead of one PR -- 1) <files> (AC <n>) based on <BASE> | 2) <files> (AC <n>) based on <PREFIX>$KEY-1 | more entries as needed -- approve to open the stack, or say what to keep as one PR instead." --qid "split-$KEY-<tree>"
+   ```
+   Then exit (`maestro release "$KEY"`) without pushing — the dispatcher wakes `awaiting-human` on
+   the answer, which routes back here (see step 1's fourth case) to act on it.
+
+   **Approved split** — label each stack entry on the branch's already-linear commit history (no
+   rewrite) and open its PR oldest-first, each based on the previous entry's branch, never
+   force-pushed:
+   ```bash
+   git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
+   git -C <WT> branch "<PREFIX>$KEY-1" <sha of entry 1's last commit>
+   git -C <WT> push -q -u origin "<PREFIX>$KEY-1"
+   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY-1" --draft --title "$KEY: <subject> (1/<N>)" --body "..."
+   ```
+   repeat for entries `2..N`, each based on `<PREFIX>$KEY-<n-1>` instead of `<BASE>` (the last
+   entry may just be `<PREFIX>$KEY` at `HEAD` itself — no extra branch needed). Record entry 0 —
+   the first PR, the only one QA/CI/review ever poll directly — with the normal `PrOpened` call
+   plus a `stack` sub-payload, and every later entry with the same event type (T-126 — see
+   `ops.check_merged`, which advances `pr_number`/`pr_url` down the stack as each entry merges,
+   finalizing the ticket only once the last one does):
+   ```bash
+   maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr1-number>,\"url\":\"<pr1-url>\",\"draft\":true,\"stack\":{\"index\":0,\"total\":<N>,\"branch\":\"<PREFIX>$KEY-1\",\"base\":\"<BASE>\"}}" --step-id "pr-$KEY"
+   maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr2-number>,\"url\":\"<pr2-url>\",\"draft\":true,\"stack\":{\"index\":1,\"total\":<N>,\"branch\":\"<PREFIX>$KEY-2\",\"base\":\"<PREFIX>$KEY-1\"}}" --step-id "pr-stack-$KEY-1"
+   maestro set-phase "$KEY" qa --requeue 300
+   ```
+   (one `PrOpened` append per entry, `index` 0-based in stack order, `step-id` `"pr-$KEY"` for
+   index 0 and `"pr-stack-$KEY-<index>"` for every later one, so a crash-and-respawn mid-step never
+   double-opens a PR).
    Push normally — never force-push. Let hooks run — never skip them. Test the real behavior,
    never a mock. Then exit; the dispatcher's next sweep spawns the independent `qa` reconciler
    (`skills/maestro-reconcile-qa.md`) — this session never judges its own diff, and does not poll
    CI itself.
 
-**Done when** either: (a) a fresh implementation — tests are green, every spec AC has a
-`verify-ac` attestation, a PR is open with `PrOpened` recorded, and `set-phase qa` has appended,
-handing review off to the independent `qa` phase; (b) a fix round — the fix is made per `qa`'s
-evidence, tests are green, `impl-turn` recorded the round (and did not park the ticket), the fix
-is pushed, and `set-phase qa` has appended again to re-request review; (c) a conflict-only pass —
-the rebase is clean (or escalated via `maestro ask` with a `conflict-$KEY-<n>` qid), tests are
-green, and the branch is pushed with `set-phase awaiting-ci` appended; (d) a review-feedback
+**Done when** one of the following holds: (a) a fresh implementation — tests are green, every spec
+AC has a `verify-ac` attestation, a PR is open with `PrOpened` recorded, and `set-phase qa` has
+appended, handing review off to the independent `qa` phase; (b) a fix round — the fix is made per
+`qa`'s evidence, tests are green, `impl-turn` recorded the round (and did not park the ticket), the
+fix is pushed, and `set-phase qa` has appended again to re-request review; (c) a conflict-only
+pass — the rebase is clean (or escalated via `maestro ask` with a `conflict-$KEY-<n>` qid), tests
+are green, and the branch is pushed with `set-phase awaiting-ci` appended; (d) a review-feedback
 round — the comment in the routing reason was evaluated and either addressed with a pushed code
 change or given a recorded `Note` explaining why no change is needed, tests are green if code
-changed, and `set-phase awaiting-ci` has appended; or (e) tests did not converge within this
-session and you appended `maestro fail` naming why, or `impl-turn` parked the ticket on the
-`max_impl_turns` ceiling (it has already called `ops.fail` itself — nothing further to append).
+changed, and `set-phase awaiting-ci` has appended; (e) tests did not converge within this session
+and you appended `maestro fail` naming why, or `impl-turn` parked the ticket on the
+`max_impl_turns` ceiling (it has already called `ops.fail` itself — nothing further to append);
+(f) an oversized diff (T-126) — `pr-size` reported `exceeds: true` and `maestro ask` recorded a
+`split-$KEY-<tree>` proposal, with nothing pushed this pass; or (g) a split-decision round — the
+human's answer was read and either the approved stack was opened (one `PrOpened` per entry,
+`set-phase qa` appended) or the single PR was opened as in (a) after a decline.
 In every case, `maestro release "$KEY"` has run.

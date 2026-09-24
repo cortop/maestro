@@ -47,6 +47,10 @@ Inspect each qid key in `answered_questions`:
 - **any qid starts with `conflict-`** → an escalated merge conflict the implementing reconciler
   could not auto-resolve; the human answered with guidance. Route back to apply it:
   `maestro set-phase "$KEY" implementing --reason "retry conflict resolution: <verbatim>"`
+- **any qid starts with `split-`** → a PR-split proposal (T-126) the implementing reconciler
+  deferred instead of opening/growing the PR; route back with the verbatim answer so it can decide
+  between the approved stack and the single PR:
+  `maestro set-phase "$KEY" implementing --reason "pr split decision: <verbatim>"`
 
 **If `KIND == research`** (research approval question — qid starts with `research-approval-`):
 Read the proposal at `$MHOME/tickets/$KEY/proposal.md`. Inspect the answer:
@@ -87,6 +91,6 @@ can't sleep forever). Recover by re-deriving the phase so this step still makes 
 `maestro set-phase "$KEY" triaging --reason "stranded recovery"`.
 
 **Done when:** exactly one `set-phase`/`finalize` path above has appended its event (conflict
-retry, research-ticket mint + finalize, standard approve/reject/modify, or stranded recovery),
-`maestro inbox-ack "$KEY"` has run last for any answer-consuming path, and
+retry, pr-split decision retry, research-ticket mint + finalize, standard approve/reject/modify, or
+stranded recovery), `maestro inbox-ack "$KEY"` has run last for any answer-consuming path, and
 `maestro release "$KEY"` has run.
