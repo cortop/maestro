@@ -2706,9 +2706,7 @@ def test_reconciler_literal_coverage_matches_skills():
         gh_subcommands.update(m.group(1) for m in gh_re.finditer(text))
 
     assert gh_subcommands == {"pr"}
-    assert git_subcommands == {
-        "add", "branch", "commit", "diff", "fetch", "log", "merge", "push", "rebase",
-    }
+    assert git_subcommands == {"add", "commit", "diff", "fetch", "log", "merge", "push", "rebase"}
 
     git_covered = {t.removeprefix("Bash(git ").removesuffix(":*)")
                    for t in disp.RECONCILER_LITERAL_COVERAGE["Bash(git:*)"]}
