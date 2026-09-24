@@ -16,6 +16,8 @@ from maestro.cli import main
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase, SLEEPING_PHASES
 
+from conftest import git, make_origin_and_repo
+
 
 class FakeVCS:
     """The only mock: the external GitHub boundary (the VCS Protocol seam).
@@ -424,6 +426,83 @@ def test_sync_vcs_merged_pr_finalizes(cfg, monkeypatch):
     snap = snap_mod.load(cfg.home, "T-5")
     assert snap.phase == Phase.DONE.value
     assert snap.pr_state == "merged"
+
+
+def _seed_stack(cfg, key, phase, *, n=3):
+    """T-126: a ticket with an approved *n*-entry PR-split stack, mirroring
+    exactly what the implementing skill's "Approved split" block appends --
+    one `PrOpened` per entry (index 0-based, PR numbers 100, 101, 102, ...),
+    each carrying its own `stack` sub-payload."""
+    store.atomic_write(
+        store.spec_path(cfg.home, key),
+        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n",
+    )
+    spec_hash = disp.spec_hash_on_disk(cfg.home, key)
+    event_log.append(cfg.home, key, "TicketCreated", {"title": key, "spec_hash": spec_hash},
+                     actor="d")
+    for i in range(n):
+        pr = 100 + i
+        base = "main" if i == 0 else f"maestro/{key}-{i}"
+        event_log.append(cfg.home, key, "PrOpened", {
+            "number": pr, "url": f"https://github.com/x/y/pull/{pr}", "draft": False,
+            "stack": {"index": i, "total": n, "branch": f"maestro/{key}-{i+1}", "base": base},
+        }, actor="r")
+    event_log.append(cfg.home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
+    return snap_mod.rebuild(cfg.home, key)
+
+
+def _real_worktree(cfg, tmp_path, key):
+    """A REAL git worktree, registered with a real repo (never a plain mkdir'd
+    directory) -- so a `git worktree remove` this test's assertions depend on
+    not happening is a meaningful negative, not an accidental one from `git`
+    simply failing against an unregistered directory."""
+    _, repo = make_origin_and_repo(tmp_path, name=f"{key}-repo")
+    cfg.repo_path = str(repo)
+    wt = cfg.home / "worktrees" / key
+    git("worktree", "add", "-q", "-b", f"maestro/{key}", str(wt), "main", cwd=repo)
+    return wt
+
+
+def test_sync_vcs_stack_advances_without_removing_worktree(cfg, monkeypatch, tmp_path):
+    """A mid-stack merge advances pr_number to the next entry and re-polls it
+    fresh next sweep -- it must NOT remove the ticket's worktree (the ticket
+    isn't done) and must not carry over the just-merged PR's stale CI/draft
+    status onto the still-open next entry."""
+    fake = FakeVCS(statuses={
+        100: {"state": "MERGED", "mergeable": "UNKNOWN", "head_sha": "sha100",
+              "ci_state": "passing", "failing_checks": []},
+        101: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha101",
+              "ci_state": "unknown", "failing_checks": []},
+    })
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed_stack(cfg, "T-5", Phase.AWAITING_CI, n=3)
+    wt = _real_worktree(cfg, tmp_path, "T-5")
+
+    disp.sync_vcs(cfg, now=1000)
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.AWAITING_CI.value  # not finalized
+    assert snap.pr_number == 101
+    assert wt.exists()  # worktree stays -- more of the stack still to merge
+
+    disp.sync_vcs(cfg, now=2000)  # next sweep polls the NEW pr_number fresh
+    assert fake.status_calls[-1] == ("x/y", 101)
+    assert snap_mod.load(cfg.home, "T-5").ci_state == "unknown"  # 101's own state
+
+
+def test_sync_vcs_stack_finalizes_and_removes_worktree_on_last_merge(cfg, monkeypatch, tmp_path):
+    fake = FakeVCS(statuses={
+        100: {"state": "MERGED", "mergeable": "UNKNOWN", "head_sha": "sha100",
+              "ci_state": "passing", "failing_checks": []},
+    })
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed_stack(cfg, "T-5", Phase.AWAITING_CI, n=1)  # a 1-entry "stack" -- last == only
+    wt = _real_worktree(cfg, tmp_path, "T-5")
+
+    disp.sync_vcs(cfg, now=1000)
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.DONE.value
+    assert snap.pr_state == "merged"
+    assert not wt.exists()
 
 
 def test_sync_vcs_conflicting_pr_routes_to_implementing(cfg, monkeypatch):

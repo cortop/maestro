@@ -301,6 +301,23 @@ class Snapshot:
     # reset by a phase change -- a head SHA's one rerun stays recorded across
     # a fix-round bounce as long as the SHA itself hasn't moved.
     ci_reruns: dict[str, dict] = field(default_factory=dict)
+    # T-126: an approved PR split's ordered stack, from PrOpened events whose
+    # payload carries a "stack" sub-dict ({index, total, number, url, branch,
+    # base}) -- a plain (non-split) PrOpened carries no such field and this
+    # stays empty, so a threshold-0/under-threshold ticket is byte-identical
+    # to before this field existed. Each entry: {index, total, number, url,
+    # branch, base, merged, ci_state, qa_verdict}. `pr_number`/`pr_url`/
+    # `pr_state`/`pr_draft` above always mirror whichever PR is CURRENTLY
+    # being polled -- entry 0 at open time, advancing to the next unmerged
+    # entry as `ops.check_merged` folds a further PrOpened each time one
+    # merges (see that function's docstring). `ci_state`/`qa_verdict` treat
+    # each entry as its own subticket: a CiObserved or a qa-gated
+    # PhaseChanged into AWAITING_CI is stamped onto whichever entry is
+    # CURRENTLY the active poll target at that point in the fold, so an
+    # entry's status survives the mirror later advancing past it -- a human
+    # reading `pr_stack` can see entry 0 passed CI/QA even after entry 1
+    # becomes the active poll target.
+    pr_stack: list[dict] = field(default_factory=list)
 
     @property
     def question_open(self) -> bool:
@@ -505,6 +522,19 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 s.fold_warnings.append(f"seq {seq} {t}: dropped -- phase is DONE (absorbing)")
             else:
                 new_phase, warn = _coerce_phase(p, s.phase)
+                # T-126: a qa-gated hop into AWAITING_CI ("qa: ..." is the
+                # literal reason the qa skill's own set-phase call always
+                # uses) means every current-hash AC just passed spec-axis QA
+                # -- stamp that onto whichever stack entry is CURRENTLY the
+                # active poll target, so each stacked PR keeps its own QA
+                # record even once the mirror later advances past it. A
+                # non-split ticket's empty pr_stack makes this a no-op.
+                if (new_phase == Phase.AWAITING_CI.value
+                        and p.get("reason", "").startswith("qa:") and s.pr_stack):
+                    for e in s.pr_stack:
+                        if e.get("number") == s.pr_number:
+                            e["qa_verdict"] = "pass"
+                            break
                 s.phase = new_phase
                 s.failure_count = 0
                 s.burning = False
@@ -523,18 +553,69 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             if qid:
                 s.answered_questions[qid] = p.get("answer", "")
         elif t == E.PR_OPENED:
-            s.pr_number = p.get("number", s.pr_number)
-            s.pr_url = p.get("url", s.pr_url)
-            s.pr_draft = p.get("draft", True)
-            s.pr_state = "open"
+            # T-126: a split-approved open also carries stack metadata --
+            # record/replace this entry in pr_stack. A plain (non-split) open
+            # carries no "stack" key, so pr_stack stays untouched (empty) for
+            # every ticket that never split -- ships dark. Only index 0 (or a
+            # plain, non-stack open) mirrors into the ticket-wide pr_number/
+            # pr_url/pr_draft/pr_state fields below -- those always track
+            # whichever PR is CURRENTLY the active poll target, and every
+            # later stack entry is opened well before it becomes that (see
+            # ops.check_merged, which fires a further, stack-metadata-free
+            # PrOpened to advance the mirror once the active entry merges).
+            stack_meta = p.get("stack")
+            is_stack_entry = isinstance(stack_meta, dict) and isinstance(stack_meta.get("index"), int)
+            if is_stack_entry:
+                entry = {
+                    "index": stack_meta["index"], "total": stack_meta.get("total"),
+                    "number": p.get("number"), "url": p.get("url"),
+                    "branch": stack_meta.get("branch"), "base": stack_meta.get("base"),
+                    "merged": False, "ci_state": None, "qa_verdict": None,
+                }
+                s.pr_stack = [e for e in s.pr_stack if e.get("index") != entry["index"]] + [entry]
+            if not is_stack_entry or stack_meta.get("index") == 0:
+                s.pr_number = p.get("number", s.pr_number)
+                s.pr_url = p.get("url", s.pr_url)
+                s.pr_draft = p.get("draft", True)
+                s.pr_state = "open"
         elif t == E.PR_UPDATED:
-            if p.get("merged"):
-                s.pr_state = "merged"
-            if "draft" in p:
-                s.pr_draft = p["draft"]
+            # T-126: a stack-bookkeeping update (one non-final stack entry
+            # merging) is scoped to ITS OWN entry only -- it must never touch
+            # the ticket-wide pr_state/pr_draft mirror below, which always
+            # reflects whichever PR is currently the active poll target (a
+            # plain PrOpened advances that mirror separately, see check_merged).
+            stack_idx = p.get("stack_index")
+            if isinstance(stack_idx, int):
+                for e in s.pr_stack:
+                    if e.get("index") == stack_idx:
+                        e["merged"] = bool(p.get("merged", e.get("merged")))
+                        break
+            elif p.get("number", s.pr_number) == s.pr_number:
+                # T-126: scoped to the CURRENTLY-mirrored PR number -- an
+                # update for a PR that isn't (or is no longer) the active
+                # poll target must never mutate the ticket-wide mirror. A
+                # missing "number" (the plain finalize-on-merge fallback,
+                # `pr-merged-<key>`, predates this field and every non-stack
+                # ticket's history lacks it) defaults to matching, so this
+                # stays byte-identical for every ticket that never split.
+                # This is what keeps a stray/late update about a non-root
+                # stack entry from clobbering the mirror's actual state (the
+                # 2026-09-24 T-126 "tip got undrafted instead of root"
+                # incident: an update for the tip PR landed while an older
+                # fold still had the tip mirrored, and nothing here checked
+                # that the update's number still matched).
+                if p.get("merged"):
+                    s.pr_state = "merged"
+                if "draft" in p:
+                    s.pr_draft = p["draft"]
         elif t == E.CI_OBSERVED:
             s.ci_state = p.get("state", s.ci_state)
             s.failing_checks = p.get("failing_checks", [])
+            if s.pr_stack:
+                for e in s.pr_stack:
+                    if e.get("number") == s.pr_number:
+                        e["ci_state"] = s.ci_state
+                        break
         elif t == E.CI_RERUN_REQUESTED:
             head_sha = p.get("head_sha")
             if head_sha:

@@ -1843,18 +1843,44 @@ def ask_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconci
 
 
 def check_merged(cfg: Config, key: str, pr_state: str, *, actor: str = "reconciler") -> bool:
-    """Finalize if the PR is merged — callable from any phase (idempotent).
+    """Advance *key* off a MERGED poll of its currently-tracked PR — callable
+    from any phase (idempotent). Returns True iff this call changed state
+    (finalized OR advanced a stacked PR's pointer to the next entry), False if
+    the state isn't MERGED or the ticket is already done -- callers that poll
+    `snap.pr_number` (e.g. `dispatcher._route_if_merged`) should treat True as
+    "my `snap`/`status` are now stale, re-poll fresh" in both cases, not just
+    finalization.
 
-    Records PrUpdated(merged=True) then Finalized. Returns True if finalized,
-    False if the state isn't MERGED or the ticket is already done.
+    T-126: `snap.pr_stack` (empty for a today's-single-PR ticket, unaffected)
+    is the ordered list of stacked PRs `implementing` opened for an approved
+    split. When the just-merged PR is a non-final stack entry, this records it
+    merged and advances `pr_number`/`pr_url` (via a plain PrOpened, reusing
+    fold's existing mirror logic) to the NEXT entry instead of finalizing —
+    the ticket completes only when the LAST stack entry merges, at which point
+    this falls through to the same Finalized path a non-stacked PR always took.
     """
     if pr_state.upper() != "MERGED":
         return False
     snap = snap_mod.load(cfg.home, key)
     if snap.phase == Phase.DONE.value:
         return False
-    _append(cfg, key, E.PR_UPDATED, {"merged": True},
-            actor=actor, sid=f"pr-merged-{key}")
+    stack = snap.pr_stack
+    if stack:
+        current = next((e for e in stack
+                        if e.get("number") == snap.pr_number and not e.get("merged")), None)
+        if current is not None:
+            idx = current["index"]
+            nxt = next((e for e in stack if e.get("index") == idx + 1), None)
+            if nxt is not None:
+                _append(cfg, key, E.PR_UPDATED, {"merged": True, "stack_index": idx},
+                        actor=actor, sid=f"pr-stack-merged-{key}-{idx}")
+                _append(cfg, key, E.PR_OPENED,
+                        {"number": nxt["number"], "url": nxt["url"], "draft": nxt.get("draft", True)},
+                        actor=actor, sid=f"pr-stack-advance-{key}-{nxt['index']}")
+                return True
+            _append(cfg, key, E.PR_UPDATED, {"merged": True, "stack_index": idx},
+                    actor=actor, sid=f"pr-stack-merged-{key}-{idx}")
+    _append(cfg, key, E.PR_UPDATED, {"merged": True}, actor=actor, sid=f"pr-merged-{key}")
     finalize(cfg, key, actor=actor)
     return True
 

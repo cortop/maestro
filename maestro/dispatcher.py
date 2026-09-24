@@ -1664,10 +1664,19 @@ def sync_vcs(cfg: Config, now: float) -> dict:
 
 def _route_if_merged(cfg: Config, key: str, status: dict,
                      worktree_removal_errors: dict | None = None) -> bool:
+    """True iff `ops.check_merged` changed *key*'s state this poll -- callers
+    must treat that as "the `snap`/`status` this loop iteration was holding
+    are now stale, stop using them" in both of its two shapes (T-126): a
+    finalize (the ticket is DONE, its worktree is removed below) OR a stacked
+    PR's pointer advancing to the next entry (the ticket is NOT done -- the
+    worktree stays, and the caller must re-poll the new `pr_number` fresh next
+    sweep rather than keep going with this tick's now-superseded status)."""
     from . import ops
     from . import repos as repos_mod
     if not ops.check_merged(cfg, key, status.get("state", ""), actor="dispatcher"):
         return False
+    if snap_mod.load(cfg.home, key).phase != Phase.DONE.value:
+        return True  # advanced to the next stack entry -- not finalized, no worktree removal
     import subprocess
     wt = store.worktree_path(cfg.home, key)
     if wt.exists():
