@@ -450,10 +450,11 @@ MAESTRO_OWN_REPO_EXTRA_TOOLS = (
 #     skills/maestro-reconcile-implementing.md -- the only reconciler skill
 #     that invokes ``gh`` at all).
 #   - git: fetch/merge/rebase/log/add/commit/push (same skill's rebase +
-#     commit flow) plus diff (skills/maestro-reconcile-qa.md's read-only
-#     ``git diff --no-index``, T-94's rewritten test grants only the 7
-#     implementing-side subcommands and confirms it still WARNs on the
-#     missing ``diff`` one). test_dispatcher.py's
+#     commit flow) plus branch (T-126's stacked-PR split: one label per stack
+#     entry on the existing linear commit history, no rewrite) plus diff
+#     (skills/maestro-reconcile-qa.md's read-only ``git diff --no-index``,
+#     T-94's rewritten test grants only the 7 implementing-side subcommands
+#     and confirms it still WARNs on the missing ``diff`` one). test_dispatcher.py's
 #     test_reconciler_literal_coverage_matches_skills keeps this whole table
 #     honest against a fresh grep of every skills/maestro-reconcile-*.md, so
 #     a future skill invoking e.g. ``gh run view`` or ``git stash`` doesn't
@@ -471,7 +472,7 @@ MAESTRO_OWN_REPO_EXTRA_TOOLS = (
 RECONCILER_LITERAL_COVERAGE: dict[str, tuple[str, ...]] = {
     "Bash(gh:*)": ("Bash(gh pr:*)",),
     "Bash(git:*)": (
-        "Bash(git add:*)", "Bash(git commit:*)", "Bash(git diff:*)",
+        "Bash(git add:*)", "Bash(git branch:*)", "Bash(git commit:*)", "Bash(git diff:*)",
         "Bash(git fetch:*)", "Bash(git log:*)", "Bash(git merge:*)",
         "Bash(git push:*)", "Bash(git rebase:*)",
     ),
