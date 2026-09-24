@@ -419,6 +419,15 @@ class Config:
     # refuses to start, naming the knob, rather than raising later mid-poll.
     review_noise_patterns: list = field(default_factory=list)
     review_noise_authors: list = field(default_factory=list)
+    # T-126: lines changed (additions + deletions vs base) above which the
+    # `implementing` skill stops before `gh pr create` (or before pushing
+    # further commits to an already-open PR) and proposes a stack of smaller
+    # PRs via `maestro ask` instead -- measured deterministically by
+    # `ops.pr_size` (a `git diff --numstat` helper), never eyeballed by the
+    # agent. 0 disables the check entirely (ships dark at that value). Per-
+    # [repos.<name>] override wins, same "table wins, unset inherits"
+    # precedence as `test_command` -- see `repos.RepoBinding.pr_split_threshold`.
+    pr_split_threshold: int = 800
     raw: dict = field(default_factory=dict)
 
 
@@ -437,7 +446,7 @@ _REPO_TABLE_KEYS = frozenset({
     # T-123: per-repo overrides of the board-wide [maestro] CI auto-rerun
     # defaults above -- same "table wins, unset inherits" precedence.
     "ci_auto_rerun", "ci_rerun_grace", "ci_failure_excerpt",
-    "file_hints",
+    "file_hints", "pr_split_threshold",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -660,6 +669,21 @@ def _validate_review_noise_patterns(patterns) -> None:
                 f"regex {pat!r}: {exc}") from exc
 
 
+def _validate_pr_split_threshold(value, *, where: str) -> int:
+    """T-126: fail `config.load()` closed on a non-integer/negative
+    `pr_split_threshold` -- same posture as `min_spawn_interval`: a typo'd
+    negative value is worse than 0 (it would silently disable the check with
+    no feedback), so it's a loud config error instead. 0 is a legitimate,
+    documented "disabled" value."""
+    try:
+        as_int = int(value)
+    except (TypeError, ValueError):
+        raise store.MaestroError(f"config.toml: {where} must be an integer, got {value!r}")
+    if as_int < 0:
+        raise store.MaestroError(f"config.toml: {where} must be >= 0, got {as_int}")
+    return as_int
+
+
 def _validate_skill_name(value, *, where: str) -> None:
     """T-115: fail `config.load()` closed on a malformed `post_qa_skill` value --
     same posture as `language` (`testlang.SUPPORTED`) and `test_selector`
@@ -749,6 +773,9 @@ def load(home_arg: str | None = None) -> Config:
         cfg.ci_auto_rerun = bool(m.get("ci_auto_rerun", cfg.ci_auto_rerun))
         cfg.ci_rerun_grace = int(m.get("ci_rerun_grace", cfg.ci_rerun_grace))
         cfg.ci_failure_excerpt = bool(m.get("ci_failure_excerpt", cfg.ci_failure_excerpt))
+        cfg.pr_split_threshold = _validate_pr_split_threshold(
+            m.get("pr_split_threshold", cfg.pr_split_threshold),
+            where="[maestro] pr_split_threshold")
         raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
         cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
         raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
@@ -856,6 +883,14 @@ def load(home_arg: str | None = None) -> Config:
                 # T-124: bool, no validation needed -- None (absent from the table)
                 # inherits cfg.file_hints (see repos.RepoBinding.file_hints).
                 raw_file_hints = table.get("file_hints")
+                # T-126: None (unset) inherits cfg.pr_split_threshold -- same
+                # "table wins, unset inherits" precedence as test_command above.
+                # A SET value is fail-closed validated the same way the
+                # board-wide one is (an int, >= 0).
+                raw_pr_split_threshold = table.get("pr_split_threshold")
+                if raw_pr_split_threshold is not None:
+                    raw_pr_split_threshold = _validate_pr_split_threshold(
+                        raw_pr_split_threshold, where=f"[repos.{name}] pr_split_threshold")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -917,6 +952,10 @@ def load(home_arg: str | None = None) -> Config:
                     # T-124: this repo's file_hints override -- None (unset) inherits
                     # cfg.file_hints (see repos.RepoBinding.file_hints).
                     "file_hints": bool(raw_file_hints) if raw_file_hints is not None else None,
+                    # T-126: this repo's pr_split_threshold override -- validated
+                    # above; None (unset) inherits cfg.pr_split_threshold (see
+                    # repos.RepoBinding.pr_split_threshold).
+                    "pr_split_threshold": raw_pr_split_threshold,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
@@ -1297,6 +1336,10 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # config load closed.
 # review_noise_authors = []       # T-125: exact review-author logins (e.g. "github-actions[bot]")
                                   # filtered the same way as review_noise_patterns above.
+# pr_split_threshold = 800        # T-126: lines changed (additions + deletions vs base) above
+                                  # which `implementing` proposes a stack of smaller PRs
+                                  # (`maestro ask`) instead of opening/growing one big one. 0
+                                  # disables the check. Per-[repos.<name>] override wins.
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom
@@ -1435,6 +1478,9 @@ implementer = "claude_skill"
                                      # board-wide default.
 # file_hints = true                 # T-124: this repo's override of [maestro] file_hints
                                      # above -- unset inherits the board-wide default.
+# pr_split_threshold = 1500         # T-126: this repo's override of [maestro]
+                                     # pr_split_threshold above -- unset inherits the
+                                     # board-wide default.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see

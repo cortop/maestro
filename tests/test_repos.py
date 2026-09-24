@@ -74,7 +74,7 @@ def test_config_load_parses_repos_tables(home):
         "test_selector": None, "post_qa_skill": None,
         "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
         "ci_auto_rerun": None, "ci_rerun_grace": None, "ci_failure_excerpt": None,
-        "file_hints": None,
+        "file_hints": None, "pr_split_threshold": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
@@ -86,7 +86,7 @@ def test_config_load_parses_repos_tables(home):
         "test_selector": None, "post_qa_skill": None,
         "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
         "ci_auto_rerun": None, "ci_rerun_grace": None, "ci_failure_excerpt": None,
-        "file_hints": None,
+        "file_hints": None, "pr_split_threshold": None,
     }
 
 

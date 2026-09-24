@@ -949,6 +949,14 @@ def cmd_check_conflicts(args) -> int:
     return 0
 
 
+def cmd_pr_size(args) -> int:
+    """[agent] report this ticket's lines-changed vs base and whether it exceeds
+    the resolved pr_split_threshold (T-126) -- deterministic measurement the
+    `implementing` skill checks before opening/growing a PR."""
+    _print(ops.pr_size(_cfg(args), args.key))
+    return 0
+
+
 def cmd_verify_ac(args) -> int:
     """[agent] attest AC #n with structured evidence — content-hash keyed, idempotent."""
     evidence = {"what": args.what, "where": args.where, "result": args.result}
@@ -1718,6 +1726,10 @@ def build_parser() -> argparse.ArgumentParser:
              "[agent] record one implementing turn; parks the ticket past max_impl_turns")
     sp.add_argument("key"); sp.add_argument("--role", default="implementer")
     sp.add_argument("--actor", default="reconciler")
+    sp = add("pr-size", cmd_pr_size,
+             "[agent] report this ticket's lines-changed vs base and whether it exceeds pr_split_threshold")
+    sp.add_argument("key")
+
     sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with structured evidence (content-hash keyed)")
     sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")
     sp.add_argument("--what", required=True, help="what was run (e.g. a command or test)")

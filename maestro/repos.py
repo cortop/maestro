@@ -118,6 +118,11 @@ class RepoBinding:
     # reader `maestro/locate.py`/`context.regenerate` go through. False
     # (default) means `maestro/locate.py` computes nothing (ships dark).
     file_hints: bool = False
+    # T-126: this repo's pr_split_threshold override, already resolved against
+    # the board-wide [maestro] pr_split_threshold default -- see resolve(),
+    # the sole reader `ops.pr_size` goes through. 0 disables the check for
+    # this key.
+    pr_split_threshold: int = 800
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -185,6 +190,13 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         file_hints=(
             table["file_hints"] if table.get("file_hints") is not None else cfg.file_hints
         ),
+        # T-126: same "table wins, unset inherits" shape as prime_timeout/
+        # worktree_timeout above -- int-valued, so `or` (which would treat a
+        # configured 0 as unset) isn't the right check.
+        pr_split_threshold=(
+            table["pr_split_threshold"] if table.get("pr_split_threshold") is not None
+            else cfg.pr_split_threshold
+        ),
     )
 
 
@@ -233,6 +245,8 @@ def implicit_default(cfg: Config) -> RepoBinding:
         ci_failure_excerpt=cfg.ci_failure_excerpt,
         # T-124: ditto.
         file_hints=cfg.file_hints,
+        # T-126: ditto.
+        pr_split_threshold=cfg.pr_split_threshold,
     )
 
 
