@@ -37,6 +37,29 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
         draft = " [dim](draft)[/dim]" if snap.pr_draft else ""
         pr_info = f'[link="{snap.pr_url}"]#{snap.pr_number}[/link]{draft} ({v(snap.pr_state)})'
 
+    # T-127: a split PR (T-126) carries its own ordered `pr_stack` -- list every
+    # entry so a human can see how far the stack has got, not just the one PR
+    # currently being polled (`pr_info` above). Empty `pr_stack` (every ticket
+    # that never split) renders nothing here, byte-identical to before.
+    pr_stack_info = None
+    if snap.pr_stack:
+        lines = []
+        for e in sorted(snap.pr_stack, key=lambda e: e.get("index") or 0):
+            idx, total = e.get("index"), e.get("total")
+            pos = f"{idx + 1}/{total}" if idx is not None and total else _EM
+            number, url = e.get("number"), e.get("url")
+            link = f'[link="{url}"]#{number}[/link]' if url and number else v(number)
+            state = "merged" if e.get("merged") else "open"
+            branch, base = v(e.get("branch")), v(e.get("base"))
+            qa = e.get("qa_verdict") or "pending"
+            current = " [bold](current)[/bold]" if number == snap.pr_number else ""
+            lines.append(
+                f"{pos} {link} ({state}) {branch}→{base}"
+                f"  [dim]merged: {'yes' if e.get('merged') else 'no'}  qa: {_esc(qa)}[/dim]"
+                f"{current}"
+            )
+        pr_stack_info = "\n  ".join(lines)
+
     questions = _EM
     if snap.open_questions:
         lines = []
@@ -73,6 +96,8 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
         state = _esc(snap.last_error_state or "unknown")
         last_error_line = f"[red bold]PROVIDER[/red bold] ({state}) {last_error_line}"
 
+    pr_stack_line = f"[dim]PR stack[/dim]     {pr_stack_info}\n" if pr_stack_info else ""
+
     return (
         f"[bold]{v(title if title is not None else snap.title)}[/bold]\n\n"
         f"[dim]Key[/dim]           {v(snap.key)}\n"
@@ -81,6 +106,7 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
         f"[dim]Source[/dim]        {v(snap.source)}\n"
         f"[dim]External[/dim]      {external_info}\n"
         f"[dim]PR[/dim]            {pr_info}\n"
+        f"{pr_stack_line}"
         f"[dim]CI[/dim]            {v(snap.ci_state)}\n"
         f"[dim]Failures[/dim]      {snap.failure_count}\n"
         f"[dim]Last error[/dim]    {last_error_line}\n"

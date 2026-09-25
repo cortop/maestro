@@ -140,6 +140,32 @@ def test_ticket_rows_pr_label(home):
     assert rows[0][3] == "[link=https://github.com/x/y/pull/42]#42[/link]"
 
 
+def test_ticket_rows_pr_stack_shows_compact_progress_marker(home):
+    """T-127 AC3: a stacked ticket's row shows 'PR i/total' instead of a single link --
+    `i` tracks whichever entry is currently the active poll target."""
+    for i in range(3):
+        event_log.append(home, "T-1", "PrOpened", {
+            "number": 100 + i, "url": f"https://example.com/pull/{100 + i}", "draft": True,
+            "stack": {"index": i, "total": 3, "branch": f"maestro/T-1-{i+1}",
+                      "base": "main" if i == 0 else f"maestro/T-1-{i}"},
+        }, actor="r")
+    snap_mod.rebuild(home, "T-1")
+
+    rows = ticket_rows(home)
+    assert rows[0][3] == "PR 1/3"
+
+
+def test_ticket_rows_pr_stack_empty_renders_exactly_as_today(home):
+    """T-127 AC4: a non-split ticket's PR cell is untouched by pr_stack existing."""
+    event_log.append(home, "T-1", "PrOpened",
+                     {"number": 42, "url": "https://github.com/x/y/pull/42", "draft": True},
+                     actor="r", step_id="pr-T-1")
+    snap_mod.rebuild(home, "T-1")
+    assert snap_mod.load(home, "T-1").pr_stack == []
+    rows = ticket_rows(home)
+    assert rows[0][3] == "[link=https://github.com/x/y/pull/42]#42[/link]"
+
+
 def test_ticket_rows_phase_order(home):
     """Rows are sorted by WORKSTATE phase order (implementing before triaging)."""
     event_log.append(home, "A-1", "TicketCreated", {"title": "alpha"}, actor="d")
@@ -321,6 +347,59 @@ def test_render_detail_no_pr_shows_emdash():
     lines = [l for l in out.splitlines() if "PR" in l]
     assert lines, "Expected a PR line"
     assert "—" in lines[0]
+
+
+# --- PR stack (T-126/T-127) ---------------------------------------------------
+
+def test_render_detail_pr_stack_lists_every_entry_in_order():
+    """AC1/AC2: every pr_stack entry appears in index order as i/total #number
+    (state), with a link, its branch->base, and its own merged/QA status."""
+    snap = snap_mod.Snapshot(
+        key="T-1", phase="qa", pr_number=101, pr_url="https://example.com/pull/101",
+        pr_stack=[
+            {"index": 0, "total": 3, "number": 100, "url": "https://example.com/pull/100",
+             "branch": "maestro/T-1-1", "base": "main", "merged": True,
+             "ci_state": "passing", "qa_verdict": "pass"},
+            {"index": 1, "total": 3, "number": 101, "url": "https://example.com/pull/101",
+             "branch": "maestro/T-1-2", "base": "maestro/T-1-1", "merged": False,
+             "ci_state": None, "qa_verdict": None},
+            {"index": 2, "total": 3, "number": 102, "url": "https://example.com/pull/102",
+             "branch": "maestro/T-1-3", "base": "maestro/T-1-2", "merged": False,
+             "ci_state": None, "qa_verdict": None},
+        ],
+    )
+    out = _render_detail(snap)
+    assert "1/3" in out and "2/3" in out and "3/3" in out
+    assert "#100" in out and "#101" in out and "#102" in out
+    assert "maestro/T-1-1→main" in out
+    assert "maestro/T-1-2→maestro/T-1-1" in out
+    assert "merged: yes" in out
+    assert "merged: no" in out
+    assert "qa: pass" in out
+    # entry 1 (#101) mirrors snap.pr_number -- it's the current poll target
+    assert "(current)" in out
+
+
+def test_render_detail_empty_pr_stack_renders_exactly_as_today():
+    """AC4: a ticket that never split (empty pr_stack) shows no PR stack line at all."""
+    snap = snap_mod.Snapshot(key="T-2", phase="implementing",
+                             pr_number=7, pr_url="https://example.com/pull/7")
+    out = _render_detail(snap)
+    assert "PR stack" not in out
+
+
+def test_render_detail_pr_stack_valid_markup_with_bracketed_branch_name():
+    """A branch/base name (dynamic data) containing '[' must not corrupt the markup --
+    same escaping discipline as every other dynamic field in this pane."""
+    snap = snap_mod.Snapshot(
+        key="T-1", phase="qa", pr_number=101,
+        pr_stack=[
+            {"index": 0, "total": 1, "number": 101, "url": "https://example.com/pull/101",
+             "branch": "maestro/T-1[wip]", "base": "main", "merged": False,
+             "ci_state": None, "qa_verdict": None},
+        ],
+    )
+    _assert_valid_markup(_render_detail(snap))
 
 
 def test_render_detail_open_questions_rendered():
