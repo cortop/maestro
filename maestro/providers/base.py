@@ -120,6 +120,28 @@ class VCS(Protocol):
         """
         ...
 
+    def reply_to_review_comment(self, pr_number: int, comment_id: str, body: str,
+                                repo: str | None = None, env: dict | None = None) -> dict:
+        """T-128: reply to an INLINE review-thread comment (the numeric id
+        underneath ``review_feedback``'s own ``inline-<id>``, with the
+        ``inline-`` prefix already stripped by the caller) through the
+        thread's own ``/replies`` endpoint -- never a new top-level comment.
+        Returns ``{"ok": True}`` on success, or ``{"ok": False, "error": ...}``
+        classified the same way as ``pr_status``'s ``error`` field. ``env``
+        (GA-17): see ``pr_status``.
+        """
+        ...
+
+    def comment_pr(self, pr_number: int, body: str, repo: str | None = None,
+                   env: dict | None = None) -> dict:
+        """T-128: post one plain, top-level PR comment -- the fallback for a
+        review-body (non-inline) comment id, which GitHub has no threaded
+        reply endpoint for. Returns ``{"ok": True}``/``{"ok": False,
+        "error": ...}``, same shape as ``reply_to_review_comment``. ``env``
+        (GA-17): see ``pr_status``.
+        """
+        ...
+
 
 class Fetcher(Protocol):
     """Imports external work into maestro by writing to the ``_new`` inbox."""
@@ -155,6 +177,12 @@ class NullVCS:
     def failed_log_tail(self, run_id: str, max_bytes: int = 2048, repo: str | None = None,
                         env: dict | None = None) -> str:
         return ""
+    def reply_to_review_comment(self, pr_number: int, comment_id: str, body: str,
+                                repo: str | None = None, env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
+    def comment_pr(self, pr_number: int, body: str, repo: str | None = None,
+                   env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
 
 
 class NullFetcher:

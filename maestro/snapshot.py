@@ -318,6 +318,12 @@ class Snapshot:
     # reading `pr_stack` can see entry 0 passed CI/QA even after entry 1
     # becomes the active poll target.
     pr_stack: list[dict] = field(default_factory=list)
+    # T-128: comment_id -> [tree_sha, ...] already replied to, from
+    # ReviewReplyPosted events -- `ops.reply_review` consults this BEFORE
+    # calling the VCS provider, so a re-run at the same tree state (the worker
+    # cwd's HEAD sha unchanged) never posts a duplicate reply. Never reset by a
+    # phase change -- a comment's reply history survives a fix-round bounce.
+    review_replies: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def question_open(self) -> bool:
@@ -623,6 +629,12 @@ def fold(key: str, events: list[dict]) -> Snapshot:
         elif t == E.REVIEW_FEEDBACK_RECEIVED:
             if p.get("state") == "CHANGES_REQUESTED":
                 s.unresolved_reviews += 1
+        elif t == E.REVIEW_REPLY_POSTED:
+            cid, tree_sha = p.get("comment_id"), p.get("tree_sha")
+            if cid and tree_sha:
+                seen = s.review_replies.setdefault(cid, [])
+                if tree_sha not in seen:
+                    seen.append(tree_sha)
         elif t == E.IMPL_TURN:
             turn, warn = _coerce_turn(p, s.impl_turns)
             s.impl_turns = max(s.impl_turns, turn)

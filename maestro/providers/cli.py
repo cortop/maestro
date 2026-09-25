@@ -290,6 +290,36 @@ class GitHubCliVCS:
         data = out.encode("utf-8", errors="replace")
         return data[-max_bytes:].decode("utf-8", errors="replace")
 
+    def reply_to_review_comment(self, pr_number: int, comment_id: str, body: str,
+                                repo: str | None = None, env: dict | None = None) -> dict:
+        """T-128: thread a reply under an inline review comment -- the ``gh api``
+        POST GitHub itself calls a "reply", the only way to land in the SAME
+        thread rather than opening a new top-level one (`gh pr comment` cannot
+        target a thread at all). ``-f body=<...>`` is what tells ``gh api`` to
+        POST rather than its default GET (see ``_inline_review_comments``'s own
+        ``{owner}/{repo}`` fallback -- same shim, for when no repo is
+        configured/resolved)."""
+        slug = repo or (self.repos[0] if self.repos else None) or "{owner}/{repo}"
+        rc, out, err = _run(
+            ["gh", "api", f"repos/{slug}/pulls/{pr_number}/comments/{comment_id}/replies",
+             "-f", f"body={body}"], env=env)
+        if rc != 0:
+            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+        return {"ok": True}
+
+    def comment_pr(self, pr_number: int, body: str, repo: str | None = None,
+                   env: dict | None = None) -> dict:
+        """T-128: one plain, top-level PR comment -- the fallback for a
+        review-body (non-inline) id, which has no threaded-reply endpoint."""
+        repo = repo or (self.repos[0] if self.repos else None)
+        cmd = ["gh", "pr", "comment", str(pr_number), "--body", body]
+        if repo:
+            cmd += ["--repo", repo]
+        rc, out, err = _run(cmd, env=env)
+        if rc != 0:
+            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+        return {"ok": True}
+
 
 class CommandFetcher:
     """Runs an arbitrary import command (e.g. the old helsinki.sh) that is expected
