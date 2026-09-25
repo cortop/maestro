@@ -73,6 +73,17 @@ def _link(snap: snap_mod.Snapshot) -> str:
 
 
 def _pr_cell(snap: snap_mod.Snapshot) -> str:
+    # T-127: a split PR (T-126) shows a compact "PR i/total" progress marker
+    # instead of the single-PR link -- the detail pane (tui/detail.py) is
+    # where the full per-entry breakdown lives. `i` is the entry currently
+    # mirrored onto pr_number/pr_url (the active poll target); falls back to
+    # the stack length if that PR isn't found (defensive only -- every stack
+    # entry's number is folded before it can become the active mirror).
+    if snap.pr_stack:
+        total = snap.pr_stack[0].get("total") or len(snap.pr_stack)
+        current = next((e for e in snap.pr_stack if e.get("number") == snap.pr_number), None)
+        idx = current["index"] + 1 if current else len(snap.pr_stack)
+        return f"PR {idx}/{total}"
     if snap.pr_url and snap.pr_number:
         return f"[link={snap.pr_url}]#{snap.pr_number}[/link]"
     return "—"

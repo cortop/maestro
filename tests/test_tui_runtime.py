@@ -830,6 +830,45 @@ def test_detail_screen_shows_detail_and_events(seeded_home):
     asyncio.run(_inner())
 
 
+def test_detail_screen_shows_stacked_pr_entries(home):
+    """T-127 AC5: a 3-entry stacked ticket's DetailScreen lists every PR in the
+    stack, in order, with its own state -- proven by mounting the real app and
+    pressing real keys, not by mocking query_one/push_screen."""
+    seed_ticket(home, "T-1", "stacked PR ticket", phase="qa")
+    for i in range(3):
+        event_log.append(home, "T-1", "PrOpened", {
+            "number": 200 + i, "url": f"https://example.com/pull/{200 + i}", "draft": True,
+            "stack": {"index": i, "total": 3, "branch": f"maestro/T-1-{i+1}",
+                      "base": "main" if i == 0 else f"maestro/T-1-{i}"},
+        }, actor="r")
+    snap_mod.rebuild(home, "T-1")
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            assert app._selected_key == "T-1"
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            ds_text = app.screen_stack[-1].query_one("#ds-detail", Static).render().plain
+            assert "#200" in ds_text and "#201" in ds_text and "#202" in ds_text
+            assert "1/3" in ds_text and "2/3" in ds_text and "3/3" in ds_text
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_detail_pane_and_screen_render_title_from_spec_at_row_zero(home):
     """AD-7 replaces GA-18's tier-rendering test (the Tier line is gone --
     there is no more tier to render): proves both the compact #detail pane and
