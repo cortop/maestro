@@ -29,6 +29,15 @@ CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, error?
                                          # routes to `implementing` after a ci_auto_rerun rerun -- see
                                          # dispatcher._observe_ci and CiRerunRequested below.
 REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body, author}  one PR review; idempotent per comment_id
+# T-128: `ops.reply_review`'s own record that it posted a reply through the VCS
+# provider -- to the `/replies` thread endpoint for an `inline-<id>` comment_id,
+# or one quoting PR comment for a review-body/plain id (see providers.base.VCS.
+# reply_to_review_comment/comment_pr). `tree_sha` is the worker cwd's HEAD sha
+# at post time -- both the idempotency key half (snapshot.Snapshot.
+# review_replies: comment_id -> [tree_sha, ...]) and the commit the reply body
+# itself cites, so a re-run at the SAME tree never posts twice, while a further
+# commit is a fresh reply.
+REVIEW_REPLY_POSTED = "ReviewReplyPosted"  # {comment_id, tree_sha, kind, body}  kind: "inline"|"review"
 IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-off
 IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
 

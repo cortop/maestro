@@ -185,6 +185,7 @@ AGENT_TOOL_VERBS = (
     "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
     "verify-ac", "qa-brief", "qa-verdict", "capture-tests", "finalize", "checked", "release",
     "check-conflicts", "check-merged", "fold-steps", "worktree", "locate", "pr-size",
+    "reply-review",
     # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
     "env",     # every phase preamble's first command, all phase files
     "show",    # maestro-reconcile-passive.md reads pending_inbox through it
@@ -234,14 +235,16 @@ def maestro_verb_grant(verbs=AGENT_TOOL_VERBS) -> list[str]:
 # `maestro <verb>` invocations and fails if one names a verb its phase isn't
 # granted here.
 #
-# `capture-tests`/`check-conflicts`/`check-merged`/`fold-steps`/`events` are
-# granted to NO phase: the first four are dispatcher-owned (`ops.route_
-# conflict`/`ops.check_merged` run in-process, actor="dispatcher", never via
-# a reconciler's own Bash; `capture-tests` is for a `test_command`-configured
-# board whose `implementing` skill calls it explicitly -- unset on this board,
-# so its own skill file doesn't yet, see that skill's step 2) and `events`
-# has no current skill caller at all -- granting a verb nothing calls is
-# exactly the surplus surface this ticket exists to remove.
+# `capture-tests`/`check-conflicts`/`check-merged`/`fold-steps` are granted to
+# NO phase: all four are dispatcher-owned (`ops.route_conflict`/`ops.
+# check_merged` run in-process, actor="dispatcher", never via a reconciler's
+# own Bash; `capture-tests` is for a `test_command`-configured board whose
+# `implementing` skill calls it explicitly -- unset on this board, so its own
+# skill file doesn't yet, see that skill's step 2). `events` USED to be in
+# this granted-to-nothing set too -- T-128 gave `implementing` its first
+# caller (reading a review comment's raw `comment_id` for `reply-review`,
+# which `maestro snapshot` doesn't surface), so it moved to that phase's own
+# row below instead.
 _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
     "triaging": ("ask", "env", "fold-inbox", "locate", "observe-spec", "release", "snapshot"),
     "awaiting-human": ("append", "create", "env", "finalize", "fold-inbox", "inbox-ack",
@@ -249,9 +252,9 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
     "ready": ("ask", "env", "fold-inbox", "observe-spec", "release", "requeue", "set-phase",
               "snapshot", "worktree"),
     "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
-    "implementing": ("append", "ask", "env", "fail", "finalize", "fold-inbox", "impl-turn",
-                      "local-backup", "locate", "observe-spec", "pr-size", "release", "set-phase",
-                      "snapshot", "verify-ac", "worktree"),
+    "implementing": ("append", "ask", "env", "events", "fail", "finalize", "fold-inbox",
+                      "impl-turn", "local-backup", "locate", "observe-spec", "pr-size", "release",
+                      "reply-review", "set-phase", "snapshot", "verify-ac", "worktree"),
     "qa": ("append", "ask", "env", "fold-inbox", "locate", "observe-spec", "qa-brief", "qa-verdict",
            "release", "set-phase", "snapshot"),
     "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",

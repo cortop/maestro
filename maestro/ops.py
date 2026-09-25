@@ -1463,6 +1463,140 @@ def pr_size(cfg: Config, key: str) -> dict:
     }
 
 
+# T-128: a reply must be short enough for a person to read at a glance -- the
+# spec's own example limit.
+REPLY_BODY_MAX_CHARS = 600
+
+# A raw pasted content-hash -- both an AC-hash (snapshot.ac_hash) and a
+# step-id (idempotency.step_id) are 16 lowercase hex chars -- has no meaning to
+# a human reviewer and is a sign the reply was copy-pasted from internal
+# reasoning rather than written for them.
+_JARGON_HASH_RE = re.compile(r"\b[0-9a-f]{16}\b")
+# The literal terms the spec names, in case the WORD leaks in rather than a
+# raw hash value.
+_JARGON_PHRASES = ("ac-hash", "ac_hash", "step id", "step-id", "step_id")
+# Only the HYPHENATED phase names -- "awaiting-human", "awaiting-ci",
+# "in-review" -- are unambiguous internal jargon; the single-word ones
+# ("ready", "done", "qa", ...) double as ordinary English a genuine
+# reviewer-facing reply needs to be able to say, so they are deliberately
+# NOT blocked here.
+_JARGON_PHASE_NAMES = tuple(p.value for p in Phase if "-" in p.value)
+
+
+def _validate_reply_body(body: str) -> None:
+    if not body or not body.strip():
+        raise store.MaestroError("reply-review: --body must not be empty")
+    if len(body) > REPLY_BODY_MAX_CHARS:
+        raise store.MaestroError(
+            f"reply-review: body is {len(body)} chars, over the {REPLY_BODY_MAX_CHARS}-char "
+            f"limit -- a review reply must be short enough for a person to read at a glance")
+    lowered = body.lower()
+    if _JARGON_HASH_RE.search(lowered):
+        raise store.MaestroError(
+            "reply-review: body contains a raw content-hash (an AC-hash or step-id) -- cite "
+            "the commit sha or a plain description instead, never an internal id")
+    for phrase in _JARGON_PHRASES:
+        if phrase in lowered:
+            raise store.MaestroError(
+                f"reply-review: body contains internal jargon ({phrase!r}) -- rewrite in "
+                f"plain language for the reviewer")
+    for name in _JARGON_PHASE_NAMES:
+        if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", lowered):
+            raise store.MaestroError(
+                f"reply-review: body contains an internal phase name ({name!r}) -- rewrite "
+                f"in plain language for the reviewer")
+
+
+def _head_sha(cwd: Path, *, timeout: int = _GIT_TIMEOUT) -> str:
+    """HEAD commit sha at *cwd* -- the tree-sha half of `reply_review`'s
+    (comment_id, tree_sha) idempotency key, and the sha its reply body cites.
+    Empty string on any git failure (an unborn HEAD, no repo at all) -- the
+    caller treats that as unresolvable rather than posting with a broken key."""
+    try:
+        proc = subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
+                 actor: str = "reconciler") -> dict:
+    """T-128: reply to one PR review comment IN ITS OWN THREAD, through the VCS
+    provider -- never an improvised new top-level comment, which is what the
+    `implementing` skill used to open by hand. An `inline-<id>` comment_id
+    (the shape `providers.cli.GitHubCliVCS._inline_review_comments` mints)
+    threads the reply under that inline comment via the `/replies` endpoint
+    (`VCS.reply_to_review_comment`); any other id -- a review body or a plain
+    PR comment -- has no threaded-reply endpoint, so it gets one PR comment
+    quoting the original's first line and linking to it (`VCS.comment_pr`).
+
+    Idempotent per (comment_id, tree_sha): checked against `snap.
+    review_replies` (folded from prior `ReviewReplyPosted` events) BEFORE the
+    real VCS call, so a re-spawned reconciler at the SAME tree state (the
+    worker cwd's HEAD sha unchanged) never posts a duplicate reply. A further
+    commit moves the tree_sha and is treated as a fresh reply -- same idiom as
+    the H4/T-126 tree-state-keyed gates.
+    """
+    _validate_reply_body(body)
+    if not comment_id or not comment_id.strip():
+        raise store.MaestroError("reply-review: --comment-id must not be empty")
+
+    snap = snap_mod.load(cfg.home, key)
+    if not snap.pr_number:
+        raise store.MaestroError(f"{key}: reply-review: no open PR to reply on (pr_number unset)")
+
+    from .dispatcher import _worker_cwd, resolve_credential  # lazy: avoid a module-load cycle
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    cwd = _worker_cwd(cfg, key)
+    tree_sha = _head_sha(cwd, timeout=binding.worktree_timeout)
+    if not tree_sha:
+        raise store.MaestroError(
+            f"{key}: reply-review: could not resolve HEAD sha at {cwd} -- needed for both the "
+            f"reply's idempotency key and the commit sha it cites")
+
+    if tree_sha in snap.review_replies.get(comment_id, []):
+        return {"posted": False, "reason": "already replied at this tree state",
+                "comment_id": comment_id, "tree_sha": tree_sha}
+
+    cred = resolve_credential(binding, {})
+    if not cred.ok:
+        raise store.MaestroError(
+            f"{key}: reply-review: credential resolution failed ({cred.error})")
+
+    from . import providers
+    repo_slug = repos_mod.resolve_vcs_slug(cfg, snap)
+    vcs = providers.get_vcs(cfg)
+
+    if comment_id.startswith("inline-"):
+        kind = "inline"
+        raw_id = comment_id[len("inline-"):]
+        result = vcs.reply_to_review_comment(snap.pr_number, raw_id, body,
+                                             repo=repo_slug, env=cred.env)
+    else:
+        kind = "review"
+        original = next(
+            (r for r in vcs.review_feedback(snap.pr_number, repo=repo_slug, env=cred.env)
+             if r.get("id") == comment_id), None)
+        first_line = ""
+        if original and (original.get("body") or "").strip():
+            first_line = original["body"].strip().splitlines()[0]
+        link = (f"https://github.com/{repo_slug}/pull/{snap.pr_number}"
+                f"#pullrequestreview-{comment_id}") if repo_slug else None
+        quote = f"> {first_line}" if first_line else "> (original comment)"
+        parts = [quote] + ([link] if link else []) + [body]
+        result = vcs.comment_pr(snap.pr_number, "\n\n".join(parts), repo=repo_slug, env=cred.env)
+
+    if not result.get("ok"):
+        raise store.MaestroError(
+            f"{key}: reply-review: failed to post ({result.get('error', 'unknown')})")
+
+    _append(cfg, key, E.REVIEW_REPLY_POSTED,
+            {"comment_id": comment_id, "tree_sha": tree_sha, "kind": kind, "body": body},
+            actor=actor, sid=f"reply-{key}-{comment_id}-{tree_sha}")
+    return {"posted": True, "kind": kind, "comment_id": comment_id, "tree_sha": tree_sha}
+
+
 def _diff_added_test_names(cwd: Path, base: str, rel_path: str,
                            profile: "testlang.LanguageProfile") -> set[str]:
     """Test names newly introduced (an added line matching *profile*'s own

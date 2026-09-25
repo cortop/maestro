@@ -143,18 +143,28 @@ Otherwise implement the spec's Acceptance criteria:
    verbatim comment text is right there in the reason): this is
    a **review-feedback round**, a third case alongside the `qa` fix round and a fresh
    implementation. Evaluate the comment on its merits — address it with a real code change where
-   it's warranted, or, if no change is warranted, say why:
-   `maestro append "$KEY" --type Note --payload "{\"text\":\"review comment: <verbatim comment>
-   -- no change: <your reasoning>\"}"`. Either way continue at step 2, then at step 5 push the fix
-   (or, if you recorded a Note and made no code change, just the Note — nothing to push) and
-   `set-phase awaiting-ci` instead of `set-phase qa`: a human is already reviewing this PR
-   directly on GitHub, so this pass hands back to CI/that review rather than routing through
-   `qa` again. **`approved with comments:`** means the reviewer already APPROVED the PR but left
-   feedback with it: the approval is NOT blocking, so never treat it as a reason to stop or
-   escalate. Evaluate EACH comment (the approval body and every `path:line:` inline comment,
-   separated by ` | `) — address what is warranted with a real change, and for every comment you
-   skip append a `Note` (`approved with comments: <that comment> -- no change: <why>`) so the human
-   sees the evaluation.
+   it's warranted, or, if no change is warranted, say why. Either way, reply to it **in its own
+   thread** through `maestro reply-review` (T-128) — never a local Note alone, and never an
+   improvised new top-level `gh` comment:
+   `maestro reply-review "$KEY" --comment-id <id> --body "<what changed or why not, in 1-3 plain
+   sentences, plus the commit sha>"`. `<id>` is that comment's own `comment_id`, off the
+   `ReviewFeedbackReceived` event this round recorded for it (`maestro events "$KEY"` lists them) —
+   an `inline-<id>` threads the reply under the original inline comment; any other id (a review
+   body or a plain PR comment) gets one quoting PR comment instead, both decided by the verb
+   itself, never by you. The verb refuses a body over ~600 chars or one carrying internal jargon
+   (a phase name, an AC-hash, a step id) — write it for the reviewer, not for another reconciler.
+   It is also idempotent per (comment, tree state): calling it again for a comment you already
+   answered at this same commit is a no-op, so replying before you know whether this pass
+   converges is safe. Either way continue at step 2, then at step 5 push the fix (or, if you made
+   no code change, just the reply — nothing to push) and `set-phase awaiting-ci` instead of
+   `set-phase qa`: a human is already reviewing this PR directly on GitHub, so this pass hands back
+   to CI/that review rather than routing through `qa` again. **`approved with comments:`** means
+   the reviewer already APPROVED the PR but left feedback with it: the approval is NOT blocking,
+   so never treat it as a reason to stop or escalate. Evaluate EACH comment (the approval body and
+   every `path:line:` inline comment, separated by ` | `) — address what is warranted with a real
+   change, and reply to EVERY one (addressed or declined) with `maestro reply-review`, same as
+   above, so the human sees the evaluation in the thread itself rather than a Note only they'd have
+   to go dig for.
    **If a PR-split proposal was answered instead** (the most recent phase-history transition is
    `awaiting-human -> implementing` with a reason starting `pr split decision:` — the verbatim
    answer is right there in the reason): this is a **split-decision round** (T-126), not a fresh
@@ -314,9 +324,10 @@ appended, handing review off to the independent `qa` phase; (b) a fix round — 
 fix is pushed, and `set-phase qa` has appended again to re-request review; (c) a conflict-only
 pass — the rebase is clean (or escalated via `maestro ask` with a `conflict-$KEY-<n>` qid), tests
 are green, and the branch is pushed with `set-phase awaiting-ci` appended; (d) a review-feedback
-round — the comment in the routing reason was evaluated and either addressed with a pushed code
-change or given a recorded `Note` explaining why no change is needed, tests are green if code
-changed, and `set-phase awaiting-ci` has appended; (e) tests did not converge within this session
+round — every addressed or declined comment got a `maestro reply-review` reply in its own thread,
+each one either addressed with a pushed code change or explaining why no change is needed, tests
+are green if code changed, and `set-phase awaiting-ci` has appended; (e) tests did not converge
+within this session
 and you appended `maestro fail` naming why, or `impl-turn` parked the ticket on the
 `max_impl_turns` ceiling (it has already called `ops.fail` itself — nothing further to append);
 (f) an oversized diff (T-126) — `pr-size` reported `exceeds: true` and `maestro ask` recorded a

@@ -155,6 +155,7 @@ def test_agent_tool_verbs_named_exactly():
         "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
         "verify-ac", "qa-brief", "qa-verdict", "capture-tests", "finalize", "checked", "release",
         "check-conflicts", "check-merged", "fold-steps", "worktree", "locate", "pr-size",
+        "reply-review",
         "env", "show", "create",
     }
     assert granted == expected
