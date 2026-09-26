@@ -74,7 +74,10 @@ Core (correctness-critical):
 - `ops.py` — high-level reconciler verbs (each correct-by-construction); what agents call.
 - `cli.py` — argparse entrypoint; each subcommand is a `cmd_*` wrapper over `ops`.
 - `sessions.py` — spawn/list reconciler sessions (`claude -p`, opencode, pi backends).
-- `config.py` — project-agnostic `config.toml` loading/validation.
+- `config.py` — project-agnostic `config.toml` loading/validation. Every `[maestro]` key
+  is one row of `config.KNOBS` (coercion + whether `[repos.<name>]` may override it);
+  unknown keys fail `config.load()` closed. Adding a knob: a `Config` field, a `KNOBS`
+  row, a commented line in `DEFAULT_CONFIG_TOML` (`tests/test_config.py` checks all three).
 - `repos.py` — per-ticket repo binding (`[repos.<name>]`). `gates.py` — spec front-matter reads.
 
 Guards and budgets:

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import snapshot as snap_mod
 from . import store
-from .config import Config
+from .config import REPO_OVERRIDE_KEYS, Config
 from .dispatcher import parse_spec_overrides
 
 _PR_URL_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/pull/\d+")
@@ -125,13 +125,22 @@ class RepoBinding:
     pr_split_threshold: int = 800
 
 
+def _inherited(cfg: Config, table: dict) -> dict:
+    """Every `config.REPO_OVERRIDE_KEYS` field: the table's own value wins, an
+    unset one (absent, None, or "") inherits the board-wide [maestro] knob. A
+    configured 0/False is a real value, never "unset"."""
+    out = {}
+    for key in REPO_OVERRIDE_KEYS:
+        value = table.get(key)
+        out[key] = getattr(cfg, key) if value is None or value == "" else value
+    return out
+
+
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
     mode = table.get("mode", "git")
     if mode not in _MODES:
         mode = "git"
     raw_tools = table.get("reconcile_allowed_tools", [])
-    raw_prime_timeout = table.get("prime_timeout")
-    raw_worktree_timeout = table.get("worktree_timeout")
     return RepoBinding(
         name=name,
         path=table.get("path"),
@@ -144,59 +153,10 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
         gh_account=table.get("gh_account"),
         token_env=table.get("token_env"),
         prime=table.get("prime"),
-        # MTO-2: this table's own override wins; unset inherits the board-wide default.
-        base_drift_policy=table.get("base_drift_policy") or cfg.base_drift_policy,
-        # T-83: same precedence as base_drift_policy above.
-        test_command=table.get("test_command") or cfg.test_command,
-        # T-90: same "table wins, unset inherits" shape, int-valued so `or` (which
-        # would treat a configured 0 as unset) isn't the right check.
-        prime_timeout=raw_prime_timeout if raw_prime_timeout is not None else cfg.prime_timeout,
-        worktree_timeout=(
-            raw_worktree_timeout if raw_worktree_timeout is not None else cfg.worktree_timeout
-        ),
-        # T-96: same "table wins, unset inherits" precedence as test_command
-        # above -- a board-wide [maestro] language default (cfg.language) is
-        # now honored, not silently ignored; still None (-> "python") when
-        # neither is set (see RepoBinding.language).
-        language=table.get("language") or cfg.language,
         # T-98: no board-wide fallback -- unset means the language profile's
         # own format_selector (see RepoBinding.test_selector).
         test_selector=table.get("test_selector") or None,
-        # T-115: same "table wins, unset inherits" precedence as test_command
-        # above.
-        post_qa_skill=table.get("post_qa_skill") or cfg.post_qa_skill,
-        # T-117: same "table wins, unset inherits" precedence as post_qa_skill
-        # above.
-        post_qa_skill_runner=table.get("post_qa_skill_runner") or cfg.post_qa_skill_runner,
-        post_qa_skill_runner_model=(
-            table.get("post_qa_skill_runner_model") or cfg.post_qa_skill_runner_model),
-        # T-123: same "table wins, unset inherits" precedence as
-        # prime_timeout/worktree_timeout above -- bool-valued, so a plain
-        # `table.get(...) or cfg....` (which would treat a configured False
-        # as unset) is not the right check.
-        ci_auto_rerun=(
-            table["ci_auto_rerun"] if table.get("ci_auto_rerun") is not None else cfg.ci_auto_rerun
-        ),
-        ci_rerun_grace=(
-            table["ci_rerun_grace"] if table.get("ci_rerun_grace") is not None else cfg.ci_rerun_grace
-        ),
-        ci_failure_excerpt=(
-            table["ci_failure_excerpt"] if table.get("ci_failure_excerpt") is not None
-            else cfg.ci_failure_excerpt
-        ),
-        # T-124: same "table wins, unset inherits" shape as prime_timeout above --
-        # bool-valued, so `or` (which would treat a configured `false` as unset)
-        # isn't the right check.
-        file_hints=(
-            table["file_hints"] if table.get("file_hints") is not None else cfg.file_hints
-        ),
-        # T-126: same "table wins, unset inherits" shape as prime_timeout/
-        # worktree_timeout above -- int-valued, so `or` (which would treat a
-        # configured 0 as unset) isn't the right check.
-        pr_split_threshold=(
-            table["pr_split_threshold"] if table.get("pr_split_threshold") is not None
-            else cfg.pr_split_threshold
-        ),
+        **_inherited(cfg, table),
     )
 
 
@@ -228,25 +188,7 @@ def implicit_default(cfg: Config) -> RepoBinding:
         base_branch="main",
         branch_prefix=cfg.branch_prefix,
         prime=cfg.prime,
-        base_drift_policy=cfg.base_drift_policy,
-        test_command=cfg.test_command,
-        prime_timeout=cfg.prime_timeout,
-        worktree_timeout=cfg.worktree_timeout,
-        # T-96: same board-wide-default precedence as test_command above.
-        language=cfg.language,
-        # T-115: same board-wide-default precedence as test_command above.
-        post_qa_skill=cfg.post_qa_skill,
-        # T-117: ditto.
-        post_qa_skill_runner=cfg.post_qa_skill_runner,
-        post_qa_skill_runner_model=cfg.post_qa_skill_runner_model,
-        # T-123: same board-wide-default precedence as test_command above.
-        ci_auto_rerun=cfg.ci_auto_rerun,
-        ci_rerun_grace=cfg.ci_rerun_grace,
-        ci_failure_excerpt=cfg.ci_failure_excerpt,
-        # T-124: ditto.
-        file_hints=cfg.file_hints,
-        # T-126: ditto.
-        pr_split_threshold=cfg.pr_split_threshold,
+        **{key: getattr(cfg, key) for key in REPO_OVERRIDE_KEYS},
     )
 
 
