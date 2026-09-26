@@ -3985,11 +3985,6 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     # claim commit -- see _spawn_lock_target's docstring.
     with store.file_lock(_spawn_lock_target(home)):
         active = _active_agent_keys(sessions, home)
-        due: list[tuple[str, str]] = []
-        claimed: list[str] = []
-        observed_seq_by_key: dict[str, int] = {}
-        phase_by_key: dict[str, str] = {}
-        decisions: dict[str, dict] = {}
 
         # MTO-4: the candidate set, restricted to `filter_keys` when given -- every
         # downstream step (due-check, throttle, claims, spawn ledger) only ever
