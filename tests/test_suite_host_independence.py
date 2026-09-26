@@ -12,7 +12,6 @@ agent.
 """
 import subprocess
 
-import pytest
 
 from conftest import git, make_origin_and_repo
 

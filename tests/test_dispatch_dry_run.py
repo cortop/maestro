@@ -14,15 +14,7 @@ from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from conftest import git as _git, make_origin_and_repo as _make_origin_and_repo
-
-
-def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(store.spec_path(home, key),
-                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated",
-                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
+from conftest import seed_phase
 
 
 def _write_stream_log(home, key, epoch, records):
@@ -60,7 +52,7 @@ class FakeTracker:
 # --- AC: N consecutive previews leave events/ledger/attempts byte-identical --
 
 def test_n_consecutive_previews_leave_events_ledger_attempts_byte_identical(home, cfg):
-    _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase -- due every sweep
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)  # active phase -- due every sweep
     cfg.min_spawn_interval = 0
 
     events_before = store.events_path(home, "T-1").read_bytes()
@@ -88,7 +80,7 @@ def test_n_consecutive_cli_dry_run_invocations_leave_state_byte_identical(home):
     .spawn_attempts.json."""
     (home / "config.toml").write_text(
         "[maestro]\nmax_concurrency = 3\nmin_spawn_interval = 0\n")
-    _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase -- due every sweep
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)  # active phase -- due every sweep
 
     events_before = store.events_path(home, "T-1").read_bytes()
     ledger_path = disp._spawn_ledger_path(home)
@@ -109,7 +101,7 @@ def test_n_consecutive_cli_dry_run_invocations_leave_state_byte_identical(home):
 def test_seven_previews_at_attempts_cap_append_zero_events(home, cfg):
     cfg.max_spawn_attempts = 5
     cfg.min_spawn_interval = 0
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     events_before = store.events_path(home, "T-1").read_bytes()
     snap_before = snap_mod.load(home, "T-1")
 
@@ -130,7 +122,7 @@ def test_seven_previews_at_attempts_cap_append_zero_events(home, cfg):
 # --- AC: a preview never throttles or delays the very next real sweep -------
 
 def test_preview_never_throttles_the_next_real_sweep(home, cfg):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 300  # would throttle a second REAL spawn this close
 
     for i in range(10):
@@ -146,7 +138,7 @@ def test_preview_never_throttles_the_next_real_sweep(home, cfg):
 # --- AC: no phantom "spawned" in dispatch.jsonl / heartbeat / `maestro why` --
 
 def test_preview_never_reports_a_spawn_that_never_happened(home, cfg):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=1000, dry_run=True)
     assert report.spawned == ["T-1"]
 
@@ -278,7 +270,7 @@ def test_hook_backup_maybe_backup_is_absent_under_dry_run(home, cfg, tmp_path):
     from maestro import backup
 
     cfg.backup_dir = str(tmp_path / "backups")
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cursor_path = home / "derived" / ".backup_cursor.json"
 
     disp.dispatch(cfg, DryRunSessions(), now=cfg.backup_interval + 1000, dry_run=True)
@@ -295,7 +287,7 @@ def test_hook_backup_maybe_backup_is_absent_under_dry_run(home, cfg, tmp_path):
 def test_hook_run_compact_tick_is_absent_under_dry_run(home, cfg):
     cfg.compact_interval = 60
     cfg.compact_min_events = 1
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     events_before = store.events_path(home, "T-1").read_bytes()
     cursor_path = home / "derived" / ".compact_cursor.json"
     archive_path = store.events_archive_path(home, "T-1")
@@ -312,7 +304,7 @@ def test_hook_run_compact_tick_is_absent_under_dry_run(home, cfg):
 
 def test_hook_run_archive_tick_is_absent_under_dry_run(home, cfg):
     cfg.archive_after = 0
-    _seed(home, "T-1", Phase.DONE)
+    seed_phase(home, "T-1", Phase.DONE)
     ticket_dir = store.ticket_dir(home, "T-1")
 
     disp.dispatch(cfg, DryRunSessions(), now=1000, dry_run=True)
@@ -325,7 +317,7 @@ def test_hook_run_archive_tick_is_absent_under_dry_run(home, cfg):
 
 def test_hook_ratelimit_probe_is_absent_under_dry_run(home, cfg):
     cfg.min_spawn_interval = 0
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     real1 = disp.dispatch(cfg, DryRunSessions(), now=1000)  # real spawn, seeds ledger
     assert real1.spawned == ["T-1"]
     _write_stream_log(home, "T-1", 1000.0, [{
@@ -346,7 +338,7 @@ def test_hook_ratelimit_probe_is_absent_under_dry_run(home, cfg):
 
 def test_hook_notify_maybe_notify_is_absent_under_dry_run(home, cfg):
     cfg.notify_command = "true"  # harmless real subprocess -- the external boundary
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cursor_path = home / "derived" / ".notify_cursor.json"
 
     disp.dispatch(cfg, DryRunSessions(), now=1000, dry_run=True)
@@ -358,7 +350,7 @@ def test_hook_notify_maybe_notify_is_absent_under_dry_run(home, cfg):
 
 def test_hook_run_watchdog_is_absent_under_dry_run(home, cfg):
     cfg.max_session_seconds = 100
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     claims.write_claim(home, "T-1", 999_999_999, "reconcile-T-1")  # pid that can't exist
     data = claims.read_claim(home, "T-1")
     data["epoch"] = 1000 - 10_000  # far past the threshold
@@ -380,7 +372,7 @@ def test_hook_run_watchdog_is_absent_under_dry_run(home, cfg):
 def test_hook_prune_logs_tick_is_absent_under_dry_run(home, cfg):
     cfg.session_log_retention_days = 1
     cfg.session_log_max_per_ticket = None
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     old_log = _write_stream_log(home, "T-1", 1_000.0, [])  # epoch far before `now`
     cursor_path = home / "derived" / ".prune_cursor.json"
 

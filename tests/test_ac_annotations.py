@@ -7,7 +7,6 @@ attestations/verdicts/checks exactly like any other edit to the line.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 from maestro import snapshot as snap_mod
 from maestro.snapshot import AcAnnotation, ac_hash, parse_ac_annotation, parse_acs

@@ -15,11 +15,10 @@ Go runs a REAL `go test` (the toolchain is present here).
 from __future__ import annotations
 
 import shutil
-import sys
 
 import pytest
 
-from maestro import claims, dispatcher as disp, event_log, ops, snapshot as snap_mod, store
+from maestro import dispatcher as disp, event_log, ops, snapshot as snap_mod
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
@@ -27,7 +26,7 @@ from maestro.statemachine import Phase
 from conftest import git, make_origin_and_repo
 from test_dispatcher_ac_checks import (
     _advance_to_verifying, _commit_test_file, _run_verifying_to_completion, _seed_to_worktree,
-    _wait_until_dead, _PASS_CMD,
+    _PASS_CMD,
 )
 
 pytestmark = pytest.mark.skipif(shutil.which("go") is None, reason="go toolchain not installed")

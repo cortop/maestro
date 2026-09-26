@@ -18,7 +18,7 @@ from pathlib import Path
 from maestro import cli, dispatcher as disp, event_log, health, ops, snapshot as snap_mod, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
-from maestro.statemachine import ACTIVE_PHASES, SLEEPING_PHASES, TRANSITIONS, Phase, can_transition
+from maestro.statemachine import ACTIVE_PHASES, SLEEPING_PHASES, Phase, can_transition
 
 from conftest import seed_ticket
 

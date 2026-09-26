@@ -12,15 +12,13 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from maestro import claims, dispatcher as disp, event_log, ops, skills_install, store
 from maestro import snapshot as snap_mod
-from maestro.config import Config, DEFAULT_CONFIG_TOML
-from maestro.sessions import ClaudeCliSessions, DryRunSessions, RoutingSessions
+from maestro.config import DEFAULT_CONFIG_TOML
+from maestro.sessions import ClaudeCliSessions, DryRunSessions
 from maestro.statemachine import Phase
 
 from test_pi_sessions import _install_stub_pi
@@ -87,7 +85,6 @@ def test_install_repo_bakes_configured_turn_cap_into_agent_stubs(home, tmp_path)
     store.atomic_write(home / "config.toml",
                        f'[maestro]\nmax_session_turns = 75\nrunner_enabled = ["claude", "opencode"]\n'
                        f'\n[repos.acme]\npath = "{repo}"\n')
-    from maestro import config as config_mod
     from maestro.cli import main as cli_main
     assert cli_main(["--home", str(home), "install-commands", "--repo", "acme"]) == 0
     agent_dir = repo / ".opencode" / "agent"

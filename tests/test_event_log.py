@@ -83,7 +83,7 @@ def test_read_dedups_seq_duplicated_across_archive_and_active(home):
     import json
 
     ev1 = event_log.append(home, "T-1", "Note", {"n": 1}, actor="t")
-    ev2 = event_log.append(home, "T-1", "Note", {"n": 2}, actor="t")
+    event_log.append(home, "T-1", "Note", {"n": 2}, actor="t")
     archive_path = store.events_archive_path(home, "T-1")
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     with archive_path.open("a", encoding="utf-8") as f:

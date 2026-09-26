@@ -102,7 +102,7 @@ maestro ans T-1 "yes, go ahead"    # non-interactive: answer by key+text directl
 - **Bounded reads:** a decision reads a ~1-2KB snapshot, never the history.
 
 ```bash
-pip install -e ".[dev]" && pytest -q     # full suite, all green
+pip install -e ".[dev,tui]" && pytest -q -n auto     # full suite, all green
 ```
 
 ## Project-agnostic

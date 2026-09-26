@@ -37,7 +37,7 @@ from textual.worker import WorkerFailed  # noqa: E402
 
 from rich.text import Text  # noqa: E402
 
-from conftest import seed_ticket  # noqa: E402
+from conftest import seed_phase, seed_ticket  # noqa: E402
 from maestro import claims, config as config_mod, event_log, fleet as fleet_mod, inbox  # noqa: E402
 from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
 from maestro.cli import main as cli_main  # noqa: E402
@@ -568,7 +568,7 @@ def test_import_linear_transport_failure_notifies_without_crash(seeded_home, mon
 
 def test_create_modal_intent_is_textarea_and_accepts_multiline(seeded_home):
     """Intent field must be a TextArea (not an Input) and must accept newlines."""
-    from textual.widgets import Input, TextArea
+    from textual.widgets import TextArea
 
     async def _inner():
         app = _make_app(seeded_home)
@@ -1402,11 +1402,10 @@ def test_fleet_screen_renders_runaway_board_differently(seeded_home):
     from maestro import dispatcher as disp
     from maestro.config import Config
     from maestro.statemachine import Phase
-    from test_dispatcher import _EphemeralSessions, _seed
-
+    from test_dispatcher import _EphemeralSessions
     (seeded_home / "config.toml").write_text(
         "[maestro]\nrunaway_spawns_per_hour = 1\n")
-    _seed(seeded_home, "R-1", Phase.IN_REVIEW)
+    seed_phase(seeded_home, "R-1", Phase.IN_REVIEW)
     cfg = Config(home=seeded_home, max_concurrency=1, min_spawn_interval=0)
     sessions = _EphemeralSessions()
     t0 = store.now_epoch()
@@ -3173,6 +3172,7 @@ def test_add_ac_modal_blank_text_dismisses_without_writing(seeded_home):
             assert len(app.screen_stack) == 1
 
     asyncio.run(_inner())
+    assert store.spec_path(seeded_home, "T-5").read_bytes() == before_bytes
 
 
 # --------------------------------------------------------------------------- #

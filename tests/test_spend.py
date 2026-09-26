@@ -7,21 +7,11 @@ Only the `claude -p` spawn (DryRunSessions) is mocked, per CLAUDE.md.
 import json
 
 from maestro import dispatcher as disp
-from maestro import event_log, snapshot as snap_mod, spend, store
+from maestro import spend, store
 from maestro.cli import main
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
-
-
-def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(
-        store.spec_path(home, key),
-        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n",
-    )
-    event_log.append(home, key, "TicketCreated",
-                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
+from conftest import seed_phase
 
 
 def _write_stream_log(home, key, epoch, records):
@@ -64,7 +54,7 @@ def _spawn_and_seed_ledger(home, cfg, key, now):
     """Real first sweep: spawns *key*, populating derived/.spawn_ledger.json --
     the ledger spend.probe reads (mirrors test_ratelimit.py's identical helper)."""
     cfg.min_spawn_interval = 0
-    _seed(home, key, Phase.READY)
+    seed_phase(home, key, Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=now)
     assert key in report.spawned
     return report
@@ -223,7 +213,7 @@ def test_dispatch_blocks_spawns_at_or_above_ceiling(home, cfg):
     spend.probe(cfg, t0 + 5)
 
     cfg.daily_spend_ceiling_usd = 10.00
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-2", Phase.READY)
     ledger_before = store.read_json(home / "derived" / ".spawn_ledger.json", {})
 
     report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
@@ -242,7 +232,7 @@ def test_dispatch_spawns_normally_one_cent_below_ceiling(home, cfg):
 
     cfg.daily_spend_ceiling_usd = 10.00
     cfg.min_spawn_interval = 0
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-2", Phase.READY)
 
     report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
 
@@ -262,7 +252,7 @@ def test_dispatch_still_spawns_with_no_ceiling_configured(home, cfg):
 
     assert cfg.daily_spend_ceiling_usd is None
     cfg.min_spawn_interval = 0
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-2", Phase.READY)
 
     report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
 
@@ -279,7 +269,7 @@ def test_text_format_home_reports_spend_unavailable_not_zero(home, cfg):
     assert st["today_usd"] is None
 
     cfg.daily_spend_ceiling_usd = 0.01  # would block any dollar figure at all
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 0
     report = disp.dispatch(cfg, DryRunSessions(), now=store.now_epoch())
     assert "T-1" in report.spawned
@@ -313,7 +303,7 @@ def test_corrupt_spend_state_does_not_abort_sweep(home, cfg):
     # meter cannot make sense of.
     store.atomic_write(home / "derived" / ".spend.json", json.dumps("not-an-object"))
 
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-2", Phase.READY)
     cfg.min_spawn_interval = 0
     report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
 

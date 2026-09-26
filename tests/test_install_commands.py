@@ -43,10 +43,10 @@ def _init_git_repo(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC1/AC3: --repo copies all seven, idempotently, no duplication
+# AC1/AC3: --repo copies every payload file, idempotently, no duplication
 # ---------------------------------------------------------------------------
 
-def test_install_repo_copies_six_files_byte_identical(home, tmp_path):
+def test_install_repo_copies_every_payload_file_byte_identical(home, tmp_path):
     repo = tmp_path / "acme"
     _write_config(home, f'[repos.acme]\npath = "{repo}"\n')
 

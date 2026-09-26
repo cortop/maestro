@@ -1,5 +1,4 @@
 """Tests for the event-driven nudge: ans/cmd/create trigger an in-process dispatch."""
-import pytest
 
 from maestro import cli, dispatcher as disp, event_log, inbox, snapshot as snap_mod, store
 from maestro.config import Config

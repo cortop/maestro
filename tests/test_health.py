@@ -1,8 +1,6 @@
-import io
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from maestro import backup, cli, claims, dispatcher as disp, event_log, health, ops, snapshot as snap_mod, store
@@ -10,19 +8,9 @@ from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
-from test_dispatcher import _EphemeralSessions, _seed, _seed_with_deps
-from test_repo_preflight import _repo_table, _seed_bound_ticket
-
-
-def _sweep(home):
-    buf = io.StringIO()
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        code = cli.main(["--home", str(home), "doctor"])
-    finally:
-        sys.stdout = old
-    return code, json.loads(buf.getvalue())
+from test_dispatcher import _EphemeralSessions, _seed_with_deps
+from conftest import run_doctor, seed_phase
+from test_repo_preflight import _seed_bound_ticket
 
 
 # --- spawn_budget_per_hour knob -----------------------------------------------
@@ -30,7 +18,7 @@ def _sweep(home):
 
 def test_spawn_budget_uses_configured_knob(home):
     (home / "config.toml").write_text("[maestro]\nrunaway_spawns_per_hour = 5\n")
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     assert out["spawn_budget_per_hour"] == 5
 
@@ -41,19 +29,19 @@ def test_spawn_budget_derived_from_spawn_floor_when_knob_absent(home, cfg):
     # is unchanged; only an `implementing` ticket gets the bigger allowance
     # (see test_same_tickets_under_default_floor_do_not_trip).
     for i in range(3):
-        _seed(home, f"T-{i}", Phase.READY)
+        seed_phase(home, f"T-{i}", Phase.READY)
     import math
     expected = len(disp.list_keys(home)) * math.ceil(3600 / disp.spawn_floor(cfg))
     assert health.spawn_budget(cfg) == expected
     # Same number, proven through the real CLI (no config.toml -> knob absent).
-    _code, out = _sweep(home)
+    _code, out = run_doctor(home)
     assert out["spawn_budget_per_hour"] == expected
 
 
 def test_spawn_budget_falls_back_when_floor_disabled(home):
     # GA-14: READY tickets weight 1, so this stays a plain session count too.
     for i in range(2):
-        _seed(home, f"T-{i}", Phase.READY)
+        seed_phase(home, f"T-{i}", Phase.READY)
     cfg = Config(home=home, min_spawn_interval=0, reconcile_steady_interval=300)
     import math
     expected = len(disp.list_keys(home)) * math.ceil(3600 / max(300, 60))
@@ -63,12 +51,12 @@ def test_spawn_budget_falls_back_when_floor_disabled(home):
 
 def test_runaway_check_disabled_when_knob_is_zero(home, cfg):
     (home / "config.toml").write_text("[maestro]\nrunaway_spawns_per_hour = 0\n")
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg2 = Config(home=home, min_spawn_interval=0, max_concurrency=1)
     sessions = _EphemeralSessions()
     for i in range(50):
         disp.dispatch(cfg2, sessions, now=1000 + i)
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert out["spawn_budget_per_hour"] == 0
     assert out["runaway"] is False
     assert code == 0
@@ -81,7 +69,7 @@ def test_doctor_keeps_original_fields_and_stale_semantics(home):
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"ts": "x", "epoch": store.now_epoch() - 2000,
                       "spawned": 0, "active": 0, "throttled": 0, "due": 0})
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert out["heartbeat"]["epoch"] is not None
     assert out["heartbeat_age_s"] > 1800
     assert out["dead_letters"] == []
@@ -90,7 +78,7 @@ def test_doctor_keeps_original_fields_and_stale_semantics(home):
 
 
 def test_doctor_reports_new_fields(home):
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert "total" in out["spawns_last_hour"] and "by_key" in out["spawns_last_hour"]
     assert isinstance(out["throttled_last_sweep"], int)
     assert isinstance(out["spawn_budget_per_hour"], int)
@@ -109,13 +97,13 @@ def test_doctor_reports_new_fields(home):
 
 def test_throttled_last_sweep_reflects_prior_real_sweep(home, cfg):
     for i in range(3):
-        _seed(home, f"T-{i}", Phase.READY)
+        seed_phase(home, f"T-{i}", Phase.READY)
     cfg.min_spawn_interval = 300
     sessions = _EphemeralSessions()
     disp.dispatch(cfg, sessions, now=1000)          # spawns all three
     report = disp.dispatch(cfg, sessions, now=1001)  # all three throttled
     assert len(report.throttled) == 3
-    _code, out = _sweep(home)
+    _code, out = run_doctor(home)
     assert out["throttled_last_sweep"] == 3
 
 
@@ -144,18 +132,18 @@ def test_incident_replay_trips_runaway_with_floor_disabled(home):
     own runaway-brake tests already cover.
     """
     for k in ("T-1", "T-2", "T-3", "T-4"):
-        _seed(home, k, Phase.QA)
+        seed_phase(home, k, Phase.QA)
     cfg = Config(home=home, max_concurrency=4, min_spawn_interval=0, qa_standards_axis=True)
     sessions = _EphemeralSessions()
     t0, step = store.now_epoch(), 11
     for i in range(12):
         disp.dispatch(cfg, sessions, now=t0 + i * step)
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert out["runaway"] is True and code == 1
 
     for i in range(12, 100):  # ~18 minutes of 11s sweeps, well inside the 1h window
         disp.dispatch(cfg, sessions, now=t0 + i * step)
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert out["runaway"] is True
     assert code == 1
 
@@ -168,7 +156,7 @@ def test_same_tickets_under_default_floor_do_not_trip(home):
     which is NOT silently redefined down to a bare session count just because
     every ticket happens to be `qa` with the Standards axis on."""
     for k in ("T-1", "T-2", "T-3", "T-4"):
-        _seed(home, k, Phase.QA)
+        seed_phase(home, k, Phase.QA)
     cfg = Config(home=home, max_concurrency=4, qa_standards_axis=True)  # min_spawn_interval
                                                  # defaults to reconcile_steady_interval (300)
     sessions = _EphemeralSessions()
@@ -178,7 +166,7 @@ def test_same_tickets_under_default_floor_do_not_trip(home):
 
     W_qa = disp.spawn_weight(cfg, Phase.QA.value)  # 1 + 1 (Standards axis on) == 2
     assert health.spawn_rate(home, t0 + 99 * step)["total"] == 16 * W_qa
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert out["runaway"] is False
     assert code == 0
 
@@ -270,7 +258,7 @@ def test_check_backup_age_warns_when_swept_and_no_backups_exist(home, cfg):
     fault, distinct from the no-state case above. (T-101: gated on
     `_holds_state`, no longer on a heartbeat write.)"""
     cfg.backup_interval = 100
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     result = health.check_backup_age(cfg, store.now_epoch())
     assert result["status"] == "warn"
     assert result["age_s"] is None
@@ -282,7 +270,7 @@ def test_check_backup_age_ignores_a_stale_cursor_over_an_emptied_backup_dir(home
     holds real state (T-101: `_holds_state`, not a heartbeat write)."""
     cfg.backup_interval = 100
     now = store.now_epoch()
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     store.write_json(home / "derived" / ".backup_cursor.json", {"epoch": now})
     assert not backup.resolve_backup_dir(cfg).exists()
     result = health.check_backup_age(cfg, now)
@@ -299,7 +287,7 @@ def test_check_backup_age_warns_when_newest_tarball_is_stale(home, cfg):
     something irreplaceable -- this test now seeds a real ticket to reach
     that branch honestly."""
     cfg.backup_interval = 100
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
     backup.create_backup(cfg, now - 1000)
     result = health.check_backup_age(cfg, now)
@@ -309,7 +297,7 @@ def test_check_backup_age_warns_when_newest_tarball_is_stale(home, cfg):
 
 def test_check_backup_age_ok_when_newest_tarball_is_fresh(home, cfg):
     cfg.backup_interval = 3600
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
     backup.create_backup(cfg, now - 10)
     result = health.check_backup_age(cfg, now)
@@ -321,7 +309,7 @@ def test_check_backup_age_uses_the_newest_of_several_tarballs(home, cfg):
     """A stale cursor (or none at all) must not shadow a newer tarball that a
     manual `maestro backup` created after the dispatcher's last sweep."""
     cfg.backup_interval = 3600
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     now = float(int(store.now_epoch()))  # whole seconds: the tarball name is second-precision
     backup.create_backup(cfg, now - 5000)
     backup.create_backup(cfg, now - 5)
@@ -416,7 +404,7 @@ def test_check_backup_age_non_ok_after_restore_into_a_backupless_home(tmp_path, 
 def test_check_backup_age_ok_after_dispatcher_sweep_runs_maybe_backup(home, cfg):
     """T-88 AC6: the existing dispatcher-timer path (`backup.maybe_backup`) is
     not regressed -- a real sweep still leaves `backup_age` at status "ok"."""
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     now = store.now_epoch()
     disp.dispatch(cfg, DryRunSessions(), now=now)
     assert backup.list_backups(cfg)  # maybe_backup actually ran
@@ -494,7 +482,7 @@ def test_doctor_cli_warns_and_names_key_for_mid_threshold_claim(home):
     data["epoch"] = store.now_epoch() - 60  # 0.6 x threshold
     store.write_json(claims.claim_path(home, "T-1"), data)
 
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "claim_age")
     assert check["status"] == "warn"
@@ -592,7 +580,7 @@ def test_check_watchdog_loops_warns_on_repeated_identical_failure(home, cfg):
     session logs."""
     from maestro import event_log
 
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     for seq in (3, 8):
         event_log.append(home, "T-1", "Failed",
                          {"error": f"watchdog: 2 spawns with no progress at seq {seq}"},
@@ -606,7 +594,7 @@ def test_check_watchdog_loops_ok_below_threshold(home, cfg):
     """A single trip is not (yet) a loop -- only repetition is the signal."""
     from maestro import event_log
 
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     event_log.append(home, "T-1", "Failed",
                      {"error": "watchdog: 5 spawns with no progress at seq 0"},
                      actor="dispatcher")
@@ -619,7 +607,7 @@ def test_check_watchdog_loops_ignores_unrelated_failures(home, cfg):
     counts toward this check, no matter how many times it recurs."""
     from maestro import event_log
 
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     for _ in range(3):
         event_log.append(home, "T-1", "Failed", {"error": "tests still red"}, actor="reconciler")
     result = health.check_watchdog_loops(cfg, store.now_epoch())
@@ -663,7 +651,7 @@ def test_check_depends_on_reports_missing_key(home, cfg):
 def test_check_depends_on_ignores_an_archived_done_dependency(home, cfg):
     """A finished, archived dependency is not a 'missing' dep -- that would
     falsely flag every completed-and-archived ticket's dependents forever."""
-    _seed(home, "T-dep", Phase.DONE)
+    seed_phase(home, "T-dep", Phase.DONE)
     ops.archive_done(cfg)
     _seed_with_deps(home, "T-1", Phase.READY, depends_on=["T-dep"])
 
@@ -682,7 +670,7 @@ def test_check_depends_on_detects_a_cycle(home, cfg):
 
 
 def test_check_depends_on_ok_with_no_deps(home, cfg):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     result = health.check_depends_on(cfg, store.now_epoch())
     assert result == {"name": "depends_on", "status": "ok",
                        "detail": "0 missing dep(s), 0 cycle(s)", "missing": [], "cycles": []}
@@ -713,7 +701,7 @@ def test_doctor_resolves_per_home_plist_ignoring_a_legacy_decoy(home, tmp_path, 
     stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
 
-    _code, out = _sweep(home)
+    _code, out = run_doctor(home)
     hb_check = next(c for c in out["checks"] if c["name"] == "heartbeat")
     assert hb_check["threshold_s"] == 111 * health.STALE_INTERVAL_FACTOR
 
@@ -724,8 +712,8 @@ def test_doctor_resolves_per_home_plist_ignoring_a_legacy_decoy(home, tmp_path, 
 
 def test_doctor_cli_includes_check_registry(home, cfg):
     """AC3: `maestro doctor` runs the full check registry via the real CLI."""
-    _seed(home, "T-1", Phase.READY)
-    code, out = _sweep(home)
+    seed_phase(home, "T-1", Phase.READY)
+    code, out = run_doctor(home)
     assert code == 0
     names = {c["name"] for c in out["checks"]}
     assert names == {"home_structure", "heartbeat", "backup_age", "claim_age", "claim_no_output",
@@ -809,7 +797,7 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
         "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_branch", "worktree_witness",
         "provider_availability", "burn", "missing_acs", "ac_annotation_parse", "unresolvable_spec_hints",
     }
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     assert {c["name"] for c in out["checks"]} == baseline_names
 
@@ -821,14 +809,13 @@ def test_doctor_over_real_home_warns_on_disabled_floor(tmp_path):
     """QA per CLAUDE.md: min_spawn_interval = 0 in a real config.toml, over a real
     `maestro` CLI call -- nothing mocked. The doctor payload carries both the warn
     check and the effective-floor field."""
-    from maestro import cli
 
     home = tmp_path / "home"
     for d in ("events", "inbox", "tickets", "worktrees", "derived/snapshots", "derived/cursors"):
         (home / d).mkdir(parents=True, exist_ok=True)
     (home / "config.toml").write_text("[maestro]\nmin_spawn_interval = 0\n")
 
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     assert out["spawn_floor_s"] == 0
     check = next(c for c in out["checks"] if c["name"] == "spawn_floor")
@@ -922,7 +909,7 @@ def test_reconciler_permissions_registered_and_never_blocks_a_spawn(home, tmp_pa
     repo = tmp_path / "repo"
     _init_plain_repo(repo)
     cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert report.spawned == ["T-1"]  # the missing grant never blocked the spawn
@@ -1341,7 +1328,6 @@ def test_user_settings_path_injectable_never_reads_real_home(tmp_path, monkeypat
 # wrong (Claude-only) surface for a non-claude-runner ticket -------------------
 
 from maestro import event_log as event_log_mod  # noqa: E402
-from maestro import snapshot as snap_mod  # noqa: E402
 
 
 def _seed_with_runner(home, key, *, phase=Phase.IMPLEMENTING, runner=None, tier=0):
@@ -1470,7 +1456,7 @@ def test_missing_reconcile_skill_partial_install_warns_naming_the_missing_file(
     _init_plain_repo(repo)
     _install_partial_payload(repo / ".claude" / "commands")
     cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
 
     check = health.check_missing_reconcile_skill(cfg, 1000)
     assert check["status"] == "warn"
@@ -1536,7 +1522,7 @@ def test_missing_reconcile_skill_per_file_union_across_repo_and_user_scope(
     user_dir.mkdir(parents=True)
     (user_dir / "maestro-reconcile-qa.md").write_text("# stub\n")
     cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
 
     check = health.check_missing_reconcile_skill(cfg, 1000)
     assert check["status"] == "ok"
@@ -1557,7 +1543,7 @@ def test_missing_reconcile_skill_stray_user_scope_file_does_not_suppress_board_w
     user_dir.mkdir(parents=True)
     (user_dir / "maestro-reconcile-triaging.md").write_text("# stray, already present repo-side\n")
     cfg = Config(home=home, repo_path=str(repo), min_spawn_interval=0)
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
 
     check = health.check_missing_reconcile_skill(cfg, 1000)
     assert check["status"] == "warn"
@@ -1738,7 +1724,7 @@ def test_real_doctor_over_a_mixed_phase_runner_board_reports_without_exception(
 def test_doctor_warns_on_unset_spend_ceiling(home):
     """AC1: `maestro doctor` reports an unset ceiling as a named check with a
     warning status and today's spend for context, over the real CLI."""
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0  # a warning must not itself fail the (non-strict) sweep
     check = next(c for c in out["checks"] if c["name"] == "daily_spend")
     assert check["status"] == "warn"
@@ -1751,7 +1737,7 @@ def test_doctor_passes_when_spend_ceiling_set(home):
     """AC2: with a ceiling configured, the check passes (not warn/fail) and the
     reported value matches the configured one, over the real CLI."""
     store.atomic_write(home / "config.toml", "[maestro]\ndaily_spend_ceiling_usd = 25.0\n")
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "daily_spend")
     assert check["status"] == "ok"
@@ -1782,7 +1768,7 @@ def test_init_sets_a_nonzero_default_spend_ceiling(tmp_path):
     assert cfg.daily_spend_ceiling_usd is not None
     assert cfg.daily_spend_ceiling_usd > 0
 
-    code, out = _sweep(tmp_path)
+    code, out = run_doctor(tmp_path)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "daily_spend")
     assert check["status"] == "ok"
@@ -1851,7 +1837,7 @@ def test_check_worktree_health_registered_in_doctor(home):
     """AC6: `maestro doctor` runs this check as part of the real registry, not
     just as a standalone function."""
     assert health.check_worktree_health in health.CHECKS
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
 
 
@@ -1915,7 +1901,7 @@ def test_check_worktree_witness_does_not_flag_a_no_index_directory(home):
 
 def test_check_worktree_witness_registered_in_doctor(home):
     assert health.check_worktree_witness in health.CHECKS
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     names = [c["name"] for c in out["checks"]]
     assert "worktree_witness" in names
@@ -1988,7 +1974,7 @@ def test_check_language_binding_ok_for_a_python_board(home, tmp_path):
 
 def test_check_language_binding_registered_in_doctor(home):
     assert health.check_language_binding in health.CHECKS
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     assert next(c for c in out["checks"] if c["name"] == "language_binding")["status"] == "ok"
 
@@ -2068,7 +2054,7 @@ def test_check_unresolvable_spec_hints_skips_terminal_and_local_mode(home, tmp_p
 
 def test_check_unresolvable_spec_hints_registered_in_doctor(home):
     assert health.check_unresolvable_spec_hints in health.CHECKS
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     assert next(c for c in out["checks"]
                if c["name"] == "unresolvable_spec_hints")["status"] == "ok"

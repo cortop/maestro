@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from maestro import config as config_mod
-from maestro import credentials, event_log, health, providers, repos as repos_mod
+from maestro import credentials, event_log, health, repos as repos_mod
 from maestro import snapshot as snap_mod, store
 from maestro import dispatcher as disp
 from maestro.cli import main as cli_main
@@ -416,7 +416,7 @@ def test_dispatch_credential_unresolvable_blocks_spawn_and_records_visible_failu
     evs = event_log.read(home, "A-1")
     assert any(e["type"] == "Failed" for e in evs)
 
-    rc, out = 0, None
+    rc = 0
     import io, sys
     buf = io.StringIO()
     old = sys.stdout

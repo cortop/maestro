@@ -25,7 +25,7 @@ def _rebuild(home, key):
 def test_compact_moves_pre_snapshot_events(cfg):
     home = cfg.home
     _append_n(home, "T-1", 5)                        # seq 1-5
-    snap = _rebuild(home, "T-1")                     # observed_seq = 5
+    _rebuild(home, "T-1")                     # observed_seq = 5
     event_log.append(home, "T-1", "Note", {"n": 6}, actor="t")   # seq 6
 
     result = compact(cfg, "T-1")

@@ -6,7 +6,6 @@ real dispatcher sweep — never a mocked backup module.
 import json
 import shutil
 
-import pytest
 
 from maestro import backup, dispatcher as disp, store
 from maestro.cli import main
@@ -163,5 +162,5 @@ def test_newest_backup_epoch_falls_back_to_newest_parseable_name(tmp_path, capsy
 
     assert backup.newest_backup_epoch(cfg) is None  # only tarball, unparseable -- no fallback left
 
-    older = backup.create_backup(cfg, now=1_000_000_000.0)
+    backup.create_backup(cfg, now=1_000_000_000.0)
     assert backup.newest_backup_epoch(cfg) == 1_000_000_000.0  # falls back past the bad name

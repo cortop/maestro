@@ -15,19 +15,7 @@ from maestro.statemachine import Phase
 
 from test_dispatcher import _EphemeralSessions
 from test_spend import _result_record, _write_stream_log
-
-
-def _seed(home, key, phase=Phase.READY):
-    """Local override of test_dispatcher._seed: T-80's due-gate parks any
-    non-terminal ticket whose spec has no acceptance-criteria section into
-    awaiting-human before a sweep can spawn it. This file's tests are about
-    burn detection, not ACs, so give every seeded spec a trivial AC section
-    to keep them exercising their original, unrelated behavior."""
-    store.atomic_write(store.spec_path(home, key),
-                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
+from conftest import seed_phase
 
 
 def _sweep_doctor(home):
@@ -43,7 +31,7 @@ def _sweep_doctor(home):
 
 def _spawn_and_seed_ledger(home, cfg, key, now):
     cfg.min_spawn_interval = 0
-    _seed(home, key, Phase.READY)
+    seed_phase(home, key, Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=now)
     assert key in report.spawned
     return report
@@ -69,7 +57,7 @@ def test_no_progress_spawn_count_flags_burn(home, cfg):
     """A key respawned `burn_repeat_threshold` times at the SAME observed_seq
     (dispatcher's own `.spawn_attempts.json` ledger) is flagged, even with no
     Failed history and no spend at all."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     snap = snap_mod.load(home, "T-1")
     store.write_json(disp._spawn_attempts_path(home),
                      {"T-1": {"seq": snap.observed_seq, "count": cfg.burn_repeat_threshold}})
@@ -90,7 +78,7 @@ def test_stale_attempts_entry_from_before_progress_is_not_flagged(home, cfg):
     spawn attempt -- a stale high-count entry recorded against an OLDER
     observed_seq than the key's live snapshot must not be trusted, since real
     progress may have happened since it was written."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     stale_seq = snap_mod.load(home, "T-1").observed_seq
     event_log.append(home, "T-1", "Note", {"text": "made real progress"}, actor="r")
     snap_mod.rebuild(home, "T-1")
@@ -107,7 +95,7 @@ def test_stale_attempts_entry_from_before_progress_is_not_flagged(home, cfg):
 # --- AC2: repeated identical failure text, reproducing the measured shape ---
 
 def test_fifteen_identical_failures_flag_burn(home, cfg):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     for _ in range(15):
         event_log.append(home, "T-1", "Failed",
                          {"error": "watchdog: 5 spawns with no progress at seq 3"},
@@ -120,7 +108,7 @@ def test_fifteen_identical_failures_flag_burn(home, cfg):
 
 
 def test_fifteen_different_failures_do_not_flag_burn(home, cfg):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     for i in range(15):
         event_log.append(home, "T-1", "Failed", {"error": f"distinct failure #{i}"}, actor="dispatcher")
     snap_mod.rebuild(home, "T-1")
@@ -134,7 +122,7 @@ def test_repeated_failure_scoped_to_current_phase_visit(home, cfg):
     """A stale identical-failure streak from a phase the key has since LEFT
     (a human answering its question, a fresh fix round) must not park a key
     that is no longer stuck -- see `burn._recent_failure_texts`."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     for _ in range(5):
         event_log.append(home, "T-1", "Failed", {"error": "identical, old phase"}, actor="dispatcher")
     event_log.append(home, "T-1", "PhaseChanged", {"phase": Phase.QA.value}, actor="r")
@@ -149,7 +137,7 @@ def test_repeated_failure_scoped_to_current_phase_visit(home, cfg):
 # --- trigger -----------------------------------------------------------------
 
 def test_free_runner_loop_flagged_without_any_spend(home, cfg):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     snap = snap_mod.load(home, "T-1")
     store.write_json(disp._spawn_attempts_path(home),
                      {"T-1": {"seq": snap.observed_seq, "count": cfg.burn_repeat_threshold + 1}})
@@ -168,7 +156,7 @@ def test_free_runner_loop_flagged_without_any_spend(home, cfg):
 def test_key_making_progress_via_distinct_failures_never_flagged(home, cfg):
     """Even a key that fails on EVERY attempt is never flagged if the text
     differs each time (real, if slow, forward motion, not a burn)."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     for i in range(20):
         event_log.append(home, "T-1", "Failed", {"error": f"attempt {i} hit a different snag"},
                          actor="dispatcher")
@@ -179,7 +167,7 @@ def test_key_making_progress_via_distinct_failures_never_flagged(home, cfg):
 
 
 def test_should_park_never_trips_on_a_progressing_key(home, cfg):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     for i in range(cfg.burn_repeat_threshold + 5):
         event_log.append(home, "T-1", "Failed", {"error": f"different every time {i}"}, actor="r")
     snap_mod.rebuild(home, "T-1")
@@ -191,11 +179,11 @@ def test_should_park_never_trips_on_a_progressing_key(home, cfg):
 
 def test_status_and_needs_you_distinguish_burning_from_waiting(home, cfg):
     # A plain dead-lettered ticket -- generic failure, "waiting for you".
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     ops.fail(cfg, "T-1", "a real bug, not a burn", actor="reconciler", dead_letter=True)
 
     # A burn-parked ticket -- repeated identical failures, then parked.
-    _seed(home, "T-2", Phase.IMPLEMENTING)
+    seed_phase(home, "T-2", Phase.IMPLEMENTING)
     ops.fail(cfg, "T-2", "burn: repeated identical failures", actor="dispatcher",
              dead_letter=True, kind="burn")
 
@@ -255,8 +243,8 @@ def test_real_sweep_parks_burning_key_leaves_other_due_key_spawning(home, cfg):
     advances`, so both keys are re-considered due every sweep."""
     cfg.min_spawn_interval = 0
     cfg.burn_repeat_threshold = 3
-    _seed(home, "T-1", Phase.READY)
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
+    seed_phase(home, "T-2", Phase.READY)
     sessions = _EphemeralSessions()
 
     now = 1_000_000
@@ -286,7 +274,7 @@ def test_real_sweep_parks_burning_key_leaves_other_due_key_spawning(home, cfg):
 def test_burn_repeat_threshold_zero_disables_the_park(home, cfg):
     cfg.min_spawn_interval = 0
     cfg.burn_repeat_threshold = 0
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     sessions = _EphemeralSessions()
 
     now = 1_000_000

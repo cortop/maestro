@@ -24,20 +24,7 @@ from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from test_dispatcher import _age_claim
-
-
-def _seed(home, key, phase=Phase.READY):
-    """Local override of test_dispatcher._seed: T-80's due-gate parks any
-    non-terminal ticket whose spec has no acceptance-criteria section into
-    awaiting-human before a sweep can spawn it. This file's tests are about
-    the checked-signal/no-op-vs-crash distinction, not ACs, so give every
-    seeded spec a trivial AC section to keep them exercising their original,
-    unrelated behavior."""
-    store.atomic_write(store.spec_path(home, key),
-                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
+from conftest import seed_phase
 
 
 class _HonestNoopSessions(DryRunSessions):
@@ -80,7 +67,7 @@ def test_repeated_genuine_noop_produces_zero_failed_events(home, cfg):
     test_degraded_ticket_does_not_accumulate_failed_stalled_pairs for that
     (stronger) fix. `ready` here proves the underlying Checked-signal
     mechanism itself, independent of any one phase's due-classification."""
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.max_spawn_attempts = 3
     cfg.min_spawn_interval = 0
     sessions = _HonestNoopSessions(cfg)
@@ -114,7 +101,7 @@ def test_crash_before_appending_anything_still_fails_at_max_attempts(home, cfg):
     test's own)."""
     from test_dispatcher import _EphemeralSessions
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.max_spawn_attempts = 3
     cfg.min_spawn_interval = 0
     sessions = _EphemeralSessions()  # dies instantly every sweep, appends nothing
@@ -139,7 +126,7 @@ def test_watchdog_killed_session_never_emits_checked(home, cfg):
     test_dispatcher.py's test_watchdog_kills_aged_claim_and_fails_ticket,
     plus the explicit absence-of-Checked assertion RB-10 adds."""
     cfg.max_session_seconds = 100
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     claims.write_claim(home, "T-1", 2_000_000_001, "reconcile-T-1")
     _age_claim(home, "T-1", store.now_epoch() - 10_000)
 
@@ -170,7 +157,7 @@ def test_genuine_noop_signal_is_runner_agnostic():
                 (home / d).mkdir(parents=True, exist_ok=True)
             cfg = Config(home=home, max_concurrency=3, backoff_base=10, max_failures=3,
                         max_spawn_attempts=3, min_spawn_interval=0)
-            _seed(home, "T-1", Phase.READY)  # active phase: degraded is sleeping since OC-7
+            seed_phase(home, "T-1", Phase.READY)  # active phase: degraded is sleeping since OC-7
             sessions = _HonestNoopSessions(cfg, runner=runner)
 
             now = 1_000_000
@@ -195,7 +182,7 @@ def test_degraded_ticket_with_empty_inbox_does_not_accumulate_failed_stalled_pai
     Failed/Stalled check pass vacuously; see test_dispatcher.py's
     test_degraded_ticket_does_not_accumulate_failed_stalled_pairs for the
     same regression proven directly against `is_due`/`dispatch`."""
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     cfg.max_spawn_attempts = 5
     cfg.min_spawn_interval = 0
     sessions = _HonestNoopSessions(cfg)
@@ -217,7 +204,7 @@ def test_checked_event_payload_and_envelope_cost_is_small(home, cfg):
     (type/actor/step_id/ts/seq), on-disk. Measured here rather than merely
     asserted in prose (ops.checked's own docstring states the resulting
     worst-case bytes/day at the spawn floor)."""
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
 
     ev = ops.checked(cfg, "T-1")
     assert ev is not None
@@ -239,7 +226,7 @@ def test_checked_collapses_two_racing_appends_at_the_same_seq(home, cfg):
     reads the advanced seq and legitimately appends a second, distinct
     check-in -- see test_repeated_genuine_noop_produces_zero_failed_events
     for that shape, one per real sweep.)"""
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     snap = snap_mod.load(home, "T-1")
     sid = step_id_mod.step_id("T-1", snap.phase, snap.observed_seq, "checked")
 
@@ -256,7 +243,7 @@ def test_checked_called_again_after_landing_is_a_second_real_checkin(home, cfg):
     """Not a duplicate: once the first `Checked` has landed, observed_seq has
     moved on, so a second call legitimately appends a second event -- the
     same shape a second `maestro impl-turn` call has."""
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     before = snap_mod.load(home, "T-1").observed_seq
 
     ev1 = ops.checked(cfg, "T-1")

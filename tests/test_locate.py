@@ -5,11 +5,9 @@ PRIOR-EDIT/churn stages resolve against actual git state.
 """
 import json
 
-import pytest
 
 from maestro import cli, context, event_log, locate, ops, snapshot as snap_mod, store
 from maestro.config import Config
-from maestro.statemachine import Phase
 
 from conftest import git as _git, make_origin_and_repo as _make_origin_and_repo
 

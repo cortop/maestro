@@ -1040,8 +1040,8 @@ def check_spawn_floor(cfg: Config, now: float) -> dict:
     visibility for the setting, not a second brake on top of it."""
     floor = dispatcher.spawn_floor(cfg)
     disabled = floor == 0
-    detail = (f"spawn floor is 0 (disabled) -- only max_concurrency x sweep cadence "
-              f"bounds the fleet" if disabled else f"spawn floor is {floor}s")
+    detail = ("spawn floor is 0 (disabled) -- only max_concurrency x sweep cadence "
+              "bounds the fleet" if disabled else f"spawn floor is {floor}s")
     return {"name": "spawn_floor", "status": "warn" if disabled else "ok",
             "detail": detail, "floor_s": floor}
 

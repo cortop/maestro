@@ -389,7 +389,7 @@ def test_dispatch_and_doctor_and_why_render_per_repo_attribution(home, tmp_path,
         f'[repos.alpha]\npath = "{alpha_repo}"\ndefault = true\n\n'
         f'[repos.beta]\npath = "{beta_repo}"\n')
     from maestro.config import load
-    cfg = load(str(home))
+    load(str(home))
     _seed_bound_ticket(home, "A-1", "alpha")
     _seed_bound_ticket(home, "B-1", "beta")
 

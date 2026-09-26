@@ -4269,10 +4269,9 @@ def resolve_binary(cfg: Config, name: str) -> str | None:
     against a PATH already extended by every configured runner dir, so a
     daemon whose plist PATH predates the runner still resolves it.
 
-    Keyed on the BINARY name, never on the runner whose spawn is being gated:
-    `_ollama_probe` below probes `ollama` while gating the `opencode` runner,
-    and a resolver keyed on the runner name would silently change what that
-    probe means. A configured `bin` is checked for executability here (the
+    Keyed on the BINARY name, never on the runner whose spawn is being gated,
+    so a probe can look up a helper binary distinct from the runner it gates
+    without the lookup silently changing meaning. A configured `bin` is checked for executability here (the
     config layer validates only shape, on purpose -- see
     `config._validate_runner_bin`), so a path that is set but wrong reports
     missing instead of passing preflight and dying at Popen.
@@ -4284,58 +4283,30 @@ def resolve_binary(cfg: Config, name: str) -> str | None:
 
 
 def _make_default_runner_probe(cfg: Config) -> Callable[[str], dict]:
-    """Creates a closure that builds the default runner probe function.
-    
-    The returned closure will dispatch to different probes based on runner name.
-    For unrecognized runners it falls back to the ollama probe to maintain 
-    backward compatibility.
-    
-    This is called from within dispatch(), and the result is used as the 
-    default probe_fn when runner_probe=None, to support both:
-
-    a) Tests that inject one-arg probes (lambda runner: {...})
-    b) The new per-runner dispatch table approach
+    """The default ``runner -> probe dict`` function `_runner_preflight` uses
+    when no ``runner_probe`` is injected (tests inject one-arg fakes of the
+    same shape). pi has a dedicated probe; every other non-claude runner
+    (today: opencode, which serves its models through ollama) uses
+    `_default_runner_probe`.
     """
-    # Build a dispatch table for different runners
+    def _pi_probe() -> dict:
+        # T-57 (PI-5): run under maestro's own PI_CODING_AGENT_DIR (PI-4)
+        # so this never depends on -- or pollutes -- a developer's real
+        # `~/.pi`; `providers.pi.fetch_models` itself sets pi's offline
+        # flag. `models is None` (fetch_models' failure AND zero-models
+        # shape, see its own docstring) is exactly the generic
+        # `probed.get("models") is None` branch in `_runner_preflight`, so a
+        # credential-less/unreachable pi is TRANSIENT with no special-casing.
+        from .providers import pi as pi_mod
+        models, reason = pi_mod.fetch_models(store.pi_agent_dir(cfg.home),
+                                             path=config_mod.runner_path(cfg))
+        return {"binary_ok": resolve_binary(cfg, "pi") is not None,
+                "models": models, "daemon_reason": reason}
+
     def _probe(runner: str) -> dict:
-        # Create probe functions for different runner types
-        def _ollama_probe() -> dict:
-            from .providers import ollama as ollama_mod
-            models, daemon_reason = ollama_mod.fetch_models()
-            return {"binary_ok": resolve_binary(cfg, "ollama") is not None,
-                    "models": models, "daemon_reason": daemon_reason}
-
-        def _pi_probe() -> dict:
-            # T-57 (PI-5): run under maestro's own PI_CODING_AGENT_DIR (PI-4)
-            # so this never depends on -- or pollutes -- a developer's real
-            # `~/.pi`; `providers.pi.fetch_models` itself sets pi's offline
-            # flag. `models is None` (fetch_models' failure AND zero-models
-            # shape, see its own docstring) is exactly the generic
-            # `probed.get("models") is None` branch below, so a credential-
-            # less/unreachable pi is TRANSIENT with no special-casing here.
-            from . import store as store_mod
-            from .providers import pi as pi_mod
-            models, reason = pi_mod.fetch_models(store_mod.pi_agent_dir(cfg.home),
-                                                 path=config_mod.runner_path(cfg))
-            return {"binary_ok": resolve_binary(cfg, "pi") is not None,
-                    "models": models, "daemon_reason": reason}
-
-        def _generic_probe() -> dict:
-            # For runners like opencode that don't have special support yet
-            # we use the existing ollama probe for compatibility, but this would
-            # be the place to add true runner-specific probing in future
-            return _default_runner_probe(runner, cfg)
-
-        # Dispatch table for different runner types
-        probe_dispatch = {
-            "ollama": _ollama_probe,
-            "pi": _pi_probe,
-            # Other runners can have their own specific probes later
-        }
-        
-        # Get the appropriate probe function, fallback to generic
-        probe_fn = probe_dispatch.get(runner, _generic_probe)
-        return probe_fn()
+        if runner == "pi":
+            return _pi_probe()
+        return _default_runner_probe(runner, cfg)
 
     return _probe
 
@@ -4344,45 +4315,19 @@ def _make_default_runner_verdict(cfg: Config) -> Callable[[str], Callable]:
     """The default resolver for the permanent model-verdict branch: given a
     runner name, returns the ``(models, daemon_reason, runner_model) ->
     (verdict, reason)`` function that judges whether that runner's catalogue
-    has ``runner_model`` installed and tool-capable. Mirrors
-    ``_make_default_runner_probe``'s ``{runner name: fn}`` dispatch table so
-    the two preflight checks generalize the same way -- a genuinely
-    unrecognized runner name (no dedicated verdict logic of its own yet)
-    falls back to the existing ollama-backed verdict, matching the spec's
-    Note that unrecognized runners fall back to the ollama probe. Called from
-    within ``dispatch()``; the result is used as the default resolver when
-    ``runner_verdict=None``, so injected one-arg fakes
-    (``lambda runner: fake_verdict_fn``) and this real dispatch table share
-    the same call shape.
+    has ``runner_model`` installed and tool-capable. pi judges its own
+    catalogue; every other non-claude runner (opencode) is judged against
+    ollama's. Injected one-arg fakes (``lambda runner: fake_verdict_fn``)
+    share this call shape.
     """
     def _resolve(runner: str) -> Callable:
-        def _ollama_verdict() -> Callable:
-            from .providers import ollama as ollama_mod
-            return ollama_mod.verdict_for_model
-
-        def _pi_verdict() -> Callable:
+        if runner == "pi":
             from .providers import pi as pi_mod
             return pi_mod.verdict_for_model
-
-        # Dispatch table for different runner types -- other runners can get
-        # their own dedicated verdict function here as they gain real support.
-        verdict_dispatch = {
-            "ollama": _ollama_verdict,
-            "pi": _pi_verdict,
-        }
-        verdict_fn_getter = verdict_dispatch.get(runner, _ollama_verdict)
-        return verdict_fn_getter()
+        from .providers import ollama as ollama_mod
+        return ollama_mod.verdict_for_model
 
     return _resolve
-
-
-# T-117: the outcome vocabulary `_runner_preflight` classifies a non-claude
-# runner into -- named here so every caller switches on the same fixed set
-# rather than a magic string of its own invention.
-_RUNNER_PREFLIGHT_OUTCOMES = frozenset({
-    "ok", "unregistered", "disabled", "binary_missing",
-    "daemon_unreachable", "model_unavailable", "capped",
-})
 
 
 def _runner_preflight(cfg: Config, runner: str, runner_model: str | None, active: Iterable[str],
@@ -4399,8 +4344,9 @@ def _runner_preflight(cfg: Config, runner: str, runner_model: str | None, active
     ``runner == "claude"`` -- every caller already knows the resolved runner
     isn't claude before reaching here.
 
-    Returns ``(outcome, reason)``, *outcome* one of `_RUNNER_PREFLIGHT_OUTCOMES`
-    and *reason* a human-readable sentence for every non-"ok" outcome (``None``
+    Returns ``(outcome, reason)``, *outcome* one of "ok", "unregistered",
+    "disabled", "binary_missing", "daemon_unreachable", "model_unavailable" or
+    "capped", and *reason* a human-readable sentence for every non-"ok" outcome (``None``
     for "ok"). Deliberately returns a GENERIC classification, never a `key`-
     specific qid or an `ops.ask` call -- what a given outcome MEANS (park the
     ticket in awaiting-human? silently retry next sweep?) is the CALLER's

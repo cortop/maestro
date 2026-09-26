@@ -8,7 +8,7 @@ that a multi-question round lands N entries in open_questions, that answering
 a subset leaves the rest open, and that the reconciler is woken on the first
 answer.
 """
-from maestro import event_log, inbox, ops, snapshot as snap_mod, store
+from maestro import event_log, ops, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
 from maestro.dispatcher import dispatch
 from maestro.sessions import DryRunSessions

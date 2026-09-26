@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-from . import claims, event_log, store
+from . import claims, event_log
 from . import events as E
 
 # Tools we consider "notable" and want to surface in the timeline

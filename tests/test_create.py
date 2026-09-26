@@ -1,9 +1,7 @@
 """Tests for 'maestro create' — both flag-based and interactive forms."""
 import io
 import sys
-import types
 
-import pytest
 
 from maestro import inbox
 from maestro.cli import cmd_create
