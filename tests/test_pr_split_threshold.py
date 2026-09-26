@@ -122,6 +122,9 @@ def test_pr_size_counts_additions_vs_base(home):
 
 
 def test_pr_size_exceeds_when_over_threshold(home):
+    """Pinned by T-129: a ticket with no PR yet keeps today's behavior --
+    `exceeds: true` over threshold -- unaffected by the pr-open skip added
+    alongside this test."""
     key = "T-1"
     _, repo = make_origin_and_repo(home / "worktrees", name=key)
     _seed(home, key)
@@ -158,6 +161,28 @@ def test_pr_size_different_trees_yield_different_qids(home):
     git("commit", "-q", "-m", "grow", cwd=repo)
     tree_after = ops.pr_size(cfg, key)["tree"]
     assert tree_before != tree_after
+
+
+def test_pr_size_skips_check_once_pr_already_open(home):
+    """T-129: once a PR is open, the split-vs-single decision no longer
+    applies -- a later fix round pushing the diff over threshold must not
+    trigger a split proposal against a PR reviewers are already working."""
+    key = "T-1"
+    _, repo = make_origin_and_repo(home / "worktrees", name=key)
+    _seed(home, key)
+    event_log.append(home, key, "PrOpened",
+                      {"number": 1, "url": "https://example/pr/1", "draft": True},
+                      actor="d")
+    snap_mod.rebuild(home, key)
+    (repo / "big.txt").write_text("\n".join(f"line {i}" for i in range(50)) + "\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "grow", cwd=repo)
+    cfg = Config(home=home, pr_split_threshold=10)
+    result = ops.pr_size(cfg, key)
+    assert result["lines_changed"] == 50
+    assert result["threshold"] == 10
+    assert result["exceeds"] is False
+    assert result["skipped"] == "pr_open"
 
 
 def test_pr_size_via_real_cli(home, capsys):
