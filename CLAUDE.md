@@ -64,7 +64,8 @@ responsibility; preserve that.
 Core (correctness-critical):
 - `store.py` — filesystem primitives: home resolution, atomic writes, per-key locks, paths.
 - `event_log.py` — the append-only, **fencing-gated** event log (the sole truth).
-- `events.py` — event type vocabulary. `snapshot.py` — fold of one ticket's log → snapshot.
+- `events.py` — event type vocabulary. `snapshot.py` — fold of one ticket's log → snapshot:
+  one handler per event type in `snapshot._FOLDERS` (or listed in `snapshot._UNFOLDED`).
 - `statemachine.py` — the per-ticket phase machine (`Phase`, `TRANSITIONS`).
 - `idempotency.py` — deterministic `step_id = hash(key, phase, observed_seq, action)`.
 - `claims.py` — per-key liveness dedup backed by verified process identity.

@@ -32,6 +32,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from typing import Callable
 
 from . import events as E
 from . import event_log, store
@@ -475,16 +476,305 @@ def _coerce_turn(p: dict, default: int) -> tuple[int, str | None]:
         return default, f"non-integer turn {raw!r}"
 
 
+# --- fold: one small handler per event type ----------------------------------
+#
+# Each handler takes (snapshot, payload, seq, event_type) and mutates the
+# snapshot. Handlers must be total (never raise -- law (b)): read the payload
+# with `.get`, coerce through `_coerce_*`, and record a `fold_warnings` entry
+# instead of failing. Event types with no handler fold to nothing beyond
+# `observed_seq`/`updated_ts` and must be listed in `_UNFOLDED`, so a new
+# event type can't be silently ignored (tests/test_snapshot.py checks this).
+
+
+def _warn(s: Snapshot, seq, t: str, msg: str) -> None:
+    s.fold_warnings.append(f"seq {seq} {t}: {msg}")
+
+
+def _stack_entry(s: Snapshot, *, number=None, index=None) -> dict | None:
+    """The `pr_stack` row with this PR number (or stack index), if any."""
+    for e in s.pr_stack:
+        if (index is not None and e.get("index") == index) or \
+                (index is None and e.get("number") == number):
+            return e
+    return None
+
+
+def _fold_ticket_created(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.title = p.get("title", s.title)
+    s.source = p.get("source", s.source)
+    s.spec_hash = p.get("spec_hash", s.spec_hash)
+    s.kind = p.get("kind", "implementation")
+    s.external_source = p.get("external_source", s.external_source)
+    s.external_id = p.get("external_id", s.external_id)
+    s.repo = p.get("repo", s.repo)
+    s.phase = Phase.TRIAGING.value
+
+
+def _fold_spec_observed(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.spec_hash = p.get("spec_hash", s.spec_hash)
+
+
+def _fold_phase_changed(s: Snapshot, p: dict, seq, t: str) -> None:
+    new_phase, warn = _coerce_phase(p, s.phase)
+    # T-126: a qa-gated hop into AWAITING_CI (the qa skill's set-phase reason
+    # always starts "qa:") means every current AC just passed spec-axis QA --
+    # stamp that on the stack entry currently being polled, so each stacked
+    # PR keeps its own QA record after the mirror advances past it.
+    if (new_phase == Phase.AWAITING_CI.value
+            and p.get("reason", "").startswith("qa:") and s.pr_stack):
+        entry = _stack_entry(s, number=s.pr_number)
+        if entry is not None:
+            entry["qa_verdict"] = "pass"
+    s.phase = new_phase
+    s.failure_count = 0
+    s.burning = False
+    s.last_error_kind = None
+    s.last_error_state = None
+    s.next_requeue_at = None
+    s.answered_questions = {}
+    s.unresolved_reviews = 0
+    if warn:
+        _warn(s, seq, t, warn)
+
+
+def _fold_question_asked(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.open_questions[p.get("qid", str(seq))] = p.get("text", "")
+
+
+def _fold_question_answered(s: Snapshot, p: dict, seq, t: str) -> None:
+    qid = p.get("qid")
+    s.open_questions.pop(qid, None)
+    if qid:
+        s.answered_questions[qid] = p.get("answer", "")
+
+
+def _fold_pr_opened(s: Snapshot, p: dict, seq, t: str) -> None:
+    # T-126: a split-approved open carries `stack` metadata and records its
+    # own `pr_stack` row. Only a plain open (or stack index 0) moves the
+    # ticket-wide pr_* mirror, which always tracks the PR currently being
+    # polled; `ops.check_merged` advances it with a further plain PrOpened.
+    stack_meta = p.get("stack")
+    is_stack_entry = isinstance(stack_meta, dict) and isinstance(stack_meta.get("index"), int)
+    if is_stack_entry:
+        entry = {
+            "index": stack_meta["index"], "total": stack_meta.get("total"),
+            "number": p.get("number"), "url": p.get("url"),
+            "branch": stack_meta.get("branch"), "base": stack_meta.get("base"),
+            "merged": False, "ci_state": None, "qa_verdict": None,
+            # T-131: opened --draft, like the ticket-wide mirror below.
+            "draft": p.get("draft", True),
+        }
+        s.pr_stack = [e for e in s.pr_stack if e.get("index") != entry["index"]] + [entry]
+    if not is_stack_entry or stack_meta.get("index") == 0:
+        s.pr_number = p.get("number", s.pr_number)
+        s.pr_url = p.get("url", s.pr_url)
+        s.pr_draft = p.get("draft", True)
+        s.pr_state = "open"
+
+
+def _fold_pr_updated(s: Snapshot, p: dict, seq, t: str) -> None:
+    stack_idx = p.get("stack_index")
+    if isinstance(stack_idx, int):
+        # T-126/T-131: a stack-bookkeeping update touches only its own row,
+        # never the ticket-wide mirror.
+        entry = _stack_entry(s, index=stack_idx)
+        if entry is not None:
+            if "merged" in p:
+                entry["merged"] = bool(p.get("merged", entry.get("merged")))
+            if "draft" in p:
+                entry["draft"] = p["draft"]
+        return
+    # Scoped to the currently mirrored PR: an update about any other PR must
+    # never touch the mirror (the 2026-09-24 "tip undrafted instead of root"
+    # incident). A missing "number" -- every non-stack ticket's history --
+    # defaults to matching.
+    if p.get("number", s.pr_number) != s.pr_number:
+        return
+    if p.get("merged"):
+        s.pr_state = "merged"
+    if "draft" in p:
+        s.pr_draft = p["draft"]
+        # T-131: keep the tracked entry's own row in step, or the root-first
+        # undraft check would see the root as perpetually draft.
+        entry = _stack_entry(s, number=s.pr_number)
+        if entry is not None:
+            entry["draft"] = p["draft"]
+
+
+def _fold_ci_observed(s: Snapshot, p: dict, seq, t: str) -> None:
+    # T-130: a stacked entry's observation carries its own `pr_number`; only
+    # the currently tracked PR's moves the ticket-wide ci_state mirror, but
+    # every entry's own `pr_stack` row is kept current.
+    ev_pr = p.get("pr_number")
+    if ev_pr is None or ev_pr == s.pr_number:
+        s.ci_state = p.get("state", s.ci_state)
+        s.failing_checks = p.get("failing_checks", [])
+    if s.pr_stack:
+        entry = _stack_entry(s, number=ev_pr if ev_pr is not None else s.pr_number)
+        if entry is not None:
+            entry["ci_state"] = p.get("state", entry.get("ci_state"))
+
+
+def _fold_ci_rerun_requested(s: Snapshot, p: dict, seq, t: str) -> None:
+    head_sha = p.get("head_sha")
+    if head_sha:
+        s.ci_reruns[head_sha] = {"at": p.get("at"), "run_ids": p.get("run_ids", [])}
+
+
+def _fold_review_feedback_received(s: Snapshot, p: dict, seq, t: str) -> None:
+    # T-130: same scoping as CiObserved -- only a review of the tracked PR
+    # counts toward `unresolved_reviews` (what gates undraft).
+    ev_pr = p.get("pr_number")
+    if p.get("state") == "CHANGES_REQUESTED" and (ev_pr is None or ev_pr == s.pr_number):
+        s.unresolved_reviews += 1
+
+
+def _fold_review_reply_posted(s: Snapshot, p: dict, seq, t: str) -> None:
+    cid, tree_sha = p.get("comment_id"), p.get("tree_sha")
+    if cid and tree_sha:
+        seen = s.review_replies.setdefault(cid, [])
+        if tree_sha not in seen:
+            seen.append(tree_sha)
+
+
+def _fold_impl_turn(s: Snapshot, p: dict, seq, t: str) -> None:
+    turn, warn = _coerce_turn(p, s.impl_turns)
+    s.impl_turns = max(s.impl_turns, turn)
+    if warn:
+        _warn(s, seq, t, warn)
+
+
+def _fold_impl_step(s: Snapshot, p: dict, seq, t: str) -> None:
+    _fold_impl_turn(s, p, seq, t)
+    if p.get("summary"):
+        s.last_step = p["summary"]
+
+
+def _fold_ac_verified(s: Snapshot, p: dict, seq, t: str) -> None:
+    h = p.get("ac_hash")
+    if h:
+        s.ac_verified[h] = p.get("evidence", {})
+
+
+def _fold_ac_qa_verdict(s: Snapshot, p: dict, seq, t: str) -> None:
+    h = p.get("ac_hash")
+    if h:
+        entry = {"verdict": p.get("verdict"), "evidence": p.get("evidence", "")}
+        if p.get("axis") == "standards":
+            s.qa_verdicts_standards[h] = entry
+        else:
+            s.qa_verdicts[h] = entry  # axis "spec", or absent (pre-T-23 events)
+
+
+def _capture_record(p: dict, **extra) -> dict:
+    """The shared shape of a TestRunCaptured / AcCheckCaptured record. RB-14:
+    `failure_excerpt` (failing records only) is kept so a cached record can
+    still be routed on, not just a freshly folded one."""
+    rec = {**extra, "command": p.get("command"), "exit_code": p.get("exit_code"),
+           "passed": bool(p.get("passed"))}
+    if p.get("failure_excerpt"):
+        rec["failure_excerpt"] = p["failure_excerpt"]
+    return rec
+
+
+def _fold_test_run_captured(s: Snapshot, p: dict, seq, t: str) -> None:
+    tk = p.get("tree_key")
+    if tk:
+        s.test_runs[tk] = _capture_record(p)
+
+
+def _fold_ac_check_captured(s: Snapshot, p: dict, seq, t: str) -> None:
+    tk, h = p.get("tree_key"), p.get("ac_hash")
+    if tk and h:
+        s.ac_checks.setdefault(tk, {})[h] = _capture_record(p, kind=p.get("kind"))
+
+
+def _fold_research_proposed(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.proposal_path = p.get("proposal_path", s.proposal_path)
+
+
+def _fold_approved(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.approved = True  # AD-7: historical-only, see events.APPROVED/Snapshot.approved
+
+
+def _fold_requeue_scheduled(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.next_requeue_at = p.get("at")
+
+
+def _fold_failed(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.failure_count += 1
+    s.last_error = p.get("error", s.last_error)
+    s.last_error_kind = p.get("kind")
+    s.last_error_state = p.get("state")
+
+
+def _fold_stalled(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.phase = Phase.DEGRADED.value
+    s.last_error = p.get("reason", s.last_error)
+    s.burning = p.get("kind") == "burn"
+    s.last_error_kind = p.get("kind")
+    s.last_error_state = p.get("state")
+    # Clear the (necessarily elapsed) backoff timer, as every phase-moving
+    # event does: left in place, `is_due` answers "timer" above the sleeping
+    # gate and DEGRADED never actually sleeps (T-65; 218 no-op Checked
+    # events on the dogfood board, 2026-09-11).
+    s.next_requeue_at = None
+
+
+def _fold_finalized(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.phase = Phase.DONE.value
+    s.next_requeue_at = None
+
+
+_FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
+    E.TICKET_CREATED: _fold_ticket_created,
+    E.SPEC_OBSERVED: _fold_spec_observed,
+    E.PHASE_CHANGED: _fold_phase_changed,
+    E.QUESTION_ASKED: _fold_question_asked,
+    E.QUESTION_ANSWERED: _fold_question_answered,
+    E.PR_OPENED: _fold_pr_opened,
+    E.PR_UPDATED: _fold_pr_updated,
+    E.CI_OBSERVED: _fold_ci_observed,
+    E.CI_RERUN_REQUESTED: _fold_ci_rerun_requested,
+    E.REVIEW_FEEDBACK_RECEIVED: _fold_review_feedback_received,
+    E.REVIEW_REPLY_POSTED: _fold_review_reply_posted,
+    E.IMPL_TURN: _fold_impl_turn,
+    E.IMPL_STEP: _fold_impl_step,
+    E.AC_VERIFIED: _fold_ac_verified,
+    E.AC_QA_VERDICT: _fold_ac_qa_verdict,
+    E.TEST_RUN_CAPTURED: _fold_test_run_captured,
+    E.AC_CHECK_CAPTURED: _fold_ac_check_captured,
+    E.RESEARCH_PROPOSED: _fold_research_proposed,
+    E.APPROVED: _fold_approved,
+    E.REQUEUE_SCHEDULED: _fold_requeue_scheduled,
+    E.FAILED: _fold_failed,
+    E.STALLED: _fold_stalled,
+    E.FINALIZED: _fold_finalized,
+}
+
+# Event types that deliberately fold to nothing here: audit breadcrumbs, or
+# facts their own readers scan the log for directly (sync cursors, the post-QA
+# skill's once-per-pass marker, the answered-command inbox record).
+_UNFOLDED = frozenset({
+    E.NOTE, E.CHECKED, E.COMMAND_RECEIVED, E.JIRA_SYNCED, E.LINEAR_SYNCED,
+    E.LINEAR_STATUS_PUSHED, E.POST_QA_SKILL_SPAWNED,
+})
+
+# (e) DONE is absorbing. These event types are dropped outright once a ticket
+# is DONE -- a full no-op, not just a phase no-op -- because applying any part
+# of them (resetting counters, marking DEGRADED) would describe a live ticket.
+_DROPPED_WHEN_DONE = frozenset({E.PHASE_CHANGED, E.STALLED})
+
+
 def fold(key: str, events: list[dict]) -> Snapshot:
     """Replay events into a Snapshot. Pure function of the log — the whole point.
 
-    Total (never raises — see module docstring) and DONE-absorbing. Also
-    duplicate-idempotent in its own right (``fold(evs) == fold(evs * 2)``):
-    *events* is deduplicated by seq (first occurrence wins) before the replay
-    loop runs, so a caller handing this a raw, possibly-duplicated list —
-    including ``fold`` itself, called directly, as opposed to through
-    ``event_log.read``, which already dedups upstream for the same reason
-    (see its docstring) — still gets a duplicate-safe fold.
+    Total (never raises — see module docstring) and DONE-absorbing: once
+    folded to DONE, no event moves the phase again (enforced here, for every
+    handler). Also duplicate-idempotent in its own right (``fold(evs) ==
+    fold(evs * 2)``): *events* is deduplicated by seq (first occurrence wins)
+    before the replay loop runs, so a caller handing this a raw,
+    possibly-duplicated list still gets a duplicate-safe fold.
     """
     seen_seqs: set[int] = set()
     deduped: list[dict] = []
@@ -495,282 +785,33 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 continue
             seen_seqs.add(seq)
         deduped.append(ev)
-    events = deduped
 
     s = Snapshot(key=key)
-    for ev in events:
+    for ev in deduped:
         seq = ev.get("seq")
         if isinstance(seq, int) and seq > s.observed_seq:
             s.observed_seq = seq
         t = ev.get("type")
         p = ev.get("payload")
         if not isinstance(p, dict):
-            # (b) totality: a payload that isn't a dict at all (a bare int/str/list, found by
-            # RB-10's property generator) must coerce to empty, not crash every `p.get(...)`
-            # call below -- the same defensive posture as `_coerce_phase`/`_coerce_turn`.
+            # (b) totality: a non-dict payload (RB-10's property generator
+            # found bare ints/strs/lists) folds as empty.
             p = {}
         s.updated_ts = ev.get("ts", s.updated_ts)
 
-        if t == E.TICKET_CREATED:
-            s.title = p.get("title", s.title)
-            s.source = p.get("source", s.source)
-            s.spec_hash = p.get("spec_hash", s.spec_hash)
-            s.kind = p.get("kind", "implementation")
-            s.external_source = p.get("external_source", s.external_source)
-            s.external_id = p.get("external_id", s.external_id)
-            s.repo = p.get("repo", s.repo)
-            if s.phase == Phase.DONE.value:
-                # (e) DONE is absorbing: a (re-)TicketCreated after Finalized
-                # must not resurrect a finished ticket back to TRIAGING -- the
-                # write boundary already refuses to append a second
-                # TicketCreated to a key with events, but `fold` itself must
-                # hold this law for ANY event list, not just ones the write
-                # boundary would actually produce.
-                s.fold_warnings.append(f"seq {seq} {t}: dropped phase reset -- phase is DONE (absorbing)")
-            else:
-                s.phase = Phase.TRIAGING.value
-        elif t == E.SPEC_OBSERVED:
-            s.spec_hash = p.get("spec_hash", s.spec_hash)
-        elif t == E.PHASE_CHANGED:
-            if s.phase == Phase.DONE.value:
-                # (e) DONE is absorbing: a PhaseChanged after Finalized is a
-                # full no-op, not just a phase no-op -- record it and move on.
-                s.fold_warnings.append(f"seq {seq} {t}: dropped -- phase is DONE (absorbing)")
-            else:
-                new_phase, warn = _coerce_phase(p, s.phase)
-                # T-126: a qa-gated hop into AWAITING_CI ("qa: ..." is the
-                # literal reason the qa skill's own set-phase call always
-                # uses) means every current-hash AC just passed spec-axis QA
-                # -- stamp that onto whichever stack entry is CURRENTLY the
-                # active poll target, so each stacked PR keeps its own QA
-                # record even once the mirror later advances past it. A
-                # non-split ticket's empty pr_stack makes this a no-op.
-                if (new_phase == Phase.AWAITING_CI.value
-                        and p.get("reason", "").startswith("qa:") and s.pr_stack):
-                    for e in s.pr_stack:
-                        if e.get("number") == s.pr_number:
-                            e["qa_verdict"] = "pass"
-                            break
-                s.phase = new_phase
-                s.failure_count = 0
-                s.burning = False
-                s.last_error_kind = None
-                s.last_error_state = None
-                s.next_requeue_at = None
-                s.answered_questions = {}
-                s.unresolved_reviews = 0
-                if warn:
-                    s.fold_warnings.append(f"seq {seq} {t}: {warn}")
-        elif t == E.QUESTION_ASKED:
-            s.open_questions[p.get("qid", str(seq))] = p.get("text", "")
-        elif t == E.QUESTION_ANSWERED:
-            qid = p.get("qid")
-            s.open_questions.pop(qid, None)
-            if qid:
-                s.answered_questions[qid] = p.get("answer", "")
-        elif t == E.PR_OPENED:
-            # T-126: a split-approved open also carries stack metadata --
-            # record/replace this entry in pr_stack. A plain (non-split) open
-            # carries no "stack" key, so pr_stack stays untouched (empty) for
-            # every ticket that never split -- ships dark. Only index 0 (or a
-            # plain, non-stack open) mirrors into the ticket-wide pr_number/
-            # pr_url/pr_draft/pr_state fields below -- those always track
-            # whichever PR is CURRENTLY the active poll target, and every
-            # later stack entry is opened well before it becomes that (see
-            # ops.check_merged, which fires a further, stack-metadata-free
-            # PrOpened to advance the mirror once the active entry merges).
-            stack_meta = p.get("stack")
-            is_stack_entry = isinstance(stack_meta, dict) and isinstance(stack_meta.get("index"), int)
-            if is_stack_entry:
-                entry = {
-                    "index": stack_meta["index"], "total": stack_meta.get("total"),
-                    "number": p.get("number"), "url": p.get("url"),
-                    "branch": stack_meta.get("branch"), "base": stack_meta.get("base"),
-                    "merged": False, "ci_state": None, "qa_verdict": None,
-                    # T-131: each entry's own draft/ready state -- opened
-                    # `--draft` per the "Approved split" skill section, so this
-                    # defaults True exactly like the ticket-wide mirror below.
-                    "draft": p.get("draft", True),
-                }
-                s.pr_stack = [e for e in s.pr_stack if e.get("index") != entry["index"]] + [entry]
-            if not is_stack_entry or stack_meta.get("index") == 0:
-                s.pr_number = p.get("number", s.pr_number)
-                s.pr_url = p.get("url", s.pr_url)
-                s.pr_draft = p.get("draft", True)
-                s.pr_state = "open"
-        elif t == E.PR_UPDATED:
-            # T-126: a stack-bookkeeping update (one non-final stack entry
-            # merging) is scoped to ITS OWN entry only -- it must never touch
-            # the ticket-wide pr_state/pr_draft mirror below, which always
-            # reflects whichever PR is currently the active poll target (a
-            # plain PrOpened advances that mirror separately, see check_merged).
-            stack_idx = p.get("stack_index")
-            if isinstance(stack_idx, int):
-                for e in s.pr_stack:
-                    if e.get("index") == stack_idx:
-                        if "merged" in p:
-                            e["merged"] = bool(p.get("merged", e.get("merged")))
-                        # T-131: a non-tracked entry's own draft observation
-                        # (or our own root-first-gated undraft of it) is
-                        # scoped by stack_index -- keep its `pr_stack` row
-                        # current so later sweeps' root-first check sees it.
-                        if "draft" in p:
-                            e["draft"] = p["draft"]
-                        break
-            elif p.get("number", s.pr_number) == s.pr_number:
-                # T-126: scoped to the CURRENTLY-mirrored PR number -- an
-                # update for a PR that isn't (or is no longer) the active
-                # poll target must never mutate the ticket-wide mirror. A
-                # missing "number" (the plain finalize-on-merge fallback,
-                # `pr-merged-<key>`, predates this field and every non-stack
-                # ticket's history lacks it) defaults to matching, so this
-                # stays byte-identical for every ticket that never split.
-                # This is what keeps a stray/late update about a non-root
-                # stack entry from clobbering the mirror's actual state (the
-                # 2026-09-24 T-126 "tip got undrafted instead of root"
-                # incident: an update for the tip PR landed while an older
-                # fold still had the tip mirrored, and nothing here checked
-                # that the update's number still matched).
-                if p.get("merged"):
-                    s.pr_state = "merged"
-                if "draft" in p:
-                    s.pr_draft = p["draft"]
-                    # T-131: this plain (non-stack_index) update is how BOTH
-                    # `_observe_pr_draft` and `_maybe_undraft` refresh the
-                    # currently-tracked entry's draft state -- without also
-                    # mirroring it onto that entry's own `pr_stack` row, the
-                    # row would stay frozen at its PrOpened-time default and
-                    # the root-first check below would see the root as
-                    # perpetually draft even after it actually undrafted.
-                    for e in s.pr_stack:
-                        if e.get("number") == s.pr_number:
-                            e["draft"] = p["draft"]
-                            break
-        elif t == E.CI_OBSERVED:
-            # T-130: a split stack's CiObserved carries its own `pr_number` (a
-            # non-stack ticket's never does) -- the ticket-wide `ci_state`/
-            # `failing_checks` mirror stays scoped to whichever entry is
-            # CURRENTLY tracked (merge detection/advance/undraft's own axis),
-            # exactly as before this ticket; a non-tracked entry's observation
-            # still updates its OWN `pr_stack` row below, just not the mirror.
-            ev_pr = p.get("pr_number")
-            if ev_pr is None or ev_pr == s.pr_number:
-                s.ci_state = p.get("state", s.ci_state)
-                s.failing_checks = p.get("failing_checks", [])
-            if s.pr_stack:
-                target = ev_pr if ev_pr is not None else s.pr_number
-                for e in s.pr_stack:
-                    if e.get("number") == target:
-                        e["ci_state"] = p.get("state", e.get("ci_state"))
-                        break
-        elif t == E.CI_RERUN_REQUESTED:
-            head_sha = p.get("head_sha")
-            if head_sha:
-                s.ci_reruns[head_sha] = {"at": p.get("at"), "run_ids": p.get("run_ids", [])}
-        elif t == E.REVIEW_FEEDBACK_RECEIVED:
-            # T-130: same scoping as CiObserved above -- a stacked entry's
-            # comment only bumps the ticket-wide `unresolved_reviews` counter
-            # (what gates `_maybe_undraft`) when it's about the CURRENTLY
-            # tracked PR; a non-stack ticket's payload never carries
-            # `pr_number` at all, so this stays unconditional for it.
-            ev_pr = p.get("pr_number")
-            if p.get("state") == "CHANGES_REQUESTED" and (ev_pr is None or ev_pr == s.pr_number):
-                s.unresolved_reviews += 1
-        elif t == E.REVIEW_REPLY_POSTED:
-            cid, tree_sha = p.get("comment_id"), p.get("tree_sha")
-            if cid and tree_sha:
-                seen = s.review_replies.setdefault(cid, [])
-                if tree_sha not in seen:
-                    seen.append(tree_sha)
-        elif t == E.IMPL_TURN:
-            turn, warn = _coerce_turn(p, s.impl_turns)
-            s.impl_turns = max(s.impl_turns, turn)
-            if warn:
-                s.fold_warnings.append(f"seq {seq} {t}: {warn}")
-        elif t == E.IMPL_STEP:
-            turn, warn = _coerce_turn(p, s.impl_turns)
-            s.impl_turns = max(s.impl_turns, turn)
-            if warn:
-                s.fold_warnings.append(f"seq {seq} {t}: {warn}")
-            if p.get("summary"):
-                s.last_step = p["summary"]
-        elif t == E.AC_VERIFIED:
-            h = p.get("ac_hash")
-            if h:
-                s.ac_verified[h] = p.get("evidence", {})
-        elif t == E.AC_QA_VERDICT:
-            h = p.get("ac_hash")
-            if h:
-                entry = {"verdict": p.get("verdict"), "evidence": p.get("evidence", "")}
-                if p.get("axis") == "standards":
-                    s.qa_verdicts_standards[h] = entry
-                else:
-                    s.qa_verdicts[h] = entry  # axis "spec", or absent (pre-T-23 events)
-        elif t == E.TEST_RUN_CAPTURED:
-            tk = p.get("tree_key")
-            if tk:
-                rec = {
-                    "command": p.get("command"),
-                    "exit_code": p.get("exit_code"),
-                    "passed": bool(p.get("passed")),
-                }
-                # RB-14: only present on a failing record (see events.py) --
-                # carried into the snapshot so a CACHED record (one already
-                # captured before `verifying` re-checks it) still has an
-                # excerpt to route with, not just a freshly-folded one.
-                if p.get("failure_excerpt"):
-                    rec["failure_excerpt"] = p["failure_excerpt"]
-                s.test_runs[tk] = rec
-        elif t == E.AC_CHECK_CAPTURED:
-            tk = p.get("tree_key")
-            h = p.get("ac_hash")
-            if tk and h:
-                rec = {
-                    "kind": p.get("kind"),
-                    "command": p.get("command"),
-                    "exit_code": p.get("exit_code"),
-                    "passed": bool(p.get("passed")),
-                }
-                if p.get("failure_excerpt"):
-                    rec["failure_excerpt"] = p["failure_excerpt"]
-                s.ac_checks.setdefault(tk, {})[h] = rec
-        elif t == E.RESEARCH_PROPOSED:
-            s.proposal_path = p.get("proposal_path", s.proposal_path)
-        elif t == E.APPROVED:
-            s.approved = True  # AD-7: historical-only, see events.APPROVED/Snapshot.approved
-        elif t == E.REQUEUE_SCHEDULED:
-            s.next_requeue_at = p.get("at")
-        elif t == E.FAILED:
-            s.failure_count += 1
-            s.last_error = p.get("error", s.last_error)
-            s.last_error_kind = p.get("kind")
-            s.last_error_state = p.get("state")
-        elif t == E.STALLED:
-            if s.phase == Phase.DONE.value:
-                # (e) DONE is absorbing: a Stalled after Finalized cannot
-                # resurrect a finished ticket into an active phase.
-                s.fold_warnings.append(f"seq {seq} {t}: dropped -- phase is DONE (absorbing)")
-            else:
-                s.phase = Phase.DEGRADED.value
-                s.last_error = p.get("reason", s.last_error)
-                s.burning = p.get("kind") == "burn"
-                s.last_error_kind = p.get("kind")
-                s.last_error_state = p.get("state")
-                # Clear the stale backoff timer, as PHASE_CHANGED and FINALIZED
-                # (the other two phase-moving arms) already do. A ticket
-                # arriving here through the ordinary max_failures path carries
-                # the RequeueScheduled from its previous backoff, necessarily
-                # already elapsed -- it had to wake past that timer to fail the
-                # final time -- and `ops.fail`'s dead-letter branch sets no new
-                # one by design. Left in place it makes T-65's
-                # `PHASE_CLASS[DEGRADED] = "sleeping"` unreachable, because
-                # `is_due` answers "timer" above the SLEEPING_PHASES gate.
-                # Dogfood board, 2026-09-11: 218 no-op Checked events on
-                # degraded keys, every one of them woken by an expired timer.
-                s.next_requeue_at = None
-        elif t == E.FINALIZED:
+        handler = _FOLDERS.get(t)
+        if handler is None:
+            continue
+        was_done = s.phase == Phase.DONE.value
+        if was_done and t in _DROPPED_WHEN_DONE:
+            _warn(s, seq, t, "dropped -- phase is DONE (absorbing)")
+            continue
+        handler(s, p, seq, t)
+        if was_done and s.phase != Phase.DONE.value:
+            # Any other handler that would move the phase (a re-TicketCreated
+            # resetting to TRIAGING) keeps its other effects but not the move.
             s.phase = Phase.DONE.value
-            s.next_requeue_at = None
+            _warn(s, seq, t, "dropped phase reset -- phase is DONE (absorbing)")
     return s
 
 
