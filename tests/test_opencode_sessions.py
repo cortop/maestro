@@ -297,3 +297,11 @@ def test_run_watchdog_reaps_a_real_opencode_spawn_by_pgid(home, cfg, tmp_path, m
             os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             pass
+
+
+def test_claim_records_opencode_when_no_runner_is_passed(home):
+    """The claim's `runner` field feeds the per-runner concurrency cap; a spawn
+    with no explicit runner used to be recorded as "claude" (copied from the
+    Claude backend), undercounting opencode's own cap."""
+    _capture_cmd(home, key="T-7")
+    assert claims.read_claim(home, "T-7")["runner"] == "opencode"

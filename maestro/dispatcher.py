@@ -18,8 +18,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -1176,7 +1178,6 @@ def _probe_repo_path(repo: str) -> dict:
     guards against, so only positive evidence of a real conflict blocks. Never
     raises into ``dispatch()``.
     """
-    import subprocess
 
     def _run(args, timeout=10):
         try:
@@ -1363,7 +1364,6 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     groups land in the returned ``blocked`` map ({name: [blockers]}), never in
     ``errors`` (that key stays reserved for a real git/network failure).
     """
-    import subprocess
 
     from . import ops
     from . import repos as repos_mod
@@ -1721,7 +1721,6 @@ def _route_if_merged(cfg: Config, key: str, status: dict,
         return False
     if snap_mod.load(cfg.home, key).phase != Phase.DONE.value:
         return True  # advanced to the next stack entry -- not finalized, no worktree removal
-    import subprocess
     wt = store.worktree_path(cfg.home, key)
     if wt.exists():
         # Removal must run in the ticket's OWNING repo -- `git -C <worktree>
@@ -2590,8 +2589,6 @@ def _start_test_run(home: Path, key: str, cwd: Path, command: str) -> None:
     process exits, so a LATER `maestro dispatch` invocation is never its
     parent and can't `waitpid()` it -- it can only read what the child left
     behind for itself (`_test_run_result_path`/`_test_run_log_path`)."""
-    import shlex
-    import subprocess
 
     result_path = _test_run_result_path(home, key)
     log_path = _test_run_log_path(home, key)
@@ -2661,7 +2658,6 @@ def _diff_deleted_test_names(cwd: Path, base: str, profile) -> list[str]:
     deletion can't slip past the gate either. Empty on any git failure --
     fail open here; the gate strengthens the oracle, it is not a correctness
     invariant, and a broken git must never wedge routing."""
-    import subprocess
 
     def _git(*args: str):
         try:
@@ -3393,6 +3389,529 @@ def key_decisions(home: Path, key: str, *, tail: int = 20) -> list[dict]:
     return out[-tail:] if tail else out
 
 
+# --- one sweep: dispatch() and the phases it runs, in call order -------------
+#
+# Every gate outcome below is a literal `decisions[key]["outcome"] = "..."`
+# (or dict-literal / `_ask_park(outcome=...)`) assignment through a local
+# named `decisions`: `diagram.py` AST-walks this module for exactly those
+# shapes to generate docs/dispatch-gates.md, so keep them literal.
+
+@dataclass
+class _Sweep:
+    """Mutable state one `dispatch()` call threads through its phases."""
+    cfg: Config
+    now: float
+    dry_run: bool
+    hook_errors: dict = field(default_factory=dict)
+    decisions: dict = field(default_factory=dict)     # key -> {"outcome", "reason"}
+    due: list = field(default_factory=list)           # [(key, due reason)]
+    claimed: list = field(default_factory=list)
+    observed_seq: dict = field(default_factory=dict)  # key -> snapshot observed_seq
+    phase: dict = field(default_factory=dict)         # key -> snapshot phase
+    reaped: list = field(default_factory=list)
+    runner_blockers: dict = field(default_factory=dict)  # runner name -> transient reason
+
+    @property
+    def home(self) -> Path:
+        return self.cfg.home
+
+
+@dataclass
+class _HookResults:
+    minted: list = field(default_factory=list)
+    would_mint: list = field(default_factory=list)
+    scheduled_fired: list = field(default_factory=list)
+    worktree_removal_errors: dict = field(default_factory=dict)
+    drift_skipped: list = field(default_factory=list)
+    drift_skip_reasons: dict = field(default_factory=dict)
+    pruned_logs: int = 0
+    pruned_bytes: int = 0
+    errors: dict = field(default_factory=dict)
+
+
+def _check_key_filter(home: Path, key_filter: Iterable[str] | None) -> frozenset[str] | None:
+    """MTO-4: the `--key` candidate set, validated up front (before the pause
+    gate, so a typo is never swallowed by a paused board). A key with a
+    derived-only footprint but no spec/ticket dir/event history (RB-17) is
+    as unknown as one that doesn't exist at all."""
+    if key_filter is None:
+        return None
+    filter_keys = frozenset(key_filter)
+    known = set(list_keys(home))
+    unknown = {k for k in filter_keys if k not in known}
+    unknown |= {k for k in filter_keys if k not in unknown and _never_minted(home, k)}
+    if unknown:
+        raise store.MaestroError(
+            f"dispatch --key: unknown ticket key(s): {', '.join(sorted(unknown))}")
+    return filter_keys
+
+
+def _refuse_if_tickets_dir_missing(home: Path, now: float) -> DispatchReport | None:
+    """T-99: `tickets/` absent while events/snapshots still hold ticket data is
+    RB-17's phantom-ticket shape -- `list_keys` would manufacture `triaging`
+    rows with no spec.md to read. Refuse the whole unrestricted sweep (a
+    `--key` sweep never calls this, so per-key `discard` still works)."""
+    board = store.board_state(home)
+    if not ("tickets/" in board["missing_paths"] and list_keys(home)):
+        return None
+    decisions: dict[str, dict] = {}
+    decisions["_board"] = {
+        "outcome": "board_refused",
+        "reason": ("tickets/ directory missing while events/ or derived "
+                   "snapshots hold ticket data -- refusing an unrestricted "
+                   "sweep (see `maestro doctor` / `maestro status`); a "
+                   "`dispatch --key <KEY>` sweep is unaffected"),
+    }
+    _write_heartbeat(home, now, 0, 0)
+    _append_dispatch_ledger(home, {
+        "ts": store.iso_now(), "epoch": now, "hook_errors": {},
+        "decisions": decisions,
+        "drift_skipped": [], "drift_skip_reasons": {},
+    })
+    return DispatchReport(minted=[], due=[], claimed=[], spawned=[], capacity_skipped=[],
+                          active_sessions=0)
+
+
+def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: frozenset[str] | None, *,
+                     runner_probe, runner_verdict) -> _HookResults:
+    """Every per-sweep side-effecting hook, each isolated by `_run_hook` so one
+    failure never halts the sweep. Under `dry_run` none of them run (GA-4:
+    each mutates the log, advances a cursor, or touches the outside world);
+    only `would_mint` is computed, by reading -- not draining -- inbox/_new.
+    A `--key` sweep never mints: the _new inbox is keyless, so it can't be
+    scoped to `filter_keys`."""
+    from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
+
+    cfg, now, hook_errors = sweep.cfg, sweep.now, sweep.hook_errors
+    if sweep.dry_run:
+        return _HookResults(would_mint=[] if filter_keys is not None else _would_mint_keys(cfg.home))
+
+    out = _HookResults()
+    if filter_keys is None:
+        out.minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
+    _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
+    out.scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
+                                    cfg, now, default={"fired": []})["fired"]
+    # sync_worktrees preflight-gates itself per repo group (MR-5).
+    drift = _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg, now, default={}) or {}
+    out.drift_skipped = drift.get("skipped_by_policy", [])
+    out.drift_skip_reasons = drift.get("skip_reasons", {})
+    vcs = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={}) or {}
+    out.worktree_removal_errors = vcs.get("worktree_removal_errors", {})
+    # T-132: folds any gt-managed stack restack `sync_vcs`'s own `check_merged`
+    # call just queued -- same detached-subprocess shape as `sync_test_runs`
+    # below, so it needs its own hook run.
+    _run_hook("sync_restacks", hook_errors, sync_restacks, cfg, now, default={})
+    _run_hook("sync_test_runs", hook_errors, sync_test_runs, cfg, now, default={})
+    # The one hook that needs `sessions`: it spawns the post-QA skill itself.
+    _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,
+              runner_probe=runner_probe, runner_verdict=runner_verdict, default={})
+    _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
+    _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
+    _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
+    _run_hook("ratelimit_probe", hook_errors, ratelimit.probe, cfg, now)
+    _run_hook("spend_probe", hook_errors, spend.probe, cfg, now)
+    _run_hook("notify", hook_errors, notify.maybe_notify, cfg, now)
+
+    # The watchdogs run before `active` is computed: a hung claim must not count
+    # toward concurrency, and a reaped key's Failed event must be fold-visible
+    # before this sweep's due-check -- and before `active_keys()` silently
+    # releases a dead-and-never-ran claim (T-45).
+    sweep.reaped.extend(_run_hook("watchdog", hook_errors, run_watchdog, cfg, now, default=[]))
+    sweep.reaped.extend(_run_hook("detect_zero_turn_spawns", hook_errors,
+                                  detect_zero_turn_spawns, cfg, now, default=[]))
+
+    prune = _run_hook("prune_tick", hook_errors, prune_logs_tick, cfg, now, default=None)
+    if prune:
+        out.pruned_logs = prune.get("pruned_logs", 0)
+        out.pruned_bytes = prune.get("pruned_bytes", 0)
+        per_key_errors = prune.get("errors") or {}
+        if per_key_errors:
+            out.errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
+    return out
+
+
+def _active_agent_keys(sessions: SessionManager, home: Path) -> set[str]:
+    """Keys holding a live agent session. A dispatcher-owned test-run claim
+    (RB-14) is not an agent and never eats into `max_concurrency`
+    (`TEST_RUN_CONCURRENCY` bounds those instead). T-132: a `gt sync`/`gt
+    restack`/`gt submit` restack subprocess (`_start_restack`) is the same
+    shape -- detached, dispatcher-owned, not an agent session -- so it gets
+    the identical exclusion."""
+    active = sessions.list_active()
+    return active - {k for k, c in claims.all_claims(home).items()
+                      if c.get("kind") in ("testrun", "restack")}
+
+
+def _due_check(home: Path, key: str, snap, now: float) -> DueResult:
+    return is_due(home, key, snap,
+                  inbox_pending=inbox.has_pending(home, key),
+                  current_spec_hash=spec_hash_on_disk(home, key),
+                  now=now, blocked_dep=_has_unmet_deps(home, key))
+
+
+def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
+    """Fold *key* and run the pre-spawn checks that can end its sweep early
+    (never minted, fold error, not due, no ACs, already claimed), recording
+    that outcome. Returns ``(snap, due_reason)`` when *key* is still a
+    candidate, else None."""
+    home, now, dry_run = sweep.home, sweep.now, sweep.dry_run
+    decisions, hook_errors = sweep.decisions, sweep.hook_errors
+
+    # RB-17: never fold or spawn a key that was never minted. A real sweep
+    # prunes the stray snapshot that would keep `list_keys` returning it.
+    if _never_minted(home, key):
+        if not dry_run:
+            snap_path = store.snapshot_path(home, key)
+            if snap_path.exists():
+                snap_path.unlink()
+        decisions[key] = {
+            "outcome": "phantom",
+            "reason": "never minted -- no spec.md, ticket directory, or event log",
+        }
+        return None
+    # RB-2: one corrupt ticket must never abort the sweep for every other one.
+    snap = _run_hook(f"fold:{key}", hook_errors, _load_and_refresh_snapshot, home, key)
+    if snap is None:
+        decisions[key] = {"outcome": "fold_error",
+                          "reason": hook_errors.get(f"fold:{key}", "fold failed")}
+        return None
+    sweep.observed_seq[key] = snap.observed_seq
+    sweep.phase[key] = snap.phase
+    res = _due_check(home, key, snap, now)
+    if not res.due:
+        decisions[key] = {"outcome": "not_due", "reason": res.reason}
+        return None
+    # T-80: park a spec with no acceptance criteria before it reaches any spawn
+    # gate -- unless a human answer is pending, which must reach a reconciler.
+    if res.reason not in _MISSING_ACS_EXEMPT_DUE_REASONS and _missing_acs(home, key):
+        if dry_run:
+            decisions[key] = {
+                "outcome": "would_park_missing_acs",
+                "reason": "spec has no acceptance criteria",
+            }
+        else:
+            _ask_park(sweep.cfg, key,
+                      f"{key}: spec.md has no acceptance criteria (its "
+                      "'## Acceptance criteria' section parses to zero non-blank "
+                      "'- [ ] ...' lines) -- add at least one, then answer this "
+                      "question to unpark it",
+                      qid=f"missing-acs-{key}", actor="dispatcher",
+                      hook_errors=hook_errors, decisions=decisions,
+                      outcome="missing_acs",
+                      reason="spec has no acceptance criteria")
+        return None
+    if key in active:
+        sweep.claimed.append(key)        # per-key serialization: one reconciler per key
+        decisions[key] = {"outcome": "claimed", "reason": res.reason}
+        return None
+    return snap, res.reason
+
+
+def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bool:
+    """T-122: route an exact-literal human approval straight to `ready` in this
+    sweep instead of spawning an awaiting-human reconciler just to read "ok".
+    Returns True when it fully decided *key*'s outcome. `answer_fast_path =
+    "off"` (default) never computes eligibility; "shadow" (or "on" under
+    dry_run) only predicts."""
+    cfg, home, now = sweep.cfg, sweep.home, sweep.now
+    decisions = sweep.decisions
+    if cfg.answer_fast_path == "off":
+        return False
+    answer = _answer_fast_path_eligible(home, key, snap, due_reason)
+    if answer is None:
+        return False
+    if cfg.answer_fast_path == "on" and not sweep.dry_run:
+        reason = f"approved: {answer}"
+        try:
+            _apply_answer_fast_path(cfg, key, reason, actor="dispatcher")
+        except Exception as e:  # noqa: BLE001 -- a lost race must not abort the sweep
+            sweep.hook_errors[f"answer_fast_path:{key}"] = f"{type(e).__name__}: {e}"
+            answer = None
+        else:
+            decisions[key] = {"outcome": "answer_routed", "reason": reason}
+            refreshed = snap_mod.load(home, key)
+            sweep.observed_seq[key] = refreshed.observed_seq
+            sweep.phase[key] = refreshed.phase
+            # Re-check against the just-routed `ready` snapshot so its
+            # reconciler spawns THIS sweep, not next interval.
+            res = _due_check(home, key, refreshed, now)
+            if res.due:
+                sweep.due.append((key, res.reason))
+            return True
+    if answer is None:
+        return False
+    decisions[key] = {"outcome": "would_route_answer",
+                      "reason": f"would approve: {answer}"}
+    sweep.due.append((key, due_reason))
+    return True
+
+
+def _classify_key(sweep: _Sweep, key: str, active: set[str]) -> None:
+    """Decide whether *key* is due this sweep, recording its outcome. Due keys
+    are appended to `sweep.due`; every other outcome is final for this sweep."""
+    candidate = _fold_and_gate(sweep, key, active)
+    if candidate is None:
+        return
+    snap, due_reason = candidate
+    if _route_answer_fast_path(sweep, key, snap, due_reason):
+        return
+    decisions = sweep.decisions
+    sweep.due.append((key, due_reason))
+    decisions[key] = {"outcome": "due", "reason": due_reason}
+
+
+def _gate_due(sweep: _Sweep, active: set[str], bindings_by_key: dict,
+              repo_blockers_by_repo: dict, ledger: dict) -> tuple[list, list, list]:
+    """Apply the per-key spawn gates in order -- spawn-rate floor, repo-blocked,
+    concurrency slots. Returns (to_spawn, throttled, capacity_skipped). Gated
+    keys stay in `report.due`, so the next sweep retries them."""
+    cfg, now = sweep.cfg, sweep.now
+    decisions = sweep.decisions
+
+    # Spawn-rate floor: the ledger outlives a session that dies in <1s (whose
+    # claim vanishes with it), so it bounds the per-key rate however often the
+    # dispatcher itself fires. A human signal bypasses it.
+    floor = spawn_floor(cfg)
+    throttled: list[str] = []
+    eligible: list[tuple[str, str]] = []
+    for key, reason in sweep.due:
+        if floor:
+            entry = ledger.get(key)
+            last = entry.get("last") if isinstance(entry, dict) else entry
+            if (reason not in _UNTHROTTLED_REASONS
+                    and isinstance(last, (int, float)) and now - last < floor):
+                throttled.append(key)
+                decisions[key]["outcome"] = "throttled"
+                continue
+        eligible.append((key, reason))
+
+    # Repo-blocked: NOT bypassable by a human signal -- an answer is exactly
+    # the moment you must not launch an agent into a half-merged tree.
+    unblocked: list[tuple[str, str]] = []
+    for key, reason in eligible:
+        binding = bindings_by_key.get(key)
+        if binding is not None and binding.name in repo_blockers_by_repo:
+            decisions[key]["outcome"] = "repo_blocked"
+            continue
+        unblocked.append((key, reason))
+
+    slots = max(0, cfg.max_concurrency - len(active))
+    capacity_skipped = [k for k, _ in unblocked[slots:]]
+    for key in capacity_skipped:
+        decisions[key]["outcome"] = "capacity_skipped"
+    return unblocked[:slots], throttled, capacity_skipped
+
+
+def _repo_cap_reached(binding, counts: dict[str, int]) -> bool:
+    """MR-5 `max_spawns_per_sweep`: has *binding*'s repo used its budget? The
+    count is of ACTUAL launches (T-63), bumped by `_count_repo_spawn` only once
+    a key clears every gate, so a key a later gate rejects never burns a slot."""
+    cap = binding.max_spawns_per_sweep if binding is not None else None
+    return cap is not None and counts.get(binding.name, 0) >= cap
+
+
+def _count_repo_spawn(binding, counts: dict[str, int]) -> None:
+    if binding is not None and binding.max_spawns_per_sweep is not None:
+        counts[binding.name] = counts.get(binding.name, 0) + 1
+
+
+def _preview_spawns(sweep: _Sweep, to_spawn: list, bindings_by_key: dict,
+                    interlock_reason: str | None) -> list[str]:
+    """dry_run's spawn phase: report what a real sweep would do, with no
+    `_allow_spawn` (it can append Failed events), no spawn, no ledger write."""
+    decisions = sweep.decisions
+    per_repo: dict[str, int] = {}
+    spawned: list[str] = []
+    for key, _reason in to_spawn:
+        binding = bindings_by_key.get(key)
+        if _repo_cap_reached(binding, per_repo):
+            decisions[key]["outcome"] = "repo_capped"
+            continue
+        if interlock_reason is not None:
+            decisions[key]["outcome"] = "would_ask_backend_interlocked"
+            continue
+        spawned.append(key)
+        decisions[key]["outcome"] = "would_spawn"
+        _count_repo_spawn(binding, per_repo)
+    return spawned
+
+
+def _record_spawn(ledger: dict, key: str, now: float, weight) -> None:
+    """Append this spawn to *key*'s spawn-ledger entry, keeping only the
+    health window's worth of recent entries."""
+    from . import health  # lazy: health -> dispatcher would cycle at import time
+    prev = ledger.get(key)
+    recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
+    recent.append([now, weight])
+    recent = [e for e in recent
+              if (ts := _ledger_entry_ts(e)) is not None
+              and now - ts <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
+    ledger[key] = {"last": now, "recent": recent}
+
+
+def _admit_for_spawn(sweep: _Sweep, key: str, binding, active: set[str],
+                     interlock_reason: str | None, memo: dict, *, runner_probe, runner_verdict):
+    """The per-key gates between "a slot is free" and the no-progress attempts
+    check, in order: burn cap, repo cap, backend interlock, credential, runner
+    preflight. Records the outcome of whichever refuses. Returns
+    ``(credential, runner, runner_model)`` when *key* may spawn, else None.
+    *memo* holds this sweep's per-repo spawn counts and credential / runner
+    probe caches."""
+    from . import burn, ops
+
+    cfg, decisions, hook_errors = sweep.cfg, sweep.decisions, sweep.hook_errors
+    # RB-11: a burning key is dead-lettered before any other gate, so it
+    # never spends a repo-cap slot or an attempts-ledger attempt.
+    burn_reason = burn.should_park(cfg, key)
+    if burn_reason:
+        ops.fail(cfg, key, burn_reason, actor="dispatcher", dead_letter=True, kind="burn")
+        sweep.reaped.append(key)
+        decisions[key]["outcome"] = "burn_parked"
+        return None
+    if _repo_cap_reached(binding, memo["per_repo"]):
+        decisions[key]["outcome"] = "repo_capped"
+        return None
+    if interlock_reason is not None:
+        # A backend gap, not a per-key error: ask once, no attempts spend.
+        _ask_park(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
+                  actor="dispatcher", hook_errors=hook_errors,
+                  decisions=decisions, outcome="backend_interlocked")
+        return None
+    cred = resolve_credential(binding, memo["credentials"])
+    if not cred.ok:
+        # GA-17: never spawn into a repo whose credential can't be resolved,
+        # and never fall back to the ambient `gh` account.
+        decisions[key]["outcome"] = "credential_unresolvable"
+        ops.fail(cfg, key,
+                 f"gh credential unresolvable for repo "
+                 f"'{binding.name if binding is not None else 'default'}': {cred.error}",
+                 actor="dispatcher")
+        return None
+    runner, runner_model = resolve_runner(cfg, key, sweep.phase.get(key, ""))
+    if runner != "claude" and not _runner_admits(
+            sweep, key, runner, runner_model, active, memo["runners"],
+            runner_probe=runner_probe, runner_verdict=runner_verdict):
+        return None
+    return cred, runner, runner_model
+
+
+def _runner_admits(sweep: _Sweep, key: str, runner: str, runner_model: str | None,
+                   active: set[str], state: dict, *, runner_probe, runner_verdict) -> bool:
+    """Fail-closed preflight for a non-claude runner (the checks themselves live
+    in `_runner_preflight`, shared with the post-QA hook). What an outcome
+    MEANS is decided here: a config problem a human must fix is asked once
+    (stable qid, parked in awaiting-human); a transient one (binary missing,
+    daemon down, runner at capacity) skips this sweep with no event and no
+    attempts-ledger spend, so an outage can't walk the board into `degraded`.
+    Never falls back to spawning under claude."""
+    cfg, decisions, hook_errors = sweep.cfg, sweep.decisions, sweep.hook_errors
+    outcome, reason = _runner_preflight(
+        cfg, runner, runner_model, active,
+        runner_probe=runner_probe, runner_verdict=runner_verdict,
+        state=state, home=sweep.home)
+    if outcome == "unregistered":
+        _ask_park(cfg, key, reason,
+                  qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher",
+                  hook_errors=hook_errors, decisions=decisions,
+                  outcome="runner_unregistered")
+        return False
+    if outcome == "disabled":
+        _ask_park(cfg, key, reason,
+                  qid=f"runner-disabled-{key}-{runner}", actor="dispatcher",
+                  hook_errors=hook_errors, decisions=decisions,
+                  outcome="runner_disabled")
+        return False
+    if outcome == "binary_missing":
+        decisions[key]["outcome"] = "runner_binary_missing"
+        sweep.runner_blockers[runner] = reason
+        return False
+    if outcome == "daemon_unreachable":
+        decisions[key]["outcome"] = "runner_daemon_unreachable"
+        sweep.runner_blockers[runner] = reason
+        return False
+    if outcome == "model_unavailable":
+        _ask_park(cfg, key, reason,
+                  qid=f"runner-model-{key}-{runner}-{runner_model}",
+                  actor="dispatcher", hook_errors=hook_errors,
+                  decisions=decisions, outcome="runner_model_unavailable")
+        return False
+    if outcome == "capped":
+        # OC-4: capacity, not a broken ticket -- must never burn max_failures.
+        decisions[key]["outcome"] = "runner_capped"
+        return False
+    return True
+
+
+def _spawn_due(sweep: _Sweep, sessions: SessionManager, to_spawn: list, active: set[str],
+               bindings_by_key: dict, interlock_reason: str | None, ledger: dict,
+               rotation_cursor: dict, *, runner_probe, runner_verdict) -> list[str]:
+    """The real spawn phase: per key, `_admit_for_spawn`'s gates, then the
+    no-progress attempts check, then the spawn itself. Persists the spawn ledger, attempts
+    ledger and rotation cursor. Returns the spawned keys."""
+    cfg, home, now = sweep.cfg, sweep.home, sweep.now
+    decisions = sweep.decisions
+    attempts_path = _spawn_attempts_path(home)
+    attempts = store.read_json(attempts_path, {}) or {}
+    attempts_changed = False
+    rotation_changed = False
+    # Per-sweep memos: repo spawn counts; one credential resolution per
+    # (gh_account, token_env); one runner probe per runner name, plus
+    # per-runner active counts bumped as this sweep spawns (`_runner_preflight`).
+    memo: dict = {"per_repo": {}, "credentials": {}, "runners": {}}
+    spawned: list[str] = []
+
+    for key, _reason in to_spawn:
+        binding = bindings_by_key.get(key)
+        admitted = _admit_for_spawn(sweep, key, binding, active, interlock_reason, memo,
+                                    runner_probe=runner_probe, runner_verdict=runner_verdict)
+        if admitted is None:
+            continue
+        cred, runner, runner_model = admitted
+        phase = sweep.phase.get(key, "")
+        attempts_changed = True
+        if not _allow_spawn(cfg, key, sweep.observed_seq.get(key, 0), attempts):
+            sweep.reaped.append(key)
+            decisions[key]["outcome"] = "attempts_exhausted"
+            continue
+
+        command = resolve_reconcile_command(cfg, phase)
+        model, effort = _resolve_model_effort(cfg, key)
+        # RB-16: the explicit phase-verb deny is the enforcement half of the
+        # narrowed grant -- an allowedTools omission alone is not enough.
+        disallowed_tools = MERGE_DENYLIST + phase_denylist(phase) + phase_verb_denylist(phase)
+        allowed_tools = (phase_verb_grant(phase) + skill_grant(command)
+                         + resolved_allowed_tools(cfg, binding))
+        # RF-1: command and key go separately; each backend composes its own
+        # invocation from them.
+        sessions.spawn(key, command, _worker_cwd(cfg, key), model=model, effort=effort,
+                       disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
+                       env_overlay=cred.env, runner=runner, runner_model=runner_model)
+        spawned.append(key)
+        # T-122: a fast-pathed key keeps its more specific outcome.
+        if decisions[key]["outcome"] not in ("would_route_answer", "answer_routed"):
+            decisions[key]["outcome"] = "spawned"
+        _count_repo_spawn(binding, memo["per_repo"])
+        # T-63: round-robin within a (repo, priority) group -- next sweep starts
+        # just past the key that actually launched.
+        repo_name = binding.name if binding is not None else "default"
+        rotation_cursor.setdefault(repo_name, {})[str(spec_priority(home, key))] = key
+        rotation_changed = True
+        _record_spawn(ledger, key, now, spawn_weight(cfg, phase))
+
+    if spawned or attempts_changed:
+        # Drop entries for keys that no longer exist, so neither ledger grows unbounded.
+        known = set(list_keys(home))
+        if spawned:
+            store.write_json(_spawn_ledger_path(home),
+                             {k: v for k, v in ledger.items() if k in known})
+        if attempts_changed:
+            store.write_json(attempts_path, {k: v for k, v in attempts.items() if k in known})
+    if rotation_changed:
+        store.write_json(_rotation_cursor_path(home), rotation_cursor)
+    return spawned
+
+
 def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = False, *,
              runner_probe: Callable[[str], dict] | None = None,
              runner_verdict: Callable[[str], Callable] | None = None,
@@ -3401,217 +3920,71 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     ``DryRunSessions`` to record-without-launch). Always idempotent and safe to
     run on a timer — minting and folding are no-ops when nothing changed.
 
+    Phases, in order: validate ``key_filter`` → fleet-pause kill switch →
+    missing-``tickets/`` refusal → side-effecting hooks (`_run_sweep_hooks`) →
+    classify every candidate key (`_classify_key`) → order the due set →
+    sweep-level brakes (rate limit, runaway, spend ceiling) → per-key gates
+    (`_gate_due`) → spawn (`_spawn_due`, or `_preview_spawns` under dry_run) →
+    heartbeat + decision ledger.
+
     ``runner_probe`` (OC-2) overrides ``_default_runner_probe`` for the
-    non-claude runner preflight below -- tests inject a fake to assert every
+    non-claude runner preflight -- tests inject a fake to assert every
     transient/permanent branch without a real binary or ollama daemon; real
     callers never pass it.
 
     ``runner_verdict`` (PI-3) overrides ``_make_default_runner_verdict(cfg)``
-    for the permanent model-verdict branch below -- given a runner name, it
-    returns the ``(models, daemon_reason, runner_model) -> (verdict, reason)``
-    function to judge that runner's catalogue with. Tests inject a one-arg
-    fake (``lambda runner: fake_verdict_fn``) to assert the ``ops.ask`` text
-    comes from a runner-specific reason without a real ollama daemon; real
-    callers never pass it.
+    for the permanent model-verdict branch -- given a runner name, it returns
+    the ``(models, daemon_reason, runner_model) -> (verdict, reason)``
+    function to judge that runner's catalogue with. Real callers never pass it.
 
     ``key_filter`` (MTO-4) restricts the candidate set to exactly these keys,
     resolved before due-checking so everything downstream -- due-checking,
     throttling, claims, the spawn ledger -- behaves normally but only ever
-    considers them. An unknown key raises ``MaestroError`` (checked up front,
-    before the fleet-pause gate, so a typo is never swallowed by a paused
-    board). Minting is skipped entirely (the ``_new`` inbox holds keyless
-    create-requests, so there is no way to scope it to a key that doesn't
-    exist yet) -- a ``--key`` sweep drives an already-minted ticket, never
-    creates one. Because the candidate set is restricted before the throttle
-    check, a throttled target simply has no other candidate to fall back to:
-    it idles rather than substituting a different key -- the substitution
-    that makes an unrestricted sweep spawn a different due key when the
-    floored one is skipped still applies exactly as before when
-    ``key_filter`` is ``None``.
+    considers them. An unknown key raises ``MaestroError``. Minting is skipped
+    entirely. A throttled target idles rather than a different key being
+    substituted, since there is no other candidate.
 
     ``dry_run`` (GA-4) makes the sweep strictly read-only: no ``TicketCreated``
-    (``would_mint`` reports what mint_new_tickets would have minted, read via
-    ``inbox.pending_new`` without draining it), no external-source sync, no
-    scheduled-task fire, no worktree/VCS sync, no backup, no compact/archive/
-    prune, no rate-limit or spend probe, no notify, no watchdog reap, and no spawn-ledger
-    or spawn-attempts write (so it can never trip ``max_spawn_attempts`` into a
-    real ``Failed``/``RequeueScheduled``, and never throttles the next real
-    sweep). ``dry_run`` is an explicit, separate flag from the ``sessions``
-    argument -- NEVER infer it from the ``SessionManager`` type: existing direct
-    ``dispatch(cfg, DryRunSessions(), now=...)`` callers (most of this test
-    suite) keep getting a full real sweep, only ``sessions.spawn()`` is a no-op.
-    Only the snapshot refold and ``derived/*`` dashboards (heartbeat, the
-    per-sweep decision ledger) are written either way -- both idempotent/
-    regenerable, never the sole source of truth.
+    (``would_mint`` reports what would be minted), no hooks, no watchdog reap,
+    no spawn-ledger or spawn-attempts write (so it can never trip
+    ``max_spawn_attempts`` or throttle the next real sweep). It is an explicit
+    flag, NEVER inferred from the ``SessionManager`` type: a direct
+    ``dispatch(cfg, DryRunSessions(), now=...)`` call (most of the test suite)
+    is a full real sweep in which only ``sessions.spawn()`` is a no-op. Only the
+    snapshot refold and ``derived/*`` dashboards (heartbeat, decision ledger)
+    are written either way -- both regenerable, never the source of truth.
     """
     home = cfg.home
-
-    filter_keys: frozenset[str] | None = None
-    if key_filter is not None:
-        filter_keys = frozenset(key_filter)
-        unknown = set(k for k in filter_keys if k not in set(list_keys(home)))
-        # RB-17: a key can be a `list_keys` member -- some derived-only
-        # footprint on disk, e.g. a stray leftover snapshot -- while still
-        # never having been minted (no spec.md, no ticket dir, no event-log
-        # history). Surfaced as the same clear, attributable error as an
-        # outright-unknown key (AC3) rather than let dispatch attempt it.
-        unknown |= set(k for k in filter_keys if k not in unknown and _never_minted(home, k))
-        if unknown:
-            raise store.MaestroError(
-                f"dispatch --key: unknown ticket key(s): {', '.join(sorted(unknown))}")
+    filter_keys = _check_key_filter(home, key_filter)
 
     if fleet.pause_state(home, now) is not None:
-        # The kill switch. Ahead of EVERYTHING else — mint/sync/scheduled-tasks/
-        # worktrees/backup/sessions all stay untouched, and no due-computation
-        # even runs, so there is no due-reason (not even an _UNTHROTTLED_REASONS
-        # human signal) that could slip past it. The one permitted side effect
-        # is the heartbeat, so a paused board never reads as a dead dispatcher.
+        # The kill switch, ahead of EVERYTHING -- not even a human signal slips
+        # past it. The heartbeat is the one side effect, so a paused board
+        # never reads as a dead dispatcher.
         _write_heartbeat(home, now, 0, 0, paused=True)
         return DispatchReport(
             minted=[], due=[], claimed=[], spawned=[], capacity_skipped=[],
             active_sessions=0, paused=True,
         )
-
     if filter_keys is None:
-        # T-99 AC9: `tickets/` entirely absent while `events/`/snapshots still
-        # carry per-key history is RB-17's phantom-ticket shape -- `list_keys`
-        # (union of ticket dirs + event logs + snapshots) and `snapshot.load`
-        # manufacture `triaging` rows from bare event-log history alone, and
-        # `_never_minted` deliberately returns False for any key with real
-        # event-log history (so `maestro cmd <KEY> discard` keeps working --
-        # RB-17 AC4). Left unguarded, an unrestricted sweep over a board in
-        # this shape would due-check -- and could spawn a reconciler for -- a
-        # key with no `spec.md` to read. Refuse the WHOLE sweep instead of
-        # only warning: a `--key` sweep (`filter_keys is not None`) skips this
-        # guard entirely, so per-key `discard` still works end to end.
-        board = store.board_state(home)
-        if "tickets/" in board["missing_paths"] and list_keys(home):
-            # A dict-literal `decisions[<key>] = {"outcome": ..., ...}`
-            # assignment (not an inline argument) -- `diagram._outcome_assignments`
-            # AST-walks `dispatcher.py` for exactly this shape to keep
-            # `docs/dispatch-gates.md` a total derivation of every outcome a
-            # sweep can record; a bare inline dict passed straight to
-            # `_append_dispatch_ledger` would silently escape that walk.
-            decisions: dict[str, dict] = {}
-            decisions["_board"] = {
-                "outcome": "board_refused",
-                "reason": ("tickets/ directory missing while events/ or derived "
-                           "snapshots hold ticket data -- refusing an unrestricted "
-                           "sweep (see `maestro doctor` / `maestro status`); a "
-                           "`dispatch --key <KEY>` sweep is unaffected"),
-            }
-            _write_heartbeat(home, now, 0, 0)
-            _append_dispatch_ledger(home, {
-                "ts": store.iso_now(), "epoch": now, "hook_errors": {},
-                "decisions": decisions,
-                "drift_skipped": [], "drift_skip_reasons": {},
-            })
-            return DispatchReport(
-                minted=[], due=[], claimed=[], spawned=[], capacity_skipped=[],
-                active_sessions=0,
-            )
+        refused = _refuse_if_tickets_dir_missing(home, now)
+        if refused is not None:
+            return refused
 
-    from . import backup  # lazy: backup -> projection -> dispatcher would cycle at import time
     from . import health  # lazy: health -> dispatcher would cycle at import time
-
     from . import repos as repos_mod  # lazy: repos imports us at module load time
 
-    hook_errors: dict = {}
-    runner_blockers: dict = {}  # OC-2: {runner name: reason}, populated below only for a real spawn loop
-    if dry_run:
-        # Strictly read-only (GA-4 option (a)): none of the twelve hooks below
-        # run -- each one either mutates the event log, drains/advances a
-        # cursor, or touches the outside world (network, worktrees, backup
-        # tarballs, notifications). `would_mint` is the one hook-shaped value a
-        # preview still owes the caller, computed by reading (not draining)
-        # inbox/_new instead of calling mint_new_tickets.
-        minted: list[str] = []
-        would_mint = [] if filter_keys is not None else _would_mint_keys(home)
-        scheduled_fired: list[str] = []
-        worktree_removal_errors: dict = {}
-        drift_skipped: list[str] = []
-        drift_skip_reasons: dict = {}
-        reaped: list[str] = []
-        pruned_logs = 0
-        pruned_bytes = 0
-        errors: dict = {}
-    else:
-        # MTO-4: a --key sweep never mints -- the _new inbox is keyless (a
-        # request may not even carry the target key yet), so there is no way
-        # to scope draining it to just `filter_keys` without either minting
-        # an unrelated pending request or silently ack-ing it away unminted.
-        # Left to the next unrestricted sweep instead.
-        minted = ([] if filter_keys is not None else
-                  _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[]))
-        would_mint = []
-        _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
-        scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
-                                    cfg, now, default={"fired": []})["fired"]
-        # sync_worktrees preflight-gates itself per repo group now (MR-5) -- no
-        # outer repo_ok gate needed here; a blocked repo skips only its own group.
-        drift_sync_result = _run_hook("sync_worktrees", hook_errors, sync_worktrees, cfg, now,
-                                      default={})
-        drift_skipped = (drift_sync_result or {}).get("skipped_by_policy", [])
-        drift_skip_reasons = (drift_sync_result or {}).get("skip_reasons", {})
-        vcs_sync_result = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={})
-        worktree_removal_errors = (vcs_sync_result or {}).get("worktree_removal_errors", {})
-        # T-132: folds any gt-managed stack restack `sync_vcs`'s own
-        # `check_merged` call just queued -- same detached-subprocess shape
-        # as `sync_test_runs` below, so it needs its own hook run.
-        _run_hook("sync_restacks", hook_errors, sync_restacks, cfg, now, default={})
-        # RB-14: same sleeping-phase-observation shape as sync_vcs just above,
-        # applied to `verifying`/`cfg.test_command` instead of a PR.
-        _run_hook("sync_test_runs", hook_errors, sync_test_runs, cfg, now, default={})
-        # T-115: fires each key's config-referenced post_qa_skill (if any) once
-        # per QA pass -- see sync_post_qa_skill's own docstring for why this
-        # needs `sessions` (a real spawn, unlike every other hook above).
-        _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,
-                  runner_probe=runner_probe, runner_verdict=runner_verdict, default={})
-        _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
-        _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
-        _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
-        _run_hook("ratelimit_probe", hook_errors, ratelimit.probe, cfg, now)
-        _run_hook("spend_probe", hook_errors, spend.probe, cfg, now)
-        _run_hook("notify", hook_errors, notify.maybe_notify, cfg, now)
+    sweep = _Sweep(cfg=cfg, now=now, dry_run=dry_run)
+    hooks = _run_sweep_hooks(sweep, sessions, filter_keys,
+                             runner_probe=runner_probe, runner_verdict=runner_verdict)
+    spawned: list[str] = []
+    throttled: list[str] = []
+    capacity_skipped: list[str] = []
 
-        # Watchdog runs before `active` is computed: a hung claim must not count
-        # toward concurrency, and a reaped key needs to be re-fold-visible (fail
-        # appends an event) before this sweep's due-check reads its snapshot.
-        reaped = _run_hook("watchdog", hook_errors, run_watchdog, cfg, now, default=[])
-        # T-45: same ordering requirement -- must run before `active_keys()`
-        # (below) silently releases a dead-and-never-ran claim as unremarkable.
-        reaped += _run_hook("detect_zero_turn_spawns", hook_errors,
-                            detect_zero_turn_spawns, cfg, now, default=[])
-
-        pruned_logs = 0
-        pruned_bytes = 0
-        errors = {}
-        prune_result = _run_hook("prune_tick", hook_errors, prune_logs_tick, cfg, now, default=None)
-        if prune_result:
-            pruned_logs = prune_result.get("pruned_logs", 0)
-            pruned_bytes = prune_result.get("pruned_bytes", 0)
-            per_key_errors = prune_result.get("errors") or {}
-            if per_key_errors:
-                errors["prune"] = "; ".join(f"{k}: {v}" for k, v in per_key_errors.items())
-
-    # T-52: hold the spawn-region lock from the active-read through the
-    # last claim commit below -- see _spawn_lock_target's docstring for why.
+    # T-52: hold the spawn-region lock from the active-read through the last
+    # claim commit -- see _spawn_lock_target's docstring.
     with store.file_lock(_spawn_lock_target(home)):
-        active = sessions.list_active()
-        # RB-14: a dispatcher-owned test-run subprocess is NOT an agent
-        # session -- it must never eat into `max_concurrency`'s fleet-wide
-        # agent-slot budget (that's what `TEST_RUN_CONCURRENCY` bounds
-        # instead). `sessions.list_active()` for every REAL backend delegates
-        # to `claims.active_keys`, which has no notion of `kind` -- filter its
-        # test-run-claimed keys back out here, at the one place that budget is
-        # computed, rather than teaching every backend's `list_active()` (or
-        # `claims.active_keys` itself, whose other callers -- e.g. spend.py's
-        # cost-settlement check -- have no reason to make the same exclusion).
-        # T-132: a `gt sync`/`gt restack`/`gt submit` restack subprocess
-        # (`_start_restack`) is the same shape -- detached, dispatcher-owned,
-        # not an agent session -- so it gets the identical exclusion.
-        active -= {k for k, c in claims.all_claims(home).items()
-                   if c.get("kind") in ("testrun", "restack")}
+        active = _active_agent_keys(sessions, home)
         due: list[tuple[str, str]] = []
         claimed: list[str] = []
         observed_seq_by_key: dict[str, int] = {}
@@ -3624,548 +3997,80 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # computed, let alone spawned.
         candidates = sorted(filter_keys, key=split_key) if filter_keys is not None else list_keys(home)
         for key in candidates:
-            # RB-17: never fold or spawn a key that was never minted -- no
-            # spec.md, ticket directory, or event-log history. A stray
-            # `derived/snapshots/<key>.json` (left by a fold that ran before
-            # this guard existed, or by any other bug) is exactly what would
-            # keep `list_keys` returning this key forever -- the self-
-            # bootstrapping this ticket closes -- so a real sweep prunes it
-            # here (never in `dry_run`, per GA-4's strictly-read-only
-            # contract). A key with real event-log history but no spec.md is
-            # NOT `_never_minted` -- it keeps sweeping normally below,
-            # unaffected, so `maestro cmd <KEY> discard` can still retire it
-            # end to end (RB-17 AC4).
-            if _never_minted(home, key):
-                if not dry_run:
-                    snap_path = store.snapshot_path(home, key)
-                    if snap_path.exists():
-                        snap_path.unlink()
-                decisions[key] = {
-                    "outcome": "phantom",
-                    "reason": "never minted -- no spec.md, ticket directory, or event log",
-                }
-                continue
-            # RB-2: `snapshot.fold` is total by construction (never raises), but this
-            # is defense-in-depth against a future/unforeseen corruption -- ONE bad
-            # ticket must never abort the sweep for every other ticket on the board.
-            # Same pattern as `_run_hook`, keyed per-ticket instead of per-hook-name.
-            snap = _run_hook(f"fold:{key}", hook_errors, _load_and_refresh_snapshot, home, key)
-            if snap is None:
-                decisions[key] = {"outcome": "fold_error",
-                                   "reason": hook_errors.get(f"fold:{key}", "fold failed")}
-                continue
-            observed_seq_by_key[key] = snap.observed_seq
-            phase_by_key[key] = snap.phase
-            blocked_dep = _has_unmet_deps(home, key)
-            res = is_due(
-                home, key, snap,
-                inbox_pending=inbox.has_pending(home, key),
-                current_spec_hash=spec_hash_on_disk(home, key),
-                now=now,
-                blocked_dep=blocked_dep,
-            )
-            if not res.due:
-                decisions[key] = {"outcome": "not_due", "reason": res.reason}
-                continue
-            # T-80: the early catch -- before this key ever reaches the throttle,
-            # repo-preflight, or spawn gates below (let alone a worker), park a
-            # non-terminal ticket whose spec has no acceptance criteria. No LLM
-            # spent: `ops.ask` is plain deterministic plumbing, same precedent as
-            # the `runner-disabled-<key>-<runner>` permanent-verdict ask above.
-            # Exempted while a human answer is actually pending (`res.reason` in
-            # `_MISSING_ACS_EXEMPT_DUE_REASONS`) -- that sweep must fall through
-            # to a real spawn so the awaiting-human reconciler can fold the
-            # inbox and re-route, exactly like every other `ops.ask` park.
-            if (res.reason not in _MISSING_ACS_EXEMPT_DUE_REASONS
-                    and _missing_acs(home, key)):
-                if dry_run:
-                    decisions[key] = {
-                        "outcome": "would_park_missing_acs",
-                        "reason": "spec has no acceptance criteria",
-                    }
-                else:
-                    _ask_park(cfg, key,
-                              f"{key}: spec.md has no acceptance criteria (its "
-                              "'## Acceptance criteria' section parses to zero non-blank "
-                              "'- [ ] ...' lines) -- add at least one, then answer this "
-                              "question to unpark it",
-                              qid=f"missing-acs-{key}", actor="dispatcher",
-                              hook_errors=hook_errors, decisions=decisions,
-                              outcome="missing_acs",
-                              reason="spec has no acceptance criteria")
-                continue
-            if key in active:
-                claimed.append(key)        # per-key serialization: one reconciler per key
-                decisions[key] = {"outcome": "claimed", "reason": res.reason}
-                continue
+            _classify_key(sweep, key, active)
 
-            # T-122: route an exact-literal human approval straight to `ready`
-            # in this same sweep instead of spawning a full awaiting-human
-            # reconciler whose only job would be to read "ok" and call
-            # set-phase. `off` (default) never even computes this --
-            # `_answer_fast_path_eligible` is skipped entirely, so this
-            # branch is byte-identical to before this knob existed.
-            fast_path_answer = (_answer_fast_path_eligible(home, key, snap, res.reason)
-                                 if cfg.answer_fast_path != "off" else None)
-            if fast_path_answer is not None and cfg.answer_fast_path == "on" and not dry_run:
-                reason = f"approved: {fast_path_answer}"
-                try:
-                    _apply_answer_fast_path(cfg, key, reason, actor="dispatcher")
-                except Exception as e:  # noqa: BLE001 -- a lost race must not abort the sweep
-                    hook_errors[f"answer_fast_path:{key}"] = f"{type(e).__name__}: {e}"
-                    fast_path_answer = None  # fall through below, as if never eligible
-                else:
-                    decisions[key] = {"outcome": "answer_routed", "reason": reason}
-                    refreshed = snap_mod.load(home, key)
-                    observed_seq_by_key[key] = refreshed.observed_seq
-                    phase_by_key[key] = refreshed.phase
-                    # Re-evaluate due-ness against the just-routed `ready`
-                    # snapshot so the `ready` reconciler spawns THIS sweep
-                    # instead of waiting for the next launchd interval.
-                    res2 = is_due(home, key, refreshed,
-                                  inbox_pending=inbox.has_pending(home, key),
-                                  current_spec_hash=spec_hash_on_disk(home, key),
-                                  now=now, blocked_dep=_has_unmet_deps(home, key))
-                    if res2.due:
-                        due.append((key, res2.reason))
-                    continue
-            if fast_path_answer is not None:
-                # `shadow`, or `on` previewed under a strictly-read-only
-                # `dry_run` sweep (GA-4): predict only, never write -- the
-                # ticket spawns exactly like today.
-                decisions[key] = {"outcome": "would_route_answer",
-                                  "reason": f"would approve: {fast_path_answer}"}
-                due.append((key, res.reason))
-                continue
-
-            due.append((key, res.reason))
-            decisions[key] = {"outcome": "due", "reason": res.reason}
-
-        # MTO-7: order the due set by (priority, key) -- a preference over WHICH due
-        # key is considered first, upstream of every existing brake (spawn floor,
-        # repo-blocked, max_spawns_per_sweep, max_concurrency slots, the runaway
-        # brake/rate-limit/spend-ceiling gates below). It decides nothing about
-        # whether a key is due, throttled, or spawnable -- only their relative order
-        # through those unchanged filters, so a throttled/capped/blocked high-priority
-        # ticket still can't starve the rest of the board. `spec_priority` reads fresh
-        # from disk per sweep (never the folded snapshot), total and never-raises;
-        # `split_key` is the tiebreaker so ordering stays deterministic when
-        # priorities are equal (including the
-        # all-default-3 case, which reduces to today's plain lexical order).
-        due.sort(key=lambda kr: (spec_priority(home, kr[0]), split_key(kr[0])))
-        bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in due}
-
-        # T-63 (MTO-9 defect 4b): rotate the same-priority tiebreak, scoped per
-        # repo -- a preference over WHICH same-priority due key comes first,
-        # upstream of every gate below (repo-blocked, max_spawns_per_sweep,
-        # slots), exactly like MTO-7's own priority sort is. Only reorders
-        # within a (repo, priority) group; never changes group membership or
-        # the across-priority order, so it can't punch through any brake
-        # MTO-7's sort couldn't. See `_apply_rotation`'s docstring for the
-        # degrade-safely contract on a missing/corrupt cursor file.
+        # MTO-7: consider due keys by (priority, key); T-63 then rotates the
+        # tiebreak within each (repo, priority) group. Both only reorder --
+        # neither can punch through any gate below.
+        sweep.due.sort(key=lambda kr: (spec_priority(home, kr[0]), split_key(kr[0])))
+        bindings_by_key = {key: repos_mod.resolve(cfg, home, key) for key, _ in sweep.due}
         rotation_cursor = store.read_json(_rotation_cursor_path(home), {})
         if not isinstance(rotation_cursor, dict):
             rotation_cursor = {}
-        due = _apply_rotation(home, due, bindings_by_key, rotation_cursor)
+        sweep.due = _apply_rotation(home, sweep.due, bindings_by_key, rotation_cursor)
 
-        # Per-repo preflight, scoped to the repos this sweep's due tickets (plus the
-        # implicit default) actually reference -- a 1-repo board still runs exactly
-        # one probe. `repo_blockers` is the flat union, kept for existing readers
-        # (heartbeat/_nudge/cmd_dispatch); `repo_blockers_by_repo` is the new
-        # per-repo mapping the spawn gate below keys off of.
-        preflight = repo_preflight_all(cfg, home, [k for k, _ in due])
+        # Per-repo preflight, only for repos this sweep's due keys reference.
+        preflight = repo_preflight_all(cfg, home, [k for k, _ in sweep.due])
         repo_blockers_by_repo = preflight["blockers_by_repo"]
         repo_blockers = preflight["blockers"]
 
-        # Fleet-wide rate-limit gate. Above the human-signal bypass below: an inbox
-        # answer must not punch through a 429, since that spawn would be rejected too.
-        # While paused, nothing spawns and the spawn ledger is left untouched.
+        # Sweep-level brakes: any one of them means nothing spawns this sweep.
+        # The rate-limit pause sits above the human-signal bypass (an answer
+        # can't punch through a 429). The runaway brake never arms under
+        # dry_run; the spend ceiling is a pure read, so it applies either way.
         paused_until_ts = ratelimit.paused_until(home, now)
-        # GA-5: the runaway auto-brake, beside the rate-limit gate above. Only
-        # evaluated when the rate-limit gate didn't already decide this sweep spawns
-        # nothing, and never during dry_run (a strictly read-only preview must not
-        # arm a pause). Arming it also makes THIS sweep spawn nothing -- mirroring
-        # the rate-limit gate exactly -- while the next sweep short-circuits at G1.
         runaway_armed = (None if paused_until_ts is not None or dry_run
                          else _maybe_trip_runaway_brake(cfg, home, now, health))
-        # GA-11: the daily spend ceiling, a third reason to take the same
-        # spawn-nothing branch. spend.over_ceiling is a pure read, never folds --
-        # so it still applies even under dry_run, off whatever spend.probe last
-        # persisted (the ratelimit gate above is read the same way).
         spend_ceiling_reason = (None if paused_until_ts is not None or runaway_armed is not None
                                 else spend.over_ceiling(cfg, now))
-        # RB-12: the detection-channel alarm, off the exact signals just computed above --
-        # never recomputed, so it can't drift from what actually gated this sweep. A write
-        # (persists derived/.alarm.json, may fire notify_command/webhooks), so it's skipped
-        # under dry_run like every other hook here, and never reached at all while a
-        # fleet-wide pause already short-circuited the whole sweep at G1 (top of dispatch()).
+        # RB-12: the detection-channel alarm, off exactly the signals that gated this sweep.
         if not dry_run:
-            _run_hook("alarm", hook_errors, alarm.check, cfg, now, health,
-                       runaway_reason=runaway_armed, spend_ceiling_reason=spend_ceiling_reason)
-        if paused_until_ts is not None or runaway_armed is not None or spend_ceiling_reason is not None:
-            spawned: list[str] = []
-            throttled: list[str] = []
-            capacity_skipped: list[str] = []
-        else:
-            # Spawn-rate floor. The claim file is the ONLY other per-key spawn memory and it
-            # is unlinked the moment the worker dies — so a session that exits in under a
-            # second (a rate-limit rejection, a crash) leaves nothing behind and the key is
-            # instantly re-spawnable. This ledger outlives the process and bounds the rate no
-            # matter how often the dispatcher itself is fired.
-            floor = spawn_floor(cfg)
-            ledger_path = _spawn_ledger_path(home)
-            ledger = store.read_json(ledger_path, {}) or {}
-            throttled = []
-            if floor:
-                eligible: list[tuple[str, str]] = []
-                for key, reason in due:
-                    entry = ledger.get(key)
-                    last = entry.get("last") if isinstance(entry, dict) else entry
-                    if (reason not in _UNTHROTTLED_REASONS
-                            and isinstance(last, (int, float)) and now - last < floor):
-                        throttled.append(key)
-                        decisions[key]["outcome"] = "throttled"
-                        continue
-                    eligible.append((key, reason))
-            else:
-                eligible = due
-
-            # Per-key repo-blocked gate. NOT bypassable by an _UNTHROTTLED_REASONS
-            # human signal — a human answering a question is exactly the moment you
-            # must not launch an agent into a half-merged tree. Skipped keys stay
-            # "due" (report.due is never filtered) so the very next sweep retries
-            # them once their repo is healthy again.
-            repo_gated: list[tuple[str, str]] = []
-            for key, reason in eligible:
-                binding = bindings_by_key.get(key)
-                if binding is not None and binding.name in repo_blockers_by_repo:
-                    decisions[key]["outcome"] = "repo_blocked"
-                    continue
-                repo_gated.append((key, reason))
-            eligible = repo_gated
-
-            # Per-repo max_spawns_per_sweep safety rail (MR-5): bounds one repo's
-            # blast radius on the sweep's spawn budget without touching the per-key
-            # min_spawn_interval floor, the max_spawn_attempts watchdog, or this
-            # fleet-wide rate gate -- all three still apply on top. None (default)
-            # is uncapped, i.e. today's behavior by construction. T-63 (MTO-9
-            # defect 4a): the cap must count ACTUAL launches, not intent, so
-            # `per_repo_spawn_count` is no longer incremented here -- it lives
-            # beside the real spawn attempt below (dry_run's would_spawn / the
-            # real branch's sessions.spawn), incremented only once a key clears
-            # every downstream gate. A key a later gate rejects (credential,
-            # runner, interlock, attempts-exhausted) never burns its repo's
-            # slot, so it can no longer starve a key behind it that would have
-            # spawned cleanly.
-            per_repo_spawn_count: dict[str, int] = {}
-
-            slots = max(0, cfg.max_concurrency - len(active))
-            to_spawn = eligible[:slots]
-            capacity_skipped = [k for k, _ in eligible[slots:]]
-            for key in capacity_skipped:
-                decisions[key]["outcome"] = "capacity_skipped"
-
-            # T-34/RF-5: the interlock -- config-only, computed once per sweep, not
-            # per-key, and read here (before the dry_run split) so the read-only
-            # preview reports the same refusal a real sweep would act on -- a
-            # dry_run that still showed "would_spawn" for an interlocked backend
-            # would make `make dry` lie about the one thing this ticket exists to
-            # guarantee. While it returns a reason, no key spawns into this
-            # backend at all until a bypass-resistant guard exists and is added
-            # to gates.BYPASS_RESISTANT_IMPLEMENTERS (see that function's
-            # docstring).
+            _run_hook("alarm", sweep.hook_errors, alarm.check, cfg, now, health,
+                      runaway_reason=runaway_armed, spend_ceiling_reason=spend_ceiling_reason)
+        if paused_until_ts is None and runaway_armed is None and spend_ceiling_reason is None:
+            ledger = store.read_json(_spawn_ledger_path(home), {}) or {}
+            to_spawn, throttled, capacity_skipped = _gate_due(
+                sweep, active, bindings_by_key, repo_blockers_by_repo, ledger)
+            # T-34/RF-5: config-only and read before the dry_run split, so the
+            # preview reports the same refusal a real sweep would act on.
             interlock_reason = backend_interlock_reason(cfg)
-
             if dry_run:
-                # No _allow_spawn (it can call ops.fail -> Failed/RequeueScheduled
-                # events, exactly the bug this ticket exists to stop), no real
-                # sessions.spawn(), no ledger/attempts write. Every to_spawn key is
-                # reported as would-spawn (or would-ask, if interlocked); the next
-                # REAL sweep decides for itself.
-                spawned = []
-                for key, _reason in to_spawn:
-                    binding = bindings_by_key.get(key)
-                    cap = binding.max_spawns_per_sweep if binding is not None else None
-                    if cap is not None:
-                        name = binding.name
-                        if per_repo_spawn_count.get(name, 0) >= cap:
-                            decisions[key]["outcome"] = "repo_capped"
-                            continue
-                    if interlock_reason is not None:
-                        decisions[key]["outcome"] = "would_ask_backend_interlocked"
-                        continue
-                    spawned.append(key)
-                    decisions[key]["outcome"] = "would_spawn"
-                    if cap is not None:
-                        per_repo_spawn_count[binding.name] = per_repo_spawn_count.get(binding.name, 0) + 1
+                spawned = _preview_spawns(sweep, to_spawn, bindings_by_key, interlock_reason)
             else:
-                attempts_path = _spawn_attempts_path(home)
-                attempts = store.read_json(attempts_path, {}) or {}
-                attempts_changed = False
-                # GA-17: memoized per (gh_account, token_env) for this whole sweep -- N
-                # keys bound to the same repo resolve the credential once, not once each.
-                credential_cache: dict = {}
-                # T-117: `_runner_preflight`'s per-call-site cache -- "probe_cache"
-                # (OC-2: memoized per runner name for this whole sweep -- N keys bound
-                # to the same non-claude runner probe its binary/daemon once, not once
-                # each, "Probe once per sweep, cached — never per key"), "active_counts"
-                # (OC-4: {runner name: count}, seeded lazily on first key that reaches
-                # the cap check, then incremented in-place as this sweep spawns more of
-                # that runner -- so two due opencode keys in the SAME sweep can't both
-                # slip through a cap computed from a snapshot taken before either
-                # spawned), and "claims_by_key" (T-54: the seed sum counts from the
-                # runner recorded ON EACH ACTIVE KEY'S CLAIM at spawn time
-                # (`claims.write_claim`'s own `runner` field), never from re-resolving
-                # `resolve_runner(cfg, k, phase_by_key.get(k, ""))` -- a session spawned
-                # while `k` was `implementing` still holds its slot after `k` folds to a
-                # phase where its runner is no longer eligible, and re-resolving would
-                # silently stop counting it, leaking a cap slot; loaded lazily, once for
-                # the whole sweep, only if a cap check is actually reached).
-                runner_preflight_state: dict = {}
+                spawned = _spawn_due(sweep, sessions, to_spawn, active, bindings_by_key,
+                                     interlock_reason, ledger, rotation_cursor,
+                                     runner_probe=runner_probe, runner_verdict=runner_verdict)
 
-                spawned = []
-                rotation_changed = False
-                for key, _reason in to_spawn:
-                    # RB-11: the per-key burn cap -- checked before ANY other
-                    # per-key gate below (repo cap, credential, runner
-                    # preflight, the no-progress attempts ledger), so a
-                    # burning key is parked without spending a repo-cap slot
-                    # or an attempts-ledger attempt on a spawn that would
-                    # never have been let through anyway. Dead-letters (not a
-                    # backoff retry) -- waiting out `max_failures` more
-                    # backed-off attempts first would just reproduce the
-                    # burn this exists to stop. Every OTHER due key in this
-                    # sweep is untouched -- `continue` only skips this one.
-                    from . import burn
-                    burn_reason = burn.should_park(cfg, key)
-                    if burn_reason:
-                        from . import ops
-                        ops.fail(cfg, key, burn_reason, actor="dispatcher",
-                                 dead_letter=True, kind="burn")
-                        reaped.append(key)
-                        decisions[key]["outcome"] = "burn_parked"
-                        continue
-                    binding = bindings_by_key.get(key)
-                    cap = binding.max_spawns_per_sweep if binding is not None else None
-                    if cap is not None and per_repo_spawn_count.get(binding.name, 0) >= cap:
-                        decisions[key]["outcome"] = "repo_capped"
-                        continue
-                    if interlock_reason is not None:
-                        # Ask (not fail): this is a config/backend gap, not a per-key
-                        # error, and asking parks the key in awaiting-human -- visibly,
-                        # once (idempotent qid) -- instead of respawning it into the same
-                        # refusal every sweep. No attempts-ledger spend either, same as
-                        # the credential_unresolvable branch below.
-                        _ask_park(cfg, key, interlock_reason, qid=f"backend-interlock-{key}",
-                                  actor="dispatcher", hook_errors=hook_errors,
-                                  decisions=decisions, outcome="backend_interlocked")
-                        continue
-                    cred = resolve_credential(binding, credential_cache)
-                    if not cred.ok:
-                        # Fail closed (GA-17): never spawn into a repo whose configured
-                        # credential can't be resolved, and never fall back to the
-                        # ambient `gh` account -- that's precisely the silent-404 mode
-                        # this ticket exists to remove. No attempts-ledger spend either;
-                        # this is a config problem, not a no-progress spawn.
-                        decisions[key]["outcome"] = "credential_unresolvable"
-                        from . import ops
-                        ops.fail(cfg, key,
-                                f"gh credential unresolvable for repo "
-                                f"'{binding.name if binding is not None else 'default'}': {cred.error}",
-                                actor="dispatcher")
-                        continue
-                    runner, runner_model = resolve_runner(cfg, key, phase_by_key.get(key, ""))
-                    if runner not in _REGISTERED_RUNNERS:
-                        # RF-2: fail closed (never fall back to Claude, same rule GA-17
-                        # states verbatim for credentials) -- ask, don't fail, and spend
-                        # no attempts-ledger slot: this is a config problem for a human
-                        # to fix (register the runner, or fix the spec's `runner:` line),
-                        # not a no-progress spawn attempt.
-                        _ask_park(cfg, key,
-                                  f"spec names runner {runner!r}, which has no registered "
-                                  f"SessionManager (registered: {sorted(_REGISTERED_RUNNERS)}) -- "
-                                  "fix the spec's `runner:` line or register the runner",
-                                  qid=f"unregistered-runner-{key}-{runner}", actor="dispatcher",
-                                  hook_errors=hook_errors, decisions=decisions,
-                                  outcome="runner_unregistered")
-                        continue
-                    if runner != "claude":
-                        # OC-2: fail-closed preflight for a registered non-claude
-                        # runner -- a fast-failing runner is the worst failure mode
-                        # here (a claim file is the ONLY other per-key spawn memory
-                        # and is unlinked the moment the worker dies, so a runner
-                        # that exits in under a second leaves nothing behind and the
-                        # key is instantly re-spawnable, the 21,731-spawn/~$845
-                        # shape). Binary missing/unexecutable or the ollama daemon
-                        # unreachable are TRANSIENT: a group-level skip modelled on
-                        # `repo_blocked` above -- no event, no attempts-ledger spend,
-                        # so a 30s daemon outage doesn't walk the board into
-                        # `degraded` one ticket at a time (AC1/AC2/AC5). Model
-                        # absent or not tool-capable is PERMANENT: `ops.ask`, same
-                        # shape as `runner_unregistered` just above -- a human must
-                        # fix the spec, so no attempts-ledger spend either (AC3/AC4).
-                        # Never falls through to `sessions.spawn` on any branch, so
-                        # a bad runner can never silently spawn under claude (AC6).
-                        # OC-3: the board-wide kill switch -- consulted before ANY of
-                        # OC-2's own preflight (before the binary probe, before the
-                        # daemon probe). A disabled runner is a config problem, not a
-                        # transient one, so it gets the same PERMANENT `ops.ask`
-                        # treatment as `runner_unregistered`/`runner_model_unavailable`
-                        # above: no attempts-ledger spend, a stable qid, parked in
-                        # awaiting-human for a human to flip `runner_enabled` or fix
-                        # the spec's `runner:` line.
-                        #
-                        # T-117: the actual checks (registered/enabled/binary/daemon/
-                        # model/concurrency) live in `_runner_preflight`, shared with
-                        # `sync_post_qa_skill`/`trigger_post_qa_skill` -- only what each
-                        # OUTCOME means (ask-park here vs. transient blocker vs. capped)
-                        # stays local, since that part is where this loop and the
-                        # post-QA hook deliberately disagree.
-                        outcome, reason = _runner_preflight(
-                            cfg, runner, runner_model, active,
-                            runner_probe=runner_probe, runner_verdict=runner_verdict,
-                            state=runner_preflight_state, home=home)
-                        if outcome == "disabled":
-                            _ask_park(cfg, key, reason,
-                                      qid=f"runner-disabled-{key}-{runner}", actor="dispatcher",
-                                      hook_errors=hook_errors, decisions=decisions,
-                                      outcome="runner_disabled")
-                            continue
-                        if outcome == "binary_missing":
-                            decisions[key]["outcome"] = "runner_binary_missing"
-                            runner_blockers[runner] = reason
-                            continue
-                        if outcome == "daemon_unreachable":
-                            decisions[key]["outcome"] = "runner_daemon_unreachable"
-                            runner_blockers[runner] = reason
-                            continue
-                        if outcome == "model_unavailable":
-                            _ask_park(cfg, key, reason,
-                                      qid=f"runner-model-{key}-{runner}-{runner_model}",
-                                      actor="dispatcher", hook_errors=hook_errors,
-                                      decisions=decisions, outcome="runner_model_unavailable")
-                            continue
-                        if outcome == "capped":
-                            # OC-4: per-runner concurrency cap -- still OC-2's own preflight
-                            # (before `_allow_spawn`, no attempts-ledger spend), because the
-                            # thing bounding a fast-failing runner's spawn RATE must never be
-                            # the no-progress circuit breaker (that would burn `max_failures`
-                            # attempts and dead-letter the ticket over what is, here, pure
-                            # capacity -- not a broken ticket). Group-level skip, modelled on
-                            # `repo_capped`/`repo_blocked`: no event, ticket stays due, retried
-                            # next sweep once a slot frees up.
-                            decisions[key]["outcome"] = "runner_capped"
-                            continue
-                        # outcome == "ok": fall through to the spawn below. "unregistered"
-                        # can't reach here -- it's already handled above, before this
-                        # `if runner != "claude"` block, and _REGISTERED_RUNNERS always
-                        # contains "claude" so this branch never sees it anyway.
-                    if not _allow_spawn(cfg, key, observed_seq_by_key.get(key, 0), attempts):
-                        attempts_changed = True
-                        reaped.append(key)
-                        decisions[key]["outcome"] = "attempts_exhausted"
-                        continue
-                    attempts_changed = True
-                    cwd = _worker_cwd(cfg, key)
-                    command = resolve_reconcile_command(cfg, phase_by_key.get(key, ""))
-                    model, effort = _resolve_model_effort(cfg, key)
-                    phase_here = phase_by_key.get(key, "")
-                    # RB-16: phase_verb_denylist is the enforcement half of the
-                    # narrowed grant below -- see its own docstring for why an
-                    # explicit deny is required, not just an allowedTools omission.
-                    disallowed_tools = (MERGE_DENYLIST + phase_denylist(phase_here)
-                                        + phase_verb_denylist(phase_here))
-                    allowed_tools = (phase_verb_grant(phase_here) + skill_grant(command)
-                                     + resolved_allowed_tools(cfg, binding))
-                    # RF-1: hand the resolved command and key to spawn() as separate
-                    # arguments -- each backend composes its own invocation (the Claude
-                    # CLI concatenates "<command> <key>" into one prompt string; a
-                    # non-Claude backend, e.g. opencode, can take them as distinct
-                    # `--command <name>` + argument instead of string-parsing a slash
-                    # command back out of a prompt maestro pre-flattened).
-                    sessions.spawn(key, command, cwd, model=model, effort=effort,
-                                   disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
-                                   env_overlay=cred.env, runner=runner, runner_model=runner_model)
-                    spawned.append(key)
-                    # T-122: a fast-pathed key's own outcome (`would_route_answer` in
-                    # shadow, `answer_routed` on a routed-but-still-due key) is the
-                    # more specific fact for THIS key's ledger entry -- a real spawn
-                    # still launches (`spawned` above, unconditional) either way, so
-                    # this is cosmetic-only, never a gate.
-                    if decisions[key]["outcome"] not in ("would_route_answer", "answer_routed"):
-                        decisions[key]["outcome"] = "spawned"
-                    if cap is not None:
-                        per_repo_spawn_count[binding.name] = per_repo_spawn_count.get(binding.name, 0) + 1
-                    # T-63 (MTO-9 defect 4b): remember this key as the last one
-                    # actually spawned for its (repo, priority) group, so the
-                    # NEXT sweep's `_apply_rotation` starts that group just
-                    # past it -- true round-robin, not favoring the same key
-                    # every sweep. Only an actual launch advances the cursor
-                    # (never a dry-run "would_spawn"), matching 4a's own
-                    # actual-vs-intent rule.
-                    repo_name = binding.name if binding is not None else "default"
-                    priority = spec_priority(home, key)
-                    rotation_cursor.setdefault(repo_name, {})[str(priority)] = key
-                    rotation_changed = True
-                    weight = spawn_weight(cfg, phase_by_key.get(key, ""))
-                    prev = ledger.get(key)
-                    recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
-                    recent.append([now, weight])
-                    recent = [e for e in recent
-                              if (ts := _ledger_entry_ts(e)) is not None
-                              and now - ts <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
-                    ledger[key] = {"last": now, "recent": recent}
-
-                if spawned:
-                    # Keep the ledger from growing without bound as keys come and go.
-                    known = set(list_keys(home))
-                    store.write_json(ledger_path,
-                                     {k: v for k, v in ledger.items() if k in known})
-                if attempts_changed:
-                    known = set(list_keys(home))
-                    store.write_json(attempts_path,
-                                     {k: v for k, v in attempts.items() if k in known})
-                if rotation_changed:
-                    store.write_json(_rotation_cursor_path(home), rotation_cursor)
-
-    # Heartbeat/decision-ledger writes are dashboards, not the source of truth --
-    # both regenerate from state, so they're written either way. Under dry_run,
-    # `spawned` holds would-spawn keys for the REPORT (report.spawned is the
-    # whole point of a preview) but the heartbeat's "spawned" count -- read by
-    # fleet-health/runaway detection as "N sessions actually launched this
-    # sweep" -- must stay 0, not the phantom would-spawn count; likewise
-    # `decisions[key]["outcome"]` is "would_spawn", never "spawned", so
-    # `maestro why` can't report a spawn that never happened either.
+    # Dashboards, written either way. Under dry_run the heartbeat's "spawned"
+    # count (read by fleet-health as sessions actually launched) stays 0, and
+    # no outcome is ever "spawned", so `maestro why` can't report a phantom.
     _write_heartbeat(home, now, 0 if dry_run else len(spawned), len(active),
-                     len(throttled), len(due),
+                     len(throttled), len(sweep.due),
                      repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo,
-                     # repo_blockers IS computed under dry_run (repo_preflight_all
-                     # sits outside the split) but the runner preflight is not, so
-                     # these two carry forward instead of being blanked.
-                     runner_blockers=None if dry_run else runner_blockers,
-                     hook_errors=hook_errors,
-                     blocked=None if dry_run else blocked_keys(decisions))
+                     # The runner preflight doesn't run under dry_run, so carry
+                     # the last real sweep's blockers forward instead of blanking.
+                     runner_blockers=None if dry_run else sweep.runner_blockers,
+                     hook_errors=sweep.hook_errors,
+                     blocked=None if dry_run else blocked_keys(sweep.decisions))
     _append_dispatch_ledger(home, {
         "ts": store.iso_now(), "epoch": now,
-        "hook_errors": hook_errors, "decisions": decisions,
-        # T-82 (defect 2): sync_worktrees' skipped_by_policy/skip_reasons used
-        # to be computed and thrown away by the hook call above -- no operator
-        # could ever see a suppressed rebase. Surfaced here so `derived/
-        # dispatch.jsonl` (and anything reading it) carries it every sweep.
-        "drift_skipped": drift_skipped, "drift_skip_reasons": drift_skip_reasons,
+        "hook_errors": sweep.hook_errors, "decisions": sweep.decisions,
+        # T-82: surface sync_worktrees' suppressed rebases every sweep.
+        "drift_skipped": hooks.drift_skipped, "drift_skip_reasons": hooks.drift_skip_reasons,
     })
     return DispatchReport(
-        minted=minted, due=due, claimed=claimed, spawned=spawned,
+        minted=hooks.minted, due=sweep.due, claimed=sweep.claimed, spawned=spawned,
         capacity_skipped=capacity_skipped, active_sessions=len(active),
-        scheduled_fired=scheduled_fired, throttled=throttled,
-        pruned_logs=pruned_logs, pruned_bytes=pruned_bytes, errors=errors,
-        paused_until=paused_until_ts, spend_ceiling_reason=spend_ceiling_reason, reaped=reaped,
+        scheduled_fired=hooks.scheduled_fired, throttled=throttled,
+        pruned_logs=hooks.pruned_logs, pruned_bytes=hooks.pruned_bytes, errors=hooks.errors,
+        paused_until=paused_until_ts, spend_ceiling_reason=spend_ceiling_reason,
+        reaped=sweep.reaped,
         repo_blockers=repo_blockers, repo_blockers_by_repo=repo_blockers_by_repo,
-        runner_blockers=runner_blockers,
-        hook_errors=hook_errors,
-        worktree_removal_errors=worktree_removal_errors,
-        would_mint=would_mint,
-        drift_skipped=drift_skipped, drift_skip_reasons=drift_skip_reasons,
+        runner_blockers=sweep.runner_blockers,
+        hook_errors=sweep.hook_errors,
+        worktree_removal_errors=hooks.worktree_removal_errors,
+        would_mint=hooks.would_mint,
+        drift_skipped=hooks.drift_skipped, drift_skip_reasons=hooks.drift_skip_reasons,
     )
 
 

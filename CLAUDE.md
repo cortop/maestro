@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-Guidance for Claude Code working in this repo. Keep it accurate as the code changes.
+Guidance for Claude Code working in this repo. Keep it accurate as the code changes —
+`tests/test_docs_drift.py` fails `make test` if a module below goes missing or a
+backticked `module.name` stops resolving.
 
 ## What this is
 
@@ -8,109 +10,101 @@ Guidance for Claude Code working in this repo. Keep it accurate as the code chan
 concurrent successor to wave-based markdown orchestrators. Each ticket is a directory with
 its own append-only event log (the sole source of truth) and a small folded snapshot
 (disposable cache). A cheap, level-triggered dispatcher sweeps snapshots and fans out one
-independent `claude --bg` reconciler per *due* ticket; each reconciler takes ONE idempotent
-step and exits.
+independent headless `claude -p` reconciler per *due* ticket (or an opencode / pi session,
+per the ticket's `runner:`); each reconciler takes ONE idempotent step and exits.
 
 The governing principle: **deterministic plumbing in Python, intelligence in Claude.** The
 `maestro` package owns everything correctness-critical (fencing-gated log, atomic writes,
 fold, idempotent step-ids, dispatcher, leases, projections, dead-letter). Agents mutate
 state **only** through the `maestro` CLI, so they can never write a torn log or clobber a
-file. Read `DESIGN.md` for the full rationale, `README.md` for the quickstart, and
-`docs/board-as-a-resource-constrained-workflow-net.md` for a dated companion analysis of
-the board as a Petri net.
+file. Read `DESIGN.md` for the full rationale (including the AC-evidence gates summarized
+below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on itself.
 
 ## Build / test / run
 
 - Python ≥ 3.11, **stdlib-only core** (no runtime deps — `tomllib`, `fcntl`, `dataclasses`,
-  `argparse`). Optional extras: `dev` (pytest), `tui` (textual). Keep the core dependency-free.
-- `make install` — editable install + symlink `maestro` onto PATH.
-- `make test` — run the suite in parallel (`.venv/bin/python -m pytest -q -n auto`, pytest-xdist,
-  ~40s vs ~4m serial). Run this before finishing. `make test-serial` runs it in one process (for pdb).
+  `argparse`; `tests/test_import_graph.py` enforces it). Optional extras: `dev` (pytest,
+  pytest-xdist, hypothesis, ruff), `tui` (textual). Keep the core dependency-free.
+- `make install` — editable install of `.[dev,tui]` + symlink `maestro` onto PATH.
+- `make test` — full suite in parallel (~30s). **Run before finishing.**
+  `make t F=tests/test_x.py K=expr` — targeted run, stops at first failure.
+  `make test-serial` — one process (for pdb). `make lint` — ruff (pyflakes rules only).
 - `make status` / `make doctor` — board state / fleet health.
-- `make reconcile KEY=<KEY>` — run ONE reconcile in the foreground (best way to watch a step).
+- `make reconcile KEY=<KEY>` — run ONE reconcile step in the foreground, skipping the sweep.
 - `make dry` — one dispatcher sweep, read-only preview (`would_mint` + `would_spawn`, no
   `TicketCreated` appended, no sessions launched).
-- `maestro dispatch --key <KEY>` (repeatable, or comma-separated) — a REAL sweep restricted to
-  just the named ticket(s): due-checking, throttling, claims, and the spawn ledger all run
-  normally but only ever consider that candidate set, so it also exercises minting-adjacent
-  machinery `make reconcile` skips entirely. Composes with `--dry-run`/`--model`. A throttled
-  target idles instead of the normal sweep's slot-substitution (spawning a different due key);
-  nothing is minted from the `_new` inbox on a `--key` sweep; an unknown key is a clear error.
-  Use this over `make reconcile` when you need to watch due-checking/throttling itself for one
-  ticket, not just its next reconcile step — `make reconcile` skips straight to invoking the
-  reconcile command on an already-due ticket, bypassing the sweep machinery altogether.
+- `maestro dispatch --key <KEY>` (repeatable / comma-separated) — a REAL sweep restricted
+  to the named ticket(s): due-checking, throttling, claims and the spawn ledger all run.
+  Use it to watch the sweep machinery for one ticket; use `make reconcile` to watch just
+  the next step. `make diagram` regenerates `docs/state-machine.md` + `docs/dispatch-gates.md`.
 
-## ⚠️ MAESTRO_HOME (read this before any `maestro` command)
+## ⚠️ Safety — read before any `maestro` command
 
-**The dogfood home this project drives is `~/.maestro`** — which is also where bare `maestro`
-resolves home, so a raw `maestro <cmd>` in the shell hits the right board. The `Makefile`
-exports `MAESTRO_HOME=$(HOME)/.maestro` to make that explicit rather than implicit.
-`maestro env` prints the resolved paths; `maestro status` exits 2 and names a nearby `ok`
-board if you ever point it at an empty one. See `DOGFOOD.md`.
+- **The dogfood home is `~/.maestro`**, which is where bare `maestro` resolves. The
+  `Makefile` exports `MAESTRO_HOME=$(HOME)/.maestro` (`maestro env` prints resolved paths).
+  There is no `~/.maestro/maestro-dev` (the old home — `maestro` happily initialises a
+  phantom there and reports it healthy). If the home ever moves, grep the whole repo for
+  the old path; `tests/test_maestro_task_skill.py` pins every documented home to the Makefile.
+- **Never delete or move a home's `events/`, `tickets/`, `inbox/` or `config.toml`** — not
+  with `rm -rf`, `git clean`, or anything else, not even the dogfood board. The event logs
+  have no other copy; this is how the board was lost on 2026-07-18. A genuine reset needs
+  `maestro backup` first and the human's explicit, in-the-moment go-ahead.
+- **Backups:** the dispatcher auto-snapshots those four paths every `backup_interval`
+  (default 3600s) into the sibling `<home>-backups/` (keeps `backup_retention`, default 24).
+  Verbs: `maestro backup [--list]`, `maestro restore [<tarball>] [--force]` — restore
+  refuses to clobber a non-empty board without `--force`. Logic in `maestro/backup.py`;
+  keep `tests/test_backup.py` green if you touch it.
+- **Tests run on a `tmp_path` home, never a real one** (fixtures in `tests/conftest.py`).
 
-There is no `~/.maestro/maestro-dev`. It was the home once, and this file, `DOGFOOD.md`, the
-`Makefile` and the `maestro-task` skill all went on naming it after the board moved — so every
-`make status` / `make dry` / `make doctor` / `make backup` silently drove an empty phantom
-home, and every agent that read this file inherited the wrong path. A doc that names a home
-nobody runs is worse than no doc: `maestro` happily initialises the phantom and reports it
-healthy. If you ever move the home, grep the whole repo for the old path before you finish —
-`tests/test_maestro_task_skill.py` pins every documented `MAESTRO_HOME` to the `Makefile`'s
-export so this particular drift fails the suite instead of the board.
+## Architecture
 
-## ⚠️ NEVER delete the state home / event logs
+`maestro/` — each module starts with a one-line docstring stating its single
+responsibility; preserve that.
 
-**Do not run `rm -rf` (or any delete/move/`git clean`) against a MAESTRO_HOME, its `events/`,
-`tickets/`, `inbox/`, or `config.toml` — not the dogfood/dev home (`~/.maestro`),
-not any home.** The event logs are the sole source of truth and have no other copy; deleting them
-is unrecoverable. "It's only the dev/dogfood board" is **not** a reason to delete it — that board
-is real work-in-progress (this is exactly how it was lost on 2026-07-18). If a home genuinely
-needs resetting, `maestro backup` first, then delete only with the human's explicit, in-the-moment
-go-ahead. Tests must operate on a `tmp_path`, never on a real home (see `tests/conftest.py`).
-
-## ⚠️ Backups — the event logs are the sole source of truth
-
-There is **no other copy** of a ticket's history. An external `rm` (a stray shell command, a
-`--dangerously-skip-permissions` agent) that deletes `events/` is unrecoverable — this is exactly
-how the dogfood board was lost once (2026-07-18). Guard against it:
-
-- The dispatcher **auto-snapshots** `events/` + `tickets/` + `inbox/` + `config.toml` on a timer
-  (`backup_interval`, default 3600s; `0` disables). Snapshots are `.tar.gz` tarballs in a
-  **sibling** of the home (`backup_dir`, default `<home>-backups/`), so they survive a
-  `rm -rf <home>`. Only the most-recent `backup_retention` (default 24) are kept. Logic lives in
-  `maestro/backup.py` (stdlib-only: `tarfile` + `datetime`); it is wired into `dispatch()` via
-  `backup.maybe_backup(cfg, now)`, cursor-gated exactly like `sync_external_sources`.
-- Verbs: `maestro backup` (snapshot now), `maestro backup --list`, `maestro restore [<tarball>]`
-  (default: latest; refolds snapshots + dashboards after extracting). `make backup` / `make restore`
-  (`FORCE=1` to overwrite). `restore` refuses to clobber a non-empty `events/`/`tickets/` without
-  `--force`, so a mistaken restore can't wipe a live board.
-- If you touch `backup.py`, the dispatcher hook, or the config knobs, keep `tests/test_backup.py`
-  green — it drives the real CLI over a temp home through a backup → wipe → restore round-trip.
-
-## Architecture (package layout)
-
-`maestro/` (the correctness-critical core):
-- `cli.py` — argparse entrypoint; every subcommand is a `cmd_*` thin wrapper over `ops`.
-- `store.py` — filesystem primitives: home resolution, atomic writes, advisory per-key locks.
-- `event_log.py` — the append-only, **fencing-gated** event log (the heart; the sole truth).
-- `events.py` — event type vocabulary. `snapshot.py` — fold of one ticket's log → snapshot.
-- `dispatcher.py` — level-triggered, non-blocking work queue: mint → find due → spawn → exit.
-- `sessions.py` — spawn/list per-ticket reconciler `claude --bg` sessions.
-- `ops.py` — high-level reconciler verbs (each correct-by-construction); what agents call.
-- `statemachine.py` — the per-ticket phase machine. `claims.py` — per-key liveness dedup.
+Core (correctness-critical):
+- `store.py` — filesystem primitives: home resolution, atomic writes, per-key locks, paths.
+- `event_log.py` — the append-only, **fencing-gated** event log (the sole truth).
+- `events.py` — event type vocabulary. `snapshot.py` — fold of one ticket's log → snapshot:
+  one handler per event type in `snapshot._FOLDERS` (or listed in `snapshot._UNFOLDED`).
+- `statemachine.py` — the per-ticket phase machine (`Phase`, `TRANSITIONS`).
 - `idempotency.py` — deterministic `step_id = hash(key, phase, observed_seq, action)`.
-- `inbox.py` — per-key append-only human inbox. `projection.py` — snapshots → dashboards.
-- `config.py` — project-agnostic config (`config.toml`). `fleet.py` — launchd LaunchAgent mgmt.
-- `diagram.py` — generates `docs/state-machine.md` (mermaid) + `docs/dispatch-gates.md`
-  (`make diagram`) from `statemachine.TRANSITIONS` and an AST walk of `dispatcher.py` —
-  derived, never retyped; `tests/test_diagram.py` fails `make test` on drift.
-- `providers/` — pluggable tracker / VCS / fetcher / implementer (selected in config).
-- `tui/` — Textual TUI package (`maestro tui`, needs the `tui` extra): `app.py` (MaestroTUI +
-  entrypoint), `screens.py` (full-screen views), `modals.py` (input dialogs), `render.py`
-  (markup helpers), `detail.py`/`events.py` (textual-free renderers). External code imports
-  only via `maestro.tui` (`__init__.py` re-exports); new screens go in `screens.py`, new
-  modals in `modals.py`.
+- `claims.py` — per-key liveness dedup backed by verified process identity.
+- `inbox.py` — per-key append-only human inbox.
+- `dispatcher.py` — level-triggered work queue: mint → find due → gate → spawn → exit.
+  Also owns per-phase tool grants, VCS/CI sync, dispatcher-run test suites, runner routing.
+- `ops.py` — high-level reconciler verbs (each correct-by-construction); what agents call.
+- `cli.py` — argparse entrypoint; each subcommand is a `cmd_*` wrapper over `ops`.
+- `sessions.py` — spawn/list reconciler sessions (`claude -p`, opencode, pi backends).
+- `config.py` — project-agnostic `config.toml` loading/validation. Every `[maestro]` key
+  is one row of `config.KNOBS` (coercion + whether `[repos.<name>]` may override it);
+  unknown keys fail `config.load()` closed. Adding a knob: a `Config` field, a `KNOBS`
+  row, a commented line in `DEFAULT_CONFIG_TOML` (`tests/test_config.py` checks all three).
+- `repos.py` — per-ticket repo binding (`[repos.<name>]`). `gates.py` — spec front-matter reads.
 
-Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-owned),
+Guards and budgets:
+- `health.py` — `maestro doctor` checks. `alarm.py` — fleet-wide detection alarm.
+- `burn.py` — per-key burn detection. `spend.py` — daily USD meter + ceiling gate.
+- `ratelimit.py` — account-wide spawn gate from `rate_limit_event`s.
+- `backup.py` — tarball snapshots/restore. `credentials.py` — per-repo `gh` credentials.
+- `runner_permissions.py` / `pi_guard.py` — destructive-command guard for non-Claude runners.
+
+Supporting:
+- `context.py` — fold of a ticket's log into a context dossier. `locate.py` — file/symbol hints.
+- `steplog.py` — reads session logs (Claude/opencode/pi) into steps.
+- `projection.py` — snapshots → `derived/*.md` dashboards. `notify.py` — push notifications.
+- `schedule.py` — interval/cron scheduled tasks. `decision_labels.py` — answer → route fold.
+- `testlang.py` — per-language test-name extraction and selector formatting.
+- `skills_install.py` — `maestro install-commands` (payload in `maestro/_skill_commands/`).
+- `fleet.py` — launchd LaunchAgent management + pause switch.
+- `diagram.py` — generates the two derived docs from `statemachine.TRANSITIONS` and an AST
+  walk of `dispatcher.py`; `tests/test_diagram.py` fails on drift. It pins literal
+  `decisions[...]["outcome"] = "..."` assignments and a few exact source lines in
+  `dispatcher.py` — keep them literal when refactoring.
+- `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).
+- `tui/` — Textual TUI (`maestro tui`, `tui` extra). Import only via `maestro.tui`; new
+  screens go in `screens.py`, new modals in `modals.py`.
+
+Home layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-owned),
 `events/<KEY>.jsonl` (+ `.archive.jsonl`), `inbox/<KEY>.jsonl`, `derived/snapshots/`,
 `derived/cursors/`, `derived/*.md` dashboards, `agent-logs/<KEY>/`, `tickets/_deadletter/`.
 
@@ -119,113 +113,59 @@ Home directory layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-own
 - **Humans** edit only `tickets/<KEY>/spec.md` and append to inboxes (`maestro ans`).
 - **Agents** append only to `events/<KEY>.jsonl` (fencing-gated) and atomically replace
   `derived/*`. Never hand-edit an event log or a snapshot; go through the CLI / `ops`.
-- `derived/WORKSTATE.md` and `derived/NEEDS-YOU.md` are generated projections — never edit them.
+- `derived/WORKSTATE.md` and `derived/NEEDS-YOU.md` are generated — never edit them.
 
-## Conventions
+## QA convention: prove it with the real app
 
-- Each module starts with a one-line docstring stating its single responsibility — preserve that.
-- **QA proves the feature with the real app — every change, not just tests that pass.** A change
-  isn't done until a test exercises the actual surface a human or agent touches and demonstrates
-  the expected behavior end-to-end: invoke the real CLI (`cli.main([...])` or the `maestro` verb)
-  over a temp `MAESTRO_HOME` and assert the resulting events / snapshot / projection / exit code;
-  for a flow, run a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`); for the TUI,
-  mount the real app (next bullet). Mock ONLY the genuinely external boundary — the `claude -p`
-  spawn (`DryRunSessions`), network, `launchctl` — never the component under test. `make reconcile
-  KEY=…` runs a real reconcile step in the foreground; `make dry` runs a real sweep the same way
-  but strictly read-only (`would_mint`/`would_spawn`, no writes) — good for watching what a sweep
-  would do without minting or spawning anything.
-- Correctness invariants (idempotency, fencing, crash safety, single-writer) are all tested in
-  `tests/`. If you touch the log, dispatcher, claims, or fold, add/adjust a test proving the
-  invariant still holds.
-- **The TUI instance of that rule: mount the real app.** If you touch anything under
-  `maestro/tui/`, prove it by mounting `MaestroTUI` through Textual: add/extend
-  `tests/test_tui_runtime.py` with `async with app.run_test() as pilot:`, drive real keys
-  (`await pilot.press(...)`), and assert `app._exception is None`. Mocking `query_one` /
-  `push_screen` / `notify` does NOT count as QA — that is exactly what lets a forgotten widget id,
-  an `on_mount` exception, or a binding to a missing action ship uncaught. Any new binding, screen,
-  or modal must be covered by the binding sweep and `test_every_binding_action_resolves` (a missing
-  action is a silent no-op at runtime, so the static check is what catches it). `make test` must
-  stay green; the runtime tests need the `tui` extra, so install `.[dev,tui]`.
-- Reconciler behavior lives in per-phase `/maestro-reconcile-<phase>` skills
-  (`.claude/commands/maestro-reconcile-<phase>.md`, mirrored in `skills/`; tracked so every
-  worktree inherits them) — progressive disclosure, so a reconciler only loads the branch its
-  current phase needs. The dispatcher resolves which one to spawn per-key at spawn time
-  (`dispatcher.resolve_reconcile_command`, beside `_resolve_model_effort`/`MERGE_DENYLIST`).
-  Agents drive state exclusively via `maestro` verbs.
-- Ticket specs follow a fixed format (front-matter `priority` / optional `dependsOn`, then
-  `## Intent`, `## Notes`, `## Acceptance criteria` as `- [ ]` checkboxes) — match existing
-  tickets, don't invent fields. Some existing specs still carry a now-inert `approval_tier:`
-  line (AD-7 removed the tier gate it drove) — tolerated as an unrecognized front-matter key,
-  never rewritten in bulk.
-- An AC checkbox line may end with an OPT-IN, machine-checkable annotation (T-79):
-  `(test: <path>)`, `(test: <path>::<id>)`, or `(check: <shell command>)`. With a
-  resolved `test_command` (the board-wide default, or a `[repos.<name>]` override that
-  arms the gate per-repo even when the board-wide key is unset — T-83) configured (and
-  the ticket not `mode: local`), the `verifying` stage (T-74) runs each annotated AC's
-  own check at the same tree state as the suite and records it
-  (`snapshot.parse_ac_annotation`, `ops.run_ac_checks`, `events.AC_CHECK_CAPTURED`) — a
-  current-tree passing capture is what the `awaiting-ci` gate then requires for that AC
-  instead of a `verify-ac` self-attestation (`ops._acs_unverified_count`); `verify-ac`
-  still records narrative evidence for it, it just stops being load-bearing there.
-  `test:` requires the named test (or, for a bare file path, some test in that file) to
-  actually be ADDED by the branch's diff against base and pass — a green suite whose
-  diff never added it does not satisfy the gate (the T-55 seq-130 false-attestation
-  class). `check:` requires the command to exit 0. Ships dark by construction: an AC
-  with no such trailing parenthetical, a repo binding with no resolved `test_command`,
-  or a `mode: local` ticket all behave byte-identically to before this annotation
-  grammar existed — zero bulk rewrite of the ~130 existing specs.
-  `test:`'s added/deleted-test extraction and DEFAULT selector syntax are selected per
-  the ticket's repo binding's `language` (T-84, `maestro/testlang.py`; `[repos.<name>]
-  language = "python" | "go" | "typescript"`, unset = `"python"`) — pytest `path::id`,
-  `go test -run`, or jest `-t`, and the H4 test-deletion gate's own test-file scope
-  (see below), all keyed off the same field. An unrecognized `language` fails
-  `config.load()` closed rather than ever reaching a `test:` check. `check:` performs
-  NO added-by-diff verification on any language — it is satisfied by a pre-existing
-  green suite the branch never touched, so it does not close the T-55 seq-130 class the
-  way `test:` does; treat it as a stopgap, not a substitute.
-  `language` is the EXTRACTION axis only — `[repos.<name>] test_selector` (T-98) is
-  the orthogonal INVOCATION axis: an optional per-repo format-string template (over
-  `{test_command}`/`{path}`/`{dir}`/`{name}`/`{names}` —
-  `testlang.SELECTOR_PLACEHOLDERS`) that overrides ONLY how a named test is run —
-  e.g. "extract like go, invoke like Bazel" for a repo none of the three built-in
-  `format_selector`s (each just `test_command`-prefix + appended args) can express.
-  Unset keeps the language profile's own `format_selector` verbatim (ships dark); a
-  malformed template or an unrecognized placeholder fails `config.load()` closed, the
-  same posture as `language`. A test name substituted into a custom template is
-  refused (never interpolated raw) if it contains a character unsafe for
-  `_run_shell`'s `shell=True` line — go/python names are `\w+` and always pass; a
-  free-text TypeScript `it("...")` name is the real injection surface.
-- H4 (T-84, `dispatcher._route_test_run`/`_diff_deleted_test_names`): once the suite is
-  green, the `verifying` stage also diffs test names (per the repo binding's `language`
-  test-file scope — `tests/` for python, co-located `*_test.go` for go, or
-  `*.spec.ts`/`*.test.ts`/`*.spec.tsx`/`*.test.tsx`/`__tests__/` for typescript) against
-  base. A net deletion (not a rename — the same
-  name deleted and re-added in scope never counts) routes to `awaiting-human` for a
-  human sign-off instead of admitting `qa` — "a passing suite is a weak oracle for
-  removal." The qid encodes the tree state, so an answered sign-off for that EXACT tree
-  passes straight through; any new tree re-evaluates from scratch. `test_deletion_gate
-  = false` disables.
-- T-85's two default-ON write-path QA gates, neither `--force`-able: `ops.record_qa_verdict`
-  refuses a verdict unless the ticket's folded phase is `qa` (`cfg.qa_phase_gate`); and
-  `ops._refuse_if_qa_incomplete` refuses `set-phase awaiting-ci` unless EVERY current-hash
-  AC already has a PASSING spec-axis QA verdict, not merely no failing one
-  (`cfg.awaiting_ci_qa_gate`). T-86: once a PR's CI is `passing`, no `CHANGES_REQUESTED`
-  review is outstanding, and every AC's QA verdict is passing, `dispatcher._maybe_undraft`
-  runs `gh pr ready` on its own — no config knob, idempotent off the freshly polled
-  `status["draft"]`.
-- T-90: `worktree_timeout` (`git worktree add`/adopt's own timeout) and `prime_timeout`
-  (bounds the repo's `prime` command) are separate, board-wide-default budgets; either
-  can be overridden per `[repos.<name>]` for a repo whose checkout or dependency install
-  legitimately runs longer.
-- `bash_max_timeout` (default 1800s) is exported to every spawned reconciler as
-  `BASH_MAX_TIMEOUT_MS`, lifting Claude Code's stock 600s Bash-tool ceiling so the implementing
-  skill's single foreground test run fits. A session is silent for the whole call, so the
-  watchdog's `no_output_timeout` (default now 1800s) must cover it: `config.load()` fails
-  closed when both are set and the silence budget is shorter, and an unset ceiling shrinks to
-  an explicitly shorter silence budget instead of refusing to load.
+A change isn't done until a test exercises the real surface end-to-end:
+- Invoke the real CLI (`cli.main([...])`) over a temp `MAESTRO_HOME` and assert the
+  resulting events / snapshot / projection / exit code. For a flow, run a real sweep
+  (`dispatch(cfg, DryRunSessions(), ...)`). Pass `--no-nudge` to human verbs in tests, or
+  they spawn a live reconciler.
+- Mock ONLY the genuinely external boundary — the `claude -p` spawn (`DryRunSessions`),
+  network, `launchctl` — never the component under test.
+- If you touch the log, dispatcher, claims or fold, add/adjust a test proving the
+  invariant (idempotency, fencing, crash safety, single-writer) still holds.
+- **TUI:** mount the real `MaestroTUI` in `tests/test_tui_runtime.py` with
+  `async with app.run_test() as pilot:`, drive real keys, assert `app._exception is None`.
+  Mocking `query_one` / `push_screen` / `notify` does not count. New bindings, screens and
+  modals must be covered by the binding sweep and `test_every_binding_action_resolves`.
+- Shared test helpers live in `tests/conftest.py` (`seed_ticket`, `seed_phase`,
+  `make_origin_and_repo`, `git`, `run_doctor`, …) — reuse them instead of re-copying.
+
+## Reconciler skills
+
+Per-phase behavior lives in `.claude/commands/maestro-reconcile-<phase>.md`. `skills/` and
+`maestro/_skill_commands/` are symlinks to those files — edit `.claude/commands/` only.
+The dispatcher picks the command per key at spawn time
+(`dispatcher.resolve_reconcile_command`). Agents drive state exclusively via `maestro` verbs.
+
+## Ticket specs
+
+Front-matter `priority` / optional `dependsOn`, then `## Intent`, `## Notes`,
+`## Acceptance criteria` as `- [ ]` checkboxes — match existing tickets, don't invent
+fields. An inert `approval_tier:` line in old specs is tolerated; don't bulk-rewrite it.
+An AC line may end with `(test: <path>[::<id>])` or `(check: <shell command>)` to make it
+machine-checked (see DESIGN.md, "Acceptance criteria").
+
+## Gates that refuse on purpose
+
+Each is default-on, pinned by the named tests. Rationale lives in DESIGN.md and docstrings.
+
+| Rule | Where | Tests |
+|---|---|---|
+| A recorded QA verdict requires folded phase `qa` (`qa_phase_gate`) | `ops.record_qa_verdict` | `test_qa_phase_gate.py` |
+| `set-phase awaiting-ci` requires a PASSING QA verdict on every current AC (`awaiting_ci_qa_gate`, not `--force`-able) | `ops._refuse_if_qa_incomplete` | `test_qa_phase_gate.py`, `test_qa_exit_gate_scope.py` |
+| An annotated AC needs a current-tree passing capture, not a `verify-ac` attestation; `test:` must be ADDED by the diff | `ops.run_ac_checks`, `ops._acs_unverified_count` | `test_dispatcher_ac_checks.py`, `test_dispatcher_ac_checks_lang.py` |
+| A net test deletion in `verifying` routes to `awaiting-human` (`test_deletion_gate`) | `dispatcher._route_test_run` | `test_dispatcher_ac_checks_lang.py` (`test_h4_*`) |
+| `gh pr merge` is denied to every reconciler | `dispatcher.MERGE_DENYLIST` | `test_dispatcher.py`, `test_sessions.py` |
+| PR is undrafted only once CI passes, no `CHANGES_REQUESTED`, every AC QA-passed | `dispatcher._maybe_undraft` | `test_undraft.py` |
+| Unknown `language` / malformed `test_selector` fail `config.load()` closed | `config.load` | `test_repos.py`, `test_testlang.py` |
+| `no_output_timeout` must cover `bash_max_timeout` (exported as `BASH_MAX_TIMEOUT_MS`) | `config.load` | `test_dispatcher.py` |
 
 ## Git
 
-- Default branch `main`; reconcilers branch with prefix `maestro/` and open PRs per the ticket's
-  repo binding (`maestro env --key <KEY>`; single-repo homes default to `cortop/maestro`).
+- Default branch `main`; reconcilers branch with prefix `maestro/` and open PRs per the
+  ticket's repo binding (`maestro env --key <KEY>`; single-repo homes default to
+  `cortop/maestro`). Don't use the `maestro/` prefix for hand-made branches.
 - Commit/push only when asked. Branch first if on `main`.

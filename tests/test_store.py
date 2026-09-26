@@ -14,6 +14,8 @@ one. Kept separately -- different unit (`append_line` alone vs. the full
 `event_log.append` call), different thing proved (recovery-from-artifact vs.
 crash-during-the-call).
 """
+import pytest
+
 from maestro import inbox, store
 
 
@@ -103,3 +105,40 @@ def test_inbox_append_command_survives_a_torn_tail(home):
 
     cmds = store.read_jsonl(path)
     assert [c["args"].get("text") for c in cmds] == ["ok", "after-torn"]
+
+
+# --- shared helpers: JSONL iteration and epoch/ISO/date conversions ---------
+
+
+def test_iter_jsonl_skips_blank_comment_and_torn_lines(tmp_path):
+    path = tmp_path / "x.jsonl"
+    path.write_text('{"a": 1}\n\n# note\n{"b": 2}\n{"torn": \n', encoding="utf-8")
+    assert list(store.iter_jsonl(path)) == [{"a": 1}, {"b": 2}]
+    assert store.read_jsonl(path) == [{"a": 1}, {"b": 2}]
+
+
+def test_iter_jsonl_missing_file_yields_nothing(tmp_path):
+    assert list(store.iter_jsonl(tmp_path / "absent.jsonl")) == []
+
+
+def test_iter_jsonl_is_strict_about_bad_bytes_unless_asked(tmp_path):
+    path = tmp_path / "x.jsonl"
+    path.write_bytes(b'{"a": 1}\n{"b": "\xff"}\n')
+    with pytest.raises(UnicodeDecodeError):
+        list(store.iter_jsonl(path))
+    assert list(store.iter_jsonl(path, errors="replace"))[0] == {"a": 1}
+
+
+def test_epoch_iso_round_trip():
+    iso = store.epoch_to_iso(1_000_000_000)
+    assert iso == "2001-09-09T01:46:40+00:00"
+    assert store.iso_to_epoch(iso) == 1_000_000_000
+
+
+@pytest.mark.parametrize("bad", [None, "", "not a date", 12])
+def test_iso_to_epoch_returns_none_on_unparseable(bad):
+    assert store.iso_to_epoch(bad) is None
+
+
+def test_utc_date():
+    assert store.utc_date(1_000_000_000) == "2001-09-09"

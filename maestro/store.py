@@ -49,6 +49,24 @@ def now_epoch() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
+def epoch_to_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def iso_to_epoch(value) -> float | None:
+    """Parse an ISO-8601 timestamp (as `iso_now` writes) to an epoch; None if
+    *value* is missing or unparseable -- callers decide what that means."""
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def utc_date(epoch: float) -> str:
+    """The UTC calendar day of *epoch*, ``YYYY-MM-DD``."""
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
 def resolve_home(explicit: str | os.PathLike | None = None) -> Path:
     """Resolve MAESTRO_HOME: explicit arg > env > ~/.maestro."""
     raw = explicit or os.environ.get("MAESTRO_HOME") or "~/.maestro"
@@ -475,22 +493,27 @@ def append_line(target: Path, line: str) -> None:
         os.fsync(f.fileno())
 
 
-def read_jsonl(target: Path) -> list[dict]:
-    out: list[dict] = []
+def iter_jsonl(target: Path, *, errors: str = "strict") -> Iterator:
+    """Yield each JSON value in a JSONL file, skipping blank lines and any line
+    that doesn't parse -- a half-written final line from a crashed writer, or
+    a ``#`` comment. A missing file yields nothing. *errors* is the text
+    decoding policy: keep "strict" for maestro's own logs (a corrupt byte
+    should fail loudly), "replace" for a third-party runner's session log."""
     if not target.exists():
-        return out
-    with target.open("r", encoding="utf-8") as f:
+        return
+    with target.open("r", encoding="utf-8", errors=errors) as f:
         for raw in f:
             raw = raw.strip()
-            if not raw or raw.startswith("#"):
+            if not raw:
                 continue
             try:
-                out.append(json.loads(raw))
+                yield json.loads(raw)
             except json.JSONDecodeError:
-                # Tolerate a half-written final line (a crashed writer). The next
-                # fold simply ignores it; the durable append above makes this rare.
                 continue
-    return out
+
+
+def read_jsonl(target: Path) -> list[dict]:
+    return list(iter_jsonl(target))
 
 
 def write_json(target: Path, obj) -> None:

@@ -25,23 +25,13 @@ class StaleAppendError(store.MaestroError):
 
 
 def _scan_file(path: Path, last_seq: int, step_ids: set[str]) -> tuple[int, set[str]]:
-    if not path.exists():
-        return last_seq, step_ids
-    with path.open("r", encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                ev = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            seq = ev.get("seq")
-            if isinstance(seq, int) and seq > last_seq:
-                last_seq = seq
-            sid = ev.get("step_id")
-            if sid:
-                step_ids.add(sid)
+    for ev in store.iter_jsonl(path):
+        seq = ev.get("seq")
+        if isinstance(seq, int) and seq > last_seq:
+            last_seq = seq
+        sid = ev.get("step_id")
+        if sid:
+            step_ids.add(sid)
     return last_seq, step_ids
 
 

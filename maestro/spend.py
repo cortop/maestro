@@ -53,7 +53,6 @@ that wants per-runner spend availability rather than one board-wide flag.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import claims, sessions as sessions_mod, steplog, store
@@ -66,10 +65,6 @@ def _state_path(home: Path) -> Path:
 
 def _cursor_path(home: Path) -> Path:
     return home / "derived" / ".spend_cursor.json"
-
-
-def _utc_date(now: float) -> str:
-    return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
 def probe(cfg: Config, now: float) -> dict:
@@ -88,7 +83,7 @@ def probe(cfg: Config, now: float) -> dict:
     of.
     """
     home = cfg.home
-    today = _utc_date(now)
+    today = store.utc_date(now)
     state_path = _state_path(home)
 
     if cfg.session_log_format != "stream-json":
@@ -198,7 +193,7 @@ def status(cfg: Config, now: float) -> dict:
     the persisted state, so a ``text``-format home reads unavailable even
     before a sweep has ever probed.
     """
-    today = _utc_date(now)
+    today = store.utc_date(now)
     result = {
         "date": today,
         "today_usd": None,

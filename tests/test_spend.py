@@ -194,7 +194,7 @@ def test_all_stream_json_home_spend_state_byte_identical_to_baseline(home, cfg):
     spend.probe(cfg, t0 + 10)
 
     expected = {
-        "date": spend._utc_date(t0 + 10),
+        "date": store.utc_date(t0 + 10),
         "total_usd": 2.5,
         "unattributed_sessions": 0,
         "settled_logs": [str(path)],
