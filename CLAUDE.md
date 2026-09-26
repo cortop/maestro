@@ -24,7 +24,8 @@ the board as a Petri net.
 - Python ≥ 3.11, **stdlib-only core** (no runtime deps — `tomllib`, `fcntl`, `dataclasses`,
   `argparse`). Optional extras: `dev` (pytest), `tui` (textual). Keep the core dependency-free.
 - `make install` — editable install + symlink `maestro` onto PATH.
-- `make test` — run the suite (`.venv/bin/python -m pytest -q`). Run this before finishing.
+- `make test` — run the suite in parallel (`.venv/bin/python -m pytest -q -n auto`, pytest-xdist,
+  ~40s vs ~4m serial). Run this before finishing. `make test-serial` runs it in one process (for pdb).
 - `make status` / `make doctor` — board state / fleet health.
 - `make reconcile KEY=<KEY>` — run ONE reconcile in the foreground (best way to watch a step).
 - `make dry` — one dispatcher sweep, read-only preview (`would_mint` + `would_spawn`, no

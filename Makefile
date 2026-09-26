@@ -4,11 +4,12 @@ export MAESTRO_HOME ?= $(HOME)/.maestro
 
 PY := .venv/bin/python
 
-.PHONY: help install test diagram dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs
+.PHONY: help install test test-serial diagram dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs
 
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
-	@echo "make test        run the test suite"
+	@echo "make test        run the test suite in parallel (pytest-xdist, -n auto)"
+	@echo "make test-serial run the test suite in one process (easier to debug)"
 	@echo "make diagram     regenerate docs/state-machine.md + docs/dispatch-gates.md"
 	@echo "make dry         one dispatcher sweep, read-only preview (would_mint + would_spawn)"
 	@echo "make dispatch    one REAL sweep (spawns claude reconcilers for due tickets)"
@@ -32,7 +33,13 @@ install:
 	mkdir -p $(HOME)/.local/bin && ln -sf $(PWD)/.venv/bin/maestro $(HOME)/.local/bin/maestro
 	@echo "maestro -> $$(command -v maestro)"
 
+# Parallel by default: the suite is mostly subprocess/git wait, so -n auto is
+# ~6x faster than serial. Every test owns its tmp_path home, so workers never
+# share state. `make test-serial` for pdb / ordering-dependent debugging.
 test:
+	$(PY) -m pytest -q -n auto
+
+test-serial:
 	$(PY) -m pytest -q
 
 # Derived, never retyped (T-50): both files are pure functions of
