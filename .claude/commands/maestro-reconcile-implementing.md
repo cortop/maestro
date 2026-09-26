@@ -117,7 +117,9 @@ trying to do, not just a textual splice.
 
 If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteria are already
 implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
-step 5 (push the rebased branch + `set-phase awaiting-ci`). Keep the prior attestations and QA
+step 5 (push the rebased branch + `set-phase awaiting-ci`); the `pr-size` check does not apply
+here (T-129) — it only ever runs before the first PR exists, never on a conflict-only pass against
+one already open. Keep the prior attestations and QA
 verdicts as-is (the spec, and so their content hashes, didn't change) — do not re-implement the
 feature, re-run `verify-ac`, or route the ticket through `qa` for this pass. `set-phase
 awaiting-ci` enforces the same write-path gates here as everywhere else (T-85: every current-hash
@@ -226,20 +228,38 @@ Otherwise implement the spec's Acceptance criteria:
    the real evidence (a test name, a diff hunk), never rubber-stamp it. The enforced gates
    (unverified ACs, a failing spec-axis QA verdict) live on `qa`'s own `set-phase awaiting-ci`
    call, in its phase file — verify every AC here so that gate passes cleanly there.
-5. Commit your work — then, before opening a fresh PR or pushing further commits to one already
-   open, check whether the branch's diff against `<BASE>` has grown past the configured size
-   threshold (T-126), measured deterministically rather than eyeballed:
+5. Commit your work:
    ```bash
    git -C <WT> add -A
    git -C <WT> commit -q -m "$KEY: <subject>"
    ```
-   **If this is a split-decision round** (step 1's fourth case): there is nothing new to commit —
-   the commit above is a no-op — so skip the `pr-size` check below and act on the verbatim answer
-   from the phase-history reason instead: an approving answer means open the approved stack (see
-   "Approved split" below); anything else means push and open the single PR exactly as the
-   `exceeds: false` case below.
+   **If a PR is already open** (a fix round, a review-feedback round, or a conflict-only pass —
+   the snapshot you read at the top already has `pr_number`/`pr_stack` set): the `pr-size` gate
+   (T-126) does not apply — it only ever runs before the *first* PR exists (T-129), since pushing
+   a fix past the split threshold must never trigger a split proposal against a PR reviewers are
+   already working. Skip straight to pushing and handing off, with no `maestro pr-size` call at
+   all (calling it anyway would be a harmless no-op — `ops.pr_size` itself now refuses to report
+   `exceeds: true` once a PR is open — but there is no reason to call it here):
+   ```bash
+   git -C <WT> push -q -u origin "<PREFIX>$KEY"
+   ```
+   - **Fix round**: `maestro set-phase "$KEY" qa --requeue 300` (a PR already open already has its
+     `PrOpened` event — do not append another).
+   - **Review-feedback round**: `maestro set-phase "$KEY" awaiting-ci --requeue 300` instead of
+     `qa` — a human is already reviewing this PR directly on GitHub, so this hands back to
+     CI/that review rather than an internal re-review; push the commit first if you made a code
+     change, or skip the push entirely if this round only recorded a Note.
+   - **Conflict-only pass**: `maestro set-phase "$KEY" awaiting-ci --requeue 300` (see step 0).
 
-   **Otherwise**, measure the diff and act on `exceeds`:
+   **If this is a split-decision round** (step 1's fourth case): there is nothing new to commit —
+   the commit above is a no-op — no PR exists yet at this point either, so act on the verbatim
+   answer from the phase-history reason instead: an approving answer means open the approved stack
+   (see "Approved split" below); anything else means push and open the single PR exactly as the
+   `exceeds: false` case below (the size decision was already made when the split proposal was
+   raised, so `pr-size` is not re-run here).
+
+   **Otherwise (a fresh implementation, with no PR yet)** — this is the only case where the gate
+   applies: measure the diff and act on `exceeds` before opening the first PR:
    ```bash
    maestro pr-size "$KEY"   # -> {lines_changed, threshold, exceeds, tree}
    ```
@@ -267,16 +287,11 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    Neither the URL nor the number is captured into a shell variable — type the values you just
    read directly into the payload (`<pr-number>`/`<pr-url>` below are exactly that, not a token
-   resolved from `maestro env --key`). Skip the `PrOpened` append on a fix round (a PR already
-   open already has one):
+   resolved from `maestro env --key`):
    ```bash
    maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr-number>,\"url\":\"<pr-url>\",\"draft\":true}" --step-id "pr-$KEY"
    maestro set-phase "$KEY" qa --requeue 300
    ```
-   On a review-feedback round (see step 1), skip straight to `set-phase "$KEY" awaiting-ci
-   --requeue 300` instead of `qa` — a human is already reviewing this PR directly on GitHub, so
-   this hands back to CI/that review rather than an internal re-review; push the commit first if
-   you made a code change, or skip the push entirely if this round only recorded a Note.
 
    **`exceeds: true`** — do not push or open/grow the PR yet. Split the diff into an ordered stack
    of smaller PRs instead, by file: each entry names which files it touches, which spec ACs it

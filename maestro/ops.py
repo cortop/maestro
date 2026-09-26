@@ -1448,13 +1448,31 @@ def pr_size(cfg: Config, key: str) -> dict:
     as the H4 test-deletion gate's own qid) -- the skill binds a split
     proposal's `--qid` to it so an already-answered proposal for this exact
     tree passes straight through and a new tree (a further commit)
-    re-evaluates from scratch."""
+    re-evaluates from scratch. T-129: once the ticket already has an open PR
+    (`pr_number` set, or a non-empty `pr_stack`), the check is skipped --
+    `exceeds` is forced False and `skipped: "pr_open"` is added -- since the
+    split-vs-single-PR decision only makes sense before the first PR exists;
+    a fix/review/conflict round on an already-open PR must never trigger a
+    split proposal against a PR reviewers are already working."""
     from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
     binding = repos_mod.resolve(cfg, cfg.home, key)
     cwd = _worker_cwd(cfg, key)
     lines_changed = _diff_numstat_total(cwd, binding.base_branch or "main")
     threshold = binding.pr_split_threshold
     tree_key = _tree_state_key(cwd, timeout=binding.worktree_timeout)
+    # T-129: once a PR is open (or a split stack has its first entry open),
+    # a later fix/review/conflict round pushing the diff over threshold must
+    # never trigger a split proposal against a PR reviewers are already
+    # working -- the check is only meaningful before the *first* PR exists.
+    snap = snap_mod.load(cfg.home, key)
+    if snap.pr_number is not None or snap.pr_stack:
+        return {
+            "lines_changed": lines_changed,
+            "threshold": threshold,
+            "exceeds": False,
+            "tree": content_hash(tree_key)[:8],
+            "skipped": "pr_open",
+        }
     return {
         "lines_changed": lines_changed,
         "threshold": threshold,
