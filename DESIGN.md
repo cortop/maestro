@@ -39,7 +39,7 @@ realized on files + a cron clock instead of an always-on server.
 ## How each pain dies
 
 - **Blocking →** no waves, no mutex. The dispatcher only enqueues-and-exits; up to N
-  reconcilers run as independent OS-level `claude --bg` sessions. Wall-clock to drain the
+  reconcilers run as independent OS-level headless `claude -p` sessions. Wall-clock to drain the
   board is the slowest *single* ticket, not the sum of waves. A human question becomes
   "record `awaiting-human`, exit" — the slot frees immediately.
 - **Unsafe edits →** write-ownership partition. Humans append to `inbox/<KEY>.jsonl` or
@@ -55,7 +55,7 @@ realized on files + a cron clock instead of an always-on server.
 The decisive implementation choice: **deterministic plumbing in Python, intelligence in
 Claude.** The `maestro` package owns the correctness-critical machinery (fencing-gated
 log, atomic writes, fold, idempotent step-ids, dispatcher, leases, projections,
-dead-letter). Agents are `claude --bg` sessions that mutate state **only** through the
+dead-letter). Agents are headless `claude -p` sessions that mutate state **only** through the
 `maestro` CLI, so they cannot write a torn log or clobber a file. The dispatcher needs no
 LLM at all, which is what makes an always-on fleet cheap.
 
@@ -64,14 +64,14 @@ LLM at all, which is what makes an always-on fleet cheap.
 | Component | Role | Harness primitive |
 |-----------|------|-------------------|
 | dispatcher (`maestro dispatch`) | level sweep: mint → due → spawn → exit; the sole fan-out point | launchd `StartInterval` (the durable clock; survives reboot) |
-| reconciler (`/maestro-reconcile-<phase> <KEY>`) | one idempotent step per ticket | top-level `claude --bg` session, per-phase tool grant |
+| reconciler (`/maestro-reconcile-<phase> <KEY>`) | one idempotent step per ticket | top-level headless `claude -p` session, per-phase tool grant |
 | Impl↔QA loop | `implementing` hands off to the independent `qa` phase; `qa` judges and routes back or onward | two REAL, separately-counted dispatcher spawns (`implementing`, `qa`), not subagents inside one reconciler — `qa` alone keeps the `Agent` tool, for at most one config-gated Standards-axis subagent (one legal fan-out level) |
 | maestro CLI | correct-by-construction state verbs | Python (this package) |
 | projector | snapshots → dashboards, atomic | a phase of `maestro dispatch` |
 | providers | tracker / VCS / fetcher, pluggable | `config.toml` |
 
 **Why not one Workflow session as the engine:** a single Workflow process is one failure
-domain for all tickets — its crash kills the fleet. N independent `claude --bg` sessions
+domain for all tickets — its crash kills the fleet. N independent headless `claude -p` sessions
 are isolated; one dying is one ticket, self-healed next sweep. The no-subagent-spawning
 rule is honored because fan-out lives only at two top-level layers (dispatcher→reconcilers,
 `qa` reconciler→its one Standards-axis subagent), never inside `implementing`.
@@ -144,6 +144,23 @@ text, rather than silently matching by index. Three gates stand between an AC an
   suite passes. A net deletion routes to `awaiting-human` for a human sign-off instead
   of admitting `qa` — a rename never counts, and the sign-off is scoped to the exact
   tree state that asked for it (`test_deletion_gate`, default on).
+
+Once a PR's CI is `passing`, no `CHANGES_REQUESTED` review is outstanding, and every
+AC's QA verdict is passing, `dispatcher._maybe_undraft` runs `gh pr ready` itself (T-86)
+— no config knob, idempotent off the freshly polled `draft` status. It only ever hands a
+PR to a human: `gh pr merge` stays denied (see Known limitations).
+
+## Time budgets
+
+- `worktree_timeout` bounds `git worktree add`/adopt; `prime_timeout` bounds the repo's
+  `prime` command (T-90). Both are board-wide defaults overridable per `[repos.<name>]`,
+  for a repo whose checkout or dependency install legitimately runs longer.
+- `bash_max_timeout` (default 1800s) is exported to every spawned reconciler as
+  `BASH_MAX_TIMEOUT_MS`, lifting Claude Code's stock 600s Bash-tool ceiling so the
+  implementing skill's single foreground test run fits. A session is silent for the whole
+  call, so the watchdog's `no_output_timeout` (default 1800s) must cover it:
+  `config.load()` fails closed when both are set and the silence budget is shorter, and an
+  unset ceiling shrinks to an explicitly shorter silence budget instead of refusing to load.
 
 ## State machine
 
