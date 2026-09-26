@@ -7,7 +7,6 @@ reconciler (avoids a projection write race).
 """
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -92,11 +91,7 @@ def _pr_cell(snap: snap_mod.Snapshot) -> str:
 def _sort_secondary(s: snap_mod.Snapshot):
     """Within the done group, newest-updated first; otherwise by key."""
     if s.phase == Phase.DONE.value:
-        try:
-            epoch = datetime.fromisoformat(s.updated_ts).timestamp()
-        except (TypeError, ValueError):
-            epoch = 0.0
-        return -epoch
+        return -(store.iso_to_epoch(s.updated_ts) or 0.0)
     return split_key(s.key)
 
 
@@ -160,9 +155,8 @@ def _recent_fast_path_routes(home: Path, now_epoch: float) -> list[tuple[str, st
             payload = ev.get("payload") or {}
             reason = payload.get("reason", "")
             if ev.get("actor") == "dispatcher" and reason.startswith("approved: "):
-                try:
-                    ts = datetime.fromisoformat(ev["ts"]).timestamp()
-                except (KeyError, TypeError, ValueError):
+                ts = store.iso_to_epoch(ev.get("ts"))
+                if ts is None:
                     break
                 if now_epoch - ts <= _FAST_PATH_VISIBILITY_WINDOW_S:
                     routed.append((key, reason[len("approved: "):]))
@@ -315,9 +309,8 @@ def _suppressed_review_notes(home: Path, snaps, now: float) -> list[tuple[str, s
             if not text.startswith(_SUPPRESSED_REVIEW_NOTE_PREFIX):
                 continue
             ts = ev.get("ts", "")
-            try:
-                ts_epoch = datetime.fromisoformat(ts).timestamp()
-            except (TypeError, ValueError):
+            ts_epoch = store.iso_to_epoch(ts)
+            if ts_epoch is None:
                 continue
             if ts_epoch >= cutoff:
                 out.append((s.key, ts, text))

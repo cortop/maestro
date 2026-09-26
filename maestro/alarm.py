@@ -62,7 +62,6 @@ import json
 import os
 import subprocess
 import urllib.request
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import notify, spend as spend_mod, store
@@ -74,10 +73,6 @@ _FLEET_KEY = "fleet"  # KEY passed to notify_command/webhook -- these conditions
 
 def _state_path(home: Path) -> Path:
     return home / "derived" / ".alarm.json"
-
-
-def _utc_date(now: float) -> str:
-    return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
 def _run_notify_command_checked(cmd: str, key: str, phase: str, question: str) -> None:
@@ -197,7 +192,7 @@ def check(cfg: Config, now: float, health_mod, *,
 
     st = spend_mod.status(cfg, now)
     ceiling = st["ceiling_usd"]
-    today = _utc_date(now)
+    today = store.utc_date(now)
     if not st["unavailable"] and ceiling is not None and st["today_usd"] is not None:
         for frac in cfg.alarm_spend_warn_fractions:
             threshold = float(frac) * float(ceiling)
