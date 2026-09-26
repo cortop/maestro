@@ -14,23 +14,27 @@ own next sweep once you hand off below — never something this session spawns i
 
 ## Always: load state first
 Resolve this ticket's bound repo and the board-wide home as literals — this preamble runs no
-`eval`, `python3`, `sed`, or `cat`. REPO/SLUG/BASE/PREFIX/MODE come from `maestro env --key`, which
-can differ per ticket in a multi-repo home (single-repo homes fall back to the legacy
-`repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME and
+`eval`, `python3`, `sed`, or `cat`. REPO/SLUG/BASE/PREFIX/MODE/DISPLAY_KEY come from `maestro env
+--key`, which can differ per ticket in a multi-repo home (single-repo homes fall back to the
+legacy `repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME and
 QA_STANDARDS_AXIS, which are board-wide and come from the key-less `maestro env`. `MODE` is `git`
 (default — worktree/branch/PR, the rest of this doc unless said otherwise) or `local` (AD-6 — a
 plain directory, e.g. a notes vault or `~/.claude` for self-editing skills, with no branch/PR
-path; called out explicitly below wherever it changes what you do):
+path; called out explicitly below wherever it changes what you do). `DISPLAY_KEY` (T-134) is the
+tracker's own identifier (e.g. `BDA-123`) for a tracker-imported ticket, or `KEY` unchanged
+otherwise — use it for every PR title below; `KEY` itself, branch names, step-ids and event
+payloads always stay the maestro key, never `DISPLAY_KEY`:
 ```bash
 KEY="$1"
-maestro env --key "$KEY"   # -> repo_path/slug/base_branch/branch_prefix/mode/reconcile_command
+maestro env --key "$KEY"   # -> repo_path/slug/base_branch/branch_prefix/mode/display_key/reconcile_command
 maestro env                # -> home/qa_standards_axis (board-wide; keyless)
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
 ```
 Read the two JSON outputs above and hold their fields as literals for the rest of this file: REPO
-(`repo_path`), SLUG (`slug`), BASE (`base_branch`), PREFIX (`branch_prefix`), MODE (`mode`) from
-the first call; MHOME (`home`) and QA_STANDARDS_AXIS (`qa_standards_axis`) from the second. Then,
+(`repo_path`), SLUG (`slug`), BASE (`base_branch`), PREFIX (`branch_prefix`), MODE (`mode`),
+DISPLAY_KEY (`display_key`) from the first call; MHOME (`home`) and QA_STANDARDS_AXIS
+(`qa_standards_axis`) from the second. Then,
 with the **Read** tool — never `cat`/`sed`, this preamble reads no file via the shell — load:
 - `<MHOME>/tickets/<KEY>/spec.md` — desired state (you never edit this)
 - `<MHOME>/derived/context/<KEY>.md` — folded log: verbatim Q&A, phase reasons, failures, CI
@@ -268,7 +272,7 @@ Otherwise implement the spec's Acceptance criteria:
    `ac_verified`):
    ```bash
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
-   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY" --draft --title "$KEY: <subject>" --body "<motivation/changes> ## AC-to-evidence
+   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY" --draft --title "<DISPLAY_KEY>: <subject>" --body "<motivation/changes> ## AC-to-evidence
 
 | AC | Evidence |
 |----|----------|
@@ -311,9 +315,10 @@ Otherwise implement the spec's Acceptance criteria:
    git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
    git -C <WT> branch "<PREFIX>$KEY-1" <sha of entry 1's last commit>
    git -C <WT> push -q -u origin "<PREFIX>$KEY-1"
-   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY-1" --draft --title "$KEY: <subject> (1/<N>)" --body "..."
+   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY-1" --draft --title "<DISPLAY_KEY>: <subject> (1/<N>)" --body "..."
    ```
-   repeat for entries `2..N`, each based on `<PREFIX>$KEY-<n-1>` instead of `<BASE>` (the last
+   repeat for entries `2..N`, each based on `<PREFIX>$KEY-<n-1>` instead of `<BASE>` (the title's
+   `<DISPLAY_KEY>: <subject> (<n>/<N>)` for every entry — never `$KEY`), and the last
    entry may just be `<PREFIX>$KEY` at `HEAD` itself — no extra branch needed). Record entry 0 —
    the first PR, the only one QA/CI/review ever poll directly — with the normal `PrOpened` call
    plus a `stack` sub-payload, and every later entry with the same event type (T-126 — see

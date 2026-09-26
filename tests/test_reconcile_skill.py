@@ -1095,3 +1095,64 @@ def test_awaiting_human_routes_split_qid_back_to_implementing():
         body = _strip_frontmatter(path.read_text())
         assert "qid starts with `split-`" in body
         assert 'maestro set-phase "$KEY" implementing --reason "pr split decision:' in body
+
+
+# ---------------------------------------------------------------------------
+# T-134: PR titles use the tracker's own ticket id (`display_key`), not the
+# maestro key, when a tracker import set `snapshot.external_id`.
+# ---------------------------------------------------------------------------
+
+def test_env_key_and_snapshot_report_display_key_from_external_id(home, capsys):
+    """A tracker-imported ticket's `display_key` is its bare external_id
+    (`BDA-123`), not the `LINEAR-BDA-123` maestro key -- proven against the
+    real CLI over a temp home, on both surfaces the spec's Notes names
+    (`maestro env --key`, `maestro snapshot`)."""
+    from maestro import event_log
+
+    event_log.append(home, "LINEAR-BDA-123", "TicketCreated",
+                     {"title": "imported ticket", "source": "linear", "spec_hash": "x",
+                      "external_source": "linear", "external_id": "BDA-123"}, actor="d")
+    store.atomic_write(store.spec_path(home, "LINEAR-BDA-123"),
+                       "# LINEAR-BDA-123\n\n## Intent\nx\n\n## Acceptance criteria\n- [ ] ok\n")
+    snap_mod.rebuild(home, "LINEAR-BDA-123")
+
+    capsys.readouterr()
+    assert cli_main(["--home", str(home), "env", "--key", "LINEAR-BDA-123"]) == 0
+    env_result = json.loads(capsys.readouterr().out)
+    assert env_result["display_key"] == "BDA-123"
+
+    capsys.readouterr()
+    assert cli_main(["--home", str(home), "snapshot", "LINEAR-BDA-123"]) == 0
+    snap_result = json.loads(capsys.readouterr().out)
+    assert snap_result["display_key"] == "BDA-123"
+
+
+def test_env_key_and_snapshot_display_key_falls_back_to_maestro_key(home, cfg, capsys):
+    """A ticket with no tracker import (no `external_id` -- e.g. `T-129` and so
+    on) reports its own maestro key as `display_key`, unchanged."""
+    assert cli_main(["--home", str(home), "create", "plain ticket",
+                     "--key", "T-129", "--no-nudge"]) == 0
+    dispatch(cfg, DryRunSessions(), now=1000)
+
+    capsys.readouterr()
+    assert cli_main(["--home", str(home), "env", "--key", "T-129"]) == 0
+    env_result = json.loads(capsys.readouterr().out)
+    assert env_result["display_key"] == "T-129"
+
+    capsys.readouterr()
+    assert cli_main(["--home", str(home), "snapshot", "T-129"]) == 0
+    snap_result = json.loads(capsys.readouterr().out)
+    assert snap_result["display_key"] == "T-129"
+
+
+def test_implementing_skill_pr_titles_use_display_key_not_key():
+    """AC2: neither copy builds a `gh pr create --title` from `$KEY` any more --
+    both the single-PR and every stacked-entry title are built from
+    `<DISPLAY_KEY>` instead."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert '--title "$KEY' not in text, \
+            f'{path}: a gh pr create --title still starts from $KEY, not display_key'
+        assert text.count('--title "<DISPLAY_KEY>:') == 2, \
+            f'{path}: expected exactly 2 gh pr create titles built from <DISPLAY_KEY> ' \
+            f'(the single-PR create and the stack entry 1 create)'

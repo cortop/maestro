@@ -1468,6 +1468,7 @@ def cmd_env(args) -> int:
                 "model": model, "effort": effort,
                 "runner": runner, "runner_model": runner_model,
                 "kind": snap.kind,
+                "display_key": snap.display_key,
                 # T-96 AC4: surface the resolved test-verification knobs a
                 # `test:` annotation's presence gate actually uses, so a
                 # human/agent can see what the language guard is checking

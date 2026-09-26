@@ -329,6 +329,15 @@ class Snapshot:
     def question_open(self) -> bool:
         return bool(self.open_questions)
 
+    @property
+    def display_key(self) -> str:
+        """The tracker's own identifier (e.g. `BDA-123`) if this ticket was
+        imported from one, else the maestro key itself (T-134) -- what PR
+        titles should use instead of `self.key`, so a Linear-imported
+        `LINEAR-BDA-123` ticket's PRs read `BDA-123: ...` the way reviewers
+        and Linear's own PR linking expect."""
+        return self.external_id or self.key
+
     def acs_unverified(self, spec_text: str, tree_key: str | None = None) -> int:
         """Count ACs in *spec_text* not yet satisfied for the `awaiting-ci` gate.
 
@@ -431,6 +440,7 @@ class Snapshot:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["question_open"] = self.question_open
+        d["display_key"] = self.display_key
         return d
 
     @classmethod
