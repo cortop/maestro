@@ -431,22 +431,14 @@ class Config:
     raw: dict = field(default_factory=dict)
 
 
-# GA-17: the whole recognized [repos.<name>] key set -- config.load raises on
-# anything outside it (see the fail-closed AC), so a typo'd credential field
-# (or any other field) never gets silently ignored.
-_REPO_TABLE_KEYS = frozenset({
+# GA-17: the [repos.<name>] keys that exist ONLY per-repo. The full recognized
+# key set (`_REPO_TABLE_KEYS`, below the knob table) adds every board-wide knob
+# declared `per_repo=True`; config.load raises on anything outside it, so a
+# typo'd credential field (or any other field) never gets silently ignored.
+_REPO_ONLY_KEYS = frozenset({
     "path", "slug", "base_branch", "branch_prefix", "default",
     "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
-    "gh_account", "token_env", "prime", "base_drift_policy", "test_command",
-    # T-90: per-repo overrides of the board-wide [maestro] defaults above --
-    # unset inherits, same resolution shape as `prime`/`base_drift_policy`.
-    "prime_timeout", "worktree_timeout",
-    "language", "test_selector", "post_qa_skill",
-    "post_qa_skill_runner", "post_qa_skill_runner_model",
-    # T-123: per-repo overrides of the board-wide [maestro] CI auto-rerun
-    # defaults above -- same "table wins, unset inherits" precedence.
-    "ci_auto_rerun", "ci_rerun_grace", "ci_failure_excerpt",
-    "file_hints", "pr_split_threshold",
+    "gh_account", "token_env", "prime", "test_selector",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -669,21 +661,6 @@ def _validate_review_noise_patterns(patterns) -> None:
                 f"regex {pat!r}: {exc}") from exc
 
 
-def _validate_pr_split_threshold(value, *, where: str) -> int:
-    """T-126: fail `config.load()` closed on a non-integer/negative
-    `pr_split_threshold` -- same posture as `min_spawn_interval`: a typo'd
-    negative value is worse than 0 (it would silently disable the check with
-    no feedback), so it's a loud config error instead. 0 is a legitimate,
-    documented "disabled" value."""
-    try:
-        as_int = int(value)
-    except (TypeError, ValueError):
-        raise store.MaestroError(f"config.toml: {where} must be an integer, got {value!r}")
-    if as_int < 0:
-        raise store.MaestroError(f"config.toml: {where} must be >= 0, got {as_int}")
-    return as_int
-
-
 def _validate_skill_name(value, *, where: str) -> None:
     """T-115: fail `config.load()` closed on a malformed `post_qa_skill` value --
     same posture as `language` (`testlang.SUPPORTED`) and `test_selector`
@@ -695,6 +672,259 @@ def _validate_skill_name(value, *, where: str) -> None:
             f"config.toml: {where} must be a slash-command name like "
             f"\"/my-pr-polish\" (a leading '/', then a letter, then letters/"
             f"digits/hyphens/underscores), got {value!r}")
+
+
+# ---------------------------------------------------------------------------
+# [maestro] knobs -- the ONE declaration of every board-wide key: its name, how
+# a raw TOML value is coerced/validated, and whether a [repos.<name>] table may
+# override it. The default is the `Config` field's own default; an absent key
+# keeps it. Adding a knob = a `Config` field + one row here (+ a commented line
+# in DEFAULT_CONFIG_TOML); `per_repo=True` also needs a `repos.RepoBinding`
+# field of the same name, which `repos.py` resolves generically.
+# ---------------------------------------------------------------------------
+
+def _int(raw, where, default):
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise store.MaestroError(f"config.toml: {where} must be an integer, got {raw!r}") from None
+
+
+def _nonneg_int(raw, where, default):
+    # A negative value is a typo worse than 0 (it would silently disable or
+    # clamp with no feedback), so it is a loud config error; 0 is the
+    # documented "disabled" value for every knob using this.
+    value = _int(raw, where, default)
+    if value < 0:
+        raise store.MaestroError(f"config.toml: {where} must be >= 0, got {value}")
+    return value
+
+
+def _float(raw, where, default):
+    return float(raw)
+
+
+def _bool(raw, where, default):
+    return bool(raw)
+
+
+def _str(raw, where, default):
+    return raw
+
+
+def _opt_str(raw, where, default):
+    return raw or None
+
+
+def _list(raw, where, default):
+    return raw if isinstance(raw, list) else default
+
+
+def _choice(values: frozenset, *, optional: bool = False):
+    def coerce(raw, where, default):
+        value = (raw or None) if optional else raw
+        if value is None and optional:
+            return None
+        if value not in values:
+            unset = " (or unset)" if optional else ""
+            raise store.MaestroError(
+                f"config.toml: {where} must be one of {sorted(values)}{unset}, got {value!r}")
+        return value
+    return coerce
+
+
+def _skill_name(raw, where, default):
+    value = raw or None
+    if value is not None:
+        _validate_skill_name(value, where=where)
+    return value
+
+
+def _suggest_acs_prompt(raw, where, default):
+    value = raw or None
+    if value is not None:
+        _validate_suggest_acs_prompt(value)
+    return value
+
+
+def _review_noise_patterns(raw, where, default):
+    _validate_review_noise_patterns(raw)
+    return raw
+
+
+def _string_list(raw, where, default):
+    if not isinstance(raw, list) or not all(isinstance(a, str) for a in raw):
+        raise store.MaestroError(f"config.toml: {where} must be a list of strings")
+    return raw
+
+
+def _runner_enabled(raw, where, default):
+    return _normalize_runner_enabled(raw, default)
+
+
+@dataclass(frozen=True)
+class Knob:
+    name: str
+    coerce: object  # (raw, where, default) -> value; raises store.MaestroError
+    per_repo: bool = False
+
+
+KNOBS: tuple[Knob, ...] = (
+    Knob("max_concurrency", _int),
+    Knob("reconcile_steady_interval", _int),
+    Knob("min_spawn_interval", _nonneg_int),
+    Knob("backoff_base", _int),
+    Knob("backoff_cap", _int),
+    Knob("max_failures", _int),
+    Knob("max_impl_turns", _int),
+    Knob("max_session_turns", _int),
+    Knob("max_session_seconds", _int),
+    Knob("max_spawn_attempts", _int),
+    Knob("no_output_timeout", _int),
+    Knob("max_turn_wallclock_seconds", _int),
+    Knob("worktree_timeout", _int, per_repo=True),
+    Knob("prime_timeout", _int, per_repo=True),
+    Knob("ci_auto_rerun", _bool, per_repo=True),
+    Knob("ci_rerun_grace", _int, per_repo=True),
+    Knob("ci_failure_excerpt", _bool, per_repo=True),
+    Knob("pr_split_threshold", _nonneg_int, per_repo=True),
+    Knob("daily_spend_ceiling_usd", _float),
+    Knob("runaway_spawns_per_hour", _int),
+    Knob("runaway_pause_cooldown", _int),
+    Knob("burn_repeat_threshold", _int),
+    Knob("reconcile_command", _str),
+    Knob("repo_path", _str),
+    Knob("branch_prefix", _str),
+    Knob("prime", _opt_str),
+    Knob("test_command", _opt_str, per_repo=True),
+    Knob("test_deletion_gate", _bool),
+    Knob("language", _choice(testlang.SUPPORTED, optional=True), per_repo=True),
+    Knob("post_qa_skill", _skill_name, per_repo=True),
+    Knob("post_qa_skill_runner", _opt_str, per_repo=True),
+    Knob("post_qa_skill_runner_model", _opt_str, per_repo=True),
+    Knob("file_hints", _bool, per_repo=True),
+    Knob("user_commands_dir", _str),
+    Knob("opencode_user_commands_dir", _str),
+    Knob("user_settings_path", _str),
+    Knob("permission_mode", _str),
+    Knob("reconcile_model", _str),
+    Knob("capture_session_logs", _bool),
+    Knob("session_log_format", _str),
+    Knob("session_log_retention_days", _int),
+    Knob("session_log_max_per_ticket", _int),
+    Knob("prune_interval", _int),
+    Knob("nudge_on_human_input", _bool),
+    Knob("research_model", _str),
+    Knob("research_effort", _str),
+    Knob("default_effort", _opt_str),
+    Knob("suggest_acs_model", _opt_str),
+    Knob("suggest_acs_prompt", _suggest_acs_prompt),
+    Knob("runner", _str),
+    Knob("runner_model", _opt_str),
+    Knob("runner_enabled", _runner_enabled),
+    Knob("reconcile_web_tools", _bool),
+    Knob("reconcile_allowed_tools", _list),
+    Knob("unverified_claim_max_age", _int),
+    Knob("backup_interval", _int),
+    Knob("backup_retention", _int),
+    Knob("backup_dir", _str),
+    Knob("repo_preflight", _bool),
+    Knob("base_drift_policy", _choice(_BASE_DRIFT_POLICIES), per_repo=True),
+    Knob("qa_standards_axis", _bool),
+    Knob("qa_phase_gate", _bool),
+    Knob("awaiting_ci_qa_gate", _bool),
+    Knob("answer_fast_path", _choice(_ANSWER_FAST_PATH_MODES)),
+    Knob("compact_interval", _int),
+    Knob("compact_min_events", _int),
+    Knob("archive_after", _int),
+    Knob("ratelimit_grace", _int),
+    Knob("ratelimit_fallback_pause", _int),
+    Knob("ratelimit_max_pause", _int),
+    Knob("provider_probe_interval_s", _int),
+    Knob("review_noise_patterns", _review_noise_patterns),
+    Knob("review_noise_authors", _string_list),
+)
+
+# `bash_max_timeout` is recognized but resolved after the table, because its
+# default depends on the already-loaded `no_output_timeout` (see load()).
+MAESTRO_KEYS = frozenset({k.name for k in KNOBS} | {"bash_max_timeout"})
+
+# [repos.<name>] keys that override the board-wide knob of the same name:
+# the table's value wins, unset inherits (resolved in `repos._binding_from_table`).
+REPO_OVERRIDE_KEYS: tuple[str, ...] = tuple(k.name for k in KNOBS if k.per_repo)
+_REPO_TABLE_KEYS = _REPO_ONLY_KEYS | frozenset(REPO_OVERRIDE_KEYS)
+
+
+def _load_maestro_table(cfg: "Config", m: dict) -> None:
+    unknown = set(m) - MAESTRO_KEYS
+    if unknown:
+        raise store.MaestroError(
+            f"config.toml: [maestro] has unrecognized key(s): {', '.join(sorted(unknown))}")
+    for knob in KNOBS:
+        if knob.name in m:
+            default = getattr(cfg, knob.name)
+            setattr(cfg, knob.name, knob.coerce(m[knob.name], f"[maestro] {knob.name}", default))
+    raw_bash = m.get("bash_max_timeout")
+    if raw_bash is None and cfg.no_output_timeout and cfg.bash_max_timeout > cfg.no_output_timeout:
+        # Unset ceiling on a board that deliberately reaps silence sooner than
+        # the default ceiling: shrink the ceiling to fit rather than refuse a
+        # config that was valid before this knob existed. Only an EXPLICIT
+        # contradiction (both keys set) fails closed below.
+        cfg.bash_max_timeout = cfg.no_output_timeout
+    elif raw_bash is not None:
+        cfg.bash_max_timeout = _int(raw_bash, "[maestro] bash_max_timeout", None)
+    if cfg.bash_max_timeout < 0:
+        raise store.MaestroError(
+            f"config.toml: [maestro] bash_max_timeout must be >= 0 (got {cfg.bash_max_timeout})")
+    if cfg.no_output_timeout and cfg.bash_max_timeout > cfg.no_output_timeout:
+        # Fail closed: a session is legitimately SILENT for the whole of a
+        # foreground Bash call, so the watchdog's silence budget must cover the
+        # Bash ceiling or it kills a healthy session mid-test-suite.
+        raise store.MaestroError(
+            f"config.toml: [maestro] no_output_timeout ({cfg.no_output_timeout}s) is shorter "
+            f"than bash_max_timeout ({cfg.bash_max_timeout}s) -- the watchdog would reap a "
+            "reconciler mid-way through its foreground test run. Raise no_output_timeout "
+            "(or set it to 0), or lower bash_max_timeout.")
+
+
+def _load_repo_table(cfg: "Config", name: str, table: dict) -> dict:
+    """Normalize one `[repos.<name>]` table. Override keys stay None when unset
+    (meaning "inherit the board-wide knob"); a SET override is coerced and
+    validated exactly like the board-wide knob of the same name."""
+    raw_cap = table.get("max_spawns_per_sweep")
+    raw_mode = table.get("mode", "git")
+    raw_repo_tools = table.get("reconcile_allowed_tools", [])
+    raw_test_selector = table.get("test_selector") or None
+    if raw_test_selector is not None:
+        try:
+            testlang.validate_selector_template(raw_test_selector)
+        except ValueError as exc:
+            raise store.MaestroError(f"config.toml: [repos.{name}] {exc}") from exc
+    out = {
+        "path": table["path"],
+        "slug": table.get("slug"),
+        "base_branch": table.get("base_branch", "main"),
+        "branch_prefix": table.get("branch_prefix", cfg.branch_prefix),
+        "default": bool(table.get("default", False)),
+        "max_spawns_per_sweep": int(raw_cap) if raw_cap is not None else None,
+        "mode": raw_mode if raw_mode in ("git", "local") else "git",
+        # GA-10: unioned with the board-wide list, never a replacement -- []
+        # means "nothing extra beyond board-wide", not "no tools at all".
+        "reconcile_allowed_tools": raw_repo_tools if isinstance(raw_repo_tools, list) else [],
+        # GA-17: this repo's gh credential (maestro/credentials.py); None = ambient gh.
+        "gh_account": table.get("gh_account"),
+        "token_env": table.get("token_env"),
+        # GA-20: this repo's dependency-priming command -- see RepoBinding.prime.
+        "prime": table.get("prime"),
+        # T-98: None = the language profile's own format_selector.
+        "test_selector": raw_test_selector,
+    }
+    for knob in KNOBS:
+        if knob.per_repo:
+            raw = table.get(knob.name)
+            out[knob.name] = (None if raw is None
+                              else knob.coerce(raw, f"[repos.{name}] {knob.name}", None))
+    return out
 
 
 def config_path(home: Path) -> Path:
@@ -722,296 +952,23 @@ def load(home_arg: str | None = None) -> Config:
     path = config_path(home)
     if path.exists():
         data = tomllib.loads(path.read_text(encoding="utf-8"))
-        m = data.get("maestro", {})
-        cfg.max_concurrency = int(m.get("max_concurrency", cfg.max_concurrency))
-        cfg.reconcile_steady_interval = int(
-            m.get("reconcile_steady_interval", cfg.reconcile_steady_interval))
-        raw_floor = m.get("min_spawn_interval", cfg.min_spawn_interval)
-        if raw_floor is not None and int(raw_floor) < 0:
-            # GA-8: 0 is a legitimate, documented single-key debugging mode (it disables
-            # the floor -- see spawn_floor()); a negative value is just a typo and is
-            # worse than 0 (it would silently clamp to 0 with zero feedback), so fail
-            # closed at load rather than let it through. dispatch()/doctor never even
-            # build a Config from this home, matching the fencing-gated log's "loud, not
-            # silent" posture -- see cli.main's `except store.MaestroError` (exit 2).
-            raise store.MaestroError(
-                f"config.toml: min_spawn_interval must be >= 0, got {raw_floor!r}")
-        cfg.min_spawn_interval = int(raw_floor) if raw_floor is not None else None
-        cfg.backoff_base = int(m.get("backoff_base", cfg.backoff_base))
-        cfg.backoff_cap = int(m.get("backoff_cap", cfg.backoff_cap))
-        cfg.max_failures = int(m.get("max_failures", cfg.max_failures))
-        cfg.max_impl_turns = int(m.get("max_impl_turns", cfg.max_impl_turns))
-        cfg.max_session_turns = int(m.get("max_session_turns", cfg.max_session_turns))
-        cfg.max_session_seconds = int(m.get("max_session_seconds", cfg.max_session_seconds))
-        cfg.max_spawn_attempts = int(m.get("max_spawn_attempts", cfg.max_spawn_attempts))
-        cfg.no_output_timeout = int(m.get("no_output_timeout", cfg.no_output_timeout))
-        cfg.max_turn_wallclock_seconds = int(
-            m.get("max_turn_wallclock_seconds", cfg.max_turn_wallclock_seconds))
-        cfg.worktree_timeout = int(m.get("worktree_timeout", cfg.worktree_timeout))
-        cfg.prime_timeout = int(m.get("prime_timeout", cfg.prime_timeout))
-        raw_bash = m.get("bash_max_timeout")
-        if raw_bash is None and cfg.no_output_timeout and cfg.bash_max_timeout > cfg.no_output_timeout:
-            # Unset ceiling on a board that deliberately reaps silence sooner than
-            # the default ceiling: shrink the ceiling to fit rather than refuse a
-            # config that was valid before this knob existed. Only an EXPLICIT
-            # contradiction (both keys set) fails closed below.
-            cfg.bash_max_timeout = cfg.no_output_timeout
-        elif raw_bash is not None:
-            cfg.bash_max_timeout = int(raw_bash)
-        if cfg.bash_max_timeout < 0:
-            raise store.MaestroError(
-                f"config.toml: [maestro] bash_max_timeout must be >= 0 (got {cfg.bash_max_timeout})")
-        if cfg.no_output_timeout and cfg.bash_max_timeout > cfg.no_output_timeout:
-            # Fail closed: a session is legitimately SILENT for the whole of a
-            # foreground Bash call, so the watchdog's silence budget must cover the
-            # Bash ceiling or it kills a healthy session mid-test-suite.
-            raise store.MaestroError(
-                f"config.toml: [maestro] no_output_timeout ({cfg.no_output_timeout}s) is shorter "
-                f"than bash_max_timeout ({cfg.bash_max_timeout}s) -- the watchdog would reap a "
-                "reconciler mid-way through its foreground test run. Raise no_output_timeout "
-                "(or set it to 0), or lower bash_max_timeout.")
-        cfg.ci_auto_rerun = bool(m.get("ci_auto_rerun", cfg.ci_auto_rerun))
-        cfg.ci_rerun_grace = int(m.get("ci_rerun_grace", cfg.ci_rerun_grace))
-        cfg.ci_failure_excerpt = bool(m.get("ci_failure_excerpt", cfg.ci_failure_excerpt))
-        cfg.pr_split_threshold = _validate_pr_split_threshold(
-            m.get("pr_split_threshold", cfg.pr_split_threshold),
-            where="[maestro] pr_split_threshold")
-        raw_ceiling = m.get("daily_spend_ceiling_usd", cfg.daily_spend_ceiling_usd)
-        cfg.daily_spend_ceiling_usd = float(raw_ceiling) if raw_ceiling is not None else None
-        raw_runaway = m.get("runaway_spawns_per_hour", cfg.runaway_spawns_per_hour)
-        cfg.runaway_spawns_per_hour = int(raw_runaway) if raw_runaway is not None else None
-        cfg.runaway_pause_cooldown = int(
-            m.get("runaway_pause_cooldown", cfg.runaway_pause_cooldown))
-        cfg.burn_repeat_threshold = int(
-            m.get("burn_repeat_threshold", cfg.burn_repeat_threshold))
-        cfg.reconcile_command = m.get("reconcile_command", cfg.reconcile_command)
-        cfg.repo_path = m.get("repo_path", cfg.repo_path)
-        cfg.branch_prefix = m.get("branch_prefix", cfg.branch_prefix)
-        cfg.prime = m.get("prime", cfg.prime) or None
-        cfg.test_command = m.get("test_command", cfg.test_command) or None
-        cfg.test_deletion_gate = bool(m.get("test_deletion_gate", cfg.test_deletion_gate))
-        # T-96: fail closed on a typo'd board-wide language, same posture as
-        # a [repos.<name>] table's own `language` below -- unset (None) is
-        # valid (Config.language's own None-means-no-override fallback).
-        raw_board_language = m.get("language", cfg.language) or None
-        if raw_board_language is not None and raw_board_language not in testlang.SUPPORTED:
-            raise store.MaestroError(
-                f"config.toml: [maestro] language must be one of "
-                f"{sorted(testlang.SUPPORTED)} (or unset), got {raw_board_language!r}")
-        cfg.language = raw_board_language
-        # T-115: fail closed on a malformed board-wide post_qa_skill, same
-        # posture as language just above -- unset (None) is valid.
-        raw_post_qa_skill = m.get("post_qa_skill", cfg.post_qa_skill) or None
-        if raw_post_qa_skill is not None:
-            _validate_skill_name(raw_post_qa_skill, where="[maestro] post_qa_skill")
-        cfg.post_qa_skill = raw_post_qa_skill
-        # T-117: unvalidated -- see Config.post_qa_skill_runner's own docstring
-        # for why (a runner name/model id, not a slash-command).
-        cfg.post_qa_skill_runner = m.get("post_qa_skill_runner", cfg.post_qa_skill_runner) or None
-        cfg.post_qa_skill_runner_model = m.get(
-            "post_qa_skill_runner_model", cfg.post_qa_skill_runner_model) or None
-        # T-124: no validation needed -- a bool never fails closed, same posture
-        # as test_deletion_gate above.
-        cfg.file_hints = bool(m.get("file_hints", cfg.file_hints))
-        cfg.user_commands_dir = m.get("user_commands_dir", cfg.user_commands_dir)
-        cfg.opencode_user_commands_dir = m.get(
-            "opencode_user_commands_dir", cfg.opencode_user_commands_dir)
-        cfg.user_settings_path = m.get("user_settings_path", cfg.user_settings_path)
+        _load_maestro_table(cfg, data.get("maestro", {}))
         raw_repos = data.get("repos", {})
         if isinstance(raw_repos, dict):
             for name, table in raw_repos.items():
                 if not isinstance(table, dict):
                     continue
-                # GA-17: ONE fail-closed rule -- an unrecognized key inside
-                # [repos.<name>] (e.g. a typo'd credential field) fails config.load
-                # loudly rather than being silently ignored, which is exactly how a
-                # typo'd `gh_acount` would otherwise leave a binding on the ambient
-                # `gh` account with zero feedback. Checked before the `path`-less
-                # skip below so a path-less table's typo is still caught.
+                # Checked before the `path`-less skip below so a path-less
+                # table's typo is still caught.
                 unknown = set(table) - _REPO_TABLE_KEYS
                 if unknown:
                     raise store.MaestroError(
                         f"config.toml: [repos.{name}] has unrecognized key(s): "
                         f"{', '.join(sorted(unknown))}")
-                if not table.get("path"):
-                    continue
-                raw_cap = table.get("max_spawns_per_sweep")
-                raw_mode = table.get("mode", "git")
-                raw_repo_tools = table.get("reconcile_allowed_tools", [])
-                # MTO-2: fail closed on a typo'd/unrecognized per-repo override too --
-                # None (unset) is valid, meaning "inherit the board-wide default"
-                # (see repos._binding_from_table).
-                raw_repo_drift_policy = table.get("base_drift_policy")
-                if raw_repo_drift_policy is not None and raw_repo_drift_policy not in _BASE_DRIFT_POLICIES:
-                    raise store.MaestroError(
-                        f"config.toml: [repos.{name}] base_drift_policy must be one of "
-                        f"{sorted(_BASE_DRIFT_POLICIES)}, got {raw_repo_drift_policy!r}")
-                # T-84: fail closed on a typo'd language too -- unset (None) is valid
-                # (RepoBinding.language's own None-means-python fallback), a set-but-
-                # unrecognized value is a config error the human should fix at load
-                # time, not a `test:` annotation that fails closed forever later.
-                raw_language = table.get("language") or None
-                if raw_language is not None and raw_language not in testlang.SUPPORTED:
-                    raise store.MaestroError(
-                        f"config.toml: [repos.{name}] language must be one of "
-                        f"{sorted(testlang.SUPPORTED)} (or unset), got {raw_language!r}")
-                # T-98: fail closed on a malformed/unrecognized-placeholder test_selector
-                # too -- unset (None) is valid (RepoBinding.test_selector's own
-                # None-means-the-language-profile's-format_selector fallback), a set-but-
-                # invalid template is a config error the human should fix at load time,
-                # not a `test:` check that fails closed forever later.
-                raw_test_selector = table.get("test_selector") or None
-                if raw_test_selector is not None:
-                    try:
-                        testlang.validate_selector_template(raw_test_selector)
-                    except ValueError as exc:
-                        raise store.MaestroError(f"config.toml: [repos.{name}] {exc}") from exc
-                # T-115: fail closed on a malformed per-repo post_qa_skill too --
-                # unset (None) is valid (RepoBinding.post_qa_skill's own
-                # None-means-inherit-the-board-wide-default fallback).
-                raw_post_qa_skill = table.get("post_qa_skill") or None
-                if raw_post_qa_skill is not None:
-                    _validate_skill_name(raw_post_qa_skill, where=f"[repos.{name}] post_qa_skill")
-                # T-123: None (unset) inherits cfg.ci_auto_rerun/ci_rerun_grace/
-                # ci_failure_excerpt -- same "table wins, unset inherits" shape
-                # as prime_timeout/worktree_timeout above (bool-valued too, so
-                # `or` -- which would treat a configured False as unset -- isn't
-                # the right check here either).
-                raw_ci_auto_rerun = table.get("ci_auto_rerun")
-                raw_ci_rerun_grace = table.get("ci_rerun_grace")
-                raw_ci_failure_excerpt = table.get("ci_failure_excerpt")
-                # T-124: bool, no validation needed -- None (absent from the table)
-                # inherits cfg.file_hints (see repos.RepoBinding.file_hints).
-                raw_file_hints = table.get("file_hints")
-                # T-126: None (unset) inherits cfg.pr_split_threshold -- same
-                # "table wins, unset inherits" precedence as test_command above.
-                # A SET value is fail-closed validated the same way the
-                # board-wide one is (an int, >= 0).
-                raw_pr_split_threshold = table.get("pr_split_threshold")
-                if raw_pr_split_threshold is not None:
-                    raw_pr_split_threshold = _validate_pr_split_threshold(
-                        raw_pr_split_threshold, where=f"[repos.{name}] pr_split_threshold")
-                cfg.repos[name] = {
-                    "path": table["path"],
-                    "slug": table.get("slug"),
-                    "base_branch": table.get("base_branch", "main"),
-                    "branch_prefix": table.get("branch_prefix", cfg.branch_prefix),
-                    "default": bool(table.get("default", False)),
-                    "max_spawns_per_sweep": int(raw_cap) if raw_cap is not None else None,
-                    "mode": raw_mode if raw_mode in ("git", "local") else "git",
-                    # GA-10: unset (absent from the table) inherits the board-wide
-                    # reconcile_allowed_tools list -- this is unioned in, never a replacement,
-                    # so [] here means "nothing extra beyond board-wide", not "no tools at all".
-                    "reconcile_allowed_tools": raw_repo_tools if isinstance(raw_repo_tools, list) else [],
-                    # GA-17: this repo's gh credential -- see maestro/credentials.py.
-                    # Both None (default) means "use the ambient gh account", unchanged.
-                    "gh_account": table.get("gh_account"),
-                    "token_env": table.get("token_env"),
-                    # GA-20: this repo's dependency-priming command -- see RepoBinding.prime.
-                    "prime": table.get("prime"),
-                    # MTO-2: None (unset) inherits cfg.base_drift_policy -- see repos.resolve.
-                    "base_drift_policy": raw_repo_drift_policy,
-                    # T-83: this repo's own test_command override -- None (unset) inherits
-                    # cfg.test_command, same precedence as base_drift_policy above -- see
-                    # repos.RepoBinding.test_command / repos.resolve(...).
-                    "test_command": table.get("test_command") or None,
-                    # T-90: None (unset) inherits cfg.prime_timeout/cfg.worktree_timeout --
-                    # see repos._binding_from_table.
-                    "prime_timeout": (
-                        int(table["prime_timeout"]) if table.get("prime_timeout") is not None else None
-                    ),
-                    "worktree_timeout": (
-                        int(table["worktree_timeout"]) if table.get("worktree_timeout") is not None else None
-                    ),
-                    # T-84: this repo's test-surface language -- validated above; None
-                    # (unset) means "python" (see repos.RepoBinding.language).
-                    "language": raw_language,
-                    # T-98: this repo's test-invocation template -- validated above; None
-                    # (unset) means the language profile's own format_selector (see
-                    # repos.RepoBinding.test_selector).
-                    "test_selector": raw_test_selector,
-                    # T-115: this repo's post_qa_skill override -- validated above; None
-                    # (unset) inherits cfg.post_qa_skill (see
-                    # repos.RepoBinding.post_qa_skill).
-                    "post_qa_skill": raw_post_qa_skill,
-                    # T-117: unvalidated, same posture as the board-wide fields --
-                    # None (unset) inherits cfg.post_qa_skill_runner/_model (see
-                    # repos.RepoBinding.post_qa_skill_runner).
-                    "post_qa_skill_runner": table.get("post_qa_skill_runner") or None,
-                    "post_qa_skill_runner_model": table.get("post_qa_skill_runner_model") or None,
-                    # T-123: this repo's CI auto-rerun overrides -- None (unset)
-                    # inherits cfg.ci_auto_rerun/ci_rerun_grace/ci_failure_excerpt
-                    # (see repos._binding_from_table).
-                    "ci_auto_rerun": bool(raw_ci_auto_rerun) if raw_ci_auto_rerun is not None else None,
-                    "ci_rerun_grace": (
-                        int(raw_ci_rerun_grace) if raw_ci_rerun_grace is not None else None
-                    ),
-                    "ci_failure_excerpt": (
-                        bool(raw_ci_failure_excerpt) if raw_ci_failure_excerpt is not None else None
-                    ),
-                    # T-124: this repo's file_hints override -- None (unset) inherits
-                    # cfg.file_hints (see repos.RepoBinding.file_hints).
-                    "file_hints": bool(raw_file_hints) if raw_file_hints is not None else None,
-                    # T-126: this repo's pr_split_threshold override -- validated
-                    # above; None (unset) inherits cfg.pr_split_threshold (see
-                    # repos.RepoBinding.pr_split_threshold).
-                    "pr_split_threshold": raw_pr_split_threshold,
-                }
-        cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
-        cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)
-        cfg.capture_session_logs = bool(m.get("capture_session_logs", cfg.capture_session_logs))
-        cfg.session_log_format = m.get("session_log_format", cfg.session_log_format)
-        raw_days = m.get("session_log_retention_days", cfg.session_log_retention_days)
-        cfg.session_log_retention_days = int(raw_days) if raw_days is not None else None
-        raw_max = m.get("session_log_max_per_ticket", cfg.session_log_max_per_ticket)
-        cfg.session_log_max_per_ticket = int(raw_max) if raw_max is not None else None
-        cfg.prune_interval = int(m.get("prune_interval", cfg.prune_interval))
-        cfg.nudge_on_human_input = bool(m.get("nudge_on_human_input", cfg.nudge_on_human_input))
-        cfg.research_model = m.get("research_model", cfg.research_model)
-        cfg.research_effort = m.get("research_effort", cfg.research_effort)
-        cfg.default_effort = m.get("default_effort", cfg.default_effort) or None
-        cfg.suggest_acs_model = m.get("suggest_acs_model", cfg.suggest_acs_model) or None
-        cfg.suggest_acs_prompt = m.get("suggest_acs_prompt", cfg.suggest_acs_prompt) or None
-        if cfg.suggest_acs_prompt is not None:
-            _validate_suggest_acs_prompt(cfg.suggest_acs_prompt)
-        cfg.runner = m.get("runner", cfg.runner)
-        cfg.runner_model = m.get("runner_model", cfg.runner_model) or None
-        cfg.runner_enabled = _normalize_runner_enabled(m.get("runner_enabled"), cfg.runner_enabled)
-        cfg.reconcile_web_tools = bool(m.get("reconcile_web_tools", cfg.reconcile_web_tools))
-        raw_allowed = m.get("reconcile_allowed_tools", cfg.reconcile_allowed_tools)
-        cfg.reconcile_allowed_tools = raw_allowed if isinstance(raw_allowed, list) else cfg.reconcile_allowed_tools
-        cfg.unverified_claim_max_age = int(
-            m.get("unverified_claim_max_age", cfg.unverified_claim_max_age))
+                if table.get("path"):
+                    cfg.repos[name] = _load_repo_table(cfg, name, table)
         raw_scheduled = data.get("scheduled", [])
         cfg.scheduled = raw_scheduled if isinstance(raw_scheduled, list) else []
-        cfg.backup_interval = int(m.get("backup_interval", cfg.backup_interval))
-        raw_ret = m.get("backup_retention", cfg.backup_retention)
-        cfg.backup_retention = int(raw_ret) if raw_ret is not None else None
-        cfg.backup_dir = m.get("backup_dir", cfg.backup_dir)
-        cfg.repo_preflight = bool(m.get("repo_preflight", cfg.repo_preflight))
-        raw_drift_policy = m.get("base_drift_policy", cfg.base_drift_policy)
-        if raw_drift_policy not in _BASE_DRIFT_POLICIES:
-            raise store.MaestroError(
-                f"config.toml: base_drift_policy must be one of "
-                f"{sorted(_BASE_DRIFT_POLICIES)}, got {raw_drift_policy!r}")
-        cfg.base_drift_policy = raw_drift_policy
-        cfg.qa_standards_axis = bool(m.get("qa_standards_axis", cfg.qa_standards_axis))
-        cfg.qa_phase_gate = bool(m.get("qa_phase_gate", cfg.qa_phase_gate))
-        cfg.awaiting_ci_qa_gate = bool(m.get("awaiting_ci_qa_gate", cfg.awaiting_ci_qa_gate))
-        raw_fast_path = m.get("answer_fast_path", cfg.answer_fast_path)
-        if raw_fast_path not in _ANSWER_FAST_PATH_MODES:
-            raise store.MaestroError(
-                f"config.toml: answer_fast_path must be one of "
-                f"{sorted(_ANSWER_FAST_PATH_MODES)}, got {raw_fast_path!r}")
-        cfg.answer_fast_path = raw_fast_path
-        cfg.compact_interval = int(m.get("compact_interval", cfg.compact_interval))
-        cfg.compact_min_events = int(m.get("compact_min_events", cfg.compact_min_events))
-        raw_archive_after = m.get("archive_after", cfg.archive_after)
-        cfg.archive_after = int(raw_archive_after) if raw_archive_after is not None else None
-        cfg.ratelimit_grace = int(m.get("ratelimit_grace", cfg.ratelimit_grace))
-        cfg.ratelimit_fallback_pause = int(
-            m.get("ratelimit_fallback_pause", cfg.ratelimit_fallback_pause))
-        cfg.ratelimit_max_pause = int(m.get("ratelimit_max_pause", cfg.ratelimit_max_pause))
         n = data.get("notify", {})
         cfg.notify_command = n.get("notify_command", cfg.notify_command) or None
         raw_webhooks = n.get("webhook_urls", cfg.webhook_urls)
@@ -1022,17 +979,6 @@ def load(home_arg: str | None = None) -> Config:
             [float(x) for x in raw_fracs] if isinstance(raw_fracs, list)
             else cfg.alarm_spend_warn_fractions)
         cfg.alarm_cooldown_s = int(al.get("cooldown_s", cfg.alarm_cooldown_s))
-        cfg.provider_probe_interval_s = int(
-            m.get("provider_probe_interval_s", cfg.provider_probe_interval_s))
-        raw_noise_patterns = m.get("review_noise_patterns", cfg.review_noise_patterns)
-        _validate_review_noise_patterns(raw_noise_patterns)
-        cfg.review_noise_patterns = raw_noise_patterns
-        raw_noise_authors = m.get("review_noise_authors", cfg.review_noise_authors)
-        if not isinstance(raw_noise_authors, list) or not all(
-                isinstance(a, str) for a in raw_noise_authors):
-            raise store.MaestroError(
-                "config.toml: [maestro] review_noise_authors must be a list of strings")
-        cfg.review_noise_authors = raw_noise_authors
         if "providers" in data:
             cfg.providers.update(data["providers"])
         # OC-4: [runner.opencode] is the one provider_config table this module
