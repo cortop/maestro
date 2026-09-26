@@ -14,27 +14,30 @@ own next sweep once you hand off below — never something this session spawns i
 
 ## Always: load state first
 Resolve this ticket's bound repo and the board-wide home as literals — this preamble runs no
-`eval`, `python3`, `sed`, or `cat`. REPO/SLUG/BASE/PREFIX/MODE/DISPLAY_KEY come from `maestro env
---key`, which can differ per ticket in a multi-repo home (single-repo homes fall back to the
-legacy `repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME and
+`eval`, `python3`, `sed`, or `cat`. REPO/SLUG/BASE/PREFIX/MODE/DISPLAY_KEY/STACK_TOOL come from
+`maestro env --key`, which can differ per ticket in a multi-repo home (single-repo homes fall back
+to the legacy `repo_path`/`branch_prefix` config, so this is unchanged there) — plus MHOME and
 QA_STANDARDS_AXIS, which are board-wide and come from the key-less `maestro env`. `MODE` is `git`
 (default — worktree/branch/PR, the rest of this doc unless said otherwise) or `local` (AD-6 — a
 plain directory, e.g. a notes vault or `~/.claude` for self-editing skills, with no branch/PR
 path; called out explicitly below wherever it changes what you do). `DISPLAY_KEY` (T-134) is the
 tracker's own identifier (e.g. `BDA-123`) for a tracker-imported ticket, or `KEY` unchanged
 otherwise — use it for every PR title below; `KEY` itself, branch names, step-ids and event
-payloads always stay the maestro key, never `DISPLAY_KEY`:
+payloads always stay the maestro key, never `DISPLAY_KEY`. `STACK_TOOL` (T-132) is `gt` when the
+Graphite CLI is on PATH and this repo is Graphite-initialized (and `[repos.<name>] stack_tool` is
+unset or `"auto"`), else `git` — the "approved split" and conflict-round instructions below branch
+on it; every other instruction in this file is unaffected and stays on plain `git`/`gh` either way:
 ```bash
 KEY="$1"
-maestro env --key "$KEY"   # -> repo_path/slug/base_branch/branch_prefix/mode/display_key/reconcile_command
+maestro env --key "$KEY"   # -> repo_path/slug/base_branch/branch_prefix/mode/display_key/stack_tool/reconcile_command
 maestro env                # -> home/qa_standards_axis (board-wide; keyless)
 maestro observe-spec "$KEY"
 maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
 ```
 Read the two JSON outputs above and hold their fields as literals for the rest of this file: REPO
 (`repo_path`), SLUG (`slug`), BASE (`base_branch`), PREFIX (`branch_prefix`), MODE (`mode`),
-DISPLAY_KEY (`display_key`) from the first call; MHOME (`home`) and QA_STANDARDS_AXIS
-(`qa_standards_axis`) from the second. Then,
+DISPLAY_KEY (`display_key`), STACK_TOOL (`stack_tool`) from the first call; MHOME (`home`) and
+QA_STANDARDS_AXIS (`qa_standards_axis`) from the second. Then,
 with the **Read** tool — never `cat`/`sed`, this preamble reads no file via the shell — load:
 - `<MHOME>/tickets/<KEY>/spec.md` — desired state (you never edit this)
 - `<MHOME>/derived/context/<KEY>.md` — folded log: verbatim Q&A, phase reasons, failures, CI
@@ -88,7 +91,21 @@ substitutes them directly when you type it; none is a shell variable a fenced li
 **Step 0 — sync with the base branch (also how conflicts get resolved).** You may have landed
 here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` says so), or because
 a drifted-behind-base worktree was auto-rerouted here (snapshot `reason` says
-`origin/<BASE> advanced (policy=...)`). If a PR is already open (snapshot `pr_number` is set),
+`origin/<BASE> advanced (policy=...)`).
+
+**If `STACK_TOOL == gt`:** `gt sync` incorporates both the PR branch's own remote state and any
+moved trunk in one step — gt tracks each branch's parent directly, so there is no separate
+`git fetch`/`--ff-only` merge to run first:
+```bash
+gt -C <WT> sync
+gt -C <WT> restack
+```
+A conflicting restack exits non-zero and leaves conflict markers in the tree — resolve them, then
+continue with `gt -C <WT> continue` (its own, single invocation; never `gt -C <WT> abort`). Never
+fall back to `git rebase`/`git merge` on a gt-managed branch (`<PREFIX>$KEY-*`/`<PREFIX>$KEY`) --
+gt's own parent-tracking would then disagree with the tree.
+
+**If `STACK_TOOL == git` (default):** If a PR is already open (snapshot `pr_number` is set),
 first fetch and incorporate `origin/<PREFIX>$KEY` — the PR branch as it actually stands on
 GitHub — **before** rebasing onto base. Rebasing from only the local worktree tip would silently
 drop any commit pushed to the PR branch by someone else since your last sync (a CI bot's
@@ -308,9 +325,32 @@ Otherwise implement the spec's Acceptance criteria:
    Then exit (`maestro release "$KEY"`) without pushing — the dispatcher wakes `awaiting-human` on
    the answer, which routes back here (see step 1's fourth case) to act on it.
 
-   **Approved split** — label each stack entry on the branch's already-linear commit history (no
-   rewrite) and open its PR oldest-first, each based on the previous entry's branch, never
-   force-pushed:
+   **Approved split, if `STACK_TOOL == gt`:** build each stack entry as its own gt-tracked
+   branch, oldest first, each created while checked out on the previous entry's branch so gt
+   records the parent link itself — no manual `git branch`/`git push`/`gh pr create`:
+   ```bash
+   git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
+   git -C <WT> checkout -q <sha of entry 1's last commit>
+   gt -C <WT> create "<PREFIX>$KEY-1" -m "$KEY: <subject> (1/<N>)"
+   git -C <WT> checkout -q <sha of entry 2's last commit>
+   gt -C <WT> create "<PREFIX>$KEY-2" -m "$KEY: <subject> (2/<N>)"
+   ```
+   repeat for entries `2..N` (the last entry may just be `<PREFIX>$KEY` at `HEAD` itself — no extra
+   branch needed), then submit and open every PR in the stack in one call — this is the ONLY path
+   allowed to push a gt-managed branch (`<PREFIX>$KEY-*`/`<PREFIX>$KEY`) with history rewritten,
+   and the only case in this whole file where that's true:
+   ```bash
+   gt -C <WT> submit --stack --no-interactive --publish
+   ```
+   Record entry 0 and every later entry exactly as the `git` path does below (same
+   `PrOpened`/`stack`-sub-payload shape, same root-first ordering, same
+   `maestro set-phase "$KEY" qa --requeue 300`) — `gt submit` already supplied the push and the PR
+   create/update, so skip straight to appending those events; never run `git push`/`gh pr create`
+   yourself on this path.
+
+   **Approved split, if `STACK_TOOL == git` (default):** label each stack entry on the branch's
+   already-linear commit history (no rewrite) and open its PR oldest-first, each based on the
+   previous entry's branch, never force-pushed:
    ```bash
    git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
    git -C <WT> branch "<PREFIX>$KEY-1" <sha of entry 1's last commit>

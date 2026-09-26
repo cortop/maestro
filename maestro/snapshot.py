@@ -318,6 +318,11 @@ class Snapshot:
     # reading `pr_stack` can see entry 0 passed CI/QA even after entry 1
     # becomes the active poll target.
     pr_stack: list[dict] = field(default_factory=list)
+    # T-132: the just-merged stack index a gt-managed ticket's restack is
+    # still pending for -- set by RestackQueued, cleared by the matching
+    # RestackCompleted. None (the common case: no split, or a git-tool
+    # ticket that never queues one) means no restack is outstanding.
+    pending_restack_index: int | None = None
     # T-128: comment_id -> [tree_sha, ...] already replied to, from
     # ReviewReplyPosted events -- `ops.reply_review` consults this BEFORE
     # calling the VCS provider, so a re-run at the same tree state (the worker
@@ -646,6 +651,16 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                         if e.get("number") == s.pr_number:
                             e["draft"] = p["draft"]
                             break
+        elif t == E.RESTACK_QUEUED:
+            s.pending_restack_index = p.get("stack_index")
+        elif t == E.RESTACK_COMPLETED:
+            if p.get("stack_index") == s.pending_restack_index:
+                s.pending_restack_index = None
+            for r in p.get("retargeted", []):
+                for e in s.pr_stack:
+                    if e.get("number") == r.get("number"):
+                        e["base"] = r.get("base")
+                        break
         elif t == E.CI_OBSERVED:
             # T-130: a split stack's CiObserved carries its own `pr_number` (a
             # non-stack ticket's never does) -- the ticket-wide `ci_state`/

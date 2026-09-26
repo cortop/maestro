@@ -447,6 +447,8 @@ _REPO_TABLE_KEYS = frozenset({
     # defaults above -- same "table wins, unset inherits" precedence.
     "ci_auto_rerun", "ci_rerun_grace", "ci_failure_excerpt",
     "file_hints", "pr_split_threshold",
+    # T-132: this repo's PR-stack tool override -- see _STACK_TOOLS.
+    "stack_tool",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -454,6 +456,14 @@ _REPO_TABLE_KEYS = frozenset({
 # naming this set in the error, rather than silently falling back to a mode
 # that can livelock a fast-moving base branch.
 _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
+
+# T-132: the whole recognized [repos.<name>] stack_tool value set -- per-repo
+# only (no board-wide [maestro] default), same fail-closed posture as
+# _BASE_DRIFT_POLICIES/language. "auto" (default, unset inherits this) lets
+# `repos.resolve_stack_tool` pick "gt" when the Graphite CLI is on PATH and
+# the repo is Graphite-initialized, else "git"; "git" forces the legacy
+# git/gh flow unconditionally, even when `gt` would otherwise qualify.
+_STACK_TOOLS = frozenset({"auto", "git"})
 
 # T-122: the whole recognized answer_fast_path value set -- fails closed
 # (raises at config.load, naming the knob) on anything outside it, same
@@ -891,6 +901,14 @@ def load(home_arg: str | None = None) -> Config:
                 if raw_pr_split_threshold is not None:
                     raw_pr_split_threshold = _validate_pr_split_threshold(
                         raw_pr_split_threshold, where=f"[repos.{name}] pr_split_threshold")
+                # T-132: fail closed on a typo'd stack_tool too -- unset (None)
+                # is valid (RepoBinding.stack_tool's own None-means-"auto"
+                # fallback), no board-wide default to inherit (see _STACK_TOOLS).
+                raw_stack_tool = table.get("stack_tool") or None
+                if raw_stack_tool is not None and raw_stack_tool not in _STACK_TOOLS:
+                    raise store.MaestroError(
+                        f"config.toml: [repos.{name}] stack_tool must be one of "
+                        f"{sorted(_STACK_TOOLS)}, got {raw_stack_tool!r}")
                 cfg.repos[name] = {
                     "path": table["path"],
                     "slug": table.get("slug"),
@@ -956,6 +974,10 @@ def load(home_arg: str | None = None) -> Config:
                     # above; None (unset) inherits cfg.pr_split_threshold (see
                     # repos.RepoBinding.pr_split_threshold).
                     "pr_split_threshold": raw_pr_split_threshold,
+                    # T-132: this repo's stack_tool override -- validated
+                    # above; None (unset) means "auto" (see
+                    # repos.RepoBinding.stack_tool / repos.resolve_stack_tool).
+                    "stack_tool": raw_stack_tool,
                 }
         cfg.permission_mode = m.get("permission_mode", cfg.permission_mode)
         cfg.reconcile_model = m.get("reconcile_model", cfg.reconcile_model)

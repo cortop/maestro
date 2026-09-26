@@ -9,6 +9,7 @@ the implicit default so the dispatcher can never wedge on a bad spec edit.
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -123,6 +124,11 @@ class RepoBinding:
     # the sole reader `ops.pr_size` goes through. 0 disables the check for
     # this key.
     pr_split_threshold: int = 800
+    # T-132: "auto" (default -- see resolve_stack_tool, the sole reader) or
+    # "git" (forces the legacy git/gh flow, never probes for `gt`). No
+    # board-wide [maestro] default to inherit -- unlike base_drift_policy/
+    # test_command above, this is per-repo only (see config._STACK_TOOLS).
+    stack_tool: str = "auto"
 
 
 def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
@@ -197,6 +203,9 @@ def _binding_from_table(cfg: Config, name: str, table: dict) -> RepoBinding:
             table["pr_split_threshold"] if table.get("pr_split_threshold") is not None
             else cfg.pr_split_threshold
         ),
+        # T-132: no board-wide default -- unset means "auto" (see
+        # RepoBinding.stack_tool).
+        stack_tool=table.get("stack_tool") or "auto",
     )
 
 
@@ -309,3 +318,28 @@ def resolve(cfg: Config, home: Path, key: str) -> RepoBinding:
         if table:
             return _binding_from_table(cfg, name, table)
     return implicit_default(cfg)
+
+
+def resolve_stack_tool(binding: RepoBinding) -> str:
+    """T-132: "gt" iff the Graphite CLI is on PATH AND this repo has it
+    initialized, "git" otherwise -- or always "git" when
+    `[repos.<name>] stack_tool = "git"` forces the legacy flow.
+
+    Deterministic and side-effect free: a PATH lookup plus one marker-file
+    read, never a `gt` subprocess call of its own (the ticket's own Notes:
+    "The check is deterministic, in Python"). `gt init` writes
+    `.git/.graphite_repo_config` into the repo root the moment a repo is
+    Graphite-initialized -- that file's presence is the on-disk signal this
+    reads instead of shelling out to ask `gt` itself, so the check stays
+    cheap enough for `maestro env --key`'s hot path (every reconciler phase
+    preamble calls it).
+    """
+    if binding.stack_tool == "git":
+        return "git"
+    if shutil.which("gt") is None:
+        return "git"
+    if not binding.path:
+        return "git"
+    if not (Path(binding.path) / ".git" / ".graphite_repo_config").exists():
+        return "git"
+    return "gt"

@@ -1477,6 +1477,9 @@ def cmd_env(args) -> int:
         # inspecting a ticket) sees exactly what a real spawn would resolve to.
         model, effort = disp._resolve_model_effort(cfg, key)
         runner, runner_model = disp.resolve_runner(cfg, key, snap.phase)
+        # T-132: deterministic, PATH-lookup + marker-file check -- no `gt`
+        # subprocess of its own, see repos.resolve_stack_tool's docstring.
+        stack_tool = repos_mod.resolve_stack_tool(binding)
         _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
                 "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
                 "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
@@ -1490,7 +1493,8 @@ def cmd_env(args) -> int:
                 # `test:` annotation's presence gate actually uses, so a
                 # human/agent can see what the language guard is checking
                 # against without reading config.toml directly.
-                "language": binding.language, "test_command": binding.test_command})
+                "language": binding.language, "test_command": binding.test_command,
+                "stack_tool": stack_tool})
         return 0
     _print({"home": str(cfg.home), "board": store.board_state(cfg.home),
             "repo_path": cfg.repo_path,

@@ -142,6 +142,20 @@ class VCS(Protocol):
         """
         ...
 
+    def set_base(self, pr_number: int, base: str, repo: str | None = None,
+                 env: dict | None = None) -> dict:
+        """T-132: retarget a PR's base branch (``gh pr edit --base``) -- how
+        ``dispatcher.sync_restacks`` keeps every remaining gt-managed stack
+        entry's GitHub base pointed at the previous unmerged entry (or trunk)
+        once ``check_merged``'s queued restack finishes, independent of
+        whatever `gt submit` itself did (a fake `gt` in tests does nothing to
+        GitHub, so this call is what actually makes the retargeting
+        observable/assertable). Returns ``{"ok": True}``/``{"ok": False,
+        "error": ...}``, same shape as ``pr_ready``. ``env`` (GA-17): see
+        ``pr_status``.
+        """
+        ...
+
 
 class Fetcher(Protocol):
     """Imports external work into maestro by writing to the ``_new`` inbox."""
@@ -182,6 +196,9 @@ class NullVCS:
         return {"ok": False, "error": "unknown"}
     def comment_pr(self, pr_number: int, body: str, repo: str | None = None,
                    env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
+    def set_base(self, pr_number: int, base: str, repo: str | None = None,
+                 env: dict | None = None) -> dict:
         return {"ok": False, "error": "unknown"}
 
 
