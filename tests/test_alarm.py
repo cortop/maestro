@@ -10,7 +10,6 @@ No gate behavior under test here: `test_runaway_brake.py`/`test_ratelimit.py`/
 `test_spend.py` are unmodified and still pass (GA-5/GA-8/GA-11).
 """
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from maestro import alarm, dispatcher as disp, fleet, health, store
@@ -28,10 +27,6 @@ def _lines(path):
     return path.read_text().splitlines() if path.exists() else []
 
 
-def _utc_date(now):
-    return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
-
-
 def _write_spend_state(home, now, total_usd):
     """Stand in for a folded `derived/.spend.json` -- `spend.probe()` (which runs
     ahead of the alarm hook in every real sweep below) preserves this as-is when
@@ -39,7 +34,7 @@ def _write_spend_state(home, now, total_usd):
     faithful, minimal way to drive the spend conditions without spawning real
     sessions."""
     store.write_json(home / "derived" / ".spend.json", {
-        "date": _utc_date(now), "total_usd": total_usd, "unattributed_sessions": 0,
+        "date": store.utc_date(now), "total_usd": total_usd, "unattributed_sessions": 0,
         "settled_logs": [], "unavailable": False,
     })
 

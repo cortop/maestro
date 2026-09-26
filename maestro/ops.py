@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 import urllib.error
-from datetime import datetime
 from pathlib import Path
 
 from . import backup
@@ -155,32 +154,14 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
         _refuse_if_missing_acs(cfg, key, phase)
     src = Phase(snap.phase)
 
-    # T-97: (source, destination) jointly define the gate now, not destination
-    # alone -- see this function's docstring. `awaiting-ci` keeps its pre-T-97,
-    # knob-independent posture (only `_refuse_if_qa_incomplete` consults
-    # `awaiting_ci_qa_gate`, below); the two NEW destinations this closes,
-    # `in-review` and `done`, are additionally gated end-to-end by the knob so
-    # `awaiting_ci_qa_gate = false` reverts them to HEAD's pass-through.
-    qa_gate_applies = (src in (Phase.IMPLEMENTING, Phase.QA)
-                       and phase in (Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.DONE))
-    if phase in (Phase.IN_REVIEW, Phase.DONE) and not cfg.awaiting_ci_qa_gate:
-        qa_gate_applies = False
-
     unverified = 0
-    forced_acs = False
-    if qa_gate_applies:
-        unverified = _acs_unverified_count(cfg, key, snap)
-        if unverified > 0 and not force:
-            raise store.MaestroError(
-                f"{key}: refusing {phase.value} — {unverified} acceptance criteria unverified; "
-                f"run `maestro verify-ac` for each, or pass --force to override")
-        forced_acs = unverified > 0 and force
-        _refuse_if_qa_failing(cfg, key, snap)
-        _refuse_if_qa_incomplete(cfg, key, snap)
+    if _qa_gate_applies(cfg, src, phase):
+        unverified = _enforce_qa_gate(cfg, key, snap, phase, force=force)
+    forced_acs = unverified > 0
 
     # RB-14: transparent redirect, never a refusal and never forceable -- see
     # this function's docstring. `force` is deliberately not consulted here.
-    # Mutually exclusive with `qa_gate_applies` above (that requires `phase` in
+    # Mutually exclusive with `_qa_gate_applies` above (that requires `phase` in
     # {AWAITING_CI, IN_REVIEW, DONE}; this requires `phase == QA`), so the
     # redirect can never invalidate a gate decision already made.
     if phase == Phase.QA and src == Phase.IMPLEMENTING:
@@ -208,6 +189,37 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
         requeue(cfg, key, requeue_in, actor=actor)
     _push_linear_status(cfg, key, phase, actor=actor)
     return ev
+
+
+def _qa_gate_applies(cfg: Config, src: Phase, dest: Phase) -> bool:
+    """T-97: the QA/AC gate is keyed on (source, destination) jointly -- leaving
+    `implementing`/`qa` for `awaiting-ci`, `in-review` or `done`. Any other
+    source (a teardown, a research handoff, a passive-phase finalize) isn't
+    skipping QA. `awaiting-ci` is gated regardless of the knob (only the
+    completeness check inside consults it); `awaiting_ci_qa_gate = false`
+    reverts the two newer destinations to a pass-through."""
+    if src not in (Phase.IMPLEMENTING, Phase.QA):
+        return False
+    if dest == Phase.AWAITING_CI:
+        return True
+    return dest in (Phase.IN_REVIEW, Phase.DONE) and cfg.awaiting_ci_qa_gate
+
+
+def _enforce_qa_gate(cfg: Config, key: str, snap, dest: Phase, *,
+                     force: bool = False, forceable: bool = True) -> int:
+    """Refuse leaving QA for *dest* unless every current AC is verified, none
+    has a failing QA verdict, and (T-85) every one has a passing one. Only the
+    unverified-AC check can be forced; returns how many ACs *force* pushed
+    past (0 when none were unverified)."""
+    unverified = _acs_unverified_count(cfg, key, snap)
+    if unverified > 0 and not force:
+        hint = ", or pass --force to override" if forceable else ""
+        raise store.MaestroError(
+            f"{key}: refusing {dest.value} — {unverified} acceptance criteria unverified; "
+            f"run `maestro verify-ac` for each{hint}")
+    _refuse_if_qa_failing(cfg, key, snap)
+    _refuse_if_qa_incomplete(cfg, key, snap)
+    return unverified
 
 
 def _push_linear_status(cfg: Config, key: str, phase: Phase, *, actor: str) -> None:
@@ -254,16 +266,21 @@ def _current_tree_key(cfg: Config, key: str) -> str:
     return _tree_state_key(_worker_cwd(cfg, key), timeout=binding.worktree_timeout)
 
 
+def _spec_text(cfg: Config, key: str) -> str | None:
+    """*key*'s spec.md text, or None if it has none -- the gates below treat a
+    missing spec as nothing to check; some other failure surfaces it."""
+    path = store.spec_path(cfg.home, key)
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
 def _refuse_if_missing_acs(cfg: Config, key: str, phase: Phase) -> None:
     """T-80: raise (no event appended) if *key*'s current spec.md parses to
     zero acceptance criteria -- see `set_phase`'s own docstring for why this
     is unconditional (no `force` override) and checked against the requested
     *phase*, not the source. A missing spec.md is not this gate's problem
     (nothing to check); some other, unrelated failure will surface that."""
-    spec_path = store.spec_path(cfg.home, key)
-    if not spec_path.exists():
-        return
-    if not snap_mod.has_acs(spec_path.read_text(encoding="utf-8")):
+    text = _spec_text(cfg, key)
+    if text is not None and not snap_mod.has_acs(text):
         raise store.MaestroError(
             f"{key}: refusing {phase.value} — spec.md has no acceptance criteria "
             f"(its '## Acceptance criteria' section parses to zero non-blank "
@@ -271,11 +288,11 @@ def _refuse_if_missing_acs(cfg: Config, key: str, phase: Phase) -> None:
 
 
 def _acs_unverified_count(cfg: Config, key: str, snap) -> int:
-    spec_path = store.spec_path(cfg.home, key)
-    if not spec_path.exists():
+    text = _spec_text(cfg, key)
+    if text is None:
         return 0
     tree_key = _current_tree_key(cfg, key) if _annotations_active(cfg, key) else None
-    return snap.acs_unverified(spec_path.read_text(encoding="utf-8"), tree_key=tree_key)
+    return snap.acs_unverified(text, tree_key=tree_key)
 
 
 def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
@@ -290,10 +307,8 @@ def _refuse_if_qa_failing(cfg: Config, key: str, snap) -> None:
     `standards_failing_acs` (T-23) — a Standards-axis fail is advisory and
     must NOT gate this transition; that is an explicit, tested choice, not an
     oversight (see tests/test_standards_qa_axis.py)."""
-    spec_path = store.spec_path(cfg.home, key)
-    if not spec_path.exists():
-        return
-    failing = snap.qa_failing_acs(spec_path.read_text(encoding="utf-8"))
+    text = _spec_text(cfg, key)
+    failing = snap.qa_failing_acs(text) if text is not None else []
     if failing:
         raise store.MaestroError(
             f"{key}: refusing awaiting-ci — QA verdict is fail on {len(failing)} "
@@ -309,10 +324,8 @@ def _refuse_if_qa_incomplete(cfg: Config, key: str, snap) -> None:
     live, same posture as `_refuse_if_qa_failing`."""
     if not cfg.awaiting_ci_qa_gate:
         return
-    spec_path = store.spec_path(cfg.home, key)
-    if not spec_path.exists():
-        return
-    unpassed = snap.qa_unpassed_acs(spec_path.read_text(encoding="utf-8"))
+    text = _spec_text(cfg, key)
+    unpassed = snap.qa_unpassed_acs(text) if text is not None else []
     if unpassed:
         raise store.MaestroError(
             f"{key}: refusing awaiting-ci — {len(unpassed)} acceptance criteria have no "
@@ -2491,16 +2504,9 @@ def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
     this precondition entirely, same knob `set_phase` uses for the same two new
     destinations."""
     binding = repos_mod.resolve(cfg, cfg.home, key)
-    if binding.mode != "local" and cfg.awaiting_ci_qa_gate:
-        snap = snap_mod.load(cfg.home, key)
-        if Phase(snap.phase) in (Phase.IMPLEMENTING, Phase.QA):
-            unverified = _acs_unverified_count(cfg, key, snap)
-            if unverified > 0:
-                raise store.MaestroError(
-                    f"{key}: refusing done — {unverified} acceptance criteria unverified; "
-                    f"run `maestro verify-ac` for each")
-            _refuse_if_qa_failing(cfg, key, snap)
-            _refuse_if_qa_incomplete(cfg, key, snap)
+    snap = snap_mod.load(cfg.home, key)
+    if binding.mode != "local" and _qa_gate_applies(cfg, Phase(snap.phase), Phase.DONE):
+        _enforce_qa_gate(cfg, key, snap, Phase.DONE, forceable=False)
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
     _push_linear_status(cfg, key, Phase.DONE, actor=actor)
 
@@ -2767,9 +2773,8 @@ def archive_done(cfg: Config, *, after: float | None = None, now: float | None =
         if after:
             if not snap.updated_ts:
                 continue
-            try:
-                done_epoch = datetime.fromisoformat(snap.updated_ts).timestamp()
-            except ValueError:
+            done_epoch = store.iso_to_epoch(snap.updated_ts)
+            if done_epoch is None:
                 continue
             if now - done_epoch < after:
                 continue

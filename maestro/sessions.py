@@ -114,7 +114,7 @@ def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[d
             "path": str(f),
             "format": fmt,
             "epoch": epoch,
-            "ts": _epoch_to_iso(epoch),
+            "ts": store.epoch_to_iso(epoch),
         }
         if with_outcome:
             from . import steplog
@@ -123,11 +123,6 @@ def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[d
         out.append(entry)
     out.sort(key=lambda d: d["epoch"], reverse=True)
     return out
-
-
-def _epoch_to_iso(epoch: float) -> str:
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def session_name(key: str) -> str:
@@ -192,7 +187,72 @@ class SessionManager(Protocol):
         """
 
 
-class ClaudeCliSessions:
+def _launch_detached(home: Path, key: str, cmd: list[str], cwd: Path, env: dict,
+                     log_file: Path | None, *, prompt: str, runner: str) -> int:
+    """Launch *cmd* as a fully detached reconciler session for *key* and
+    record its claim -- the one launch sequence every real backend shares.
+
+    ``start_new_session=True`` makes pid == pgid, which `run_watchdog` kills
+    by. stdout/stderr go to *log_file* when given, else /dev/null.
+
+    T-52: the claim is reserved BEFORE Popen, under THIS process's pid, then
+    rewritten with the child's pid. Writing it only after left a window where
+    a crash between Popen and the write orphaned a live, detached reconciler
+    with no claim -- invisible to max_concurrency and to the watchdog (which
+    iterates claims only). The reservation's pid is alive exactly as long as
+    the launch call, so a crash mid-launch self-heals instead of squatting
+    the slot; a failed Popen releases it, so no phantom claim is left either.
+    """
+    log_path = str(log_file) if log_file is not None else None
+    log_handle = None
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_file.open("w", encoding="utf-8")
+    claims.write_claim(home, key, os.getpid(), session_name(key),
+                       log_path=log_path, cwd=str(cwd), prompt=prompt, runner=runner)
+    try:
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(cwd), env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
+                stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        finally:
+            if log_handle is not None:
+                log_handle.close()
+    except Exception:
+        claims.release(home, key)
+        raise
+    claims.write_claim(home, key, proc.pid, session_name(key),
+                       log_path=log_path, cwd=str(cwd), prompt=prompt, runner=runner)
+    return proc.pid
+
+
+class _ClaimBackedSessions:
+    """Shared base for the real backends: liveness comes from the same claim
+    files for every runner (`claims._verdict` keys only on pid + start
+    epoch, never the spawned command), so `list_active` is identical."""
+
+    def __init__(self, home: Path, *, capture_session_logs: bool,
+                 clock: Callable[[], float] | None,
+                 unverified_claim_max_age: float, claims_run):
+        self.home = Path(home)
+        self.capture_session_logs = capture_session_logs
+        self._clock: Callable[[], float] = clock or store.now_epoch
+        self._unverified_claim_max_age = unverified_claim_max_age
+        self._claims_run = claims_run
+
+    def list_active(self) -> set[str]:
+        return claims.active_keys(self.home, run=self._claims_run,
+                                  max_age=self._unverified_claim_max_age)
+
+    def _session_id(self, key: str) -> str:
+        return f"{session_name(key)}-{self._clock():.6f}"
+
+
+class ClaudeCliSessions(_ClaimBackedSessions):
     """Real implementation: detached ``claude -p`` + a pid claim file."""
 
     def __init__(self, home: Path, model: str = "sonnet",
@@ -205,7 +265,9 @@ class ClaudeCliSessions:
                  clock: Callable[[], float] | None = None,
                  unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
                  claims_run=subprocess.run):
-        self.home = Path(home)
+        super().__init__(home, capture_session_logs=capture_session_logs, clock=clock,
+                         unverified_claim_max_age=unverified_claim_max_age,
+                         claims_run=claims_run)
         self.model = model
         self.permission_mode = permission_mode
         self.extra_args = extra_args or []
@@ -220,15 +282,7 @@ class ClaudeCliSessions:
         # per-key allowed_tools argument and still emit exactly ONE
         # --allowedTools flag.
         self.base_allowed_tools = base_allowed_tools or []
-        self.capture_session_logs = capture_session_logs
         self.session_log_format = session_log_format
-        self._clock: Callable[[], float] = clock or store.now_epoch
-        self._unverified_claim_max_age = unverified_claim_max_age
-        self._claims_run = claims_run
-
-    def list_active(self) -> set[str]:
-        return claims.active_keys(self.home, run=self._claims_run,
-                                  max_age=self._unverified_claim_max_age)
 
     def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
@@ -248,7 +302,7 @@ class ClaudeCliSessions:
         # this backend's own `model`/`effort` params are what drive a Claude spawn.
         del runner_model
         claimed_runner = runner or "claude"
-        session_id = f"{session_name(key)}-{self._clock():.6f}"
+        session_id = self._session_id(key)
         effective_model = model or self.model
         # RF-1: compose the flattened prompt here, from the separate command/key
         # inputs -- identical to the string the caller used to pre-flatten, so argv
@@ -289,53 +343,15 @@ class ClaudeCliSessions:
         # docstring for why it belongs there and not duplicated in each backend.
         env = _spawn_env(self.home, env_overlay)
 
-        log_path: str | None = None
+        log_file: Path | None = None
         if self.capture_session_logs:
             if self.session_log_format == "stream-json":
                 cmd += ["--output-format", "stream-json", "--verbose"]
                 log_file = store.session_stream_path(self.home, key, session_id)
             else:
                 log_file = store.session_log_path(self.home, key, session_id)
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            log_handle = log_file.open("w", encoding="utf-8")
-            log_path = str(log_file)
-        else:
-            log_handle = None
-
-        # T-52: reserve the claim BEFORE Popen, not after. Writing it after (the
-        # old order) left a window where a crash between Popen returning and the
-        # write landing left a live, fully-detached (start_new_session=True)
-        # reconciler with NO claim -- invisible to max_concurrency and to
-        # run_watchdog (which iterates claims only), so the orphan was never
-        # reaped. The reservation's pid is THIS process's own -- alive for
-        # exactly as long as the launch call takes -- so a crash between the
-        # reservation and the real-pid write below self-heals the moment this
-        # process dies too, rather than permanently squatting the key's slot.
-        # Rolled back (released) if Popen itself raises, so a failed launch
-        # never leaves a phantom claim behind either.
-        claims.write_claim(self.home, key, os.getpid(), session_name(key),
-                            log_path=log_path, cwd=str(cwd), prompt=prompt,
-                            runner=claimed_runner)
-        try:
-            try:
-                proc = subprocess.Popen(
-                    cmd, cwd=str(cwd), env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
-                    stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            finally:
-                if log_handle is not None:
-                    log_handle.close()
-        except Exception:
-            claims.release(self.home, key)
-            raise
-
-        claims.write_claim(self.home, key, proc.pid, session_name(key),
-                            log_path=log_path, cwd=str(cwd), prompt=prompt,
-                            runner=claimed_runner)
-        return proc.pid
+        return _launch_detached(self.home, key, cmd, cwd, env, log_file,
+                                prompt=prompt, runner=claimed_runner)
 
 
 class DryRunSessions:
@@ -374,7 +390,7 @@ class DryRunSessions:
         return None
 
 
-class OpencodeCliSessions:
+class OpencodeCliSessions(_ClaimBackedSessions):
     """OC-4: the second real ``SessionManager`` backend -- speaks the opencode
     CLI instead of the Claude CLI. Reuses ``claims`` unchanged (RF-2's Notes:
     ``claims._verdict`` keys only on pid + ``start_epoch``, never the spawned
@@ -439,18 +455,10 @@ class OpencodeCliSessions:
                  clock: Callable[[], float] | None = None,
                  unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
                  claims_run=subprocess.run):
-        self.home = Path(home)
+        super().__init__(home, capture_session_logs=capture_session_logs, clock=clock,
+                         unverified_claim_max_age=unverified_claim_max_age,
+                         claims_run=claims_run)
         self.model_prefix = model_prefix
-        self.capture_session_logs = capture_session_logs
-        self._clock: Callable[[], float] = clock or store.now_epoch
-        self._unverified_claim_max_age = unverified_claim_max_age
-        self._claims_run = claims_run
-
-    def list_active(self) -> set[str]:
-        # Same claim files, same verified-pid liveness check ClaudeCliSessions
-        # uses -- claims are runner-agnostic (see class docstring above).
-        return claims.active_keys(self.home, run=self._claims_run,
-                                  max_age=self._unverified_claim_max_age)
 
     def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
@@ -480,7 +488,7 @@ class OpencodeCliSessions:
         # T-54: `runner` IS still threaded into the claim written below -- see
         # `ClaudeCliSessions.spawn`'s identical comment.
         del model, effort, disallowed_tools, allowed_tools
-        claimed_runner = runner or "claude"
+        claimed_runner = runner or "opencode"
         if not runner_model:
             # Must never happen: OC-2's preflight (dispatcher.dispatch) already
             # verified a real, tool-capable runner_model before routing a spawn
@@ -488,7 +496,7 @@ class OpencodeCliSessions:
             raise store.MaestroError(
                 f"OpencodeCliSessions.spawn({key!r}): no runner_model resolved -- "
                 "OC-2's preflight must run before a spawn reaches this backend")
-        session_id = f"{session_name(key)}-{self._clock():.6f}"
+        session_id = self._session_id(key)
         name = command.lstrip("/")
         cmd = ["opencode", "run",
                "--command", name,
@@ -502,47 +510,15 @@ class OpencodeCliSessions:
         # env_overlay -- see that class's spawn() docstring.
         env = _spawn_env(self.home, env_overlay)
 
-        log_path: str | None = None
-        if self.capture_session_logs:
-            # RF-3: opencode's own log-identity slot -- never "stream-json" (see
-            # store.session_opencode_path's docstring).
-            log_file = store.session_opencode_path(self.home, key, session_id)
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            log_handle = log_file.open("w", encoding="utf-8")
-            log_path = str(log_file)
-        else:
-            log_handle = None
-
-        # T-52: reserve before Popen, commit the real pid after, roll back on a
-        # failed launch -- see ClaudeCliSessions.spawn's comment for the full
-        # rationale (claims are runner-agnostic, so this backend needs the
-        # identical fix).
-        claims.write_claim(self.home, key, os.getpid(), session_name(key),
-                            log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
-                            runner=claimed_runner)
-        try:
-            try:
-                proc = subprocess.Popen(
-                    cmd, cwd=str(cwd), env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
-                    stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            finally:
-                if log_handle is not None:
-                    log_handle.close()
-        except Exception:
-            claims.release(self.home, key)
-            raise
-
-        claims.write_claim(self.home, key, proc.pid, session_name(key),
-                            log_path=log_path, cwd=str(cwd), prompt=" ".join(cmd),
-                            runner=claimed_runner)
-        return proc.pid
+        # RF-3: opencode's own log-identity slot -- never "stream-json" (see
+        # store.session_opencode_path's docstring).
+        log_file = (store.session_opencode_path(self.home, key, session_id)
+                    if self.capture_session_logs else None)
+        return _launch_detached(self.home, key, cmd, cwd, env, log_file,
+                                prompt=" ".join(cmd), runner=claimed_runner)
 
 
-class PiCliSessions:
+class PiCliSessions(_ClaimBackedSessions):
     """PI-8: the third real ``SessionManager`` backend -- speaks the ``pi``
     coding-agent CLI (``@earendil-works/pi-coding-agent``) instead of the
     Claude CLI. Reuses ``claims`` unchanged, same rationale as
@@ -630,18 +606,10 @@ class PiCliSessions:
                  clock: Callable[[], float] | None = None,
                  unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
                  claims_run=subprocess.run):
-        self.home = Path(home)
-        self.capture_session_logs = capture_session_logs
+        super().__init__(home, capture_session_logs=capture_session_logs, clock=clock,
+                         unverified_claim_max_age=unverified_claim_max_age,
+                         claims_run=claims_run)
         self.disable_context_files = disable_context_files
-        self._clock: Callable[[], float] = clock or store.now_epoch
-        self._unverified_claim_max_age = unverified_claim_max_age
-        self._claims_run = claims_run
-
-    def list_active(self) -> set[str]:
-        # Same claim files, same verified-pid liveness check every backend
-        # uses -- claims are runner-agnostic (see class docstring above).
-        return claims.active_keys(self.home, run=self._claims_run,
-                                  max_age=self._unverified_claim_max_age)
 
     def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
@@ -660,7 +628,7 @@ class PiCliSessions:
         # spawn's OWN guard data, rather than the unfiltered AGENT_TOOL_VERBS
         # ceiling every phase got before this ticket.
         del model, effort, disallowed_tools
-        claimed_runner = runner or "claude"
+        claimed_runner = runner or "pi"
         if not runner_model:
             # Must never happen: OC-2/PI-3's preflight (dispatcher.dispatch)
             # already verified a real, tool-capable runner_model before
@@ -700,7 +668,7 @@ class PiCliSessions:
                 f"PiCliSessions.spawn({key!r}): guard extension missing at "
                 f"{extension_path} -- refusing to spawn pi ungated")
 
-        session_id = f"{session_name(key)}-{self._clock():.6f}"
+        session_id = self._session_id(key)
         # RF-1-equivalent: the flattened prompt, byte-identical in shape to
         # ClaudeCliSessions.spawn's own -- pi's `$1` substitution matches
         # Claude Code's in the existing payload bodies (spec Notes), so this
@@ -738,44 +706,12 @@ class PiCliSessions:
         # via env_overlay -- see RoutingSessions._prep_pi_env's docstring.
         env = _spawn_env(self.home, env_overlay)
 
-        log_path: str | None = None
-        if self.capture_session_logs:
-            # T-58: pi's own log-identity slot -- never "stream-json" (see
-            # store.session_pi_path's docstring).
-            log_file = store.session_pi_path(self.home, key, session_id)
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            log_handle = log_file.open("w", encoding="utf-8")
-            log_path = str(log_file)
-        else:
-            log_handle = None
-
-        # T-52: reserve before Popen, commit the real pid after, roll back on
-        # a failed launch -- see ClaudeCliSessions.spawn's comment for the
-        # full rationale (claims are runner-agnostic, so this backend needs
-        # the identical fix).
-        claims.write_claim(self.home, key, os.getpid(), session_name(key),
-                            log_path=log_path, cwd=str(cwd), prompt=prompt,
-                            runner=claimed_runner)
-        try:
-            try:
-                proc = subprocess.Popen(
-                    cmd, cwd=str(cwd), env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
-                    stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            finally:
-                if log_handle is not None:
-                    log_handle.close()
-        except Exception:
-            claims.release(self.home, key)
-            raise
-
-        claims.write_claim(self.home, key, proc.pid, session_name(key),
-                            log_path=log_path, cwd=str(cwd), prompt=prompt,
-                            runner=claimed_runner)
-        return proc.pid
+        # T-58: pi's own log-identity slot -- never "stream-json" (see
+        # store.session_pi_path's docstring).
+        log_file = (store.session_pi_path(self.home, key, session_id)
+                    if self.capture_session_logs else None)
+        return _launch_detached(self.home, key, cmd, cwd, env, log_file,
+                                prompt=prompt, runner=claimed_runner)
 
 
 class RoutingSessions:

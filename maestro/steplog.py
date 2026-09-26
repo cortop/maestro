@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-from . import claims, event_log
+from . import claims, event_log, store
 from . import events as E
 
 # Tools we consider "notable" and want to surface in the timeline
@@ -458,18 +458,10 @@ def _opencode_session_outcome(path: Path) -> dict:
     ``unavailable`` (``spend.py``'s ``over_ceiling`` fails OPEN on that, which
     would disarm the ceiling -- see spec Notes)."""
     reason: str | None = None
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            t, part = oc_part(obj)
-            if t in OC_STEP_FINISH_TYPES:
-                reason = part.get("reason")
+    for obj in store.iter_jsonl(path, errors="replace"):
+        t, part = oc_part(obj)
+        if t in OC_STEP_FINISH_TYPES:
+            reason = part.get("reason")
     if reason is None:
         return {"outcome": "running", "result": None, "rate_limit_info": None}
     outcome = "error" if reason == "error" else "success"

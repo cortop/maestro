@@ -1141,26 +1141,18 @@ def _render_rate_limit_line(obj: dict) -> str:
 def _render_stream_jsonl(path: Path) -> None:
     """Print a human-readable view of a stream-jsonl session log."""
     seen_msg_ids: dict[str, dict] = {}
-    with path.open(encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if obj.get("type") == "assistant":
-                mid = obj["message"]["id"]
-                seen_msg_ids[mid] = obj
-            elif obj.get("type") == "rate_limit_event":
-                print(_render_rate_limit_line(obj))
-            elif obj.get("type") == "result":
-                # Flush collected assistant messages in order, then show result
-                for _, msg_obj in seen_msg_ids.items():
-                    _print_assistant_message(msg_obj)
-                seen_msg_ids.clear()
-                print(_render_result_line(obj))
+    for obj in store.iter_jsonl(path):
+        if obj.get("type") == "assistant":
+            mid = obj["message"]["id"]
+            seen_msg_ids[mid] = obj
+        elif obj.get("type") == "rate_limit_event":
+            print(_render_rate_limit_line(obj))
+        elif obj.get("type") == "result":
+            # Flush collected assistant messages in order, then show result
+            for _, msg_obj in seen_msg_ids.items():
+                _print_assistant_message(msg_obj)
+            seen_msg_ids.clear()
+            print(_render_result_line(obj))
     # Flush any remaining (live/incomplete session)
     for _, msg_obj in seen_msg_ids.items():
         _print_assistant_message(msg_obj)
@@ -1202,16 +1194,8 @@ def _print_opencode_part(obj: dict) -> None:
 
 def _render_opencode_jsonl(path: Path) -> None:
     """Print a human-readable view of an opencode.jsonl session log (OC-5)."""
-    with path.open(encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            _print_opencode_part(obj)
+    for obj in store.iter_jsonl(path, errors="replace"):
+        _print_opencode_part(obj)
 
 
 def cmd_logs(args) -> int:
