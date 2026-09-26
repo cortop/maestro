@@ -143,7 +143,7 @@ def test_sync_vcs_ci_observed_is_idempotent_on_unchanged_state(cfg, monkeypatch)
     cfg.awaiting_ci_qa_gate = False
 
     disp.sync_vcs(cfg, now=1000)
-    n_before = len(event_log.read(cfg.home, "T-5"))
+    len(event_log.read(cfg.home, "T-5"))
 
     # Ticket is now `implementing` (an active phase, not awaiting-ci/in-review),
     # so re-seed it back into awaiting-ci with the same PR to simulate the tick

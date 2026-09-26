@@ -13,8 +13,6 @@ from maestro import claims, dispatcher as disp, event_log, gates, ops, snapshot 
 from maestro.cli import main as cli_main
 from maestro.statemachine import Phase
 
-from test_claims import child_process  # noqa: F401 -- shared real-process fixture
-
 SPEC = (
     "# T-1: Sample\n"
     "\n"

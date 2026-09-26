@@ -13,7 +13,6 @@ success is a true no-op.
 """
 from maestro import dispatcher as disp
 from maestro import event_log, ops, providers, snapshot as snap_mod, store
-from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 

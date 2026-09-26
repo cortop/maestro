@@ -3,7 +3,6 @@ around destructive_command_guard.check_command for runners that don't speak Clau
 Code's PreToolUse JSON-on-stdin protocol (T-34/RF-5). See that script's module
 docstring for its two invocation shapes (PATH shim vs. generic ``--check`` adapter).
 """
-import os
 import subprocess
 import sys
 from pathlib import Path

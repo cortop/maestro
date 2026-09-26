@@ -911,7 +911,7 @@ def test_cmd_modal_degraded_phase_is_stored(home):
 
 # --- fleet panel (unit-level, no Textual event loop) --------------------------
 
-from maestro.tui import FleetScreen, _IntervalModal, _fmt_age, _render_badge, _render_fleet  # noqa: E402
+from maestro.tui import FleetScreen, _fmt_age, _render_badge, _render_fleet  # noqa: E402
 
 
 def test_render_badge_up_shows_interval_and_heartbeat():
@@ -1094,7 +1094,6 @@ def test_fleet_screen_not_stale_with_recent_heartbeat(home):
 # --- event timeline rendering -------------------------------------------------
 
 from maestro.tui.events import render_event, render_log, render_log_line  # noqa: E402
-from maestro import event_log  # noqa: E402 (already imported above but make dep explicit)
 
 
 def test_render_event_includes_seq_ts_type_actor():
@@ -1588,7 +1587,6 @@ def test_spec_screen_constructs(home):
 # --- TUI-11: env / config viewer panel ----------------------------------------
 
 from maestro.tui import EnvScreen, _render_env  # noqa: E402
-from maestro.config import Config  # noqa: E402
 
 
 def _make_cfg(home, repo_path="/repo", branch_prefix="m/", reconcile_command="/rec",

@@ -11,8 +11,7 @@ import io
 import json
 import sys
 
-from maestro import cli as cli_mod, event_log, health, snapshot as snap_mod, store
-from maestro import dispatcher as disp
+from maestro import cli as cli_mod, event_log, health, snapshot as snap_mod
 from maestro.statemachine import Phase
 
 from test_missing_acs import _seed

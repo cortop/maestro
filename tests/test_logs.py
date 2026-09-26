@@ -1,17 +1,14 @@
 """Tests for maestro logs <KEY> command (L-3)."""
 import json
-import os
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from maestro import store
-from maestro.sessions import list_sessions, session_name
+from maestro.sessions import list_sessions
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

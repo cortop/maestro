@@ -6,8 +6,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from maestro import event_log, skills_install, snapshot as snap_mod, store  # noqa: E402
+from maestro import cli, dispatcher as disp, event_log, skills_install, snapshot as snap_mod, store  # noqa: E402
 from maestro.config import Config  # noqa: E402
+from maestro.statemachine import Phase  # noqa: E402
 from fault_injection import FaultInjector  # noqa: E402
 
 
@@ -54,6 +55,13 @@ def make_origin_and_repo(tmp_path, name="repo", base_branch="main"):
     return origin, repo
 
 
+def add_worktree(repo, home, key, branch, base="main"):
+    """`git worktree add` KEY's worktree under *home* on a new *branch* off *base*."""
+    wt = home / "worktrees" / key
+    git("worktree", "add", "-q", "-b", branch, str(wt), base, cwd=repo)
+    return wt
+
+
 @pytest.fixture
 def home(tmp_path):
     for d in ("events", "inbox", "tickets", "worktrees", "derived/snapshots", "derived/cursors"):
@@ -72,6 +80,17 @@ def home(tmp_path):
 @pytest.fixture
 def cfg(home):
     return Config(home=home, max_concurrency=3, backoff_base=10, max_failures=3)
+
+
+@pytest.fixture
+def child_process():
+    """A real, live, non-reconciler process — the pid-reuse hazard's stand-in."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        yield proc
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 @pytest.fixture
@@ -162,3 +181,28 @@ def seeded_home(home):
     seed_ticket(home, "T-4", "awaiting ci with PR", phase="awaiting-ci", pr=16)
     seed_ticket(home, "T-5", "ready ticket", phase="ready")
     return home
+
+
+def seed_phase(home, key, phase=Phase.READY):
+    """Create ticket *key* directly in *phase*, with a one-AC spec so the
+    missing-ACs due gate (T-80) never parks it -- the minimal "a due ticket
+    exists" setup for dispatcher-level tests."""
+    store.atomic_write(store.spec_path(home, key), f"# {key}\n\n## Acceptance criteria\n- [ ] ok\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def run_doctor(home):
+    """Run the real `maestro doctor` verb over *home*; return (exit code, parsed JSON)."""
+    import io
+    import json
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        code = cli.main(["--home", str(home), "doctor"])
+    finally:
+        sys.stdout = old
+    return code, json.loads(buf.getvalue())

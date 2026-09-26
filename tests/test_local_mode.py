@@ -79,7 +79,7 @@ def test_local_mode_ticket_reaches_done_with_backup_on_write(home, tmp_path):
     target = tmp_path / "vault"
     target.mkdir()
     (target / "note.md").write_text("original\n", encoding="utf-8")
-    cfg = _write_local_config(home, target)
+    _write_local_config(home, target)
 
     store.atomic_write(
         store.spec_path(home, "V-1"),

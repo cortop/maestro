@@ -12,7 +12,7 @@ license = { text = "MIT" }
 dependencies = []  # stdlib-only core (tomllib, fcntl, dataclasses, argparse)
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-xdist>=3", "hypothesis>=6"]
+dev = ["pytest>=8", "pytest-xdist>=3", "hypothesis>=6", "ruff>=0.6"]
 tui = ["textual>=0.50"]
 
 [project.scripts]
@@ -27,3 +27,12 @@ packages = ["maestro"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["lab"]
+
+[tool.ruff.lint]
+# Pyflakes only: unused imports/variables, redefinitions, undefined names --
+# the class of drift a 4k-line module hides from a reader. No style rules.
+select = ["F"]

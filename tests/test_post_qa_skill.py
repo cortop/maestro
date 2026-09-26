@@ -38,7 +38,7 @@ from maestro import repos as repos_mod, snapshot as snap_mod, store
 from maestro.sessions import DryRunSessions, PiCliSessions, RoutingSessions
 from maestro.statemachine import Phase
 
-from test_runner_preflight import _counting_probe, _register, _enable
+from test_runner_preflight import _counting_probe, _enable
 
 AC_TEXT = "- [ ] the widget works"
 

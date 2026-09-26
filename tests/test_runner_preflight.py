@@ -17,27 +17,14 @@ on a real daemon. This file exercises the preflight gate itself with plain
 """
 from __future__ import annotations
 
-import io
-import json
 import shutil
-import sys
 
-from maestro import cli, dispatcher as disp, event_log, health, snapshot as snap_mod, store
+from maestro import dispatcher as disp, event_log, health, snapshot as snap_mod, store
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
+from conftest import run_doctor
 
 RUNNER = "opencode"
-
-
-def _sweep(home):
-    buf = io.StringIO()
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        code = cli.main(["--home", str(home), "doctor"])
-    finally:
-        sys.stdout = old
-    return code, json.loads(buf.getvalue())
 
 
 def _register(monkeypatch, *names):
@@ -247,7 +234,7 @@ def test_binary_missing_real_doctor_warns_naming_the_runner(home, monkeypatch):
     _seed(home, "BAD-1", phase=Phase.IMPLEMENTING, runner=RUNNER, runner_model="a:1b")
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
 
     assert code == 0  # WARN-only, never blocks
     check = next(c for c in out["checks"] if c["name"] == "runner_binary")
@@ -430,7 +417,7 @@ def test_launchd_path_unchanged_when_no_runner_bin_is_configured(cfg):
 def test_spawn_env_prepends_the_configured_runner_dir(cfg, tmp_path):
     """The reconciler's own PATH -- what lets the runner resolve the tools IT
     shells out for, which pinning argv[0] would not fix."""
-    from maestro import config as config_mod, sessions
+    from maestro import sessions
     runner_dir = tmp_path / "volta" / "bin"
     _stub_binary(runner_dir, "pi")
     (cfg.home / "config.toml").write_text(

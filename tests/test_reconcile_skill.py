@@ -67,8 +67,8 @@ ALL_PHASE_PATHS = [_commands_path(p) for p in PHASE_FILES] + [_skills_path(p) fo
 
 
 def _strip_frontmatter(text: str) -> str:
-    """Body only -- frontmatter (description/argument-hint) is intentionally allowed to
-    differ; only the body is asserted byte-identical."""
+    """Body only -- for assertions about skill prose that must not match text in the
+    YAML frontmatter block."""
     parts = text.split("---\n", 2)
     assert len(parts) == 3, "expected exactly one YAML frontmatter block"
     return parts[2]
@@ -165,7 +165,7 @@ def test_no_bare_origin_main():
 # nothing would fail. Pin its presence AND its ordering (before the
 # `git rebase "origin/<BASE>"` line), so deleting or reordering it fails the
 # suite. All three skill mirrors staying byte-identical is already covered by
-# test_skill_copies_are_byte_identical_after_stripping_frontmatter.
+# test_skill_copies_are_byte_identical_including_frontmatter.
 # ---------------------------------------------------------------------------
 
 def test_implementing_skill_fetches_and_ff_only_merges_pr_branch_before_rebasing_onto_base():
@@ -761,7 +761,7 @@ def test_acked_in_review_ticket_stops_spawning(home):
     from conftest import seed_ticket
 
     seed_ticket(home, "S-3", "in review, message already handled", phase="in-review", pr=44)
-    cfg = config_mod.Config(home=home, max_concurrency=5, backoff_base=10, max_failures=99)
+    config_mod.Config(home=home, max_concurrency=5, backoff_base=10, max_failures=99)
     assert cli_main(["--home", str(home), "observe-spec", "S-3"]) == 0
     assert cli_main(["--home", str(home), "cmd", "S-3", "msg", "noted", "--no-nudge"]) == 0
     assert cli_main(["--home", str(home), "fold-inbox", "S-3"]) == 0
@@ -775,20 +775,26 @@ def test_acked_in_review_ticket_stops_spawning(home):
 
 
 # ---------------------------------------------------------------------------
-# AC6 (T-22 numbering) / T-3 AC3: mirror-sync -- all three copies stay
-# byte-identical (body only), per phase file. `maestro/_skill_commands/` is a
-# symlink farm into `.claude/commands/` (see pyproject.toml's packaging note),
-# so it is included here as an explicit assertion rather than trusted to
-# follow along -- a future de-symlinking would otherwise drift silently.
+# AC6 (T-22 numbering) / T-3 AC3: mirror-sync -- `skills/` and
+# `maestro/_skill_commands/` are symlink farms into `.claude/commands/`, so
+# every copy is the same file, frontmatter included. Asserted explicitly (not
+# trusted to follow along) so a future de-symlinking -- or a hand-edited copy
+# whose `allowed-tools:` grant silently diverges -- fails the suite.
 # ---------------------------------------------------------------------------
 
-def test_skill_copies_are_byte_identical_after_stripping_frontmatter():
+def test_skill_copies_are_symlinks_into_claude_commands():
+    for path in sorted(SKILLS_DIR.glob("*.md")) + sorted(SKILL_COMMANDS_DIR.glob("*.md")):
+        assert path.is_symlink(), f"{path} must be a symlink into .claude/commands/"
+        assert path.resolve() == (COMMANDS_DIR / path.name).resolve(), \
+            f"{path} points somewhere other than .claude/commands/{path.name}"
+
+
+def test_skill_copies_are_byte_identical_including_frontmatter():
     for phase in PHASE_FILES:
-        commands_body = _strip_frontmatter(_commands_path(phase).read_text())
-        skills_body = _strip_frontmatter(_skills_path(phase).read_text())
-        skill_commands_body = _strip_frontmatter(_skill_commands_path(phase).read_text())
-        assert commands_body == skills_body, f"maestro-reconcile-{phase}.md mirrors drifted"
-        assert commands_body == skill_commands_body, \
+        commands_text = _commands_path(phase).read_text()
+        assert _skills_path(phase).read_text() == commands_text, \
+            f"maestro-reconcile-{phase}.md: skills/ copy drifted from .claude/commands/"
+        assert _skill_commands_path(phase).read_text() == commands_text, \
             f"maestro-reconcile-{phase}.md: maestro/_skill_commands/ copy drifted from .claude/commands/"
 
 

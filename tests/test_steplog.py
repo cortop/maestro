@@ -2,9 +2,8 @@
 import json
 from pathlib import Path
 
-import pytest
 
-from maestro import event_log, snapshot as snap_mod, store
+from maestro import event_log, snapshot as snap_mod
 from maestro import events as E
 from maestro.steplog import classify_result, fold_stream, fold_current_session, session_outcome
 from maestro.ops import compact

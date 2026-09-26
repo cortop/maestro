@@ -1,5 +1,4 @@
 """Tests for the 'researching' phase, RESEARCH_PROPOSED event, and snapshot fields."""
-import pytest
 
 from maestro import event_log, snapshot as snap_mod
 from maestro.statemachine import Phase, ACTIVE_PHASES, can_transition

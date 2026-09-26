@@ -2,7 +2,6 @@
 import io
 import sys
 
-import pytest
 
 from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.cli import cmd_answer

@@ -1,9 +1,6 @@
 import json
 import os
-import subprocess
-import sys
 
-import pytest
 
 from maestro import claims, event_log, store
 from maestro.cli import main as cli_main
@@ -53,17 +50,6 @@ def test_write_claim_omits_cwd_and_prompt_when_not_given(home):
 # (from real `ps`) against the claim's recorded epoch — pid reuse means the live
 # process started AFTER the claim, so it's "denied", never "confirmed".
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def child_process():
-    """A real, live, non-reconciler process — the pid-reuse hazard's stand-in."""
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        yield proc
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
-
 
 def test_confirmed_when_epoch_matches_true_start(home, child_process):
     claims.write_claim(home, "T-1", child_process.pid, "reconcile-T-1")

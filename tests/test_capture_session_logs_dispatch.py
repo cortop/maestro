@@ -6,7 +6,6 @@ one (`cli.ClaudeCliSessions` itself, or the `subprocess.Popen` it shells out thr
 never `dispatch()`/`ops`/`snapshot` themselves).
 """
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from maestro import cli, dispatcher as disp, event_log, snapshot as snap_mod, store

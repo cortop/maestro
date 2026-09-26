@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 
 from maestro import dispatcher as disp, inbox, snapshot as snap_mod, store
-from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
