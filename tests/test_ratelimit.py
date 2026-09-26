@@ -13,15 +13,7 @@ from maestro import event_log, ratelimit, snapshot as snap_mod, store
 from maestro.cli import main
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
-
-
-def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(store.spec_path(home, key),
-                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated",
-                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
+from conftest import seed_phase
 
 
 def _rate_limit_event(status, resets_at, rate_limit_type="five_hour", **extra):
@@ -53,7 +45,7 @@ def _spawn_and_seed_ledger(home, cfg, key, now):
     are governed only by the rate-limit gate under test.
     """
     cfg.min_spawn_interval = 0
-    _seed(home, key, Phase.READY)
+    seed_phase(home, key, Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=now)
     assert key in report.spawned
     assert store.read_json(home / "derived" / ".spawn_ledger.json", {}).get(key, {}).get("last") == now
@@ -93,7 +85,7 @@ def test_probe_ignores_non_rejected_status(home, cfg, status):
     assert not (home / "derived" / ".ratelimit.json").exists()
 
     # Still spawns on the next sweep (nothing paused).
-    _seed(home, "T-1", Phase.READY)  # re-affirm READY (no-op if already there)
+    seed_phase(home, "T-1", Phase.READY)  # re-affirm READY (no-op if already there)
     report = disp.dispatch(cfg, DryRunSessions(), now=t1 + 400)
     assert "T-1" in report.spawned
 
@@ -113,7 +105,7 @@ def test_gate_blocks_all_spawns_including_unthrottled_human_reason(home, cfg):
 
     # A second ticket becomes due via the unthrottled "inbox" human-signal reason.
     from maestro import inbox
-    _seed(home, "T-2", Phase.AWAITING_HUMAN)
+    seed_phase(home, "T-2", Phase.AWAITING_HUMAN)
     event_log.append(home, "T-2", "QuestionAsked", {"qid": "q1", "text": "ok?"}, actor="r")
     snap_mod.rebuild(home, "T-2")
     inbox.append_command(home, "T-2", "ans", {"qid": "q1", "text": "go"})
@@ -142,7 +134,7 @@ def test_pause_expires_and_state_removed(home, cfg):
     assert paused_until is not None
 
     # Still paused just before the deadline.
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     report_mid = disp.dispatch(cfg, DryRunSessions(), now=paused_until - 1)
     assert report_mid.spawned == []
     assert (home / "derived" / ".ratelimit.json").exists()
@@ -162,7 +154,7 @@ def test_pause_expires_and_state_removed(home, cfg):
 def test_degenerate_resets_at_falls_back(home, cfg, resets_at_raw):
     cfg.ratelimit_fallback_pause = 900
     now = 1_000_000  # resets_at_raw=500 is safely in the past relative to `now`
-    record = _rate_limit_event("rejected", resets_at_raw)
+    _rate_limit_event("rejected", resets_at_raw)
     pause_target, resets_at = ratelimit._compute_paused_until(resets_at_raw, now, cfg)
     assert pause_target == now + cfg.ratelimit_fallback_pause
 
@@ -197,7 +189,7 @@ def test_ratelimit_max_pause_zero_disables_gate_via_real_config(home):
     _spawn_and_seed_ledger(home, cfg, "T-1", t0)
     _write_stream_log(home, "T-1", t0, [_rate_limit_event("rejected", t0 + 500)])
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
     assert not (home / "derived" / ".ratelimit.json").exists()
     assert "T-1" in report.spawned
@@ -244,7 +236,7 @@ def test_rejection_appended_at_nonzero_offset_is_detected_next_sweep(home, cfg):
 def test_key_absent_from_ledger_is_never_read(home, cfg):
     """A stream log for a key that was never spawned (not in the ledger) is
     ignored even though its newest log carries a rejection."""
-    _seed(home, "T-1", Phase.AWAITING_HUMAN)  # no ledger entry: never spawned
+    seed_phase(home, "T-1", Phase.AWAITING_HUMAN)  # no ledger entry: never spawned
     event_log.append(home, "T-1", "QuestionAsked", {"qid": "q1", "text": "ok?"}, actor="r")
     snap_mod.rebuild(home, "T-1")
     _write_stream_log(home, "T-1", 8_000_000.0, [_rate_limit_event("rejected", 8_000_500)])
@@ -429,6 +421,6 @@ def test_ratelimit_clear_removes_state_and_next_sweep_spawns(home, cfg, capsys):
     assert out == {"cleared": True}
     assert not (home / "derived" / ".ratelimit.json").exists()
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 11)
     assert "T-1" in report.spawned

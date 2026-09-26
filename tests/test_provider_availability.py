@@ -12,6 +12,7 @@ from maestro import alarm, claims, cli, health, store
 from maestro.config import Config
 
 from conftest import seed_ticket
+from conftest import run_doctor
 
 
 def _write_session(home, key, epoch, outcome):
@@ -309,22 +310,11 @@ def test_check_name_appears_in_the_doctor_registry(cfg):
     assert "provider_availability" in names
 
 
-def _sweep(home):
-    buf = io.StringIO()
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        code = cli.main(["--home", str(home), "doctor"])
-    finally:
-        sys.stdout = old
-    return code, json.loads(buf.getvalue())
-
-
 def test_real_doctor_json_ok_on_a_fresh_home(home, monkeypatch):
     """AC3: a fresh home now genuinely probes (no session history to fail
     open on) -- a reachable probe still reports ok."""
     monkeypatch.setattr(health, "_default_provider_probe", lambda host: (True, "reachable"))
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "provider_availability")
     assert check["status"] == "ok"
@@ -335,7 +325,7 @@ def test_real_doctor_json_reports_no_network(home, monkeypatch):
     for epoch in (100.0, 200.0, 300.0):
         _write_session(home, "T-1", epoch, "error")
     monkeypatch.setattr(health, "_default_provider_probe", lambda host: (False, "no route to host"))
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0  # WARN/FAIL-only, never blocks a spawn (report-only, MTO-8)
     check = next(c for c in out["checks"] if c["name"] == "provider_availability")
     assert check["status"] == "fail"

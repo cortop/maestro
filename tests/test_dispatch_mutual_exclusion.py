@@ -20,19 +20,10 @@ import os
 import threading
 import time
 
-from maestro import claims, dispatcher as disp, event_log, snapshot as snap_mod, store
+from maestro import claims, dispatcher as disp
 from maestro.config import Config
 from maestro.statemachine import Phase
-
-
-def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(store.spec_path(home, key),
-                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated",
-                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)},
-                     actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
+from conftest import seed_phase
 
 
 class _RacySessions:
@@ -64,7 +55,7 @@ class _RacySessions:
 
 
 def test_two_concurrent_dispatch_sweeps_never_double_spawn_same_key(home):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg = Config(home=home, max_concurrency=5)
     sessions = _RacySessions(home)
 

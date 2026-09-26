@@ -104,7 +104,7 @@ def test_green_check_annotation_admits_qa_with_no_agent_spawned_for_it(tmp_path,
 def test_red_check_annotation_routes_back_to_implementing_no_qa_spawn(tmp_path, home):
     _origin, repo = make_origin_and_repo(tmp_path)
     cfg = _write_config(home, repo, test_command=_PASS_CMD)
-    wt = _seed_to_worktree(cfg, "G-1", acs=["flag exists (check: test -f flag.txt)"])
+    _seed_to_worktree(cfg, "G-1", acs=["flag exists (check: test -f flag.txt)"])
     # deliberately never create flag.txt
     _advance_to_verifying(cfg, "G-1")
 

@@ -3,7 +3,6 @@ Built from the SAME predicate source as the Claude hook / argv adapter shim, so 
 tests assert it stays that way: sourced from destructive_command_guard, denies the
 path-qualified bypass the PATH shim can't catch, and never constructs `--auto`.
 """
-import re
 from pathlib import Path
 
 from maestro import runner_permissions

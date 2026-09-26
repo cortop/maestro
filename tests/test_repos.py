@@ -188,7 +188,7 @@ def test_env_key_prints_resolved_binding(home, capsys):
 
 
 def test_env_key_unknown_repo_exits_nonzero(home, capsys):
-    cfg = _write_multi_repo_config(home)
+    _write_multi_repo_config(home)
     store.atomic_write(store.spec_path(home, "X-4"),
                        "# X-4\napproval_tier: 1\nrepo: ghost\n\n## Intent\nx\n")
     event_log.append(home, "X-4", "TicketCreated",

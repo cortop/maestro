@@ -21,12 +21,7 @@ from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from conftest import git as _git, make_origin_and_repo as _make_origin_and_repo
-
-
-def _add_worktree(repo, home, key, branch, base="main"):
-    wt = home / "worktrees" / key
-    _git("worktree", "add", "-q", "-b", branch, str(wt), base, cwd=repo)
-    return wt
+from conftest import add_worktree
 
 
 def _seed(home, key, phase, pr=10, *, repo_name=None):
@@ -147,7 +142,7 @@ def test_on_conflict_does_not_route_far_behind_ticket_but_still_fast_forwards(ho
     cfg.repo_path = str(repo)
 
     _seed(home, "T-5", Phase.AWAITING_CI)
-    _add_worktree(repo, home, "T-5", "maestro/T-5")
+    add_worktree(repo, home, "T-5", "maestro/T-5")
     _merge_commits_to_origin(repo, origin, n=50)  # far behind, not just 1 commit
 
     result = disp.sync_worktrees(cfg)
@@ -194,7 +189,7 @@ def test_on_conflict_still_routes_a_conflicting_pr_via_route_conflict(home, cfg,
     monkeypatch.setattr(providers, "get_vcs", lambda c: fake)
 
     _seed(home, "T-9", Phase.AWAITING_CI, pr=42)
-    _add_worktree(repo, home, "T-9", "maestro/T-9")
+    add_worktree(repo, home, "T-9", "maestro/T-9")
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
 
@@ -211,7 +206,7 @@ def test_daily_routes_at_most_once_per_calendar_day(home, cfg, tmp_path):
 
     _seed(home, "T-7", Phase.AWAITING_CI)
     _ci_passing(home, "T-7")
-    _add_worktree(repo, home, "T-7", "maestro/T-7")
+    add_worktree(repo, home, "T-7", "maestro/T-7")
     _merge_commits_to_origin(repo, origin, n=1)
 
     # First sweep of the day: drifted, not yet drift-rebased today -> routes.
@@ -245,7 +240,7 @@ def test_always_routes_unconditionally_same_as_pre_ticket_behavior(home, cfg, tm
 
     _seed(home, "T-8", Phase.AWAITING_CI)
     _ci_passing(home, "T-8")
-    _add_worktree(repo, home, "T-8", "maestro/T-8")
+    add_worktree(repo, home, "T-8", "maestro/T-8")
     _merge_commits_to_origin(repo, origin, n=1)
 
     result = disp.sync_worktrees(cfg)
@@ -266,7 +261,7 @@ def test_pending_ci_checks_block_drift_route_under_every_mode(home, cfg, tmp_pat
     cfg.repo_path = str(repo)
 
     _seed(home, "T-6", Phase.AWAITING_CI)
-    _add_worktree(repo, home, "T-6", "maestro/T-6")
+    add_worktree(repo, home, "T-6", "maestro/T-6")
     _merge_commits_to_origin(repo, origin, n=1)
     event_log.append(home, "T-6", "CiObserved",
                      {"state": "pending", "failing_checks": [], "detail": "3 of 5 checks running"},
@@ -290,7 +285,7 @@ def test_set_phase_reason_names_the_policy(home, cfg, tmp_path, policy):
 
     _seed(home, "T-4", Phase.AWAITING_CI)
     _ci_passing(home, "T-4")
-    _add_worktree(repo, home, "T-4", "maestro/T-4")
+    add_worktree(repo, home, "T-4", "maestro/T-4")
     _merge_commits_to_origin(repo, origin, n=1)
 
     disp.sync_worktrees(cfg)
@@ -308,7 +303,7 @@ def test_dispatch_sweep_proves_on_conflict_no_route_and_always_byte_identical(ho
                              repo_path=str(repo))
     assert cfg_on_conflict.base_drift_policy == "on_conflict"
     _seed(home, "T-OC", Phase.AWAITING_CI)
-    _add_worktree(repo, home, "T-OC", "maestro/T-OC")
+    add_worktree(repo, home, "T-OC", "maestro/T-OC")
     _merge_commits_to_origin(repo, origin, n=1)
 
     disp.dispatch(cfg_on_conflict, DryRunSessions(), now=1000)
@@ -321,7 +316,7 @@ def test_dispatch_sweep_proves_on_conflict_no_route_and_always_byte_identical(ho
                         repo_path=str(repo), base_drift_policy="always")
     _seed(home, "T-AL", Phase.AWAITING_CI)
     _ci_passing(home, "T-AL")
-    _add_worktree(repo, home, "T-AL", "maestro/T-AL")
+    add_worktree(repo, home, "T-AL", "maestro/T-AL")
     _merge_commits_to_origin(repo, origin, n=1)
 
     report2 = disp.dispatch(cfg_always, DryRunSessions(), now=2000)
@@ -355,7 +350,7 @@ def test_per_ticket_binding_wins_over_groups_first_arrived_binding_suppresses(ho
     cfg = config_mod.load(str(home))
 
     _seed(home, "T-82X", Phase.AWAITING_CI, repo_name="x")
-    _add_worktree(repo, home, "T-82X", "maestro/T-82X")
+    add_worktree(repo, home, "T-82X", "maestro/T-82X")
     _merge_commits_to_origin(repo, origin, n=1)
 
     result = disp.sync_worktrees(cfg)
@@ -377,7 +372,7 @@ def test_per_ticket_binding_wins_over_groups_first_arrived_binding_routes(home, 
 
     _seed(home, "T-82Y", Phase.AWAITING_CI, repo_name="x")
     _ci_passing(home, "T-82Y")
-    _add_worktree(repo, home, "T-82Y", "maestro/T-82Y")
+    add_worktree(repo, home, "T-82Y", "maestro/T-82Y")
     _merge_commits_to_origin(repo, origin, n=1)
 
     result = disp.sync_worktrees(cfg)
@@ -400,10 +395,10 @@ def test_two_tickets_same_checkout_and_base_different_repo_policies_diverge(home
     cfg = config_mod.load(str(home))
 
     _seed(home, "T-82A", Phase.AWAITING_CI, repo_name="x")
-    _add_worktree(repo, home, "T-82A", "maestro/T-82A")
+    add_worktree(repo, home, "T-82A", "maestro/T-82A")
     _seed(home, "T-82B", Phase.AWAITING_CI, repo_name="y")
     _ci_passing(home, "T-82B")
-    _add_worktree(repo, home, "T-82B", "maestro/T-82B")
+    add_worktree(repo, home, "T-82B", "maestro/T-82B")
     _merge_commits_to_origin(repo, origin, n=1)
 
     result = disp.sync_worktrees(cfg)
@@ -426,7 +421,7 @@ def test_per_repo_override_proven_through_a_real_dispatch_sweep(home, tmp_path):
     cfg = config_mod.load(str(home))
 
     _seed(home, "T-82Z", Phase.AWAITING_CI, repo_name="x")
-    _add_worktree(repo, home, "T-82Z", "maestro/T-82Z")
+    add_worktree(repo, home, "T-82Z", "maestro/T-82Z")
     _merge_commits_to_origin(repo, origin, n=1)
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
@@ -469,7 +464,7 @@ def test_unobserved_or_unknown_ci_state_blocks_drift_route_under_always(home, cf
                          {"state": ci_state, "failing_checks": []}, actor="dispatcher")
         snap_mod.rebuild(home, "T-82C")
     assert snap_mod.load(home, "T-82C").ci_state == ci_state
-    _add_worktree(repo, home, "T-82C", "maestro/T-82C")
+    add_worktree(repo, home, "T-82C", "maestro/T-82C")
     _merge_commits_to_origin(repo, origin, n=1)
 
     result = disp.sync_worktrees(cfg)
@@ -495,7 +490,7 @@ def test_skipped_by_policy_reaches_the_dispatch_ledger(home, cfg, tmp_path):
     cfg.repo_path = str(repo)
 
     _seed(home, "T-82L", Phase.AWAITING_CI)
-    _add_worktree(repo, home, "T-82L", "maestro/T-82L")
+    add_worktree(repo, home, "T-82L", "maestro/T-82L")
     _merge_commits_to_origin(repo, origin, n=1)
 
     disp.dispatch(cfg, DryRunSessions(), now=1000)

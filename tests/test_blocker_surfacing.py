@@ -13,7 +13,6 @@ Every test drives the real surface: a real `dispatch(cfg, DryRunSessions(),
 ...)` sweep or the real CLI over a temp home, then asserts on the heartbeat
 and the rendered NEEDS-YOU.md.
 """
-import json
 
 from maestro import cli, dispatcher as disp, event_log, projection, \
     snapshot as snap_mod, store

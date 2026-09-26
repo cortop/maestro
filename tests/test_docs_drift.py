@@ -74,7 +74,7 @@ def test_no_stale_reconcile_payload_count_in_docs_help_or_docstrings():
             stale.append(f"{path}: says {m.group(1)!r}, expected {expected_word!r}")
     assert not stale, (
         "stale reconcile-payload file count(s) -- update the citation(s), this is "
-        f"exactly the T-100 drift class:\n" + "\n".join(stale))
+        "exactly the T-100 drift class:\n" + "\n".join(stale))
 
 
 # ---------------------------------------------------------------------------

@@ -17,8 +17,8 @@ from maestro import cli, dispatcher as disp, fleet, inbox, projection, store
 from maestro.config import Config
 from maestro.statemachine import Phase
 
-from test_dispatcher import _EphemeralSessions, _seed
-
+from test_dispatcher import _EphemeralSessions
+from conftest import seed_phase
 # GA-14: `health.spawn_rate` now records one `implementing`-phase spawn as
 # this many agent-equivalents (1 + max_impl_turns * 1, qa_standards_axis
 # defaults off), not a bare count of 1 -- every `runaway_spawns_per_hour`
@@ -55,7 +55,7 @@ def test_dispatch_never_calls_health_report(home, monkeypatch):
     monkeypatch.setattr(health_mod, "check_launchctl", _boom)
     monkeypatch.setattr(health_mod, "run_checks", _boom)
 
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=50)
     sessions = _EphemeralSessions()
@@ -67,7 +67,7 @@ def test_dispatch_never_calls_health_report(home, monkeypatch):
 # --- arm: bounded until, reason names both numbers, breaching sweep is inert -
 
 def test_brake_arms_pause_with_bounded_until_and_reason(home):
-    _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase -- due every sweep
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)  # active phase -- due every sweep
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=120)
     sessions = _EphemeralSessions()
@@ -96,7 +96,7 @@ def test_brake_arms_pause_with_bounded_until_and_reason(home):
 # --- the full arm -> short-circuit -> self-heal sequence, one temp home -----
 
 def test_arm_short_circuits_next_sweep_then_self_heals(home):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     # T-63: T-9 (minted below) shares T-1's default priority, and by the time
     # the self-heal sweep runs, T-1 is the rotation cursor's own last-spawned
     # key for their (repo, priority) group -- so a same-priority fair-rotation
@@ -135,7 +135,7 @@ def test_arm_short_circuits_next_sweep_then_self_heals(home):
 # --- no resume wedge ----------------------------------------------------------
 
 def test_resume_does_not_immediately_rewedge_without_truncating_ledger(home):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=1800)
     sessions = _EphemeralSessions()
@@ -164,7 +164,7 @@ def test_resume_suppression_expires_and_brake_resumes_working(home):
     once it elapses the brake can trip again on a still-hot rate. The grace
     is anchored to the prior armed pause's own `until` (t0+13) + cooldown
     (10) == t0+23, independent of exactly when the human resumed."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=10)
     sessions = _EphemeralSessions()
@@ -194,7 +194,7 @@ def test_human_signal_spawns_count_toward_brake_same_total_as_doctor(home):
     and the sweep that arms it agrees with `maestro doctor`'s own verdict on
     the same observed total."""
     (home / "config.toml").write_text("[maestro]\nrunaway_spawns_per_hour = 2\n")
-    _seed(home, "T-1", Phase.READY)  # sleeping phase -- due only via the inbox signal
+    seed_phase(home, "T-1", Phase.READY)  # sleeping phase -- due only via the inbox signal
     inbox.append_command(home, "T-1", "ans", {"qid": "q1", "text": "go"})
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=300,
                 runaway_spawns_per_hour=2, runaway_pause_cooldown=120)
@@ -220,7 +220,7 @@ def test_human_signal_spawns_count_toward_brake_same_total_as_doctor(home):
 # --- config: one threshold, two consumers; a separate cooldown knob ---------
 
 def test_runaway_spawns_per_hour_zero_disables_both(home):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=0, runaway_pause_cooldown=120)
     sessions = _EphemeralSessions()
@@ -236,7 +236,7 @@ def test_runaway_spawns_per_hour_zero_disables_both(home):
 
 
 def test_cooldown_zero_disables_auto_pause_but_not_doctor(home):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=2, runaway_pause_cooldown=0)
     sessions = _EphemeralSessions()
@@ -263,7 +263,7 @@ def test_cooldown_configurable_via_config_toml(home):
 # --- legible on the real surfaces without further work -----------------------
 
 def test_legible_on_fleet_status_dispatch_json_workstate_and_doctor(home):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                 runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=120)
     sessions = _EphemeralSessions()

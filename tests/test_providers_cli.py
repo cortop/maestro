@@ -358,7 +358,7 @@ def test_pr_status_failure_carries_error_field(monkeypatch):
 
 def test_pr_status_success_has_no_error_key(monkeypatch):
     """Byte-identical to today on the success path -- no new key leaks in."""
-    calls = _stub_run(monkeypatch)
+    _stub_run(monkeypatch)
     status = GitHubCliVCS({}).pr_status(7)
     assert "error" not in status
 

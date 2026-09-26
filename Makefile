@@ -4,12 +4,14 @@ export MAESTRO_HOME ?= $(HOME)/.maestro
 
 PY := .venv/bin/python
 
-.PHONY: help install test test-serial diagram dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs
+.PHONY: help install test test-serial t lint diagram dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs run-tui-dev
 
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
 	@echo "make test        run the test suite in parallel (pytest-xdist, -n auto)"
 	@echo "make test-serial run the test suite in one process (easier to debug)"
+	@echo "make t F=tests/test_x.py K=expr   run a targeted subset, stop at first failure"
+	@echo "make lint        ruff (pyflakes rules) over maestro/ + tests/"
 	@echo "make diagram     regenerate docs/state-machine.md + docs/dispatch-gates.md"
 	@echo "make dry         one dispatcher sweep, read-only preview (would_mint + would_spawn)"
 	@echo "make dispatch    one REAL sweep (spawns claude reconcilers for due tickets)"
@@ -26,10 +28,10 @@ help:
 	@echo "make restore                 restore the latest backup (refuses to clobber; use FORCE=1)"
 	@echo "make prune-logs              delete stale session logs per retention settings (DRY_RUN=1 to preview)"
 	@echo "make autocomplete            install zsh completion script"
-	@echo "make run-tui-dev"
+	@echo "make run-tui-dev             launch the TUI against MAESTRO_HOME"
 
 install:
-	$(PY) -m pip -q install -e ".[dev]"
+	$(PY) -m pip -q install -e ".[dev,tui]"
 	mkdir -p $(HOME)/.local/bin && ln -sf $(PWD)/.venv/bin/maestro $(HOME)/.local/bin/maestro
 	@echo "maestro -> $$(command -v maestro)"
 
@@ -41,6 +43,13 @@ test:
 
 test-serial:
 	$(PY) -m pytest -q
+
+# Targeted run: `make t F=tests/test_ops.py`, `make t K=qa_gate`, or both.
+t:
+	$(PY) -m pytest -q -x $(F) $(if $(K),-k "$(K)",)
+
+lint:
+	$(PY) -m ruff check maestro tests
 
 # Derived, never retyped (T-50): both files are pure functions of
 # maestro/statemachine.py + an AST walk of maestro/dispatcher.py -- regenerate

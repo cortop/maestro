@@ -13,12 +13,7 @@ from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from conftest import git as _git, make_origin_and_repo as _make_origin_and_repo
-
-
-def _add_worktree(repo, home, key, branch, base="main"):
-    wt = home / "worktrees" / key
-    _git("worktree", "add", "-q", "-b", branch, str(wt), base, cwd=repo)
-    return wt
+from conftest import add_worktree
 
 
 def _merge_new_commit_to_origin(repo, origin, base="main"):
@@ -77,7 +72,7 @@ def test_sync_worktrees_routes_stale_awaiting_ci_ticket_to_implementing(home, cf
 
     _seed(home, "T-5", Phase.AWAITING_CI)
     _ci_passing(home, "T-5")
-    _add_worktree(repo, home, "T-5", "maestro/T-5")
+    add_worktree(repo, home, "T-5", "maestro/T-5")
 
     _merge_new_commit_to_origin(repo, origin)  # another ticket's PR just landed on main
 
@@ -97,7 +92,7 @@ def test_sync_worktrees_is_a_noop_when_worktree_already_current(home, cfg, tmp_p
     cfg.repo_path = str(repo)
 
     _seed(home, "T-5", Phase.IN_REVIEW)
-    _add_worktree(repo, home, "T-5", "maestro/T-5")
+    add_worktree(repo, home, "T-5", "maestro/T-5")
     # No new commits land on origin/main — nothing to sync.
 
     result = disp.sync_worktrees(cfg)
@@ -112,7 +107,7 @@ def test_sync_worktrees_skips_ticket_already_implementing(home, cfg, tmp_path):
     cfg.repo_path = str(repo)
 
     _seed(home, "T-5", Phase.IMPLEMENTING)
-    _add_worktree(repo, home, "T-5", "maestro/T-5")
+    add_worktree(repo, home, "T-5", "maestro/T-5")
     _merge_new_commit_to_origin(repo, origin)
 
     result = disp.sync_worktrees(cfg)
@@ -191,7 +186,7 @@ def test_dispatch_full_sweep_routes_and_spawns_stale_ticket(home, cfg, tmp_path)
 
     _seed(home, "T-5", Phase.AWAITING_CI)
     _ci_passing(home, "T-5")
-    _add_worktree(repo, home, "T-5", "maestro/T-5")
+    add_worktree(repo, home, "T-5", "maestro/T-5")
     _merge_new_commit_to_origin(repo, origin)
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)

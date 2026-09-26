@@ -139,7 +139,7 @@ def test_ensure_refuses_to_adopt_stale_branch_with_real_commits_and_no_prior_imp
     archive/rename suggested) rather than silently binding this run to a
     stranger's history."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo)
+    _write_config(home, repo)
     _seed_spec(home, "R-1")
 
     # A branch already exists for this key -- left over from an earlier
@@ -222,7 +222,7 @@ def test_ensure_prime_runs_exactly_once_across_reruns(home, tmp_path):
 
 def test_ensure_prime_nonzero_fails_loudly_no_marker(home, tmp_path, capsys):
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo, prime="exit 7")
+    _write_config(home, repo, prime="exit 7")
     _seed_spec(home, "G-6")
 
     capsys.readouterr()
@@ -293,7 +293,7 @@ def test_cli_worktree_ensure_honors_configured_prime_timeout(home, tmp_path, cap
     exceeds exits non-zero, writes the repo name + timeout to stderr, and
     appends no event."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo, prime="sleep 3", extra="prime_timeout = 1\n")
+    _write_config(home, repo, prime="sleep 3", extra="prime_timeout = 1\n")
     _seed_spec(home, "PT-3")
 
     capsys.readouterr()
@@ -810,7 +810,7 @@ def test_ensure_timeout_on_worktree_add_raises_loudly_and_leaves_no_partial_dir(
     partial worktree directory behind -- never the raw traceback the old code
     let escape, which left a poison-pill directory for every retry to skip."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _write_config(home, repo, extra="worktree_timeout = 1\n")
     _seed_spec(home, "H-4")
     wt = store.worktree_path(home, "H-4")
 
@@ -914,7 +914,7 @@ def test_ensure_interrupted_create_then_retry_never_reports_success_on_broken_wo
     point does any call report `created: False`/exit 0 on top of a broken
     worktree."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _write_config(home, repo, extra="worktree_timeout = 1\n")
     _seed_spec(home, "H-6")
     wt = store.worktree_path(home, "H-6")
 
@@ -1001,7 +1001,7 @@ def test_cleanup_recovery_path_timeout_surfaces_as_maestro_error_not_a_poison_pi
     lifted) still succeeds: the failed cleanup attempt left no poison-pill
     state behind for every subsequent retry to skip past."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _write_config(home, repo, extra="worktree_timeout = 1\n")
     _seed_spec(home, "H-8")
     wt = store.worktree_path(home, "H-8")
     wt.mkdir(parents=True)
@@ -1171,7 +1171,7 @@ def test_ensure_fetch_timeout_surfaces_as_maestro_error_not_a_poison_pill(
     `worktree add` even runs, so this is the earliest point on the whole path
     a timeout can happen."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo)
+    _write_config(home, repo)
     _seed_spec(home, "H-10")
     wt = store.worktree_path(home, "H-10")
 
@@ -1203,7 +1203,7 @@ def test_prime_extras_info_exclude_timeout_surfaces_as_maestro_error_not_a_poiso
     the very next ensure (now witnessed from the first attempt's successful
     create) completes cleanly."""
     origin, repo = _make_origin_and_repo(tmp_path, name="target")
-    cfg = _write_config(home, repo, extra="worktree_timeout = 1\n")
+    _write_config(home, repo, extra="worktree_timeout = 1\n")
     _seed_spec(home, "H-12")
     wt = store.worktree_path(home, "H-12")
 

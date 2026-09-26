@@ -8,7 +8,6 @@ import io
 import json
 import sys
 
-import pytest
 
 from maestro import backup, dispatcher as disp, event_log, health, projection, store
 from maestro.cli import main

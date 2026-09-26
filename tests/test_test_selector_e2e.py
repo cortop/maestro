@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 
-from maestro import dispatcher as disp, event_log, ops, snapshot as snap_mod, store
+from maestro import event_log, ops, snapshot as snap_mod, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase

@@ -2,12 +2,10 @@
 `check_ollama_models`, board-wide visibility (never a spawn gate; OC-2's spawn
 preflight is where a bad choice is actually refused) into tickets whose spec
 names `runner: pi` with a `runner_model:` absent from pi's own catalogue."""
-import io
-import json
 import subprocess
-import sys
 
-from maestro import cli, health, store
+from maestro import health, store
+from conftest import run_doctor
 
 TABLE_STDOUT = (
     "provider  model    context  max-out  thinking  images\n"
@@ -34,17 +32,6 @@ def _claude_spec(key):
 
 def _runner_spec(key, runner, model):
     return f"# {key}\napproval_tier: 1\nrunner: {runner}\nrunner_model: {model}\n\n## Intent\n{key}\n"
-
-
-def _sweep(home):
-    buf = io.StringIO()
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        code = cli.main(["--home", str(home), "doctor"])
-    finally:
-        sys.stdout = old
-    return code, json.loads(buf.getvalue())
 
 
 # --- no subprocess call when nothing to check -----------------------------------
@@ -115,7 +102,7 @@ def test_check_name_appears_in_the_doctor_registry(cfg):
 def test_real_doctor_json_warns_when_pi_model_is_absent(home, monkeypatch):
     _seed_spec(home, "T-1", _runner_spec("T-1", "pi", "glm-9.9-does-not-exist"))
     monkeypatch.setattr("maestro.providers.pi.subprocess.run", _fake_run(stdout=TABLE_STDOUT))
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0  # WARN-only, never blocks a spawn
     check = next(c for c in out["checks"] if c["name"] == "pi_models")
     assert check["status"] == "warn"
@@ -128,7 +115,7 @@ def test_real_doctor_json_ok_when_no_pi_ticket_exists(home, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("must not shell pi when nothing needs checking")
     monkeypatch.setattr("maestro.providers.pi.subprocess.run", boom)
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "pi_models")
     assert check["status"] == "ok"

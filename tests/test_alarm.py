@@ -13,27 +13,15 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from maestro import alarm, dispatcher as disp, event_log, fleet, health, snapshot as snap_mod, store
+from maestro import alarm, dispatcher as disp, fleet, health, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from test_dispatcher import _EphemeralSessions
+from conftest import seed_phase
 
 _W_IMPL = disp.spawn_weight(Config(home=Path(".")), Phase.IMPLEMENTING.value)
-
-
-def _seed(home, key, phase=Phase.READY):
-    """Local override of test_dispatcher._seed: T-80's due-gate parks any
-    non-terminal ticket whose spec has no acceptance-criteria section into
-    awaiting-human before a sweep can spawn it. This file's tests are about
-    alarms/rate limiting, not ACs, so give every seeded spec a trivial AC
-    section to keep them exercising their original, unrelated behavior."""
-    store.atomic_write(store.spec_path(home, key),
-                        f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
 
 
 def _lines(path):
@@ -68,7 +56,7 @@ def test_no_op_when_unconfigured(home, cfg):
 
 def test_brake_arm_fires_exactly_once(home, tmp_path):
     log_path = tmp_path / "alarm.log"
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                  runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=120,
                  notify_command=f'printf "%s|%s|%s\\n" "$KEY" "$PHASE" "$QUESTION" >> {log_path}')
@@ -131,7 +119,7 @@ def test_spend_warn_and_hard_fire_once_each_while_persisting(home, tmp_path, cfg
 
 def test_spawn_rate_alarm_agrees_with_doctor_runaway(home, tmp_path):
     log_path = tmp_path / "alarm.log"
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg = Config(home=home, max_concurrency=1, min_spawn_interval=0,
                  runaway_spawns_per_hour=2 * _W_IMPL, runaway_pause_cooldown=0,  # brake disabled
                  notify_command=f'printf "%s|%s\\n" "$KEY" "$PHASE" >> {log_path}')
@@ -223,7 +211,7 @@ def test_broken_notify_command_and_unreachable_webhook_records_hook_error(home, 
     _write_spend_state(home, 1_000_000, 90.0)  # crosses the warn fraction, not the hard
                                                 # ceiling -- an active condition without
                                                 # also invoking the (unrelated) spend gate
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 0
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1_000_000)
@@ -243,7 +231,7 @@ def test_broken_notify_command_and_unreachable_webhook_records_hook_error(home, 
 def test_corrupt_alarm_state_records_hook_error_and_sweep_still_spawns(home, cfg):
     cfg.notify_command = "true"
     store.atomic_write(home / "derived" / ".alarm.json", json.dumps("not-an-object"))
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 0
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1_000_000)

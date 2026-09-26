@@ -11,7 +11,7 @@ from maestro.providers import ollama as ollama_mod
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
-from test_health import _sweep
+from conftest import run_doctor
 
 TOOL_CAPABLE = [
     {"name": "qwen3-coder:30b", "capabilities": ["completion", "tools"]},
@@ -143,7 +143,7 @@ def test_real_doctor_json_warns_when_a_non_tool_capable_model_is_named(home, mon
     _seed_spec(home, "T-1", _runner_spec("T-1", "opencode", "mxbai-embed-large:latest"))
     monkeypatch.setattr(ollama_mod, "HttpOllamaTransport",
                          lambda: _FakeTransport(body=_tags_body(NOT_TOOL_CAPABLE)))
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0  # WARN-only, never blocks a spawn
     check = next(c for c in out["checks"] if c["name"] == "ollama_models")
     assert check["status"] == "warn"
@@ -156,7 +156,7 @@ def test_real_doctor_json_ok_when_no_non_claude_ticket_exists(home, monkeypatch)
     def boom():
         raise AssertionError("must not build a transport when nothing needs checking")
     monkeypatch.setattr(ollama_mod, "HttpOllamaTransport", boom)
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "ollama_models")
     assert check["status"] == "ok"
@@ -226,7 +226,7 @@ def test_real_doctor_json_ok_for_pi_only_board_makes_zero_ollama_requests(home, 
     requests."""
     _seed_spec(home, "T-1", _runner_spec("T-1", "pi", "glm-5.2"))
     _boom_transport(monkeypatch)
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "ollama_models")
     assert check["status"] == "ok"
@@ -236,7 +236,7 @@ def test_real_doctor_json_warns_once_when_daemon_unreachable(home, monkeypatch):
     _seed_spec(home, "T-1", _runner_spec("T-1", "opencode", "a:1b"))
     monkeypatch.setattr(ollama_mod, "HttpOllamaTransport",
                          lambda: _FakeTransport(raises=ConnectionRefusedError("refused")))
-    code, out = _sweep(home)
+    code, out = run_doctor(home)
     assert code == 0
     check = next(c for c in out["checks"] if c["name"] == "ollama_models")
     assert check["status"] == "warn"

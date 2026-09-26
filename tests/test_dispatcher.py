@@ -15,17 +15,11 @@ from maestro import event_log, inbox, ops, snapshot as snap_mod, store
 from maestro.config import Config
 from maestro.sessions import ClaudeCliSessions, DryRunSessions
 from maestro.statemachine import Phase
-
-
-def _seed(home, key, phase=Phase.READY):
-    store.atomic_write(store.spec_path(home, key), f"# {key}\napproval_tier: 0\n\n## Acceptance criteria\n- [ ] ok\n")
-    event_log.append(home, key, "TicketCreated", {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
-    event_log.append(home, key, "PhaseChanged", {"phase": phase.value}, actor="r")
-    snap_mod.rebuild(home, key)
+from conftest import seed_phase
 
 
 def test_active_phase_is_due(home):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     snap = snap_mod.load(home, "T-1")
     res = disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000)
     assert res.due and res.reason == "active"
@@ -38,7 +32,7 @@ def _ask(home, key, qid="q1", text="ok?"):
 
 
 def test_sleeping_phase_not_due_until_signal(home):
-    _seed(home, "T-1", Phase.AWAITING_HUMAN)
+    seed_phase(home, "T-1", Phase.AWAITING_HUMAN)
     _ask(home, "T-1")  # an open question is what makes awaiting-human legitimately sleep
     snap = snap_mod.load(home, "T-1")
     assert not disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000).due
@@ -88,7 +82,7 @@ def test_triaging_asks_and_routes_to_awaiting_human_then_ans_moves_it_onward(hom
 
 
 def test_spec_edit_wakes_sleeping_ticket(home):
-    _seed(home, "T-1", Phase.AWAITING_HUMAN)
+    seed_phase(home, "T-1", Phase.AWAITING_HUMAN)
     _ask(home, "T-1")
     snap = snap_mod.load(home, "T-1")
     res = disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash="DIFFERENT", now=1000)
@@ -98,7 +92,7 @@ def test_spec_edit_wakes_sleeping_ticket(home):
 def test_stranded_awaiting_human_is_due(home, cfg):
     """awaiting-human with no open question, no answered question, and no timer is
     stranded — the dispatcher must wake it so it can never sleep forever."""
-    _seed(home, "T-1", Phase.AWAITING_HUMAN)  # bare phase set, never asked
+    seed_phase(home, "T-1", Phase.AWAITING_HUMAN)  # bare phase set, never asked
     snap = snap_mod.load(home, "T-1")
     assert not snap.open_questions and not snap.answered_questions
     res = disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=1000)
@@ -109,7 +103,7 @@ def test_stranded_awaiting_human_is_due(home, cfg):
 
 
 def test_requeue_timer_wakes_awaiting_ci(home, cfg):
-    _seed(home, "T-1", Phase.AWAITING_CI)
+    seed_phase(home, "T-1", Phase.AWAITING_CI)
     ops.requeue(cfg, "T-1", 100)
     snap = snap_mod.load(home, "T-1")
     base = snap.next_requeue_at
@@ -141,7 +135,7 @@ def test_requeue_timer_holds_any_non_terminal_phase(home, cfg, phase):
     ignored it. Widened (RB-9) from a hand-picked 5 of the 9 non-terminal
     phases to all 9 -- see test_dispatcher_exhaustive.py for the full
     cross-product of this property against every other flag combination too."""
-    _seed(home, "T-1", phase)
+    seed_phase(home, "T-1", phase)
     if phase == Phase.AWAITING_HUMAN:
         _ask(home, "T-1")  # give it an open question, or it's already due via "stranded"
     ops.requeue(cfg, "T-1", 900)
@@ -160,7 +154,7 @@ def test_requeue_timer_holds_any_non_terminal_phase(home, cfg, phase):
 def test_dispatch_does_not_respawn_in_review_ticket_under_its_requeue(home, cfg):
     """Real sweeps: an in-review ticket that asked for 900s of sleep is not
     re-spawned during those 900s, even when its worker dies instantly."""
-    _seed(home, "T-1", Phase.IN_REVIEW)
+    seed_phase(home, "T-1", Phase.IN_REVIEW)
     ops.requeue(cfg, "T-1", 900)
     base = snap_mod.load(home, "T-1").next_requeue_at
     sessions = _EphemeralSessions()
@@ -182,7 +176,7 @@ def test_degraded_ticket_with_no_signal_is_never_spawned(home, cfg):
     inbox and no pending requeue timer spawns nothing for it -- and a second
     sweep still spawns nothing, proving it actually sleeps (statemachine.
     SLEEPING_PHASES) rather than merely skipping one cycle."""
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     snap = snap_mod.load(home, "T-1")
     assert not disp.is_due(home, "T-1", snap, inbox_pending=False,
                            current_spec_hash=snap.spec_hash, now=1000).due
@@ -200,7 +194,7 @@ def test_degraded_ticket_revived_by_real_inbox_command(home, cfg):
     dispatch() sweep, not asserted against a mock."""
     from maestro import cli
 
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     assert disp.dispatch(cfg, DryRunSessions(), now=1000).spawned == []
 
     # --no-nudge: this test proves revival via its own explicit dispatch()
@@ -228,7 +222,7 @@ def test_degraded_ticket_does_not_accumulate_failed_stalled_pairs(home, cfg):
     event log must be byte-for-byte unchanged after them."""
     cfg.max_spawn_attempts = 2
     cfg.min_spawn_interval = 0
-    _seed(home, "T-1", Phase.DEGRADED)
+    seed_phase(home, "T-1", Phase.DEGRADED)
     before = event_log.read(home, "T-1")
 
     sessions = _EphemeralSessions()
@@ -248,7 +242,7 @@ def test_spawn_floor_bounds_a_runaway_dispatcher(home, cfg):
     elapsed/floor regardless of how often dispatch() is called."""
     keys = ["T-1", "T-2", "T-3", "T-4"]
     for k in keys:
-        _seed(home, k, Phase.IN_REVIEW)   # active phase, no timer -> due "active"
+        seed_phase(home, k, Phase.IN_REVIEW)   # active phase, no timer -> due "active"
     cfg.max_concurrency = 4
     cfg.min_spawn_interval = 300
     sessions = _EphemeralSessions()
@@ -269,7 +263,7 @@ def test_spawn_floor_bounds_a_runaway_dispatcher(home, cfg):
 def test_human_signal_bypasses_the_spawn_floor(home, cfg):
     """A person answering a question must get an immediate reconcile — their own
     hands are the rate limit. Only machine-driven due-reasons are throttled."""
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 300
     sessions = _EphemeralSessions()
 
@@ -284,7 +278,7 @@ def test_human_signal_bypasses_the_spawn_floor(home, cfg):
 
 
 def test_spawn_floor_of_zero_disables_throttling(home, cfg):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 0
     sessions = _EphemeralSessions()
     for i in range(5):
@@ -308,7 +302,7 @@ def test_dispatch_cli_reports_throttled(home):
 
     (home / "config.toml").write_text(
         "[maestro]\nmax_concurrency = 3\nmin_spawn_interval = 300\n")
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     # Seed the ledger directly, standing in for a prior REAL spawn (the pattern
     # at test_legacy_bare_float_ledger_still_throttles above) -- a preview must
     # never be the one to write this entry. The CLI drives dispatch() off the
@@ -339,7 +333,7 @@ def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
     window and sums each entry's agent-equivalent weight (GA-14)."""
     from maestro import health
 
-    _seed(home, "T-1", Phase.IMPLEMENTING)  # active phase, no timer -> due every sweep
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)  # active phase, no timer -> due every sweep
     cfg.min_spawn_interval = 0
     cfg.max_spawn_attempts = 0  # this test's ticket never progresses observed_seq by
     # design (it's exercising the ledger, not real reconcile steps); the no-progress
@@ -372,7 +366,7 @@ def test_spawn_ledger_recent_hard_capped(home, cfg, monkeypatch):
     # the same bound in ~70 sweeps instead of the real cap's ~3,650 (which made
     # this the slowest test in the suite by 2x).
     monkeypatch.setattr(disp, "_LEDGER_RECENT_CAP", 20)
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     cfg.min_spawn_interval = 0
     cfg.max_spawn_attempts = 0  # no-progress watchdog would otherwise fail this
     # never-progressing ticket long before `recent` reaches the cap.
@@ -395,7 +389,7 @@ def test_legacy_bare_float_ledger_still_throttles(home, cfg):
     migration: a bare float is read as `last` with empty history."""
     from maestro import health
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 300
     store.write_json(disp._spawn_ledger_path(home), {"T-1": 1000.0})
     sessions = _EphemeralSessions()
@@ -412,7 +406,7 @@ def test_legacy_unweighted_recent_history_reads_without_crashing(home, cfg):
     a runaway just because maestro was upgraded."""
     from maestro import health
 
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     now = 1000.0
     store.write_json(disp._spawn_ledger_path(home),
                      {"T-1": {"last": now, "recent": [now - 5.0, now - 3.0, now - 1.0]}})
@@ -426,7 +420,7 @@ def test_legacy_unweighted_recent_history_reads_without_crashing(home, cfg):
 
 def test_dispatch_respects_concurrency_cap(home, cfg):
     for i in range(1, 6):
-        _seed(home, f"T-{i}", Phase.READY)
+        seed_phase(home, f"T-{i}", Phase.READY)
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
     assert len(report.spawned) == cfg.max_concurrency  # 3
@@ -434,8 +428,8 @@ def test_dispatch_respects_concurrency_cap(home, cfg):
 
 
 def test_dispatch_skips_live_session_for_same_key(home, cfg):
-    _seed(home, "T-1", Phase.READY)
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
+    seed_phase(home, "T-2", Phase.READY)
     sessions = DryRunSessions(active={"T-1"})  # T-1 already has a live reconciler
     report = disp.dispatch(cfg, sessions, now=1000)
     assert "T-1" in report.claimed
@@ -551,7 +545,7 @@ def test_dispatch_records_scratch_cwd_not_shared_checkout_for_triaging(home):
     commands_dir.mkdir(parents=True)
     (commands_dir / "maestro-reconcile-triaging.md").write_text("# triaging\n")
     cfg = Config(home=home, repo_path=str(repo), max_concurrency=1)
-    _seed(home, "T-1", Phase.TRIAGING)
+    seed_phase(home, "T-1", Phase.TRIAGING)
 
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
@@ -568,7 +562,7 @@ def test_dispatch_still_records_binding_path_for_local_mode(home):
     target.mkdir()
     cfg = Config(home=home, repos={"vault": {"path": str(target), "mode": "local", "default": True}},
                 max_concurrency=1)
-    _seed(home, "T-1", Phase.TRIAGING)
+    seed_phase(home, "T-1", Phase.TRIAGING)
 
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
@@ -586,7 +580,7 @@ def test_dispatch_never_spawns_git_mode_ticket_into_shared_checkout(home, phase)
     repo = home / "repo"
     (repo / ".claude" / "commands").mkdir(parents=True)
     cfg = Config(home=home, repo_path=str(repo), max_concurrency=1)
-    _seed(home, "T-1", phase)
+    seed_phase(home, "T-1", phase)
 
     sessions = DryRunSessions()
     report = disp.dispatch(cfg, sessions, now=1000)
@@ -1530,7 +1524,7 @@ def test_prune_tick_unreadable_dir_does_not_abort_the_sweep(home, cfg):
     _log(home, "T-BAD", PRUNE_NOW - 10 * 86400)
     good_old = _log(home, "T-GOOD", PRUNE_NOW - 10 * 86400)
 
-    _seed(home, "T-DUE", Phase.READY)
+    seed_phase(home, "T-DUE", Phase.READY)
 
     bad_key_dir.chmod(0o000)
     try:
@@ -1637,7 +1631,7 @@ def test_pid_reuse_claims_are_released_and_spawned(home, _children):
     keys = ["T-1", "T-2", "T-3", "T-4"]
     old_epoch = store.now_epoch() - 3600
     for key, proc in zip(keys, _children):
-        _seed(home, key, Phase.READY)
+        seed_phase(home, key, Phase.READY)
         store.write_json(claims.claim_path(home, key),
                          {"pid": proc.pid, "name": f"reconcile-{key}",
                           "ts": store.iso_now(), "epoch": old_epoch})
@@ -1657,7 +1651,7 @@ def test_genuine_reconciler_claim_survives_a_sweep(home, _children):
     """A real, correctly-identified claim (epoch matches the child's true start)
     stays claimed/confirmed and is never spawned over."""
     proc = _children[0]
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
 
     cfg = Config(home=home, max_concurrency=10)
@@ -1681,7 +1675,7 @@ def test_probe_forks_once_per_sweep_regardless_of_claim_count(home, _children):
 
     for i in range(8):
         key = f"T-{i}"
-        _seed(home, key, Phase.READY)
+        seed_phase(home, key, Phase.READY)
         pid = _children[i % len(_children)].pid
         claims.write_claim(home, key, pid, f"reconcile-{key}")
 
@@ -1713,8 +1707,8 @@ def test_watchdog_reap_during_outage_tags_failed_event_with_provider_marker(home
     import json as json_mod
 
     cfg.max_session_seconds = 100
-    _seed(home, "T-1", Phase.IMPLEMENTING)  # this is the one the watchdog reaps
-    _seed(home, "T-2", Phase.IMPLEMENTING)  # this is the one whose logs trip the streak
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)  # this is the one the watchdog reaps
+    seed_phase(home, "T-2", Phase.IMPLEMENTING)  # this is the one whose logs trip the streak
     for epoch in (100.0, 200.0, 300.0):
         session_id = f"reconcile-T-2-{epoch:.6f}"
         path = store_mod.session_stream_path(home, "T-2", session_id)
@@ -1833,7 +1827,7 @@ def test_watchdog_kills_aged_claim_and_fails_ticket(home, cfg):
     """AC: a claim older than max_session_seconds is SIGTERM'd (pid == pgid),
     released, and routed through ops.fail -- proven over a REAL process group."""
     cfg.max_session_seconds = 100
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
         claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
@@ -1864,7 +1858,7 @@ def test_watchdog_leaves_healthy_session_untouched(home, cfg):
     """AC: an under-threshold session is untouched -- no kill, no fail, still
     counted as claimed/active."""
     cfg.max_session_seconds = 3600
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")  # this process: alive, fresh
 
     reaped = disp.run_watchdog(cfg, now=store.now_epoch())
@@ -1879,7 +1873,7 @@ def test_watchdog_leaves_healthy_session_untouched(home, cfg):
 def test_watchdog_never_raises_on_already_dead_pid(home, cfg):
     """AC: the watchdog never raises when the claimed pid is already gone."""
     cfg.max_session_seconds = 100
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     dead_pid = 2_000_000_000  # almost certainly not a live pid
     claims.write_claim(home, "T-1", dead_pid, "reconcile-T-1")
     _age_claim(home, "T-1", store.now_epoch() - 10_000)
@@ -1894,7 +1888,7 @@ def test_watchdog_never_raises_on_already_dead_pid(home, cfg):
 
 def test_watchdog_disabled_when_max_session_seconds_is_zero(home, cfg):
     cfg.max_session_seconds = 0
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     claims.write_claim(home, "T-1", os.getpid(), "reconcile-T-1")
     _age_claim(home, "T-1", store.now_epoch() - 1_000_000)  # ancient, but watchdog is off
 
@@ -1911,8 +1905,8 @@ def test_dispatch_runs_watchdog_before_computing_active(home, cfg):
     reaped -- run_watchdog runs before `active = sessions.list_active()`."""
     cfg.max_session_seconds = 100
     cfg.max_concurrency = 1
-    _seed(home, "T-1", Phase.IMPLEMENTING)
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-2", Phase.READY)
     proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
         claims.write_claim(home, "T-1", proc.pid, "reconcile-T-1")
@@ -1934,7 +1928,7 @@ def test_watchdog_reaps_claim_with_stale_output_log(home, cfg, tmp_path):
     excluded from active, and its pid passed to an injected killer."""
     cfg.no_output_timeout = 300
     cfg.max_session_seconds = 7200  # far larger -- isolates the no-output rule
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     log_file = tmp_path / "T-1.jsonl"
     log_file.write_text("{}\n")
     stale = store.now_epoch() - 1000
@@ -1958,7 +1952,7 @@ def test_watchdog_no_output_rule_independent_of_claim_epoch(home, cfg, tmp_path)
     past no_output_timeout -- the two clocks are independent."""
     cfg.no_output_timeout = 300
     cfg.max_session_seconds = 0  # isolate: only the no-output rule can fire
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     log_file = tmp_path / "T-1.jsonl"
     log_file.write_text("{}\n")  # just written -- mtime is now
     claims.write_claim(home, "T-1", 424242, "reconcile-T-1", log_path=str(log_file))
@@ -1975,7 +1969,7 @@ def test_watchdog_claim_without_log_path_survives_no_output_rule(home, cfg):
     exempt from the no-output rule -- missing data never reaps."""
     cfg.no_output_timeout = 300
     cfg.max_session_seconds = 7200  # young epoch below this -- age rule can't fire either
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     claims.write_claim(home, "T-1", 424242, "reconcile-T-1")  # no log_path
 
     reaped = disp.run_watchdog(cfg, now=store.now_epoch())
@@ -1989,7 +1983,7 @@ def test_watchdog_claim_without_log_path_still_reaped_by_age_rule(home, cfg):
     it isn't blanket-exempted from the watchdog, just from the no-output check."""
     cfg.no_output_timeout = 300
     cfg.max_session_seconds = 100
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     claims.write_claim(home, "T-1", 424242, "reconcile-T-1")  # no log_path
     _age_claim(home, "T-1", store.now_epoch() - 10_000)
 
@@ -2005,10 +1999,10 @@ def test_watchdog_no_output_timeout_zero_disables_rule(home, cfg, tmp_path):
     this ticket, even with a stale log on a claim that's otherwise young."""
     cfg.no_output_timeout = 0
     cfg.max_session_seconds = 100
-    _seed(home, "T-1", Phase.IMPLEMENTING)  # aged claim, no log -- reaped by age
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)  # aged claim, no log -- reaped by age
     claims.write_claim(home, "T-1", 424242, "reconcile-T-1")
     _age_claim(home, "T-1", store.now_epoch() - 10_000)
-    _seed(home, "T-2", Phase.IMPLEMENTING)  # young claim, stale log -- untouched
+    seed_phase(home, "T-2", Phase.IMPLEMENTING)  # young claim, stale log -- untouched
     log_file = tmp_path / "T-2.jsonl"
     log_file.write_text("{}\n")
     stale = store.now_epoch() - 1_000_000
@@ -2046,7 +2040,7 @@ def test_zero_turn_spawn_fails_and_dead_letters_on_first_detection(home, cfg):
     failed -- naming the resolved command + cwd -- and dead-lettered on THIS,
     the first, detection (never a backoff/retry: a missing command file won't
     fix itself between sweeps)."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     session_id = "reconcile-T-1-1000.000000"
     log = _write_zero_turn_result(home, "T-1", session_id)
     dead_pid = 2_000_000_000  # almost certainly not a live pid
@@ -2096,7 +2090,7 @@ def test_zero_turn_pi_spawn_dead_letters_on_first_detection_same_as_claude(home,
     """AC2 (T-58): this is THE runaway net -- a pi log must trip it exactly
     like a `.stream.jsonl` one, on the very first detection, never a
     backoff/retry."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     session_id = "reconcile-T-1-1000.000000"
     log = _write_pi_zero_turn(home, "T-1", session_id)
     dead_pid = 2_000_000_000  # almost certainly not a live pid
@@ -2124,7 +2118,7 @@ def test_zero_turn_pi_spawn_leaves_real_progress_untouched(home, cfg):
     """AC2 counterpart: a dead pi session that ran real turns is left alone
     here too -- the no-progress watchdog's territory, same as the Claude
     path's own `test_zero_turn_spawn_leaves_real_progress_to_the_no_progress_watchdog`."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     session_id = "reconcile-T-1-1000.000000"
     log = store.session_pi_path(home, "T-1", session_id)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -2150,7 +2144,7 @@ def test_zero_turn_pi_spawn_leaves_real_progress_untouched(home, cfg):
 def test_zero_turn_spawn_leaves_live_session_untouched(home, cfg):
     """AC: the existing watchdog is unchanged -- a session still running is
     never touched by this detector, 0 turns so far or not."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     session_id = "reconcile-T-1-1000.000000"
     log = store.session_stream_path(home, "T-1", session_id)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -2167,7 +2161,7 @@ def test_zero_turn_spawn_leaves_real_progress_to_the_no_progress_watchdog(home, 
     """AC: a dead session that ran real turns (but appended nothing) is the
     no-progress watchdog's territory, not this detector's -- left completely
     untouched here, still gated by `_allow_spawn`/`max_spawn_attempts`."""
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     session_id = "reconcile-T-1-1000.000000"
     log = store.session_stream_path(home, "T-1", session_id)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -2221,7 +2215,7 @@ def test_dispatch_detects_zero_turn_spawn_on_the_very_next_sweep(home, cfg):
     (the log doesn't exist until spawn() writes it) -- but the VERY NEXT
     sweep does, not the Nth sweep of the no-progress watchdog."""
     cfg.min_spawn_interval = 0
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     sessions = _ZeroTurnSessions(home)
     now = 1_000_000
 
@@ -2242,7 +2236,7 @@ def test_spawn_attempts_fail_after_max_with_no_progress(home, cfg):
     """AC: N spawns with zero new events (observed_seq never advances) convert
     into a failure instead of an infinite respawn loop -- looped over real
     dispatch() sweeps with a no-op session manager."""
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.max_spawn_attempts = 3
     cfg.min_spawn_interval = 0
     sessions = _EphemeralSessions()  # "dies" instantly every sweep; appends nothing
@@ -2263,7 +2257,7 @@ def test_spawn_attempts_fail_after_max_with_no_progress(home, cfg):
 def test_spawn_attempts_reset_when_observed_seq_advances(home, cfg):
     """Real progress (an appended event) resets the no-progress counter, so a
     normally-converging ticket is never penalized."""
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.max_spawn_attempts = 2
     cfg.min_spawn_interval = 0
     sessions = _EphemeralSessions()
@@ -2287,7 +2281,7 @@ def test_paused_sweep_mints_and_spawns_nothing(home, cfg):
     must touch neither — no mint, no spawn, no backup, inbox stays unacked."""
     from maestro import fleet
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     inbox.append_new(home, "queued while paused", key="T-9")
     fleet.pause(home, reason="testing")
 
@@ -2313,7 +2307,7 @@ def test_pause_has_no_human_bypass(home, cfg):
     also skip the kill switch."""
     from maestro import fleet
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     inbox.append_command(home, "T-1", "ans", {"qid": "q1", "text": "go"})
     fleet.pause(home, reason="no bypass")
 
@@ -2325,7 +2319,7 @@ def test_pause_has_no_human_bypass(home, cfg):
 def test_paused_sweep_fails_safe_on_corrupt_pause_file(home, cfg):
     from maestro import fleet
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     store.atomic_write(fleet.pause_path(home), "{not json at all")
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert report.paused is True and report.spawned == []
@@ -2334,7 +2328,7 @@ def test_paused_sweep_fails_safe_on_corrupt_pause_file(home, cfg):
 def test_paused_sweep_fails_safe_on_garbage_until(home, cfg):
     from maestro import fleet
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     store.atomic_write(fleet.pause_path(home),
                        '{"since": 1, "until": "not-a-timestamp", "reason": "x"}')
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
@@ -2346,7 +2340,7 @@ def test_past_until_auto_resumes_mid_sweep(home, cfg):
     full normal sweep in that SAME dispatch() call — the due key is spawned."""
     from maestro import fleet
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     now = 1_000_000
     fleet.pause(home, until=now - 10, reason="expired")
 
@@ -2359,7 +2353,7 @@ def test_past_until_auto_resumes_mid_sweep(home, cfg):
 def test_future_until_stays_paused_across_sweeps(home, cfg):
     from maestro import fleet
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     now = 1_000_000
     fleet.pause(home, until=now + 3600, reason="future")
 
@@ -2411,7 +2405,7 @@ def test_raising_hook_does_not_abort_the_sweep(home, cfg, monkeypatch):
         raise RuntimeError("network is down")
 
     monkeypatch.setattr(disp, "sync_vcs", _boom)
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert report.spawned == ["T-1"]
     assert "sync_vcs" in report.hook_errors
@@ -2435,7 +2429,7 @@ def test_every_listed_hook_is_wrapped(home, cfg, monkeypatch):
         def _boom(*a, **k):
             raise RuntimeError("boom")
         monkeypatch.setattr(mod, attr, _boom)
-        _seed(home, "T-hook", Phase.READY)
+        seed_phase(home, "T-hook", Phase.READY)
         report = disp.dispatch(cfg, DryRunSessions(), now=2000 + i)
         assert report.spawned == ["T-hook"], f"{name} hook aborted the sweep"
         assert name in report.hook_errors
@@ -2446,7 +2440,7 @@ def test_every_listed_hook_is_wrapped(home, cfg, monkeypatch):
 
 
 def test_healthy_sweep_has_no_hook_errors(home, cfg):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert report.hook_errors == {}
 
@@ -2459,10 +2453,10 @@ def test_malformed_event_does_not_stop_the_sweep(home, cfg):
     PhaseChanged with an unrecognized `phase`) folds cleanly now that `fold`
     is total (law b) -- no exception, so the corrupt ticket itself is not even
     knocked out of the sweep, and every other due ticket still spawns."""
-    _seed(home, "T-bad", Phase.READY)
+    seed_phase(home, "T-bad", Phase.READY)
     event_log.append(home, "T-bad", "PhaseChanged", {"phase": "totally-bogus"}, actor="r")
     snap_mod.rebuild(home, "T-bad")
-    _seed(home, "T-good", Phase.READY)
+    seed_phase(home, "T-good", Phase.READY)
 
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert "T-good" in report.spawned
@@ -2476,8 +2470,8 @@ def test_fold_wrap_records_failure_on_report(home, cfg, monkeypatch):
     (see test_raising_hook_does_not_abort_the_sweep above) -- if it somehow
     still raises for one ticket, that must not stop the other due tickets from
     being found and spawned, and the failure must be recorded on the report."""
-    _seed(home, "T-bad", Phase.READY)
-    _seed(home, "T-good", Phase.READY)
+    seed_phase(home, "T-bad", Phase.READY)
+    seed_phase(home, "T-good", Phase.READY)
 
     real = disp._load_and_refresh_snapshot
 
@@ -2497,7 +2491,7 @@ def test_fold_wrap_records_failure_on_report(home, cfg, monkeypatch):
 
 
 def test_dispatch_appends_one_ledger_line_per_sweep(home, cfg):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     disp.dispatch(cfg, DryRunSessions(), now=1000)
     disp.dispatch(cfg, DryRunSessions(), now=1001)
     lines = disp.dispatch_ledger_path(home).read_text().splitlines()
@@ -2512,8 +2506,8 @@ def test_ledger_records_every_decision_kind(home, cfg):
     spawned all show up in the same sweep's ledger line."""
     _seed_with_deps(home, "T-dep", Phase.IMPLEMENTING)
     _seed_with_deps(home, "T-blocked", Phase.READY, depends_on=["T-dep"])
-    _seed(home, "T-claimed", Phase.READY)
-    _seed(home, "T-spawn", Phase.READY)
+    seed_phase(home, "T-claimed", Phase.READY)
+    seed_phase(home, "T-spawn", Phase.READY)
     cfg.max_concurrency = 2  # one free slot: T-dep (first due, alphabetically) gets it
     sessions = DryRunSessions(active={"T-claimed"})
 
@@ -2527,7 +2521,7 @@ def test_ledger_records_every_decision_kind(home, cfg):
 
 
 def test_ledger_is_size_capped(home, cfg):
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     cfg.min_spawn_interval = 0
     # Exercises the dispatch ledger's own line cap, not the GA-5 runaway brake --
     # with the floor off, the default budget (12/h) would otherwise trip the
@@ -2542,8 +2536,8 @@ def test_ledger_is_size_capped(home, cfg):
 
 
 def test_key_decisions_tail_filters_to_one_key(home, cfg):
-    _seed(home, "T-1", Phase.READY)
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
+    seed_phase(home, "T-2", Phase.READY)
     cfg.min_spawn_interval = 0
     for i in range(3):
         disp.dispatch(cfg, DryRunSessions(), now=1000 + i)
@@ -2558,7 +2552,7 @@ def test_why_cli_reports_a_key_recent_decisions(home, cfg):
     proven through the real CLI."""
     from maestro import cli
 
-    _seed(home, "T-1", Phase.READY)
+    seed_phase(home, "T-1", Phase.READY)
     disp.dispatch(cfg, DryRunSessions(), now=1000)
 
     buf = io.StringIO()
@@ -2592,7 +2586,7 @@ def test_why_cli_empty_for_unknown_key(home):
 
 
 def test_run_compact_tick_disabled_by_default(home, cfg):
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     assert cfg.compact_interval == 0
     result = disp.run_compact_tick(cfg, now=1000)
     assert result == {"compacted": []}
@@ -2601,7 +2595,7 @@ def test_run_compact_tick_disabled_by_default(home, cfg):
 def test_run_compact_tick_skips_keys_under_min_events(home, cfg):
     cfg.compact_interval = 60
     cfg.compact_min_events = 1000  # far above what _seed produces
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
     result = disp.run_compact_tick(cfg, now=1000)
     assert result == {"compacted": []}
 
@@ -2609,7 +2603,7 @@ def test_run_compact_tick_skips_keys_under_min_events(home, cfg):
 def test_run_compact_tick_compacts_and_is_cursor_gated(home, cfg):
     cfg.compact_interval = 60
     cfg.compact_min_events = 1  # T-1 has >= 1 folded event
-    _seed(home, "T-1", Phase.IMPLEMENTING)
+    seed_phase(home, "T-1", Phase.IMPLEMENTING)
 
     r1 = disp.run_compact_tick(cfg, now=1000)
     assert r1["compacted"] == ["T-1"]
@@ -2627,7 +2621,7 @@ def test_run_compact_tick_compacts_and_is_cursor_gated(home, cfg):
 
 def test_run_archive_tick_disabled_when_archive_after_is_none(home, cfg):
     assert cfg.archive_after is None
-    _seed(home, "T-1", Phase.DONE)
+    seed_phase(home, "T-1", Phase.DONE)
     result = disp.run_archive_tick(cfg, now=1000)
     assert result == {"archived": []}
     assert store.ticket_dir(home, "T-1").exists()  # untouched
@@ -2635,7 +2629,7 @@ def test_run_archive_tick_disabled_when_archive_after_is_none(home, cfg):
 
 def test_run_archive_tick_respects_grace_period(home, cfg):
     cfg.archive_after = 100
-    _seed(home, "T-1", Phase.DONE)
+    seed_phase(home, "T-1", Phase.DONE)
     snap = snap_mod.load(home, "T-1")
     done_epoch = datetime.fromisoformat(snap.updated_ts).timestamp()
 
@@ -2653,8 +2647,8 @@ def test_dispatch_archives_done_ticket_absent_from_next_sweep_decisions(home, cf
     """AC4: a real dispatch() sweep archives a DONE ticket, and the following
     sweep's ledger decisions no longer mention it -- list_keys stopped seeing it."""
     cfg.archive_after = 0
-    _seed(home, "T-1", Phase.DONE)
-    _seed(home, "T-2", Phase.READY)
+    seed_phase(home, "T-1", Phase.DONE)
+    seed_phase(home, "T-2", Phase.READY)
 
     r1 = disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert "T-1" in r1.hook_errors.get("archive_tick", "") or True  # no error expected
