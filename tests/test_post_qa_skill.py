@@ -313,6 +313,99 @@ def test_unset_knob_produces_no_event_and_no_spawn(home, cfg):
     assert not any(e["type"] == "PostQaSkillSpawned" for e in after)
 
 
+def test_non_stack_ticket_spawn_event_is_byte_identical_to_before_t133(home, cfg):
+    """AC4: a ticket without a stack (`pr_stack` empty) is unaffected by the
+    per-entry spawning this ticket adds -- same one event, same payload shape
+    (no `pr_number` key), as before this ticket."""
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_ticket(home, "T-1")
+    _qa_pass_to_awaiting_ci(cfg, "T-1")
+
+    sessions = DryRunSessions()
+    disp.dispatch(cfg, sessions, now=1000)
+
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert len(spawned_events) == 1
+    assert set(spawned_events[0]["payload"]) == {"skill", "tree_key"}
+
+
+# ---------------------------------------------------------------------------
+# T-133: a split stack (T-126's `pr_stack`) gets its own post-QA spawn per
+# open PR -- one per sweep, since only one spawn is allowed per key per sweep
+# (an active-session guard serializes the rest onto later sweeps).
+# ---------------------------------------------------------------------------
+
+def _seed_stack_ticket(home, key, n=3):
+    """An *n*-entry approved-split stack, mirroring exactly what the
+    implementing skill's "Approved split" block appends (T-126): one
+    `PrOpened` per entry, index 0-based, each carrying its own `stack`
+    sub-payload. PR numbers are 100, 101, 102, ... in stack order."""
+    store.atomic_write(store.spec_path(home, key), f"# {key}\n\n## Acceptance criteria\n{AC_TEXT}\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": key, "spec_hash": disp.spec_hash_on_disk(home, key)}, actor="d")
+    for i in range(n):
+        pr = 100 + i
+        base = "main" if i == 0 else f"maestro/{key}-{i}"
+        event_log.append(home, key, "PrOpened", {
+            "number": pr, "url": f"https://example.com/pull/{pr}", "draft": True,
+            "stack": {"index": i, "total": n, "branch": f"maestro/{key}-{i+1}", "base": base},
+        }, actor="r")
+    snap_mod.rebuild(home, key)
+
+
+def test_stacked_ticket_spawns_once_per_entry_across_three_sweeps(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_stack_ticket(home, "T-1", n=3)
+    _qa_pass_to_awaiting_ci(cfg, "T-1")
+
+    fired_prs = []
+    fired_urls = []
+    for now in (1000, 2000, 3000):
+        sessions = DryRunSessions()
+        disp.dispatch(cfg, sessions, now=now)
+        spawns = _skill_spawns(sessions)
+        assert len(spawns) == 1
+        _, _, _, _, _, _, _, env_overlay, *_ = spawns[0]
+        fired_prs.append(env_overlay["MAESTRO_POST_QA_PR_NUMBER"])
+        fired_urls.append(env_overlay["MAESTRO_POST_QA_PR_URL"])
+
+    assert sorted(fired_prs) == ["100", "101", "102"]
+    assert sorted(fired_urls) == [f"https://example.com/pull/{n}" for n in (100, 101, 102)]
+
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert len(spawned_events) == 3
+    assert {e["payload"]["pr_number"] for e in spawned_events} == {100, 101, 102}
+    assert len({e["step_id"] for e in spawned_events}) == 3
+
+    # AC: further sweeps with no new QA pass spawn nothing more.
+    sessions4 = DryRunSessions()
+    disp.dispatch(cfg, sessions4, now=4000)
+    assert _skill_spawns(sessions4) == []
+    assert len([e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]) == 3
+
+
+def test_merged_stack_entry_gets_no_post_qa_spawn(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_stack_ticket(home, "T-1", n=2)
+    _qa_pass_to_awaiting_ci(cfg, "T-1")
+    event_log.append(home, "T-1", "PrUpdated", {"merged": True, "stack_index": 0}, actor="dispatcher")
+    snap_mod.rebuild(home, "T-1")
+
+    sessions = DryRunSessions()
+    disp.dispatch(cfg, sessions, now=1000)
+
+    spawns = _skill_spawns(sessions)
+    assert len(spawns) == 1
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert len(spawned_events) == 1
+    assert spawned_events[0]["payload"]["pr_number"] == 101  # the unmerged entry only
+
+    # No further entry to fire for -- a later sweep is a no-op.
+    sessions2 = DryRunSessions()
+    disp.dispatch(cfg, sessions2, now=2000)
+    assert _skill_spawns(sessions2) == []
+
+
 # ---------------------------------------------------------------------------
 # T-117: a non-claude post_qa_skill_runner runs through the exact same
 # `_runner_preflight` the main spawn loop uses, but a non-"ok" outcome is a
@@ -490,6 +583,51 @@ def test_trigger_post_qa_skill_fires_again_with_no_dedup_across_two_calls(home, 
     assert spawned_events[0]["step_id"] != spawned_events[1]["step_id"]
 
 
+# ---------------------------------------------------------------------------
+# T-133: `trigger_post_qa_skill`'s optional `pr_number` targets one stack
+# entry explicitly instead of whichever PR the snapshot mirror tracks.
+# ---------------------------------------------------------------------------
+
+def test_trigger_post_qa_skill_pr_number_targets_stack_entry(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_stack_ticket(home, "T-1", n=3)
+
+    sessions = RoutingSessions({"claude": DryRunSessions()})
+    result = disp.trigger_post_qa_skill(cfg, sessions, "T-1", pr_number=101)
+
+    assert result == {"key": "T-1", "skill": "/my-pr-polish", "runner": "claude", "pid": None}
+    spawned = sessions.delegates["claude"].spawned
+    assert len(spawned) == 1
+    _, _, _, _, _, _, _, env_overlay, *_ = spawned[0]
+    assert env_overlay["MAESTRO_POST_QA_PR_NUMBER"] == "101"
+    assert env_overlay["MAESTRO_POST_QA_PR_URL"] == "https://example.com/pull/101"
+    spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
+    assert spawned_events[0]["payload"]["pr_number"] == 101
+
+
+def test_trigger_post_qa_skill_pr_number_omitted_uses_currently_tracked_pr(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_stack_ticket(home, "T-1", n=3)  # mirror tracks entry 0 (PR 100) at open time
+
+    sessions = RoutingSessions({"claude": DryRunSessions()})
+    disp.trigger_post_qa_skill(cfg, sessions, "T-1")
+
+    spawned = sessions.delegates["claude"].spawned
+    _, _, _, _, _, _, _, env_overlay, *_ = spawned[0]
+    assert env_overlay["MAESTRO_POST_QA_PR_NUMBER"] == "100"
+
+
+def test_trigger_post_qa_skill_unknown_pr_number_raises(home, cfg):
+    cfg.post_qa_skill = "/my-pr-polish"
+    _seed_stack_ticket(home, "T-1", n=3)
+
+    sessions = RoutingSessions({"claude": DryRunSessions()})
+    with pytest.raises(store.MaestroError, match="not in this ticket's stack"):
+        disp.trigger_post_qa_skill(cfg, sessions, "T-1", pr_number=999)
+
+    assert not any(e["type"] == "PostQaSkillSpawned" for e in event_log.read(home, "T-1"))
+
+
 def test_trigger_post_qa_skill_raises_on_pi_preflight_failure_with_reason(home, cfg):
     _enable(cfg, "pi")
     cfg.post_qa_skill = "/my-pr-polish"
@@ -546,3 +684,33 @@ def test_cli_trigger_post_qa_no_post_qa_skill_configured_errors_cleanly(home, ca
     err = capsys.readouterr().err
     assert "error:" in err
     assert "post_qa_skill" in err
+
+
+def _run_cli_trigger_post_qa_with_pr(home, key, pr):
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        code = cli.main(["--home", str(home), "trigger-post-qa", key, "--pr", str(pr)])
+    finally:
+        sys.stdout = old
+    return code, buf.getvalue()
+
+
+def test_cli_trigger_post_qa_pr_flag_targets_stack_entry(home, monkeypatch):
+    (home / "config.toml").write_text(
+        '[maestro]\nrepo_path = "/repo/default"\npost_qa_skill = "/my-pr-polish"\n',
+        encoding="utf-8")
+    _seed_stack_ticket(home, "T-1", n=3)
+    sessions = DryRunSessions()
+    monkeypatch.setattr("maestro.cli.ClaudeCliSessions", lambda *a, **kw: sessions)
+
+    code, out = _run_cli_trigger_post_qa_with_pr(home, "T-1", 101)
+
+    assert code == 0
+    result = json.loads(out)
+    assert result == {"key": "T-1", "skill": "/my-pr-polish", "runner": "claude", "pid": None}
+    assert len(sessions.spawned) == 1
+    _, _, _, _, _, _, _, env_overlay, *_ = sessions.spawned[0]
+    assert env_overlay["MAESTRO_POST_QA_PR_NUMBER"] == "101"
+    assert env_overlay["MAESTRO_POST_QA_PR_URL"] == "https://example.com/pull/101"

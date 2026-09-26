@@ -2200,7 +2200,8 @@ def _post_qa_skill_runner(cfg: Config, binding) -> tuple[str, str | None]:
 
 
 def _spawn_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, skill: str,
-                         runner: str, runner_model: str | None, binding) -> int | None:
+                         runner: str, runner_model: str | None, binding,
+                         pr_number: int | None = None, pr_url: str | None = None) -> int | None:
     """T-117: the one `sessions.spawn` call for `post_qa_skill`, shared by
     `sync_post_qa_skill` (automatic, gated on a fresh QA pass) and
     `trigger_post_qa_skill` (manual, ungated) -- "exactly one definition" of
@@ -2219,13 +2220,29 @@ def _spawn_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, skill:
     through the Skill tool is permission-gated. That is latent rather than live
     today only because `post_qa_skill_runner` is pi, which discards
     allowedTools -- flip it back to claude and the denial appears.
+
+    T-133: *pr_number*/*pr_url*, when given, name the ONE PR this spawn is
+    for -- carried in via env overlay (`MAESTRO_POST_QA_PR_NUMBER`/
+    `MAESTRO_POST_QA_PR_URL`) rather than the flattened `f"{command} {key}"`
+    prompt, so the shared prompt-composition shape every other spawn also
+    uses stays untouched. The spawned skill must use these instead of
+    inferring the target from the snapshot's `pr_number` mirror, which for a
+    stacked ticket tracks only whichever entry is CURRENTLY the active poll
+    target. Omitted (both None, the pre-T-133 call shape) leaves the env
+    byte-identical to before this ticket.
     """
     cwd = _worker_cwd(cfg, key)
     model, effort = _resolve_model_effort(cfg, key)
     allowed_tools = (["Bash(maestro show:*)"] + skill_grant(skill)
                      + resolved_allowed_tools(cfg, binding))
+    env_overlay: dict[str, str] = {}
+    if pr_number is not None:
+        env_overlay["MAESTRO_POST_QA_PR_NUMBER"] = str(pr_number)
+    if pr_url is not None:
+        env_overlay["MAESTRO_POST_QA_PR_URL"] = pr_url
     return sessions.spawn(key, skill, cwd, model=model, effort=effort,
                           allowed_tools=allowed_tools, disallowed_tools=MERGE_DENYLIST,
+                          env_overlay=env_overlay or None,
                           runner=runner, runner_model=runner_model)
 
 
@@ -2292,6 +2309,20 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
     reaction to the very same outcomes. `runner_probe`/`runner_verdict` mirror
     `dispatch()`'s own params of the same name, threaded through by its
     caller so a test can inject a fake probe/verdict into a real sweep.
+
+    T-133: a split ticket (`snap.pr_stack` non-empty) fires once PER unmerged
+    stack entry, since only ONE PR is ever the mirror's active poll target
+    (`snap.pr_number`) at a time -- the other entries would otherwise never
+    get their own post-QA pass. `qa_all_passing` is still the ticket-wide gate
+    (QA reviews the whole diff once, not per PR), so `_post_qa_tree_key`
+    stays a single ticket-wide fingerprint; only the step-id (and so the
+    idempotency key) gains the PR number, so each entry gets its own
+    reservation: `postqa-{key}-{pr_number}-{tree_key}`. A merged entry is
+    skipped outright. At most one spawn per key per sweep, same as the
+    non-stack case -- an active-session guard already serializes further
+    entries onto later sweeps, so a 3-entry stack takes 3 sweeps to clear. A
+    ticket with no stack (`pr_stack` empty, the common case) is unchanged:
+    one fire, keyed `postqa-{key}-{tree_key}` exactly as before this ticket.
     """
     from . import repos as repos_mod
 
@@ -2326,6 +2357,25 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
             if outcome != "ok":
                 continue  # T-117: never _ask_park here -- retried automatically next sweep
         tree_key = _post_qa_tree_key(snap)
+        if snap.pr_stack:
+            # T-133: one reservation per unmerged entry -- fire at most one
+            # per key this sweep (the active-session guard serializes any
+            # further entries onto later sweeps, same as a real reconciler).
+            for entry in sorted((e for e in snap.pr_stack if not e.get("merged")),
+                                 key=lambda e: e.get("index") or 0):
+                pr_number = entry.get("number")
+                ev = event_log.append(
+                    home, key, E.POST_QA_SKILL_SPAWNED,
+                    {"skill": skill, "tree_key": tree_key, "pr_number": pr_number},
+                    actor="dispatcher", step_id=f"postqa-{key}-{pr_number}-{tree_key}")
+                if ev is None:
+                    continue  # already fired for this entry's exact QA-pass fingerprint
+                _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding,
+                                     pr_number=pr_number, pr_url=entry.get("url"))
+                active = sessions.list_active()
+                fired.append(key)
+                break
+            continue
         ev = event_log.append(home, key, E.POST_QA_SKILL_SPAWNED,
                               {"skill": skill, "tree_key": tree_key},
                               actor="dispatcher", step_id=f"postqa-{key}-{tree_key}")
@@ -2338,6 +2388,7 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
 
 
 def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, *,
+                          pr_number: int | None = None,
                           runner_probe: Callable[[str], dict] | None = None,
                           runner_verdict: Callable[[str], Callable] | None = None) -> dict:
     """T-117: [human] manual escape hatch for `post_qa_skill` (`maestro
@@ -2369,6 +2420,13 @@ def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, *,
     `sync_post_qa_skill`/`dispatch` accept, threaded straight into
     `_runner_preflight` -- unset (the CLI/TUI callers' case) falls back to the
     real default probe/verdict factories, unchanged production behavior.
+
+    T-133: *pr_number*, when given, targets one entry of a split ticket's
+    `pr_stack` explicitly (its own URL is looked up from the entry) instead
+    of whichever PR the snapshot's mirror currently tracks -- raises
+    `store.MaestroError` if it names a PR not in the stack. Omitted (the
+    default) keeps today's behavior: the currently-tracked PR (`snap.
+    pr_number`/`snap.pr_url`), unchanged for a non-stacked ticket.
     """
     from . import repos as repos_mod
 
@@ -2388,11 +2446,25 @@ def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, *,
             state={}, home=home)
         if outcome != "ok":
             raise store.MaestroError(f"{key}: runner {runner!r} preflight failed ({outcome}): {reason}")
+    snap = snap_mod.load(home, key)
+    target_pr_number = snap.pr_number
+    target_pr_url = snap.pr_url
+    if pr_number is not None:
+        target_pr_number = pr_number
+        entry = next((e for e in snap.pr_stack if e.get("number") == pr_number), None)
+        if entry is not None:
+            target_pr_url = entry.get("url")
+        elif snap.pr_stack:
+            raise store.MaestroError(f"{key}: PR #{pr_number} is not in this ticket's stack")
+        else:
+            target_pr_url = snap.pr_url if pr_number == snap.pr_number else None
     step_id = f"postqa-manual-{key}-{store.now_epoch()}"
-    event_log.append(home, key, E.POST_QA_SKILL_SPAWNED,
-                     {"skill": skill, "tree_key": "manual"},
-                     actor="human", step_id=step_id)
-    pid = _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding)
+    payload: dict = {"skill": skill, "tree_key": "manual"}
+    if target_pr_number is not None:
+        payload["pr_number"] = target_pr_number
+    event_log.append(home, key, E.POST_QA_SKILL_SPAWNED, payload, actor="human", step_id=step_id)
+    pid = _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding,
+                               pr_number=target_pr_number, pr_url=target_pr_url)
     return {"key": key, "skill": skill, "runner": runner, "pid": pid}
 
 
