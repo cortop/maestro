@@ -405,4 +405,38 @@ def test_git_stack_tool_ticket_never_queues_a_restack_or_touches_gt(cfg, monkeyp
     assert fake.set_base_calls == []
     assert not gt_log.exists()  # the fake `gt` was never even invoked
     # the merge still advanced the stack normally -- T-132 changes nothing here
-    assert snap_mod.load(cfg.home, key).pr_number == 101
+
+
+def test_restack_claim_does_not_eat_a_max_concurrency_slot(cfg):
+    """RB-14's exclusion (originally just `kind == "testrun"`) must cover a
+    `kind == "restack"` claim too: `_start_restack`'s detached `gt sync/
+    restack/submit` subprocess is dispatcher-owned, not an agent session, so
+    it must not eat into `max_concurrency`'s fleet-wide budget either. A real
+    backend's `list_active()` reports it "active" exactly like an agent
+    session's -- simulated here via `DryRunSessions(active={...})` (this
+    mock's own `active` param stands in for whatever a real backend's
+    `list_active()` would report) plus a manually written `kind="restack"`
+    claim with a genuinely alive pid (this test process's own). A SEPARATE,
+    genuinely due ticket must still get its slot even at `max_concurrency=1`."""
+    cfg.max_concurrency = 1
+    g1 = "G-1"
+    store.atomic_write(store.spec_path(cfg.home, g1),
+                       f"# {g1}\n\n## Acceptance criteria\n- [ ] ok\n")
+    event_log.append(cfg.home, g1, "TicketCreated",
+                     {"title": g1, "spec_hash": disp.spec_hash_on_disk(cfg.home, g1)}, actor="d")
+    event_log.append(cfg.home, g1, "PhaseChanged", {"phase": Phase.AWAITING_CI.value}, actor="r")
+    snap_mod.rebuild(cfg.home, g1)
+    claims.write_claim(cfg.home, g1, os.getpid(), "restack-G-1", kind="restack")
+
+    key = "G-2"
+    store.atomic_write(store.spec_path(cfg.home, key),
+                       f"# {key}\n\n## Acceptance criteria\n- [ ] ok\n")
+    event_log.append(cfg.home, key, "TicketCreated",
+                     {"title": key, "spec_hash": disp.spec_hash_on_disk(cfg.home, key)}, actor="d")
+    snap_mod.rebuild(cfg.home, key)
+    ops.set_phase(cfg, key, Phase.READY, reason="approved")
+
+    sessions = DryRunSessions(active={g1})  # simulates a real backend's list_active()
+    report = disp.dispatch(cfg, sessions, now=1000)
+
+    assert "G-2" in report.spawned

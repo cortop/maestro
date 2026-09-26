@@ -3607,7 +3607,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
         # computed, rather than teaching every backend's `list_active()` (or
         # `claims.active_keys` itself, whose other callers -- e.g. spend.py's
         # cost-settlement check -- have no reason to make the same exclusion).
-        active -= {k for k, c in claims.all_claims(home).items() if c.get("kind") == "testrun"}
+        # T-132: a `gt sync`/`gt restack`/`gt submit` restack subprocess
+        # (`_start_restack`) is the same shape -- detached, dispatcher-owned,
+        # not an agent session -- so it gets the identical exclusion.
+        active -= {k for k, c in claims.all_claims(home).items()
+                   if c.get("kind") in ("testrun", "restack")}
         due: list[tuple[str, str]] = []
         claimed: list[str] = []
         observed_seq_by_key: dict[str, int] = {}
