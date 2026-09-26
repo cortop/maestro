@@ -485,7 +485,11 @@ def test_sync_vcs_stack_advances_without_removing_worktree(cfg, monkeypatch, tmp
     assert wt.exists()  # worktree stays -- more of the stack still to merge
 
     disp.sync_vcs(cfg, now=2000)  # next sweep polls the NEW pr_number fresh
-    assert fake.status_calls[-1] == ("x/y", 101)
+    assert fake.status_calls[1] == ("x/y", 101)  # the tracked entry, polled first
+    # T-130: the still-open, still-unmerged entry 2 (102) is now polled too --
+    # it just doesn't drive merge detection/advance/undraft, which stay scoped
+    # to the tracked entry (101) above.
+    assert fake.status_calls[-1] == ("x/y", 102)
     assert snap_mod.load(cfg.home, "T-5").ci_state == "unknown"  # 101's own state
 
 
@@ -503,6 +507,144 @@ def test_sync_vcs_stack_finalizes_and_removes_worktree_on_last_merge(cfg, monkey
     assert snap.phase == Phase.DONE.value
     assert snap.pr_state == "merged"
     assert not wt.exists()
+
+
+# --- T-130: poll CI + reviews on every unmerged PR of a stack, not just the
+# entry currently being tracked (`snap.pr_number`).
+
+def test_sync_vcs_stack_failing_ci_on_non_tracked_entry_routes_to_implementing(cfg, monkeypatch):
+    """Entry 1 (index 1, PR 101) isn't the tracked entry (PR 100 stays
+    `snap.pr_number`) -- its failing CI must still be observed and must still
+    route the ticket back to `implementing`, naming its own PR number and
+    failing checks in the reason."""
+    fake = FakeVCS(statuses={
+        100: {"state": "OPEN", "mergeable": "MERGEABLE",
+              "head_sha": "sha100", "ci_state": "unknown", "failing_checks": []},
+        101: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha101",
+              "ci_state": "failing", "failing_checks": ["unit"]},
+    })
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed_stack(cfg, "T-5", Phase.AWAITING_CI, n=2)
+
+    disp.sync_vcs(cfg, now=1000)
+
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.IMPLEMENTING.value
+    assert snap.pr_number == 100  # the tracked entry never moved
+
+    evs = event_log.read(cfg.home, "T-5")
+    ci = [e for e in evs if e["type"] == "CiObserved"]
+    assert len(ci) == 2  # one per entry
+    entry101_ci = next(e for e in ci if e["payload"].get("pr_number") == 101)
+    assert entry101_ci["payload"]["failing_checks"] == ["unit"]
+    assert entry101_ci["payload"]["stack_index"] == 1
+    entry100_ci = next(e for e in ci if e["payload"].get("pr_number") == 100)
+    assert entry100_ci["payload"]["stack_index"] == 0
+
+    changed = [e for e in evs if e["type"] == "PhaseChanged"
+               and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+    assert changed
+    reason = changed[-1]["payload"]["reason"]
+    assert "101" in reason and "unit" in reason
+
+
+def test_sync_vcs_stack_changes_requested_on_non_tracked_entry_routes_to_implementing(cfg, monkeypatch):
+    fake = FakeVCS(
+        statuses={
+            100: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha100",
+                  "ci_state": "unknown", "failing_checks": []},
+            101: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha101",
+                  "ci_state": "unknown", "failing_checks": []},
+        },
+        reviews={101: [{"id": "c1", "state": "CHANGES_REQUESTED", "body": "please fix X",
+                        "author": "bob"}]},
+    )
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed_stack(cfg, "T-5", Phase.AWAITING_CI, n=2)
+
+    disp.sync_vcs(cfg, now=1000)
+
+    snap = snap_mod.load(cfg.home, "T-5")
+    assert snap.phase == Phase.IMPLEMENTING.value
+    assert snap.unresolved_reviews == 0  # CHANGES_REQUESTED was on PR 101, not the tracked PR 100
+
+    evs = event_log.read(cfg.home, "T-5")
+    review = [e for e in evs if e["type"] == "ReviewFeedbackReceived"][0]
+    assert review["payload"]["pr_number"] == 101
+    changed = [e for e in evs if e["type"] == "PhaseChanged"
+               and e["payload"].get("phase") == Phase.IMPLEMENTING.value]
+    assert changed
+    reason = changed[-1]["payload"]["reason"]
+    assert "101" in reason and "please fix X" in reason
+
+
+def test_sync_vcs_stack_repeated_sweep_appends_no_duplicate_events(cfg, monkeypatch):
+    """Re-running the sweep with no new CI/review changes on either entry
+    appends nothing new for either of them."""
+    fake = FakeVCS(statuses={
+        100: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha100",
+              "ci_state": "unknown", "failing_checks": []},
+        101: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha101",
+              "ci_state": "unknown", "failing_checks": []},
+    })
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed_stack(cfg, "T-5", Phase.AWAITING_CI, n=2)
+
+    disp.sync_vcs(cfg, now=1000)
+    assert {c[1] for c in fake.status_calls} == {100, 101}
+    evs_first = event_log.read(cfg.home, "T-5")
+    assert len([e for e in evs_first if e["type"] == "CiObserved"]) == 2
+
+    disp.sync_vcs(cfg, now=2000)  # unchanged CI on both entries
+    evs_second = event_log.read(cfg.home, "T-5")
+    assert len(evs_second) == len(evs_first)  # no duplicate events for any entry
+
+
+def test_sync_vcs_stack_never_repolls_a_merged_entry(cfg, monkeypatch):
+    """Polling covers only unmerged entries -- a stack entry already recorded
+    merged is never polled again, even though it's still in `pr_stack`."""
+    fake = FakeVCS(statuses={
+        101: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha101",
+              "ci_state": "unknown", "failing_checks": []},
+    })
+    _use_fake(cfg, monkeypatch, fake, interval=0)
+    _seed_stack(cfg, "T-5", Phase.AWAITING_CI, n=2)
+    # Mirror what `ops.check_merged` records on a mid-stack merge: entry 0
+    # (PR 100) merged, tracked pr_number advances to entry 1 (PR 101).
+    event_log.append(cfg.home, "T-5", "PrUpdated", {"merged": True, "stack_index": 0}, actor="r")
+    event_log.append(cfg.home, "T-5", "PrOpened",
+                     {"number": 101, "url": "https://github.com/x/y/pull/101", "draft": False},
+                     actor="r")
+    snap_mod.rebuild(cfg.home, "T-5")
+
+    disp.sync_vcs(cfg, now=1000)
+
+    assert fake.status_calls == [("x/y", 101)]  # PR 100 (merged) is never re-polled
+
+
+def test_sync_vcs_non_stack_ticket_payloads_and_reasons_unchanged(cfg, monkeypatch):
+    """A non-stack ticket's `sync_vcs` event output is byte-identical to
+    before this ticket: no `pr_number`/`stack_index` field on either event
+    type, and no "PR #<n>:" prefix on the routing reason."""
+    fake = FakeVCS(
+        statuses={42: {"state": "OPEN", "mergeable": "MERGEABLE", "head_sha": "sha1",
+                       "ci_state": "unknown", "failing_checks": []}},
+        reviews={42: [{"id": "c1", "state": "CHANGES_REQUESTED", "body": "fix it"}]},
+    )
+    _use_fake(cfg, monkeypatch, fake)
+    _seed(cfg, "T-5", Phase.AWAITING_CI)
+
+    disp.sync_vcs(cfg, now=1000)
+
+    evs = event_log.read(cfg.home, "T-5")
+    ci = [e for e in evs if e["type"] == "CiObserved"][0]
+    assert "pr_number" not in ci["payload"] and "stack_index" not in ci["payload"]
+    review = [e for e in evs if e["type"] == "ReviewFeedbackReceived"][0]
+    assert "pr_number" not in review["payload"] and "stack_index" not in review["payload"]
+
+    changed = [e for e in evs if e["type"] == "PhaseChanged"][-1]
+    assert changed["payload"]["reason"] == "changes requested: fix it"
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IMPLEMENTING.value
 
 
 def test_sync_vcs_conflicting_pr_routes_to_implementing(cfg, monkeypatch):
