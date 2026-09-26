@@ -1650,9 +1650,30 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                        snap=snap, binding=binding, vcs=vcs, env=(cred.env if cred.ok else None),
                        now=now)
             if cred.ok:
-                _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env)
+                _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env,
+                                 snap=snap)
                 _maybe_undraft(cfg, key, status, vcs, repo_slug=repo_slug,
                                pr_number=snap.pr_number, env=cred.env)
+
+                # T-130: a split stack (T-126) can have more than one PR open at
+                # once -- poll CI + reviews on every OTHER unmerged entry too, so a
+                # failure on entry 1 isn't silently missed until entry 0 merges.
+                # Merge detection, advancing to the next entry, and undrafting all
+                # stay scoped to `snap.pr_number` (the entry currently being
+                # tracked) above -- unchanged. Requires a working credential (no
+                # synthesized-status polling of entries beyond the tracked one).
+                for entry in snap.pr_stack:
+                    other_pr = entry.get("number")
+                    if entry.get("merged") or other_pr is None or other_pr == snap.pr_number:
+                        continue
+                    if Phase(snap_mod.load(home, key).phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
+                        break  # already routed away (e.g. by the tracked entry) this tick
+                    other_status = vcs.pr_status(other_pr, repo=repo_slug, env=cred.env)
+                    _observe_ci(cfg, key, other_status, phase, repo_slug=repo_slug,
+                               pr_number=other_pr, snap=snap, binding=binding, vcs=vcs,
+                               env=cred.env, now=now)
+                    _observe_reviews(cfg, key, other_pr, vcs, repo=repo_slug, env=cred.env,
+                                     snap=snap)
         except event_log.StaleAppendError:
             # Lost the fencing race against a concurrent writer (a human, a
             # reconciler, or another dispatcher tick) that appended between
@@ -1746,11 +1767,22 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
     # gets a fresh event to route on. Repeats of the SAME error still dedupe
     # by construction (same hash in -> same step-id -> `ops.fail` runs once).
     check_key = content_hash(ci_state + ":" + ",".join(failing) + ":" + (error or "") + marker)
-    sid = f"ci-{key}-{head_sha}-{check_key}"
+    # T-130: a split stack polls more than one PR per tick -- fold pr_number
+    # into the step-id so two entries' observations never collide, and stamp
+    # pr_number/stack_index onto the payload so `snapshot.fold` can attribute
+    # this observation to the right stack entry. A non-stack ticket (empty
+    # `pr_stack`) keeps the pre-T-130 sid/payload shape byte-identical (AC4).
+    stack = snap.pr_stack if snap is not None else []
+    stack_index = next((e.get("index") for e in stack if e.get("number") == pr_number), None)
+    sid = f"ci-{key}-{pr_number}-{head_sha}-{check_key}" if stack else f"ci-{key}-{head_sha}-{check_key}"
     detail = f"{len(failing)} check(s) failing: {', '.join(failing)}" if failing else ""
     payload = {"state": ci_state, "failing_checks": failing, "detail": detail}
     if error:
         payload["error"] = error
+    if stack:
+        payload["pr_number"] = pr_number
+        if stack_index is not None:
+            payload["stack_index"] = stack_index
 
     # T-123: the excerpt only makes sense on the observation that will
     # actually route to `implementing` -- capturing it on the rerun-triggering
@@ -1791,12 +1823,21 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
             # Still waiting out the post-rerun grace window -- recorded above,
             # not routed.
             return
-        reason = f"CI failing: {', '.join(failing)}"
+        # T-130: name the PR in the reason once there's more than one in
+        # flight, so a failure on a non-tracked entry doesn't read as if it
+        # were about `snap.pr_number`. A non-stack ticket keeps the bare
+        # pre-T-130 reason text (AC4).
+        prefix = f"PR #{pr_number}: " if stack else ""
+        reason = f"{prefix}CI failing: {', '.join(failing)}"
         if failure_excerpt:
             reason += f"\n{failure_excerpt}"
         ops.set_phase(cfg, key, Phase.IMPLEMENTING, reason=reason, actor="dispatcher",
                       expect=fresh.observed_seq)
-    elif ci_state == "passing" and phase == Phase.AWAITING_CI:
+    elif ci_state == "passing" and phase == Phase.AWAITING_CI and (
+            not stack or snap is None or pr_number == snap.pr_number):
+        # T-130: awaiting-ci -> in-review only fires off the entry currently
+        # being tracked -- a non-tracked stack entry going green must not
+        # advance the ticket-wide phase on its own.
         ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher",
                       expect=fresh.observed_seq)
 
@@ -1854,7 +1895,8 @@ def _review_noise_match(cfg: Config, body: str, author: str | None) -> str | Non
 
 
 def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | None = None,
-                     env: dict | None = None) -> None:
+                     env: dict | None = None, snap=None) -> None:
+    stack = snap.pr_stack if snap is not None else []
     changes_requested_body: str | None = None
     # T-108: a plain COMMENTED review with substantive body content also
     # earns one implementing pass -- just a lower-priority one than an
@@ -1872,11 +1914,18 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
         cid = r.get("id")
         if not cid:
             continue
+        # T-130: stamp pr_number/stack_index onto the payload once there's a
+        # stack, so `snapshot.fold` can attribute this comment to the right
+        # entry -- a non-stack ticket's payload stays byte-identical (AC4).
+        stack_index = next((e.get("index") for e in stack if e.get("number") == pr_number), None)
         ev = event_log.append(
             cfg.home, key, E.REVIEW_FEEDBACK_RECEIVED,
             {"comment_id": cid, "state": r.get("state"), "body": r.get("body", ""),
              "author": r.get("author"),
-             **({"path": r["path"], "line": r.get("line")} if r.get("path") else {})},
+             **({"path": r["path"], "line": r.get("line")} if r.get("path") else {}),
+             **({"pr_number": pr_number, **({"stack_index": stack_index}
+                                            if stack_index is not None else {})}
+                if stack else {})},
             actor="dispatcher", step_id=f"review-{key}-{cid}",
         )
         if ev is None:
@@ -1907,13 +1956,16 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
             where = f"{r['path']}:{r['line']}: " if r.get("path") and r.get("line") else (
                 f"{r['path']}: " if r.get("path") else "")
             inline_new.append(f"{where}{body}")
+    # T-130: name the PR once there's more than one in flight (AC2) -- a
+    # non-stack ticket keeps the bare pre-T-130 reason text (AC4).
+    prefix = f"PR #{pr_number}: " if stack else ""
     if changes_requested_body is not None:
-        reason = f"changes requested: {changes_requested_body}"
+        reason = f"{prefix}changes requested: {changes_requested_body}"
     elif commented_body is not None:
-        reason = f"review comment: {commented_body}"
+        reason = f"{prefix}review comment: {commented_body}"
     elif approved_new and (approved_body or inline_new):
         parts = ([approved_body] if approved_body else []) + inline_new
-        reason = f"approved with comments: {' | '.join(parts)}"
+        reason = f"{prefix}approved with comments: {' | '.join(parts)}"
     else:
         return
     fresh = snap_mod.rebuild(cfg.home, key)

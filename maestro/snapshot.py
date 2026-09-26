@@ -615,19 +615,34 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                 if "draft" in p:
                     s.pr_draft = p["draft"]
         elif t == E.CI_OBSERVED:
-            s.ci_state = p.get("state", s.ci_state)
-            s.failing_checks = p.get("failing_checks", [])
+            # T-130: a split stack's CiObserved carries its own `pr_number` (a
+            # non-stack ticket's never does) -- the ticket-wide `ci_state`/
+            # `failing_checks` mirror stays scoped to whichever entry is
+            # CURRENTLY tracked (merge detection/advance/undraft's own axis),
+            # exactly as before this ticket; a non-tracked entry's observation
+            # still updates its OWN `pr_stack` row below, just not the mirror.
+            ev_pr = p.get("pr_number")
+            if ev_pr is None or ev_pr == s.pr_number:
+                s.ci_state = p.get("state", s.ci_state)
+                s.failing_checks = p.get("failing_checks", [])
             if s.pr_stack:
+                target = ev_pr if ev_pr is not None else s.pr_number
                 for e in s.pr_stack:
-                    if e.get("number") == s.pr_number:
-                        e["ci_state"] = s.ci_state
+                    if e.get("number") == target:
+                        e["ci_state"] = p.get("state", e.get("ci_state"))
                         break
         elif t == E.CI_RERUN_REQUESTED:
             head_sha = p.get("head_sha")
             if head_sha:
                 s.ci_reruns[head_sha] = {"at": p.get("at"), "run_ids": p.get("run_ids", [])}
         elif t == E.REVIEW_FEEDBACK_RECEIVED:
-            if p.get("state") == "CHANGES_REQUESTED":
+            # T-130: same scoping as CiObserved above -- a stacked entry's
+            # comment only bumps the ticket-wide `unresolved_reviews` counter
+            # (what gates `_maybe_undraft`) when it's about the CURRENTLY
+            # tracked PR; a non-stack ticket's payload never carries
+            # `pr_number` at all, so this stays unconditional for it.
+            ev_pr = p.get("pr_number")
+            if p.get("state") == "CHANGES_REQUESTED" and (ev_pr is None or ev_pr == s.pr_number):
                 s.unresolved_reviews += 1
         elif t == E.REVIEW_REPLY_POSTED:
             cid, tree_sha = p.get("comment_id"), p.get("tree_sha")

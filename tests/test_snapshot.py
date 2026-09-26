@@ -305,3 +305,45 @@ def test_pr_stack_entries_default_ci_state_and_qa_verdict_to_none(home):
     _open_stack(home, "T-1")
     snap = snap_mod.rebuild(home, "T-1")
     assert all(e["ci_state"] is None and e["qa_verdict"] is None for e in snap.pr_stack)
+
+
+# ---------------------------------------------------------------------------
+# T-130: `sync_vcs` now polls every unmerged stack entry, not just the active
+# one -- CiObserved/ReviewFeedbackReceived carry their own `pr_number` (and,
+# for CI, `stack_index`) so fold can attribute a non-active entry's result to
+# ITS OWN pr_stack row, without corrupting the ticket-wide ci_state/
+# unresolved_reviews mirror (which stays scoped to the active entry -- the
+# same axis merge detection, advance, and undraft already use).
+# ---------------------------------------------------------------------------
+
+def test_ci_observed_with_pr_number_stamps_the_named_entry_not_just_active(home):
+    _open_stack(home, "T-1")
+    event_log.append(home, "T-1", "CiObserved",
+                     {"state": "failing", "pr_number": 101, "stack_index": 1}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    entry0 = next(e for e in snap.pr_stack if e["index"] == 0)
+    entry1 = next(e for e in snap.pr_stack if e["index"] == 1)
+    assert entry0["ci_state"] is None  # untouched -- the event named entry 1
+    assert entry1["ci_state"] == "failing"
+    assert snap.ci_state is None  # ticket-wide mirror tracks the ACTIVE entry (100), unaffected
+
+
+def test_review_feedback_changes_requested_on_non_active_entry_does_not_bump_unresolved_reviews(home):
+    """`unresolved_reviews` gates `dispatcher._maybe_undraft` for the entry
+    CURRENTLY being tracked -- a stacked entry that isn't active yet must not
+    be able to block it."""
+    _open_stack(home, "T-1")
+    event_log.append(home, "T-1", "ReviewFeedbackReceived",
+                     {"comment_id": "c1", "state": "CHANGES_REQUESTED", "body": "fix",
+                      "pr_number": 101}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert snap.unresolved_reviews == 0
+
+
+def test_review_feedback_changes_requested_on_active_entry_bumps_unresolved_reviews(home):
+    _open_stack(home, "T-1")
+    event_log.append(home, "T-1", "ReviewFeedbackReceived",
+                     {"comment_id": "c1", "state": "CHANGES_REQUESTED", "body": "fix",
+                      "pr_number": 100}, actor="d")
+    snap = snap_mod.rebuild(home, "T-1")
+    assert snap.unresolved_reviews == 1
