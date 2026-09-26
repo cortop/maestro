@@ -238,6 +238,17 @@ class GitHubCliVCS:
             return {"ok": False, "error": classify_gh_failure(rc, out, err)}
         return {"ok": True}
 
+    def set_base(self, pr_number: int, base: str, repo: str | None = None,
+                 env: dict | None = None) -> dict:
+        repo = repo or (self.repos[0] if self.repos else None)
+        cmd = ["gh", "pr", "edit", str(pr_number), "--base", base]
+        if repo:
+            cmd += ["--repo", repo]
+        rc, out, err = _run(cmd, env=env)
+        if rc != 0:
+            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+        return {"ok": True}
+
     def rerun_failed(self, pr_number: int, head_sha: str, repo: str | None = None,
                      env: dict | None = None) -> dict:
         repo = repo or (self.repos[0] if self.repos else None)

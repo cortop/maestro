@@ -319,6 +319,11 @@ class Snapshot:
     # reading `pr_stack` can see entry 0 passed CI/QA even after entry 1
     # becomes the active poll target.
     pr_stack: list[dict] = field(default_factory=list)
+    # T-132: the just-merged stack index a gt-managed ticket's restack is
+    # still pending for -- set by RestackQueued, cleared by the matching
+    # RestackCompleted. None (the common case: no split, or a git-tool
+    # ticket that never queues one) means no restack is outstanding.
+    pending_restack_index: int | None = None
     # T-128: comment_id -> [tree_sha, ...] already replied to, from
     # ReviewReplyPosted events -- `ops.reply_review` consults this BEFORE
     # calling the VCS provider, so a re-run at the same tree state (the worker
@@ -601,6 +606,19 @@ def _fold_pr_updated(s: Snapshot, p: dict, seq, t: str) -> None:
             entry["draft"] = p["draft"]
 
 
+def _fold_restack_queued(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.pending_restack_index = p.get("stack_index")
+
+
+def _fold_restack_completed(s: Snapshot, p: dict, seq, t: str) -> None:
+    if p.get("stack_index") == s.pending_restack_index:
+        s.pending_restack_index = None
+    for r in p.get("retargeted", []):
+        entry = _stack_entry(s, number=r.get("number"))
+        if entry is not None:
+            entry["base"] = r.get("base")
+
+
 def _fold_ci_observed(s: Snapshot, p: dict, seq, t: str) -> None:
     # T-130: a stacked entry's observation carries its own `pr_number`; only
     # the currently tracked PR's moves the ticket-wide ci_state mirror, but
@@ -734,6 +752,8 @@ _FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
     E.QUESTION_ANSWERED: _fold_question_answered,
     E.PR_OPENED: _fold_pr_opened,
     E.PR_UPDATED: _fold_pr_updated,
+    E.RESTACK_QUEUED: _fold_restack_queued,
+    E.RESTACK_COMPLETED: _fold_restack_completed,
     E.CI_OBSERVED: _fold_ci_observed,
     E.CI_RERUN_REQUESTED: _fold_ci_rerun_requested,
     E.REVIEW_FEEDBACK_RECEIVED: _fold_review_feedback_received,

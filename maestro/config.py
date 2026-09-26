@@ -439,6 +439,11 @@ _REPO_ONLY_KEYS = frozenset({
     "path", "slug", "base_branch", "branch_prefix", "default",
     "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
     "gh_account", "token_env", "prime", "test_selector",
+    # T-132: this repo's PR-stack tool override -- see _STACK_TOOLS. No
+    # board-wide [maestro] default exists, so this stays repo-only rather
+    # than a per_repo=True Knob (unlike test_command/base_drift_policy/etc,
+    # which override a board-wide default and so live in REPO_OVERRIDE_KEYS).
+    "stack_tool",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -446,6 +451,14 @@ _REPO_ONLY_KEYS = frozenset({
 # naming this set in the error, rather than silently falling back to a mode
 # that can livelock a fast-moving base branch.
 _BASE_DRIFT_POLICIES = frozenset({"always", "daily", "on_conflict"})
+
+# T-132: the whole recognized [repos.<name>] stack_tool value set -- per-repo
+# only (no board-wide [maestro] default), same fail-closed posture as
+# _BASE_DRIFT_POLICIES/language. "auto" (default, unset inherits this) lets
+# `repos.resolve_stack_tool` pick "gt" when the Graphite CLI is on PATH and
+# the repo is Graphite-initialized, else "git"; "git" forces the legacy
+# git/gh flow unconditionally, even when `gt` would otherwise qualify.
+_STACK_TOOLS = frozenset({"auto", "git"})
 
 # T-122: the whole recognized answer_fast_path value set -- fails closed
 # (raises at config.load, naming the knob) on anything outside it, same
@@ -900,6 +913,14 @@ def _load_repo_table(cfg: "Config", name: str, table: dict) -> dict:
             testlang.validate_selector_template(raw_test_selector)
         except ValueError as exc:
             raise store.MaestroError(f"config.toml: [repos.{name}] {exc}") from exc
+    # T-132: fail closed on a typo'd stack_tool too -- unset (None) is valid
+    # (RepoBinding.stack_tool's own None-means-"auto" fallback), no board-wide
+    # default to inherit (see _STACK_TOOLS), so this isn't a per_repo Knob.
+    raw_stack_tool = table.get("stack_tool") or None
+    if raw_stack_tool is not None and raw_stack_tool not in _STACK_TOOLS:
+        raise store.MaestroError(
+            f"config.toml: [repos.{name}] stack_tool must be one of "
+            f"{sorted(_STACK_TOOLS)}, got {raw_stack_tool!r}")
     out = {
         "path": table["path"],
         "slug": table.get("slug"),
@@ -918,6 +939,10 @@ def _load_repo_table(cfg: "Config", name: str, table: dict) -> dict:
         "prime": table.get("prime"),
         # T-98: None = the language profile's own format_selector.
         "test_selector": raw_test_selector,
+        # T-132: this repo's stack_tool override -- validated above; None
+        # (unset) means "auto" (see repos.RepoBinding.stack_tool /
+        # repos.resolve_stack_tool).
+        "stack_tool": raw_stack_tool,
     }
     for knob in KNOBS:
         if knob.per_repo:
