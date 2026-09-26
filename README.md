@@ -16,7 +16,7 @@ a running agent.**
 > Deterministic plumbing in **Python**; intelligence in **Claude**. The `maestro` package
 > owns everything that must be correct-by-construction — the fencing-gated event log,
 > atomic writes, snapshot fold, idempotent step-ids, the dispatcher, leases, projections,
-> dead-letter. The *thinking* (triage, implement, QA) lives in `claude --bg` sessions that
+> dead-letter. The *thinking* (triage, implement, QA) lives in headless `claude -p` sessions that
 > drive state **only** through the `maestro` CLI, so an agent can never clobber a file or
 > write a torn log.
 
@@ -49,7 +49,7 @@ replaying the event log.
 | Component | What | Runs as |
 |-----------|------|---------|
 | **dispatcher** (`maestro dispatch`) | level-triggered sweep: mint → find due → spawn → exit. The only fan-out point. No LLM. | launchd `StartInterval` (5 min) |
-| **reconciler** (one of seven per-phase `/maestro-reconcile-<phase>` skills) | one idempotent step per ticket, then exit. Implementing and QA are separate dispatcher spawns, not subagents of one session (see `DESIGN.md`). | `claude --bg` session |
+| **reconciler** (one of seven per-phase `/maestro-reconcile-<phase>` skills) | one idempotent step per ticket, then exit. Implementing and QA are separate dispatcher spawns, not subagents of one session (see `DESIGN.md`). | headless `claude -p` session |
 | **maestro CLI** | correct-by-construction state verbs the agent calls | Python (this package) |
 | **projector** | snapshots → dashboards, atomic | a phase of `maestro dispatch` |
 | **providers** | Jira / GitHub / custom import, pluggable | `config.toml` |

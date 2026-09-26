@@ -83,9 +83,9 @@ project:
 # read it off `maestro env --key`, so there is one source of truth for the mapping
 # (dispatcher.resolve_reconcile_command), not a second copy re-derived in Make/bash. Needs
 # .claude/commands/ vendored in that repo's checkout. RF-2: also reads the resolved runner
-# off the same `maestro env --key` call -- "claude" is the only registered runner
-# (dispatcher._REGISTERED_RUNNERS), so a non-claude runner has no Make/bash path yet and
-# fails fast here rather than silently running `claude -p` under the wrong runner's name.
+# off the same `maestro env --key` call -- this target only knows how to launch `claude`,
+# so a ticket routed to another registered runner (opencode, pi) fails fast here rather
+# than silently running `claude -p` under the wrong runner's name.
 #
 # `make reconcile` vs `maestro dispatch --key KEY`: this target skips straight to invoking
 # the resolved reconcile command on an already-due ticket -- no due-check, no throttle, no
@@ -101,7 +101,7 @@ reconcile:
 	COMMAND=$$(echo "$$ENV_JSON" | $(PY) -c 'import sys,json;print(json.load(sys.stdin)["reconcile_command"])'); \
 	RUNNER=$$(echo "$$ENV_JSON" | $(PY) -c 'import sys,json;print(json.load(sys.stdin)["runner"])'); \
 	if [ "$$RUNNER" != "claude" ]; then \
-		echo "error: runner '$$RUNNER' has no 'make reconcile' path yet -- only 'claude' is registered" >&2; \
+		echo "error: runner '$$RUNNER' has no 'make reconcile' path yet -- this target only launches 'claude'" >&2; \
 		exit 1; \
 	fi; \
 	cd "$$REPO" && claude -p "$$COMMAND $(KEY)" --permission-mode acceptEdits

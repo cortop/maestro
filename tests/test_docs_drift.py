@@ -153,3 +153,45 @@ def test_linked_docs_actually_carry_at_least_one_relative_link():
             if not target.startswith(("http://", "https://", "mailto:", "#")):
                 found_any = True
     assert found_any, "none of README/DESIGN/CLAUDE/DOGFOOD carry a relative markdown link"
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE.md is the first thing an agent reads in this repo: every module it doesn't
+# list is one an agent won't know to look in, and every `module.name` it cites that no
+# longer exists sends the agent hunting for a symbol that was renamed away.
+# ---------------------------------------------------------------------------
+
+_PACKAGE = REPO_ROOT / "maestro"
+_AGENT_DOCS = ["CLAUDE.md", "DESIGN.md"]
+_DOTTED_REF_RE = re.compile(r"`([a-z_]+)\.([A-Za-z_][A-Za-z0-9_]*)(?:\(\))?`")
+_FILE_EXTENSIONS = {"py", "md", "toml", "json", "jsonl", "sh", "txt"}
+
+
+def _maestro_modules() -> list[str]:
+    mods = [p.stem for p in _PACKAGE.glob("*.py") if p.stem != "__init__"]
+    mods += [p.name for p in _PACKAGE.iterdir()
+             if p.is_dir() and (p / "__init__.py").exists()]
+    return sorted(mods)
+
+
+def test_claude_md_lists_every_module():
+    text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    missing = [m for m in _maestro_modules()
+               if f"`{m}.py`" not in text and f"`{m}/`" not in text]
+    assert not missing, (
+        "maestro module(s) missing from CLAUDE.md's Architecture section -- add a "
+        f"one-line entry for each: {missing}")
+
+
+def test_dotted_references_in_agent_docs_resolve():
+    import importlib
+    modules = set(_maestro_modules())
+    stale = []
+    for rel in _AGENT_DOCS:
+        for n, line in enumerate((REPO_ROOT / rel).read_text(encoding="utf-8").splitlines(), 1):
+            for mod, name in _DOTTED_REF_RE.findall(line):
+                if mod not in modules or name in _FILE_EXTENSIONS:
+                    continue
+                if not hasattr(importlib.import_module(f"maestro.{mod}"), name):
+                    stale.append(f"{rel}:{n}: `{mod}.{name}` does not exist")
+    assert not stale, "stale code reference(s) in agent-facing docs:\n" + "\n".join(stale)
