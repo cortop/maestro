@@ -347,3 +347,37 @@ def test_review_feedback_changes_requested_on_active_entry_bumps_unresolved_revi
                       "pr_number": 100}, actor="d")
     snap = snap_mod.rebuild(home, "T-1")
     assert snap.unresolved_reviews == 1
+
+
+def test_every_event_type_is_folded_or_declared_unfolded():
+    """A new event type must either get a `_FOLDERS` handler or be listed in
+    `_UNFOLDED` on purpose -- never be silently ignored by the fold."""
+    from maestro import events as E
+    types = {v for k, v in vars(E).items() if k.isupper() and isinstance(v, str)}
+    handled, unfolded = set(snap_mod._FOLDERS), set(snap_mod._UNFOLDED)
+    assert not handled & unfolded
+    assert types == handled | unfolded, sorted(types ^ (handled | unfolded))
+
+
+def test_done_absorbs_a_ticket_created_but_keeps_its_metadata():
+    """A re-TicketCreated after Finalized keeps the phase DONE (with a warning)
+    while its non-phase fields still apply -- the central guard in `fold`
+    reverts only the phase move."""
+    snap = snap_mod.fold("K", [
+        {"seq": 1, "type": "Finalized", "payload": {}},
+        {"seq": 2, "type": "TicketCreated", "payload": {"title": "renamed"}},
+    ])
+    assert snap.phase == Phase.DONE.value
+    assert snap.title == "renamed"
+    assert any("dropped phase reset -- phase is DONE (absorbing)" in w for w in snap.fold_warnings)
+
+
+def test_done_drops_phase_changed_entirely():
+    """PhaseChanged after DONE is a full no-op -- it must not reset counters."""
+    snap = snap_mod.fold("K", [
+        {"seq": 1, "type": "Failed", "payload": {"error": "x"}},
+        {"seq": 2, "type": "Finalized", "payload": {}},
+        {"seq": 3, "type": "PhaseChanged", "payload": {"phase": "ready"}},
+    ])
+    assert snap.phase == Phase.DONE.value
+    assert snap.failure_count == 1
