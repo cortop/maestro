@@ -179,7 +179,10 @@ def test_env_key_prints_resolved_binding(home, capsys):
                         "kind": "implementation",
                         # T-96 AC4: the resolved test-verification knobs a `test:`
                         # annotation's presence gate actually uses.
-                        "language": None, "test_command": None}
+                        "language": None, "test_command": None,
+                        # T-134: no tracker import (no external_id) -- display_key
+                        # falls back to the maestro key unchanged.
+                        "display_key": "X-3"}
 
 
 def test_env_key_unknown_repo_exits_nonzero(home, capsys):
