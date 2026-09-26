@@ -587,6 +587,10 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                     "number": p.get("number"), "url": p.get("url"),
                     "branch": stack_meta.get("branch"), "base": stack_meta.get("base"),
                     "merged": False, "ci_state": None, "qa_verdict": None,
+                    # T-131: each entry's own draft/ready state -- opened
+                    # `--draft` per the "Approved split" skill section, so this
+                    # defaults True exactly like the ticket-wide mirror below.
+                    "draft": p.get("draft", True),
                 }
                 s.pr_stack = [e for e in s.pr_stack if e.get("index") != entry["index"]] + [entry]
             if not is_stack_entry or stack_meta.get("index") == 0:
@@ -604,7 +608,14 @@ def fold(key: str, events: list[dict]) -> Snapshot:
             if isinstance(stack_idx, int):
                 for e in s.pr_stack:
                     if e.get("index") == stack_idx:
-                        e["merged"] = bool(p.get("merged", e.get("merged")))
+                        if "merged" in p:
+                            e["merged"] = bool(p.get("merged", e.get("merged")))
+                        # T-131: a non-tracked entry's own draft observation
+                        # (or our own root-first-gated undraft of it) is
+                        # scoped by stack_index -- keep its `pr_stack` row
+                        # current so later sweeps' root-first check sees it.
+                        if "draft" in p:
+                            e["draft"] = p["draft"]
                         break
             elif p.get("number", s.pr_number) == s.pr_number:
                 # T-126: scoped to the CURRENTLY-mirrored PR number -- an
@@ -624,6 +635,17 @@ def fold(key: str, events: list[dict]) -> Snapshot:
                     s.pr_state = "merged"
                 if "draft" in p:
                     s.pr_draft = p["draft"]
+                    # T-131: this plain (non-stack_index) update is how BOTH
+                    # `_observe_pr_draft` and `_maybe_undraft` refresh the
+                    # currently-tracked entry's draft state -- without also
+                    # mirroring it onto that entry's own `pr_stack` row, the
+                    # row would stay frozen at its PrOpened-time default and
+                    # the root-first check below would see the root as
+                    # perpetually draft even after it actually undrafted.
+                    for e in s.pr_stack:
+                        if e.get("number") == s.pr_number:
+                            e["draft"] = p["draft"]
+                            break
         elif t == E.CI_OBSERVED:
             # T-130: a split stack's CiObserved carries its own `pr_number` (a
             # non-stack ticket's never does) -- the ticket-wide `ci_state`/

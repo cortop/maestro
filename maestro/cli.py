@@ -861,6 +861,21 @@ def cmd_append(args) -> int:
             f"maestro append: {args.type!r} is ops-owned -- use `maestro {verb}` instead")
     cfg = _cfg(args)
     payload = json.loads(args.payload) if args.payload else {}
+    if args.type == events.PR_OPENED:
+        # T-131: a split PR stack (T-126) must open root-first -- refuse a
+        # later entry unless the entry immediately before it is already on
+        # record, so a stack can never end up with the tip open for review
+        # before its own base PR exists.
+        stack_meta = payload.get("stack")
+        if isinstance(stack_meta, dict) and isinstance(stack_meta.get("index"), int):
+            index = stack_meta["index"]
+            if index > 0:
+                prior_index = index - 1
+                snap = snap_mod.load(cfg.home, args.key)
+                if not any(e.get("index") == prior_index for e in snap.pr_stack):
+                    raise store.MaestroError(
+                        f"maestro append: PrOpened stack.index={index} refused -- "
+                        f"entry {prior_index} is not yet in pr_stack (open the stack root-first)")
     ev = event_log.append(cfg.home, args.key, args.type, payload, actor=args.actor,
                           step_id=args.step_id,
                           expected_last_seq=args.expect)

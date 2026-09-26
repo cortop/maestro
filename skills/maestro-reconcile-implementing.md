@@ -331,7 +331,13 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    (one `PrOpened` append per entry, `index` 0-based in stack order, `step-id` `"pr-$KEY"` for
    index 0 and `"pr-stack-$KEY-<index>"` for every later one, so a crash-and-respawn mid-step never
-   double-opens a PR).
+   double-opens a PR). **Open (and append) strictly root-first** — entry 0 before entry 1 before
+   entry 2, in that order: `maestro append` itself refuses a `PrOpened` at `stack.index = n > 0`
+   with a clear error unless entry `n-1` is already recorded, so pushing these out of order is
+   caught immediately rather than leaving a later entry open for review with no base underneath
+   it. The dispatcher's own undraft path (T-131) enforces the same order independently once CI
+   passes — entry `n` never becomes ready for review while an earlier entry is still a draft and
+   unmerged.
    Push normally — never force-push. Let hooks run — never skip them. Test the real behavior,
    never a mock. Then exit; the dispatcher's next sweep spawns the independent `qa` reconciler
    (`skills/maestro-reconcile-qa.md`) — this session never judges its own diff, and does not poll

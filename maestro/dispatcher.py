@@ -1658,10 +1658,17 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                 # T-130: a split stack (T-126) can have more than one PR open at
                 # once -- poll CI + reviews on every OTHER unmerged entry too, so a
                 # failure on entry 1 isn't silently missed until entry 0 merges.
-                # Merge detection, advancing to the next entry, and undrafting all
-                # stay scoped to `snap.pr_number` (the entry currently being
-                # tracked) above -- unchanged. Requires a working credential (no
-                # synthesized-status polling of entries beyond the tracked one).
+                # Merge detection and advancing to the next entry stay scoped to
+                # `snap.pr_number` (the entry currently being tracked) above --
+                # unchanged. Requires a working credential (no synthesized-status
+                # polling of entries beyond the tracked one).
+                #
+                # T-131: undrafting does NOT stay scoped to the tracked entry --
+                # an otherwise-eligible later entry is undrafted too, but only
+                # once every entry before it (by index, per THIS sweep's stack --
+                # see `_maybe_undraft_stack_entry`) is already merged or ready,
+                # so the stack is never reviewable out of root-first order.
+                stack_this_sweep = snap.pr_stack
                 for entry in snap.pr_stack:
                     other_pr = entry.get("number")
                     if entry.get("merged") or other_pr is None or other_pr == snap.pr_number:
@@ -1674,6 +1681,13 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                                env=cred.env, now=now)
                     _observe_reviews(cfg, key, other_pr, vcs, repo=repo_slug, env=cred.env,
                                      snap=snap)
+                    _observe_stack_entry_draft(cfg, key, entry, other_status)
+                    _maybe_undraft_stack_entry(cfg, key, entry, other_status, vcs,
+                                               repo_slug=repo_slug, env=cred.env,
+                                               stack=stack_this_sweep)
+
+                if snap.pr_stack:
+                    _detect_stack_out_of_order(cfg, key, snap_mod.load(home, key).pr_stack)
         except event_log.StaleAppendError:
             # Lost the fencing race against a concurrent writer (a human, a
             # reconciler, or another dispatcher tick) that appended between
@@ -1992,6 +2006,24 @@ def _observe_pr_draft(cfg: Config, key: str, status: dict, snap) -> None:
         snap_mod.rebuild(cfg.home, key)
 
 
+def _observe_stack_entry_draft(cfg: Config, key: str, entry: dict, status: dict) -> None:
+    """T-131: the per-entry analogue of `_observe_pr_draft` -- a non-tracked
+    stack *entry*'s own `pr_stack` row needs its `isDraft` refreshed
+    independent of whether it's eligible to be undrafted this sweep (the
+    root-first check in `_maybe_undraft_stack_entry` reads OTHER entries'
+    persisted draft state, so it must stay current even on a sweep where
+    THIS entry doesn't undraft). No-op when unobserved or unchanged, exactly
+    like the tracked-entry version."""
+    observed = status.get("draft")
+    if observed is None or observed == entry.get("draft"):
+        return
+    ev = event_log.append(cfg.home, key, E.PR_UPDATED,
+                          {"stack_index": entry["index"], "draft": observed},
+                          actor="dispatcher", step_id=f"draftobs-{key}-{entry['number']}-{observed}")
+    if ev is not None:
+        snap_mod.rebuild(cfg.home, key)
+
+
 def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str | None,
                    pr_number: int, env: dict | None) -> None:
     """T-86/T-102: undrafts a PR (`gh pr ready`) once CI is `passing`, the
@@ -2045,6 +2077,82 @@ def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str |
                           actor="dispatcher", step_id=f"undraft-{key}-{pr_number}")
     if ev is not None:
         snap_mod.rebuild(cfg.home, key)
+
+
+def _maybe_undraft_stack_entry(cfg: Config, key: str, entry: dict, status: dict, vcs, *,
+                               repo_slug: str | None, env: dict | None,
+                               stack: list[dict]) -> None:
+    """T-131: the non-tracked-entry counterpart to `_maybe_undraft` -- entry 0
+    (or whichever entry is currently tracked) is the only one that PR-wide
+    quality gate covers, since only it ever passes through the ticket's own
+    `qa` phase; a later, not-yet-tracked entry has no verdict of its own to
+    check, so its eligibility here is simply its OWN CI passing (already
+    freshly observed this same poll, via `_observe_ci` immediately above this
+    call) and the ticket still being in a reviewable phase -- same phase guard
+    as `_maybe_undraft`, since a failing CI or a fresh review on ANY entry
+    (this one or another) may have just routed the whole ticket away.
+
+    Root-first (this ticket's whole point): even once eligible, entry *n* is
+    refused `gh pr ready` while an earlier entry (`index < n`, from *stack* --
+    this SWEEP's stack, fetched once at the top of this key's poll, not a
+    live re-fold) is still a draft and not merged. This is what keeps our own
+    actions from ever creating the out-of-order state
+    `_detect_stack_out_of_order` reports -- it only ever catches drift from
+    outside maestro (e.g. a human running `gh pr ready` directly). Passing the
+    pre-sweep `stack` (rather than re-loading fresh) is also what makes
+    undrafting proceed strictly one entry per sweep once a blocker clears:
+    entry 0 undrafting earlier in this very tick doesn't unblock entry 1 until
+    the NEXT sweep re-folds a stack where entry 0's own row shows it ready."""
+    if not status.get("draft"):
+        return
+    if status.get("ci_state") != "passing":
+        return
+    fresh = snap_mod.rebuild(cfg.home, key)
+    if Phase(fresh.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
+        return  # routed away by a sibling observation earlier this tick
+    blocker = next((e for e in stack
+                    if e.get("index", -1) < entry.get("index", -1)
+                    and not e.get("merged") and e.get("draft", True)), None)
+    if blocker is not None:
+        return  # root-first: entry n waits for entry n-1 (or earlier) to be ready first
+    result = vcs.pr_ready(entry["number"], repo=repo_slug, env=env)
+    if not result.get("ok"):
+        error = result.get("error", "unknown")
+        event_log.append(cfg.home, key, E.NOTE,
+                         {"text": f"gh pr ready failed ({error}) -- will retry"},
+                         actor="dispatcher", step_id=f"undraft-err-{key}-{entry['number']}-{error}")
+        return
+    ev = event_log.append(cfg.home, key, E.PR_UPDATED,
+                          {"stack_index": entry["index"], "draft": False},
+                          actor="dispatcher", step_id=f"undraft-{key}-{entry['number']}")
+    if ev is not None:
+        snap_mod.rebuild(cfg.home, key)
+
+
+def _detect_stack_out_of_order(cfg: Config, key: str, stack: list[dict]) -> None:
+    """T-131 AC4: a later entry observed ready (not a draft) while an
+    earlier, unmerged entry is still a draft means the stack is reviewable
+    out of root-first order -- e.g. a human ran `gh pr ready` on it directly,
+    bypassing maestro's own root-first-gated undraft paths (which never
+    create this state themselves). Reported once, naming both PR numbers,
+    deduped by the pair via `step_id` -- a repeat sweep observing the exact
+    same drift is a no-op, not a fresh Note every tick."""
+    for earlier in stack:
+        if earlier.get("merged") or not earlier.get("draft", True):
+            continue
+        for later in stack:
+            if later.get("index", -1) <= earlier.get("index", -1):
+                continue
+            if later.get("merged") or later.get("draft", True):
+                continue
+            event_log.append(
+                cfg.home, key, E.NOTE,
+                {"text": f"stack out of order: PR #{later.get('number')} is ready for review "
+                         f"while PR #{earlier.get('number')} (an earlier entry) is still a draft"},
+                actor="dispatcher",
+                step_id=f"stack-order-{key}-{earlier.get('number')}-{later.get('number')}",
+            )
+            return
 
 
 def _post_qa_tree_key(snap) -> str:

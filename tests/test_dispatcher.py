@@ -366,8 +366,12 @@ def test_spawn_ledger_records_rolling_history_and_trims_window(home, cfg):
     assert health.spawn_rate(home, later)["total"] == 1 * W_implementing
 
 
-def test_spawn_ledger_recent_hard_capped(home, cfg):
+def test_spawn_ledger_recent_hard_capped(home, cfg, monkeypatch):
     """`recent` cannot grow without bound even with the spawn floor disabled."""
+    # The cap is read as a module global at trim time, so shrinking it proves
+    # the same bound in ~70 sweeps instead of the real cap's ~3,650 (which made
+    # this the slowest test in the suite by 2x).
+    monkeypatch.setattr(disp, "_LEDGER_RECENT_CAP", 20)
     _seed(home, "T-1", Phase.IMPLEMENTING)
     cfg.min_spawn_interval = 0
     cfg.max_spawn_attempts = 0  # no-progress watchdog would otherwise fail this
