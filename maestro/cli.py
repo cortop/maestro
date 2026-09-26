@@ -614,8 +614,10 @@ def cmd_trigger_post_qa(args) -> int:
     bypassing the phase/QA-verdict/dedup gates `dispatcher.sync_post_qa_skill`
     applies before firing automatically -- see `dispatcher.
     trigger_post_qa_skill`'s own docstring for exactly which gates are
-    skipped and why. Human-only verb, mirroring `cmd_runner`'s shape: never
-    added to `_AGENT_TOOL_VERBS`."""
+    skipped and why. `--pr` (T-133) targets one entry of a split ticket's
+    stack explicitly instead of whichever PR the snapshot currently tracks.
+    Human-only verb, mirroring `cmd_runner`'s shape: never added to
+    `_AGENT_TOOL_VERBS`."""
     cfg = _cfg(args)
     # RF-2/OC-4/PI-8: same RoutingSessions wiring as _nudge/cmd_dispatch above --
     # every registered non-claude backend, so a manual trigger can route to
@@ -642,7 +644,7 @@ def cmd_trigger_post_qa(args) -> int:
         ),
     }, home=cfg.home)
     try:
-        result = disp.trigger_post_qa_skill(cfg, sessions, args.key)
+        result = disp.trigger_post_qa_skill(cfg, sessions, args.key, pr_number=args.pr)
     except store.MaestroError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -1563,6 +1565,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("trigger-post-qa", cmd_trigger_post_qa,
              "[human] manually fire this ticket's post_qa_skill now, bypassing its gates")
     sp.add_argument("key")
+    sp.add_argument("--pr", type=int, default=None,
+                    help="target one stack entry by PR number (default: the currently-tracked PR)")
     sp = add("doctor", cmd_doctor, "fleet health (heartbeat, dead-letters, spawn-rate runaway)")
     sp.add_argument("--strict", action="store_true",
                     help="exit 1 when any check is not ok (default: only the runaway check gates exit code)")
