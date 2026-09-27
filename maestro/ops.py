@@ -2042,12 +2042,60 @@ def check_merged(cfg: Config, key: str, pr_state: str, *, actor: str = "reconcil
                 _append(cfg, key, E.PR_OPENED,
                         {"number": nxt["number"], "url": nxt["url"], "draft": nxt.get("draft", True)},
                         actor=actor, sid=f"pr-stack-advance-{key}-{nxt['index']}")
+                # T-132: on a gt-managed stack, the remaining entries are now
+                # based on a merged branch -- queue a restack (dispatcher.
+                # sync_restacks does the actual gt sync/restack/submit +
+                # base-retargeting, since restacking needs the worktree and
+                # this function never touches it).
+                binding = repos_mod.resolve(cfg, cfg.home, key)
+                if repos_mod.resolve_stack_tool(binding) == "gt":
+                    _append(cfg, key, E.RESTACK_QUEUED, {"stack_index": idx},
+                            actor=actor, sid=f"restack-queued-{key}-{idx}")
                 return True
             _append(cfg, key, E.PR_UPDATED, {"merged": True, "stack_index": idx},
                     actor=actor, sid=f"pr-stack-merged-{key}-{idx}")
     _append(cfg, key, E.PR_UPDATED, {"merged": True}, actor=actor, sid=f"pr-merged-{key}")
     finalize(cfg, key, actor=actor)
     return True
+
+
+def record_restack_completed(cfg: Config, key: str, *, stack_index: int,
+                              actor: str = "reconciler") -> dict:
+    """T-132: the second half of a gt restack -- called once
+    ``dispatcher.sync_restacks``'s detached ``gt sync && gt restack &&
+    gt submit`` subprocess exits 0 for the restack ``check_merged`` queued at
+    *stack_index*. Retargets every remaining, unmerged stack entry's GitHub
+    base -- the first remaining entry to trunk, each later one to the
+    previous remaining entry's own branch -- via the VCS provider, then
+    records ``RestackCompleted`` (idempotent per stack_index, like every
+    other PR-stack event `check_merged` appends).
+
+    Never raises on a VCS failure -- a base-retarget that couldn't be applied
+    is recorded with the base it WOULD be (the caller only ever calls this
+    once the gt-side subprocess itself already succeeded), the same
+    fail-open-but-recorded posture `pr_ready`'s callers use elsewhere; a
+    stuck base is visible in the recorded event and GitHub, not silently
+    swallowed by this function refusing to record anything at all.
+    """
+    from . import providers
+
+    snap = snap_mod.load(cfg.home, key)
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    vcs = providers.get_vcs(cfg)
+    slug = repos_mod.resolve_vcs_slug(cfg, snap) or binding.slug
+    remaining = sorted((e for e in snap.pr_stack if not e.get("merged")),
+                       key=lambda e: e["index"])
+    retargeted = []
+    prev_branch = binding.base_branch
+    for entry in remaining:
+        base = prev_branch
+        vcs.set_base(entry["number"], base, repo=slug)
+        retargeted.append({"number": entry["number"], "base": base})
+        prev_branch = entry.get("branch") or prev_branch
+    payload = {"stack_index": stack_index, "retargeted": retargeted}
+    _append(cfg, key, E.RESTACK_COMPLETED, payload, actor=actor,
+            sid=f"restack-completed-{key}-{stack_index}")
+    return payload
 
 
 # UX-1: same loose-frontmatter grammar `gates.parse_spec_overrides` scans

@@ -8,35 +8,35 @@ Every `decisions[key]["outcome"]` a sweep can assign -- via either `decisions[ke
 
 | # | outcome | source |
 |---|---------|--------|
-| 1 | `ask_failed` | `maestro/dispatcher.py:3225` |
-| 2 | `board_refused` | `maestro/dispatcher.py:3339` |
-| 3 | `phantom` | `maestro/dispatcher.py:3441` |
-| 4 | `fold_error` | `maestro/dispatcher.py:3448` |
-| 5 | `not_due` | `maestro/dispatcher.py:3455` |
-| 6 | `would_park_missing_acs` | `maestro/dispatcher.py:3462` |
-| 7 | `missing_acs` | `maestro/dispatcher.py:3473` |
-| 8 | `claimed` | `maestro/dispatcher.py:3478` |
-| 9 | `answer_routed` | `maestro/dispatcher.py:3504` |
-| 10 | `would_route_answer` | `maestro/dispatcher.py:3516` |
-| 11 | `due` | `maestro/dispatcher.py:3533` |
-| 12 | `throttled` | `maestro/dispatcher.py:3557` |
-| 13 | `repo_blocked` | `maestro/dispatcher.py:3567` |
-| 14 | `capacity_skipped` | `maestro/dispatcher.py:3574` |
-| 15 | `repo_capped` | `maestro/dispatcher.py:3601` |
-| 16 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:3604` |
-| 17 | `would_spawn` | `maestro/dispatcher.py:3607` |
-| 18 | `burn_parked` | `maestro/dispatcher.py:3642` |
-| 19 | `repo_capped` | `maestro/dispatcher.py:3645` |
-| 20 | `backend_interlocked` | `maestro/dispatcher.py:3651` |
-| 21 | `credential_unresolvable` | `maestro/dispatcher.py:3657` |
-| 22 | `runner_unregistered` | `maestro/dispatcher.py:3689` |
-| 23 | `runner_disabled` | `maestro/dispatcher.py:3695` |
-| 24 | `runner_binary_missing` | `maestro/dispatcher.py:3698` |
-| 25 | `runner_daemon_unreachable` | `maestro/dispatcher.py:3702` |
-| 26 | `runner_model_unavailable` | `maestro/dispatcher.py:3709` |
-| 27 | `runner_capped` | `maestro/dispatcher.py:3713` |
-| 28 | `attempts_exhausted` | `maestro/dispatcher.py:3747` |
-| 29 | `spawned` | `maestro/dispatcher.py:3765` |
+| 1 | `ask_failed` | `maestro/dispatcher.py:3345` |
+| 2 | `board_refused` | `maestro/dispatcher.py:3459` |
+| 3 | `phantom` | `maestro/dispatcher.py:3569` |
+| 4 | `fold_error` | `maestro/dispatcher.py:3576` |
+| 5 | `not_due` | `maestro/dispatcher.py:3583` |
+| 6 | `would_park_missing_acs` | `maestro/dispatcher.py:3590` |
+| 7 | `missing_acs` | `maestro/dispatcher.py:3601` |
+| 8 | `claimed` | `maestro/dispatcher.py:3606` |
+| 9 | `answer_routed` | `maestro/dispatcher.py:3632` |
+| 10 | `would_route_answer` | `maestro/dispatcher.py:3644` |
+| 11 | `due` | `maestro/dispatcher.py:3661` |
+| 12 | `throttled` | `maestro/dispatcher.py:3685` |
+| 13 | `repo_blocked` | `maestro/dispatcher.py:3695` |
+| 14 | `capacity_skipped` | `maestro/dispatcher.py:3702` |
+| 15 | `repo_capped` | `maestro/dispatcher.py:3729` |
+| 16 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:3732` |
+| 17 | `would_spawn` | `maestro/dispatcher.py:3735` |
+| 18 | `burn_parked` | `maestro/dispatcher.py:3770` |
+| 19 | `repo_capped` | `maestro/dispatcher.py:3773` |
+| 20 | `backend_interlocked` | `maestro/dispatcher.py:3779` |
+| 21 | `credential_unresolvable` | `maestro/dispatcher.py:3785` |
+| 22 | `runner_unregistered` | `maestro/dispatcher.py:3817` |
+| 23 | `runner_disabled` | `maestro/dispatcher.py:3823` |
+| 24 | `runner_binary_missing` | `maestro/dispatcher.py:3826` |
+| 25 | `runner_daemon_unreachable` | `maestro/dispatcher.py:3830` |
+| 26 | `runner_model_unavailable` | `maestro/dispatcher.py:3837` |
+| 27 | `runner_capped` | `maestro/dispatcher.py:3841` |
+| 28 | `attempts_exhausted` | `maestro/dispatcher.py:3875` |
+| 29 | `spawned` | `maestro/dispatcher.py:3893` |
 
 ## Sweep-level brakes
 
@@ -44,10 +44,10 @@ These four short-circuit the entire spawn phase before any per-key outcome above
 
 | brake | source | what it guards |
 |---|---|---|
-| fleet pause | `maestro/dispatcher.py:3832` | the board-wide kill switch (`maestro fleet pause`) -- ahead of everything else; mint/sync/worktrees/backup/sessions all stay untouched and due-computation never runs, so no `decisions[key]` entry is made at all this sweep |
-| rate-limit pause | `maestro/dispatcher.py:3883` | a live 429 backoff window; while paused, nothing spawns and the spawn ledger is left untouched |
-| runaway auto-brake | `maestro/dispatcher.py:3885` | GA-5's no-progress circuit breaker, armed off `derived/health.json` |
-| spend ceiling | `maestro/dispatcher.py:3887` | GA-11's daily spend ceiling, a pure read so it still applies under `dry_run` |
+| fleet pause | `maestro/dispatcher.py:3960` | the board-wide kill switch (`maestro fleet pause`) -- ahead of everything else; mint/sync/worktrees/backup/sessions all stay untouched and due-computation never runs, so no `decisions[key]` entry is made at all this sweep |
+| rate-limit pause | `maestro/dispatcher.py:4016` | a live 429 backoff window; while paused, nothing spawns and the spawn ledger is left untouched |
+| runaway auto-brake | `maestro/dispatcher.py:4018` | GA-5's no-progress circuit breaker, armed off `derived/health.json` |
+| spend ceiling | `maestro/dispatcher.py:4020` | GA-11's daily spend ceiling, a pure read so it still applies under `dry_run` |
 
 ## Dispatcher hooks
 
@@ -55,4 +55,4 @@ Dispatcher-owned, one-shot hooks that act on a ticket's CURRENT state directly -
 
 | hook | source | what it does |
 |---|---|---|
-| post_qa_skill | `maestro/dispatcher.py:2248` | fires the config-referenced `[maestro] post_qa_skill` / `[repos.<name>] post_qa_skill` slash-command skill exactly once per ticket per QA pass, at the `qa -> awaiting-ci` trigger point -- once a ticket in `awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on every current-hash AC (`Snapshot.qa_all_passing`). Idempotent per (key, QA-verdict fingerprint) via a `PostQaSkillSpawned` event appended before the spawn. Unset (default) fires nothing -- ships dark. |
+| post_qa_skill | `maestro/dispatcher.py:2253` | fires the config-referenced `[maestro] post_qa_skill` / `[repos.<name>] post_qa_skill` slash-command skill exactly once per ticket per QA pass, at the `qa -> awaiting-ci` trigger point -- once a ticket in `awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on every current-hash AC (`Snapshot.qa_all_passing`). Idempotent per (key, QA-verdict fingerprint) via a `PostQaSkillSpawned` event appended before the spawn. Unset (default) fires nothing -- ships dark. |

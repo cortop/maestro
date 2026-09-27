@@ -74,7 +74,7 @@ def test_config_load_parses_repos_tables(home):
         "test_selector": None, "post_qa_skill": None,
         "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
         "ci_auto_rerun": None, "ci_rerun_grace": None, "ci_failure_excerpt": None,
-        "file_hints": None, "pr_split_threshold": None,
+        "file_hints": None, "pr_split_threshold": None, "stack_tool": None,
     }
     assert cfg.repos["beta"] == {
         "path": "/repo/beta", "slug": "acme/beta",
@@ -86,7 +86,7 @@ def test_config_load_parses_repos_tables(home):
         "test_selector": None, "post_qa_skill": None,
         "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
         "ci_auto_rerun": None, "ci_rerun_grace": None, "ci_failure_excerpt": None,
-        "file_hints": None, "pr_split_threshold": None,
+        "file_hints": None, "pr_split_threshold": None, "stack_tool": None,
     }
 
 
@@ -180,6 +180,8 @@ def test_env_key_prints_resolved_binding(home, capsys):
                         # T-96 AC4: the resolved test-verification knobs a `test:`
                         # annotation's presence gate actually uses.
                         "language": None, "test_command": None,
+                        # T-132: no `gt` on PATH in this test -- resolves to "git".
+                        "stack_tool": "git",
                         # T-134: no tracker import (no external_id) -- display_key
                         # falls back to the maestro key unchanged.
                         "display_key": "X-3"}

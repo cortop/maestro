@@ -459,7 +459,12 @@ MAESTRO_OWN_REPO_EXTRA_TOOLS = (
 #     entry on the existing linear commit history, no rewrite) plus diff
 #     (skills/maestro-reconcile-qa.md's read-only ``git diff --no-index``,
 #     T-94's rewritten test grants only the 7 implementing-side subcommands
-#     and confirms it still WARNs on the missing ``diff`` one). test_dispatcher.py's
+#     and confirms it still WARNs on the missing ``diff`` one) plus checkout
+#     (T-132: the gt-path "Approved split" section checks out each stack
+#     entry's own commit before ``gt create``-ing its branch -- only reachable
+#     when ``stack_tool`` resolves to ``"gt"``, which today's dogfood board
+#     never does, so this narrower rule is unexercised there in practice).
+#     test_dispatcher.py's
 #     test_reconciler_literal_coverage_matches_skills keeps this whole table
 #     honest against a fresh grep of every skills/maestro-reconcile-*.md, so
 #     a future skill invoking e.g. ``gh run view`` or ``git stash`` doesn't
@@ -477,8 +482,8 @@ MAESTRO_OWN_REPO_EXTRA_TOOLS = (
 RECONCILER_LITERAL_COVERAGE: dict[str, tuple[str, ...]] = {
     "Bash(gh:*)": ("Bash(gh pr:*)",),
     "Bash(git:*)": (
-        "Bash(git add:*)", "Bash(git branch:*)", "Bash(git commit:*)", "Bash(git diff:*)",
-        "Bash(git fetch:*)", "Bash(git log:*)", "Bash(git merge:*)",
+        "Bash(git add:*)", "Bash(git branch:*)", "Bash(git checkout:*)", "Bash(git commit:*)",
+        "Bash(git diff:*)", "Bash(git fetch:*)", "Bash(git log:*)", "Bash(git merge:*)",
         "Bash(git push:*)", "Bash(git rebase:*)",
     ),
     "Bash(python3:*)": ("Bash(python3 -m:*)",),
@@ -2784,6 +2789,121 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
                   expect=fresh.observed_seq)
 
 
+def _restack_dir(home: Path, key: str) -> Path:
+    return home / "derived" / "restacks" / store.validate_key(key)
+
+
+def _restack_result_path(home: Path, key: str) -> Path:
+    """Where a detached restack subprocess (`_start_restack`) writes its own
+    exit code once done -- the same survives-past-this-process shape as
+    `_test_run_result_path`."""
+    return _restack_dir(home, key) / "result"
+
+
+def _restack_log_path(home: Path, key: str) -> Path:
+    return _restack_dir(home, key) / "output.log"
+
+
+def sync_restacks(cfg: Config, now: float) -> dict:
+    """T-132: the gt-managed-stack half of `ops.check_merged`'s advance --
+    the `sync_test_runs` pattern (a tracked, detached subprocess + a later
+    fold) applied to `gt sync && gt restack && gt submit` instead of a test
+    command, since restacking needs the worktree and `dispatch()` itself
+    never touches one directly.
+
+    Every key with `snap.pending_restack_index` set (RestackQueued, from
+    `ops.check_merged`'s stack advance, not yet matched by a
+    RestackCompleted) AND a `gt` stack_tool gets its restack started if none
+    is in flight yet, or folded -- base-retargeted via the VCS provider and
+    recorded -- once it's done. A `git`-stack_tool ticket is never even a
+    candidate here: its own `check_merged` call never appends RestackQueued
+    in the first place (see that function), so it never runs `gt` and never
+    has anything here that could force-push.
+    """
+    home = cfg.home
+    from . import repos as repos_mod
+
+    checked = 0
+    started: list[str] = []
+    folded: list[str] = []
+    with store.file_lock(_spawn_lock_target(home)):
+        for key in list_keys(home):
+            snap = snap_mod.load(home, key)
+            idx = snap.pending_restack_index
+            if idx is None:
+                continue
+            binding = repos_mod.resolve(cfg, home, key)
+            if repos_mod.resolve_stack_tool(binding) != "gt":
+                continue
+            checked += 1
+            claim = claims.read_claim(home, key)
+            if claim is not None and claim.get("kind") == "restack":
+                if claims.pid_alive(claim.get("pid")):
+                    continue  # in flight -- fold on a later sweep
+                _fold_restack(cfg, key, claim, idx)
+                folded.append(key)
+                continue
+            if claim is not None:
+                continue  # some other claim still holds this key -- leave it alone
+            cwd = _worker_cwd(cfg, key)
+            _start_restack(home, key, cwd)
+            started.append(key)
+    return {"checked": checked, "started": started, "folded": folded}
+
+
+def _start_restack(home: Path, key: str, cwd: Path) -> None:
+    """Launch *key*'s gt restack as a detached, tracked subprocess -- same
+    shape as `_start_test_run`: the CHILD writes its own exit code, so a
+    LATER `dispatch()` process (never this one's parent, once it exits) can
+    still read the outcome."""
+    import shlex
+    import subprocess
+
+    result_path = _restack_result_path(home, key)
+    log_path = _restack_log_path(home, key)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.unlink(missing_ok=True)
+    tmp_result = result_path.with_suffix(".tmp")
+    command = "gt sync --no-interactive && gt restack && gt submit --no-interactive"
+    wrapped = (f"{command} > {shlex.quote(str(log_path))} 2>&1; "
+              f"echo $? > {shlex.quote(str(tmp_result))} && "
+              f"mv {shlex.quote(str(tmp_result))} {shlex.quote(str(result_path))}")
+    claims.write_claim(home, key, os.getpid(), f"restack-{key}", cwd=str(cwd), kind="restack")
+    try:
+        proc = subprocess.Popen(["sh", "-c", wrapped], cwd=str(cwd),
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except Exception:
+        claims.release(home, key)
+        raise
+    claims.write_claim(home, key, proc.pid, f"restack-{key}", cwd=str(cwd), kind="restack")
+
+
+def _fold_restack(cfg: Config, key: str, claim: dict, stack_index: int) -> None:
+    """Read back a finished restack subprocess's result. A clean exit
+    retargets every remaining stack entry's GitHub base and records
+    RestackCompleted (`ops.record_restack_completed`) -- which clears
+    `pending_restack_index` on the next fold. A nonzero exit (or a missing
+    result -- the wrapper shell itself was killed before it could write one)
+    leaves `pending_restack_index` set, so a later sweep just retries; it
+    never force-pushes or wedges anything else in the meantime."""
+    from . import ops
+
+    home = cfg.home
+    result_path = _restack_result_path(home, key)
+    log_path = _restack_log_path(home, key)
+    claims.release(home, key)
+    try:
+        exit_code = int(result_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        exit_code = -1
+    result_path.unlink(missing_ok=True)
+    log_path.unlink(missing_ok=True)
+    if exit_code == 0:
+        ops.record_restack_completed(cfg, key, stack_index=stack_index, actor="dispatcher")
+
+
 def maintenance_tick(home: Path, name: str, interval: int, now: float, fn) -> dict | None:
     """Generic cursor-gated maintenance tick: run ``fn()`` at most once per
     ``interval`` seconds, persisted in ``derived/.<name>_cursor.json``
@@ -3378,6 +3498,10 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     out.drift_skip_reasons = drift.get("skip_reasons", {})
     vcs = _run_hook("sync_vcs", hook_errors, sync_vcs, cfg, now, default={}) or {}
     out.worktree_removal_errors = vcs.get("worktree_removal_errors", {})
+    # T-132: folds any gt-managed stack restack `sync_vcs`'s own `check_merged`
+    # call just queued -- same detached-subprocess shape as `sync_test_runs`
+    # below, so it needs its own hook run.
+    _run_hook("sync_restacks", hook_errors, sync_restacks, cfg, now, default={})
     _run_hook("sync_test_runs", hook_errors, sync_test_runs, cfg, now, default={})
     # The one hook that needs `sessions`: it spawns the post-QA skill itself.
     _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,
@@ -3410,9 +3534,13 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
 def _active_agent_keys(sessions: SessionManager, home: Path) -> set[str]:
     """Keys holding a live agent session. A dispatcher-owned test-run claim
     (RB-14) is not an agent and never eats into `max_concurrency`
-    (`TEST_RUN_CONCURRENCY` bounds those instead)."""
+    (`TEST_RUN_CONCURRENCY` bounds those instead). T-132: a `gt sync`/`gt
+    restack`/`gt submit` restack subprocess (`_start_restack`) is the same
+    shape -- detached, dispatcher-owned, not an agent session -- so it gets
+    the identical exclusion."""
     active = sessions.list_active()
-    return active - {k for k, c in claims.all_claims(home).items() if c.get("kind") == "testrun"}
+    return active - {k for k, c in claims.all_claims(home).items()
+                      if c.get("kind") in ("testrun", "restack")}
 
 
 def _due_check(home: Path, key: str, snap, now: float) -> DueResult:
@@ -3857,6 +3985,11 @@ def dispatch(cfg: Config, sessions: SessionManager, now: float, dry_run: bool = 
     # claim commit -- see _spawn_lock_target's docstring.
     with store.file_lock(_spawn_lock_target(home)):
         active = _active_agent_keys(sessions, home)
+
+        # MTO-4: the candidate set, restricted to `filter_keys` when given -- every
+        # downstream step (due-check, throttle, claims, spawn ledger) only ever
+        # sees these keys, so an unrestricted key's due-ness never even gets
+        # computed, let alone spawned.
         candidates = sorted(filter_keys, key=split_key) if filter_keys is not None else list_keys(home)
         for key in candidates:
             _classify_key(sweep, key, active)

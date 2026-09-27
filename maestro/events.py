@@ -52,6 +52,17 @@ IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one
 # rerun's real outcome.
 CI_RERUN_REQUESTED = "CiRerunRequested"  # {head_sha, run_ids, at}
 
+# Stack restack (T-132): once a gt-managed stack's currently-tracked entry
+# merges, `ops.check_merged` queues a restack instead of leaving the
+# remaining entries based on a now-merged branch. `RESTACK_QUEUED` records
+# which now-merged stack index triggered it; `dispatcher.sync_restacks` then
+# runs `gt sync`/`gt restack`/`gt submit` as a detached, tracked subprocess
+# (the `sync_test_runs` shape -- the dispatcher process itself never touches
+# a worktree directly) and, once it exits cleanly, retargets every remaining
+# PR's GitHub base via the VCS provider and records `RESTACK_COMPLETED`.
+RESTACK_QUEUED = "RestackQueued"        # {stack_index}
+RESTACK_COMPLETED = "RestackCompleted"  # {stack_index, retargeted: [{number, base}, ...]}
+
 # Self-review
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  evidence: {what, where, result}; content-hash keyed
 
@@ -135,4 +146,4 @@ CHECKED = "Checked"                     # {}  reconciler ran to completion, corr
 
 # Side-effecting events whose presence (by step_id) means the external action
 # already happened — used to make re-spawn after a crash idempotent.
-SIDE_EFFECTING = frozenset({PR_OPENED, PR_UPDATED, FINALIZED, QUESTION_ASKED})
+SIDE_EFFECTING = frozenset({PR_OPENED, PR_UPDATED, FINALIZED, QUESTION_ASKED, RESTACK_COMPLETED})

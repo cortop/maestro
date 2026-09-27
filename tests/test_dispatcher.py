@@ -2705,7 +2705,7 @@ def test_reconciler_literal_coverage_matches_skills():
 
     assert gh_subcommands == {"pr"}
     assert git_subcommands == {
-        "add", "branch", "commit", "diff", "fetch", "log", "merge", "push", "rebase",
+        "add", "branch", "checkout", "commit", "diff", "fetch", "log", "merge", "push", "rebase",
     }
 
     git_covered = {t.removeprefix("Bash(git ").removesuffix(":*)")

@@ -212,7 +212,7 @@ def test_gh_pr_calls_use_repo_slug_and_base():
 # ---------------------------------------------------------------------------
 
 _BASH_FENCE_RE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
-_ALLOWED_FIRST_TOKENS = {"git", "gh", "maestro", "python3"}
+_ALLOWED_FIRST_TOKENS = {"git", "gh", "gt", "maestro", "python3"}
 _BANNED_FENCE_VARS = ("$REPO", "$WT", "$MHOME", "$BASE", "$PREFIX", "$SLUG")
 
 
@@ -285,9 +285,10 @@ def test_implementing_fenced_commands_are_single_invocations():
 
 
 def test_implementing_fenced_commands_use_allowed_first_token():
-    """AC2 (GA-12): every downstream command's first token is git/gh/maestro/python3 or
-    a venv binary path (`.venv/bin/...`), so each one matches exactly one
-    Bash(<binary>:*) allow rule."""
+    """AC2 (GA-12): every downstream command's first token is git/gh/gt/maestro/python3
+    or a venv binary path (`.venv/bin/...`), so each one matches exactly one
+    Bash(<binary>:*) allow rule. `gt` (T-132) is the Graphite CLI, only ever
+    reached on the `stack_tool == "gt"` branch."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         for fence in _downstream_fences(text):
