@@ -149,20 +149,37 @@ def probe(cfg: Config, now: float) -> dict:
             except OSError:
                 continue
             entry = cursor.get(log_id)
+            migrated_legacy = False
             if isinstance(entry, dict):
                 start = entry.get("pos", 0)
                 counted = float(entry.get("counted", 0.0) or 0.0)
                 log_settled = bool(entry.get("settled", False))
-            else:
+            elif entry is not None:
                 # Pre-upgrade cursor: a bare byte offset, no per-log memory of
                 # cost already counted or settledness yet.
                 start = entry if isinstance(entry, (int, float)) else 0
+                counted = 0.0
+                log_settled = False
+                migrated_legacy = True
+            else:
+                start = 0
                 counted = 0.0
                 log_settled = False
             if not isinstance(start, (int, float)) or start > size:
                 start = 0
                 counted = 0.0
                 log_settled = False
+                migrated_legacy = False
+            if migrated_legacy and start >= size:
+                # Fully drained already under the pre-upgrade cursor, with no
+                # bytes left for us to inspect for a terminal marker -- we
+                # cannot recover whether one was ever seen for those bytes,
+                # so don't guess. Settle it quietly instead of guessing "no
+                # marker seen": an ambiguous legacy log must never spuriously
+                # join unattributed_sessions on the very sweep that migrates
+                # it (an already-drained log must not be disturbed by the
+                # upgrade -- see the ticket's Notes).
+                log_settled = True
             pos = start
             for offset, record in steplog.iter_records(path, start=start):
                 pos = offset

@@ -317,6 +317,45 @@ def test_dead_log_with_no_result_counted_unattributed_once_not_recounted_later(h
     assert st1["total_usd"] == 0.0
 
 
+def test_migrated_legacy_cursor_at_eof_is_not_counted_unattributed(home, cfg):
+    """A log already fully drained and settled under the pre-T-143 bare-int
+    cursor format must not be spuriously flagged unattributed the first time
+    the new code probes it with no new bytes to read -- the exact incident
+    this ticket exists to fix (a mass upgrade-time unattributed spike) must
+    not recur on the migration itself."""
+    t0 = 2_100_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    path = _write_stream_log(home, "T-1", t0, [_result_record(5.0)])
+    st0 = spend.probe(cfg, t0 + 5)
+    assert st0["total_usd"] == 5.0
+    assert st0["unattributed_sessions"] == 0
+
+    # Simulate the real pre-upgrade on-disk state: rewrite this log's cursor
+    # entry from the new {pos, counted, settled} dict shape back to a bare
+    # byte offset, as every log on a board upgrading from before this ticket
+    # actually has.
+    cursor_path = home / "derived" / ".spend_cursor.json"
+    cursor = store.read_json(cursor_path, {})
+    size = path.stat().st_size
+    assert cursor[str(path)]["pos"] == size
+    cursor[str(path)] = size
+    store.write_json(cursor_path, cursor)
+
+    # T-1 is not live (DryRunSessions never writes a real claim) -- the first
+    # probe after "upgrade", with no new bytes, must settle this log quietly
+    # rather than counting it unattributed.
+    st1 = spend.probe(cfg, t0 + 10)
+    assert st1["unattributed_sessions"] == 0
+    assert st1["total_usd"] == 5.0
+
+    migrated = store.read_json(cursor_path, {})
+    assert migrated[str(path)]["settled"] is True
+
+    # And it stays settled, not re-flagged, on a later probe.
+    st2 = spend.probe(cfg, t0 + 20)
+    assert st2["unattributed_sessions"] == 0
+
+
 # --- AC4: the ceiling gate reads the folded last-cumulative total, not a sum -
 
 def test_dispatch_ceiling_gate_uses_last_cumulative_not_sum(home, cfg):
