@@ -136,6 +136,14 @@ def test_install_script_renders_pinned_throttle_and_no_keepalive(tmp_path):
     assert "@MAESTRO_HOME@" not in text and "@PATH@" not in text  # fully substituted
 
 
+def test_install_script_does_not_throttle_the_dispatcher_as_background(tmp_path):
+    """launchd's ProcessType=Background gives every spawned reconciler (and the
+    bazel/git it runs) background QoS -- throttled CPU and disk -- so the rendered
+    plist must not declare a ProcessType at all."""
+    plist, _ = _render_plist(tmp_path, 900)
+    assert "<key>ProcessType</key>" not in plist.read_text()
+
+
 def test_install_script_floors_a_dangerous_interval(tmp_path):
     """`install.sh up --interval 10` — the direct-shell path that bypasses
     fleet.up — must refuse to render a 10s cadence."""
