@@ -120,14 +120,14 @@ def board_state(home: Path) -> dict:
 
 
 def find_did_you_mean(home: Path) -> Path | None:
-    """When *home* is missing/uninitialized, look one level down (children of
-    *home*, if it exists at all) and one level over (siblings -- children of
-    *home*'s parent) for a directory that itself classifies "ok" -- the
-    `~/.maestro` vs `~/.maestro/maestro-dev` trap (T-99): the real board sits
-    one directory below the default home. Depth-1 only, never a recursive
-    crawl -- this is a hint for a stderr message, not a filesystem search.
-    Children are preferred over siblings, each in alphabetical order, so the
-    same broken *home* always suggests the same path.
+    """When *home* is missing/uninitialized/partial, look one level down
+    (children of *home*, if it exists at all) and one level over (siblings --
+    children of *home*'s parent) for a directory that itself classifies "ok"
+    -- the `~/.maestro` vs `~/.maestro/maestro-dev` trap (T-99): the real
+    board sits one directory below the default home. Depth-1 only, never a
+    recursive crawl -- this is a hint for a stderr message, not a filesystem
+    search. Children are preferred over siblings, each in alphabetical order,
+    so the same broken *home* always suggests the same path.
     """
     candidates: list[Path] = []
     if home.exists() and home.is_dir():

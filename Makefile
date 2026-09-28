@@ -1,6 +1,6 @@
 # maestro — dev + dogfood targets.
 # MAESTRO_HOME defaults to the self-dev home; override on the CLI if you like.
-export MAESTRO_HOME ?= $(HOME)/.maestro
+export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
 
 PY := .venv/bin/python
 
@@ -120,10 +120,10 @@ prune-logs:
 	maestro prune-logs --all $(if $(DRY_RUN),--dry-run,)
 
 fleet-up:
-	maestro/_assets/daemon/install.sh up
+	maestro fleet up
 
 fleet-down:
-	maestro/_assets/daemon/install.sh down
+	maestro fleet down
 
 fleet-pause:
 	maestro fleet pause $(if $(FOR),--for $(FOR),) $(if $(REASON),--reason "$(REASON)",)

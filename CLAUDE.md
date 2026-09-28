@@ -40,11 +40,12 @@ below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on 
 
 ## ⚠️ Safety — read before any `maestro` command
 
-- **The dogfood home is `~/.maestro`**, which is where bare `maestro` resolves. The
-  `Makefile` exports `MAESTRO_HOME=$(HOME)/.maestro` (`maestro env` prints resolved paths).
-  There is no `~/.maestro/maestro-dev` (the old home — `maestro` happily initialises a
-  phantom there and reports it healthy). If the home ever moves, grep the whole repo for
-  the old path; `tests/test_maestro_task_skill.py` pins every documented home to the Makefile.
+- **The dogfood home is `~/.maestro/maestro-dev`**. The `Makefile` exports
+  `MAESTRO_HOME=$(HOME)/.maestro/maestro-dev` (`maestro env` prints resolved paths). Bare
+  `maestro` (no `MAESTRO_HOME` exported) instead resolves to the phantom `~/.maestro` — it
+  happily initialises there and reports it healthy, but it is not this board. If the home
+  ever moves, grep the whole repo for the old path; `tests/test_maestro_task_skill.py` pins
+  every documented home to the Makefile.
 - **Never delete or move a home's `events/`, `tickets/`, `inbox/` or `config.toml`** — not
   with `rm -rf`, `git clean`, or anything else, not even the dogfood board. The event logs
   have no other copy; this is how the board was lost on 2026-07-18. A genuine reset needs
