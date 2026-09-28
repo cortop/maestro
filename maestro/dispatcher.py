@@ -1066,6 +1066,40 @@ def sync_external_sources(cfg: Config, now: float) -> dict:
     return {"imported": imported, "refreshed": refreshed}
 
 
+def sync_linear_status(cfg: Config, now: float) -> dict:
+    """T-144: push each Linear-linked ticket's current-phase status from the
+    dispatcher sweep -- the ONE process that still holds `LINEAR_API_KEY`, now
+    that `ops.set_phase`/`ops.finalize` no longer call `LinearTracker.
+    push_phase_status` themselves (a reconciler session must never hold the
+    tracker key; see `sessions._spawn_env`/`config_mod.scrubbed_env`, which strip
+    it from every spawned env). `push_phase_status` is already idempotent per
+    (key, mapped status) via `_last_pushed_status` (reading the event log, not
+    a cursor), so calling it for every Linear-linked, non-terminal key on every
+    sweep is safe and cheap: a phase unchanged since the last successful push
+    is a zero-Linear-call no-op. Never blocks or fails the sweep --
+    `push_phase_status`'s own degrade-to-`Note` behavior on a failed push is
+    unchanged; `_run_sweep_hooks` isolates this call the same as every other
+    hook besides. `del now` -- no cursor of its own; unlike
+    `sync_external_sources`, dedup is entirely `push_phase_status`'s job.
+    Linear updates may lag by up to one sweep interval as a result (spec:
+    ~62s)."""
+    del now
+    home = cfg.home
+    from . import providers  # lazy: avoids a hard dependency from the core onto any one adapter
+
+    tracker = providers.get_trackers(cfg).get("linear")
+    if tracker is None:
+        return {"pushed": 0}
+    pushed = 0
+    for key in list_keys(home):
+        snap = snap_mod.load(home, key)
+        if snap.external_source != "linear" or not snap.external_id:
+            continue
+        pushed += tracker.push_phase_status(home, key, snap.external_id, Phase(snap.phase),
+                                            actor="dispatcher")
+    return {"pushed": pushed}
+
+
 def _schedule_cursor_path(home: Path) -> Path:
     return home / "derived" / ".schedule_cursor.json"
 
@@ -2575,12 +2609,12 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
                 if c.get("kind") == "testrun" and claims.pid_alive(c.get("pid")))
             if in_flight >= TEST_RUN_CONCURRENCY:
                 continue  # at the board-wide cap -- retried next sweep
-            _start_test_run(home, key, cwd, binding.test_command)
+            _start_test_run(cfg, key, cwd, binding.test_command)
             started.append(key)
     return {"checked": checked, "started": started, "folded": folded}
 
 
-def _start_test_run(home: Path, key: str, cwd: Path, command: str) -> None:
+def _start_test_run(cfg: Config, key: str, cwd: Path, command: str) -> None:
     """Launch *command* for *key* as a detached, tracked subprocess -- the
     Popen half of `ops.capture_tests`'s own blocking `subprocess.run`, made
     non-blocking. Wrapped in a shell so the CHILD, not this (about-to-exit)
@@ -2588,8 +2622,12 @@ def _start_test_run(home: Path, key: str, cwd: Path, command: str) -> None:
     (`start_new_session=True`) child is reparented to init the moment this
     process exits, so a LATER `maestro dispatch` invocation is never its
     parent and can't `waitpid()` it -- it can only read what the child left
-    behind for itself (`_test_run_result_path`/`_test_run_log_path`)."""
+    behind for itself (`_test_run_result_path`/`_test_run_log_path`).
 
+    T-144: runs with `config_mod.scrubbed_env(cfg)`, not the ambient dispatcher
+    env -- an agent-written `test_command` gets exactly the same secret-free
+    env `ops.capture_tests`'s synchronous path already does."""
+    home = cfg.home
     result_path = _test_run_result_path(home, key)
     log_path = _test_run_log_path(home, key)
     result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2610,7 +2648,7 @@ def _start_test_run(home: Path, key: str, cwd: Path, command: str) -> None:
         proc = subprocess.Popen(["sh", "-c", wrapped], cwd=str(cwd),
                                 stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+                                start_new_session=True, env=config_mod.scrubbed_env(cfg))
     except Exception:
         claims.release(home, key)
         raise
@@ -2846,19 +2884,22 @@ def sync_restacks(cfg: Config, now: float) -> dict:
             if claim is not None:
                 continue  # some other claim still holds this key -- leave it alone
             cwd = _worker_cwd(cfg, key)
-            _start_restack(home, key, cwd)
+            _start_restack(cfg, key, cwd)
             started.append(key)
     return {"checked": checked, "started": started, "folded": folded}
 
 
-def _start_restack(home: Path, key: str, cwd: Path) -> None:
+def _start_restack(cfg: Config, key: str, cwd: Path) -> None:
     """Launch *key*'s gt restack as a detached, tracked subprocess -- same
     shape as `_start_test_run`: the CHILD writes its own exit code, so a
     LATER `dispatch()` process (never this one's parent, once it exits) can
-    still read the outcome."""
+    still read the outcome. T-144: same `config_mod.scrubbed_env(cfg)` env as
+    `_start_test_run` -- `gt` shells out in the ticket's own worktree and must
+    not inherit a secret this key's repo binding doesn't need."""
     import shlex
     import subprocess
 
+    home = cfg.home
     result_path = _restack_result_path(home, key)
     log_path = _restack_log_path(home, key)
     result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2873,7 +2914,7 @@ def _start_restack(home: Path, key: str, cwd: Path) -> None:
         proc = subprocess.Popen(["sh", "-c", wrapped], cwd=str(cwd),
                                 stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+                                start_new_session=True, env=config_mod.scrubbed_env(cfg))
     except Exception:
         claims.release(home, key)
         raise
@@ -3495,6 +3536,7 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     if filter_keys is None:
         out.minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
     _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
+    _run_hook("sync_linear_status", hook_errors, sync_linear_status, cfg, now, default={})
     out.scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
                                     cfg, now, default={"fired": []})["fired"]
     # sync_worktrees preflight-gates itself per repo group (MR-5).

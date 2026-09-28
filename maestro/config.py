@@ -445,6 +445,17 @@ class Config:
     # [repos.<name>] override wins, same "table wins, unset inherits"
     # precedence as `test_command` -- see `repos.RepoBinding.pr_split_threshold`.
     pr_split_threshold: int = 800
+    # T-144: exact env var names or fnmatch globs (e.g. "GH_TOKEN_*") to drop
+    # from every spawned reconciler's env AND every dispatcher-run subprocess
+    # (`ops.capture_tests`/`run_ac_checks`, `_start_test_run`, `_start_restack`)
+    # -- for a human's own shell secrets that would otherwise ride along
+    # ambiently (a nudge spawned from `ans`/`cmd`/`create`, or a foreground
+    # `maestro dispatch`, inherits the invoking shell's full env). Board-wide
+    # only, unlike token_env/api_key_env below (which are per-repo/per-tracker
+    # and dropped automatically -- see `scrubbed_env`). Empty by default:
+    # ships byte-identical to before this ticket. `GH_TOKEN` itself is never
+    # dropped even if listed here (see `scrubbed_env`'s docstring).
+    scrub_env: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -639,6 +650,61 @@ def runner_path(cfg: "Config", base: str | None = None) -> str:
         return base
     existing = base.split(_os.pathsep) if base else []
     return _os.pathsep.join(entries + [e for e in existing if e not in entries])
+
+
+def _scrub_patterns(cfg: "Config") -> list[str]:
+    """Every env var name/glob T-144 drops automatically: each `[repos.<name>]
+    token_env`, the configured tracker's own token/key env var (`[tracker.jira]
+    token_env`, default `JIRA_API_TOKEN`; `[tracker.linear] api_key_env`,
+    default `LINEAR_API_KEY` -- read straight off raw config, never by
+    constructing a `providers.py` adapter, so this stays a base-layer helper
+    with no import-cycle risk), plus every `[maestro] scrub_env` entry. Never
+    includes `GH_TOKEN` -- see `scrubbed_env`'s docstring."""
+    patterns: list[str] = []
+    for table in cfg.repos.values():
+        token_env = table.get("token_env")
+        if token_env:
+            patterns.append(token_env)
+    tracker_raw = cfg.providers.get("tracker", "none")
+    tracker_names = tracker_raw if isinstance(tracker_raw, list) else [tracker_raw]
+    tracker_settings = cfg.provider_config.get("tracker", {})
+    if "jira" in tracker_names:
+        patterns.append(tracker_settings.get("jira", {}).get("token_env") or "JIRA_API_TOKEN")
+    if "linear" in tracker_names:
+        patterns.append(tracker_settings.get("linear", {}).get("api_key_env") or "LINEAR_API_KEY")
+    patterns.extend(cfg.scrub_env)
+    return patterns
+
+
+def scrubbed_env(cfg: "Config", base_env: dict | None = None) -> dict:
+    """T-144: *base_env* (default: a fresh copy of ``os.environ``) with every
+    secret maestro knows this board doesn't need for THIS purpose stripped --
+    the one helper every spawn site (`sessions._spawn_env`) and every
+    dispatcher-run subprocess (`ops.capture_tests`/`run_ac_checks`/`_run_shell`,
+    `dispatcher._start_test_run`/`_start_restack`) builds its child env from,
+    so a secret dropped in one never leaks back in through another. Matches
+    against `_scrub_patterns` via `fnmatch` (an exact name is just a glob with
+    no wildcard, so one pass covers both). Deliberately narrow: no blanket
+    `*_TOKEN`/`*_KEY`/`*_SECRET` heuristic (that would catch
+    `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, an opencode provider key, or
+    the variable a `[runner.pi] api_key = "$VAR"` line names -- runners
+    authenticate through those). `GH_TOKEN` itself is NEVER dropped, even if a
+    binding's `token_env` (or a `scrub_env` entry) literally names it --
+    unbound repos and the post-QA spawn rely on it as their ambient `gh` auth
+    (see credentials.py's own module docstring)."""
+    import fnmatch
+    import os as _os
+
+    env = dict(base_env) if base_env is not None else dict(_os.environ)
+    patterns = [p for p in _scrub_patterns(cfg) if p and p != "GH_TOKEN"]
+    if not patterns:
+        return env
+    for name in list(env):
+        if name == "GH_TOKEN":
+            continue
+        if any(fnmatch.fnmatchcase(name, p) for p in patterns):
+            del env[name]
+    return env
 
 
 # T-115: the shape a `post_qa_skill` value must have -- a leading `/`, then a
@@ -879,6 +945,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("provider_probe_interval_s", _int),
     Knob("review_noise_patterns", _review_noise_patterns),
     Knob("review_noise_authors", _string_list),
+    Knob("scrub_env", _string_list),
 )
 
 # `bash_max_timeout` is recognized but resolved after the table, because its
@@ -1347,6 +1414,13 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # which `implementing` proposes a stack of smaller PRs
                                   # (`maestro ask`) instead of opening/growing one big one. 0
                                   # disables the check. Per-[repos.<name>] override wins.
+# scrub_env = ["GH_TOKEN_*"]      # T-144: exact names or fnmatch globs dropped from every
+                                  # spawned reconciler's env and every dispatcher-run test/check
+                                  # subprocess -- for a human shell's own secrets. Board-wide
+                                  # only. Each [repos.<name>] token_env and the configured
+                                  # tracker's token/key env var are always dropped too, with no
+                                  # listing needed here. Empty by default (ships dark). GH_TOKEN
+                                  # itself is never dropped.
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom
