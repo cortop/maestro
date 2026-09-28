@@ -26,6 +26,15 @@ class MaestroError(Exception):
     """Base class for all maestro errors."""
 
 
+class WorktreeHealthRefused(MaestroError):
+    """T-138: raised ONLY by `ops.worktree_ensure`'s T-81 branch -- a witnessed
+    worktree that completed creation but now fails its own health check.
+    A distinct subclass (not just `MaestroError`) so a caller that must treat
+    this one failure differently from every other `worktree_ensure` failure
+    (fetch error, timeout, the T-44 stale-branch refusal) can `except` on
+    type rather than parsing the message text."""
+
+
 def validate_key(key: str) -> str:
     if not isinstance(key, str) or not _KEY_RE.match(key) or key in {".", ".."}:
         raise MaestroError(f"invalid ticket key: {key!r}")
