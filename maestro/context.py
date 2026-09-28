@@ -33,7 +33,6 @@ MAX_FAILURES = 10
 MAX_CI_OBSERVATIONS = 10
 MAX_IMPL_STEPS = 15
 MAX_LOCATE_HINTS = 15
-MAX_SYMBOL_ROWS = 30
 MAX_PRIOR_EDIT_FILES = 15
 
 
@@ -157,10 +156,10 @@ def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str
 
         symbols = locate.get("symbols") or []
         lines.append("## Symbol map")
-        shown, dropped = _tail(symbols, MAX_SYMBOL_ROWS)
+        dropped = locate.get("symbols_dropped") or 0
         if dropped:
-            lines.append(f"_({dropped} earlier symbol(s) omitted)_")
-        for s in shown:
+            lines.append(f"_({dropped} lower-ranked symbol(s) omitted)_")
+        for s in symbols:
             doc_suffix = f" — {s['docstring']}" if s.get("docstring") else ""
             lines.append(
                 f"- `{s['path']}:{s['line_start']}-{s['line_end']}` "

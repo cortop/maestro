@@ -22,14 +22,23 @@ from .dispatcher import spec_hash_on_disk
 
 MAX_HINTS = 15
 MAX_SYMBOL_FILES = 8
+MAX_SYMBOL_ROWS = 30
 MAX_CHURN_COMMITS = 200
 MAX_GREP_CANDIDATES = 25
+
+# T-142: a file at/above this many lines is a "hub" file (dispatcher.py/ops.py/
+# cli.py are 1.9k-4.6k lines; the smallest fixture in test_locate.py is well
+# under it) -- for these, the dossier lists only spec-matched defs instead of
+# the whole module. Picked, and documented here rather than as a config knob,
+# because Notes explicitly scopes this to "pick it and document it in the PR".
+HUB_FILE_LINE_THRESHOLD = 200
 
 _GIT_TIMEOUT = 20
 
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
 _PATHLIKE_RE = re.compile(r"\b[\w][\w./-]*\.[A-Za-z][\w]{0,8}\b")
 _BARE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PATH_LINE_TOKEN_RE = re.compile(r"^([\w./-]+\.[A-Za-z][\w]*):(\d+)(?:-(\d+))?$")
 
 
 def _run_git(repo: Path, args: list[str]) -> list[str]:
@@ -58,6 +67,26 @@ def extract_mentions(spec_text: str) -> list[str]:
         if token and " " not in token and not token.startswith(("--", "-")):
             seen.setdefault(token, None)
     return list(seen)
+
+
+def extract_path_line_mentions(spec_text: str) -> dict[str, set[int]]:
+    """path -> exact line numbers named by a backticked `path:line` or
+    `path:start-end` spec reference. `extract_mentions` throws the `:line`
+    part of such a token away; here it's kept, because when a spec cites a
+    line, that line is an exact symbol hint for free (T-142)."""
+    out: dict[str, set[int]] = {}
+    for m in _BACKTICK_RE.finditer(spec_text):
+        token = m.group(1).strip().split("(")[0].strip()
+        pm = _PATH_LINE_TOKEN_RE.match(token)
+        if not pm:
+            continue
+        path, start, end = pm.group(1), int(pm.group(2)), pm.group(3)
+        lines = out.setdefault(path, set())
+        if end:
+            lines.update(range(start, int(end) + 1))
+        else:
+            lines.add(start)
+    return out
 
 
 def _list_files(repo: Path, ref: str | None) -> list[str]:
@@ -179,21 +208,41 @@ def merge_hints(mention: list[str], prior_edit: list[str], churn_files: list[str
     return rows
 
 
-def symbol_map(repo: Path, files: list[str]) -> list[dict]:
+def _read_file_at(repo: Path, rel: str, ref: str | None) -> str | None:
+    """*rel*'s text at *ref*, or in the working tree when *ref* is None.
+    None on any read/decode failure -- callers treat a file they can't read as
+    absent, never an error (fail-open, same contract as the old bare
+    ``path.read_text()`` call this replaces)."""
+    if ref is None:
+        try:
+            return (repo / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+    proc = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{rel}"],
+                           capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=False)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def symbol_map(repo: Path, files: list[str], *, ref: str | None = None) -> list[dict]:
     """One `ast` walk per top Python file -- def/class name -> path, line
     range, first docstring line -- so a session can `Read` with offset/limit
     instead of re-reading the whole file. Non-.py files, and any file that
     fails to parse, are silently skipped (fail-open -- a symbol map is a
-    convenience, never a requirement)."""
+    convenience, never a requirement). *ref* reads each file's content at that
+    commit instead of the working tree -- used by `run_eval` to replay this
+    exact, unfiltered, untruncated ordering as T-142's baseline stage."""
     symbols: list[dict] = []
     for rel in files[:MAX_SYMBOL_FILES]:
         if not rel.endswith(".py"):
             continue
-        path = repo / rel
+        text = _read_file_at(repo, rel, ref)
+        if text is None:
+            continue
         try:
-            text = path.read_text(encoding="utf-8")
             tree = ast.parse(text, filename=rel)
-        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        except (SyntaxError, ValueError):
             continue
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -209,6 +258,113 @@ def symbol_map(repo: Path, files: list[str]) -> list[dict]:
                     "docstring": first_line,
                 })
     return symbols
+
+
+def _ast_symbols(text: str, rel: str) -> list[dict]:
+    """Every def/class in *text*, nested included, qualified by its enclosing
+    class/def chain (``Class.method``) -- the shared building block for both
+    T-142's ranked symbol map and its diff-hunk symbol truth, so the two use
+    an identical notion of "which symbol is this line inside"."""
+    try:
+        tree = ast.parse(text, filename=rel)
+    except (SyntaxError, ValueError):
+        return []
+    out: list[dict] = []
+
+    def walk(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                qualname = f"{prefix}.{child.name}" if prefix else child.name
+                kind = "class" if isinstance(child, ast.ClassDef) else "function"
+                doc = ast.get_docstring(child) or ""
+                out.append({
+                    "path": rel,
+                    "name": child.name,
+                    "qualname": qualname,
+                    "kind": kind,
+                    "line_start": child.lineno,
+                    "line_end": getattr(child, "end_lineno", child.lineno),
+                    "docstring": doc.splitlines()[0] if doc else "",
+                })
+                walk(child, qualname)
+            else:
+                walk(child, prefix)
+
+    walk(tree, "")
+    return out
+
+
+def _grep_word_lines(repo: Path, term: str, ref: str | None) -> list[tuple[str, int]]:
+    """(path, line) hits for whole-word literal *term*, ref-scoped like
+    `_grep_word` -- with the same `<ref>:` prefix strip T-141 added there."""
+    if ref:
+        prefix = f"{ref}:"
+        raw = _run_git(repo, ["grep", "-nw", "-I", term, ref, "--"])
+        raw = [line[len(prefix):] if line.startswith(prefix) else line for line in raw]
+    else:
+        raw = _run_git(repo, ["grep", "-nw", "-I", "--", term])
+    hits: list[tuple[str, int]] = []
+    for line in raw:
+        parts = line.split(":", 2)
+        if len(parts) < 2:
+            continue
+        try:
+            hits.append((parts[0], int(parts[1])))
+        except ValueError:
+            continue
+    return hits
+
+
+def _symbol_rank(name: str, line_start: int, line_end: int, path: str,
+                  candidates: set[str], grep_hit_lines: dict[str, set[int]],
+                  path_line_hints: dict[str, set[int]]) -> int:
+    """0: an explicit `path:line` spec reference falls inside this def -- an
+    exact hint, free. 1: the def's own name is itself a spec term. 2: a spec
+    identifier is used somewhere in the def's body (`git grep -nw`). 3:
+    unmatched."""
+    hinted = path_line_hints.get(path)
+    if hinted and any(line_start <= ln <= line_end for ln in hinted):
+        return 0
+    if name in candidates:
+        return 1
+    hits = grep_hit_lines.get(path)
+    if hits and any(line_start <= ln <= line_end for ln in hits):
+        return 2
+    return 3
+
+
+def ranked_symbol_map(repo: Path, files: list[str], candidates: list[str],
+                       path_line_hints: dict[str, set[int]], *, ref: str | None = None,
+                       hub_threshold: int = HUB_FILE_LINE_THRESHOLD) -> list[dict]:
+    """T-142: like `symbol_map`, but (a) for a file at/above *hub_threshold*
+    lines, keeps only the defs the spec actually points at instead of the
+    whole module, and (b) globally ranks an exact `path:line` hit first, a
+    name match second, a body-reference match third, everything else last --
+    so a later cap (`MAX_SYMBOL_ROWS`) drops the least-relevant rows instead of
+    whichever ast.walk happened to visit last."""
+    bare_candidates = {c for c in candidates if _BARE_IDENTIFIER_RE.match(c)}
+    grep_hit_lines: dict[str, set[int]] = {}
+    for term in list(bare_candidates)[:MAX_GREP_CANDIDATES]:
+        for path, lineno in _grep_word_lines(repo, term, ref):
+            grep_hit_lines.setdefault(path, set()).add(lineno)
+
+    ranked: list[tuple[int, dict]] = []
+    for rel in files[:MAX_SYMBOL_FILES]:
+        if not rel.endswith(".py"):
+            continue
+        text = _read_file_at(repo, rel, ref)
+        if text is None:
+            continue
+        defs = _ast_symbols(text, rel)
+        is_hub = (text.count("\n") + 1) >= hub_threshold
+        for d in defs:
+            rank = _symbol_rank(d["name"], d["line_start"], d["line_end"], rel,
+                                 bare_candidates, grep_hit_lines, path_line_hints)
+            if is_hub and rank == 3:
+                continue
+            ranked.append((rank, d))
+    ranked.sort(key=lambda item: item[0])
+    return [d for _, d in ranked]
 
 
 def _cache_path(home: Path, key: str) -> Path:
@@ -241,18 +397,21 @@ def compute(cfg: Config, key: str, *, force: bool = False) -> dict:
     spec_path = store.spec_path(home, key)
     spec_text = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
     candidates = extract_mentions(spec_text)
+    path_line_hints = extract_path_line_mentions(spec_text)
     mention = resolve_mentions(repo, candidates)
     prior_edit = prior_edits(home, key)
     hints = merge_hints(mention, prior_edit, [])
     if len(hints) < MAX_HINTS:
         hints = merge_hints(mention, prior_edit, churn(repo))
-    symbols = symbol_map(repo, [h["path"] for h in hints])
+    ranked = ranked_symbol_map(repo, [h["path"] for h in hints], candidates, path_line_hints)
+    symbols, symbols_dropped = ranked[:MAX_SYMBOL_ROWS], max(0, len(ranked) - MAX_SYMBOL_ROWS)
 
     result = {
         "spec_hash": spec_hash,
         "head": head,
         "hints": hints,
         "symbols": symbols,
+        "symbols_dropped": symbols_dropped,
         "prior_edits": prior_edit[:MAX_HINTS],
     }
     store.write_json(cache_file, result)
@@ -299,6 +458,62 @@ def _merged_commits(repo: Path, home: Path, base: str) -> list[tuple[str, str, s
 
 def _changed_files(repo: Path, parent: str, sha: str) -> set[str]:
     return set(_run_git(repo, ["diff", "--no-renames", "--name-only", parent, sha]))
+
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))?\s\+\d+(?:,\d+)?\s@@")
+
+
+def _diff_old_ranges(repo: Path, parent: str, sha: str) -> dict[str, list[tuple[int, int]]]:
+    """path -> old-side (line_start, line_end) ranges touched by each hunk of
+    `git diff -U0 <parent> <sha>`. A 0-old-line hunk (a pure insertion) is
+    reported as a single anchor line -- old_start, per `git diff`'s own
+    convention for where the insertion lands (T-142's "symbol truth" recipe)."""
+    lines = _run_git(repo, ["diff", "-U0", "--no-renames", parent, sha])
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    current: str | None = None
+    for line in lines:
+        if line.startswith("+++ "):
+            p = line[4:]
+            current = p[2:] if p.startswith("b/") else None
+            continue
+        m = _HUNK_RE.match(line)
+        if m and current:
+            old_start = int(m.group(1))
+            old_count = int(m.group(2)) if m.group(2) is not None else 1
+            end = old_start if old_count == 0 else old_start + old_count - 1
+            ranges.setdefault(current, []).append((old_start, end))
+    return ranges
+
+
+def _symbol_truth(repo: Path, parent: str, sha: str, parent_files: set[str]) -> set[str]:
+    """`path::Qualname` for the innermost def/class enclosing each hunk's
+    old-side lines, resolved against the PARENT commit's own AST -- never the
+    working tree, so a later edit can't move the goalposts. A module-level
+    hunk (an import, a constant -- no enclosing def) intentionally contributes
+    no truth: T-142's Notes call this out as a choice to document, and treating
+    a module-level edit as "the whole module" truth would make every stage's
+    file-level recall trivially perfect on it, which isn't a meaningful signal
+    for a SYMBOL-level ranker."""
+    ranges_by_path = _diff_old_ranges(repo, parent, sha)
+    truth: set[str] = set()
+    defs_cache: dict[str, list[dict]] = {}
+    for path, ranges in ranges_by_path.items():
+        if not path.endswith(".py") or path not in parent_files:
+            continue
+        if path not in defs_cache:
+            text = _read_file_at(repo, path, parent)
+            defs_cache[path] = _ast_symbols(text, path) if text is not None else []
+        defs = defs_cache[path]
+        for start, end in ranges:
+            best = None
+            for d in defs:
+                if d["line_start"] <= start and end <= d["line_end"]:
+                    span = d["line_end"] - d["line_start"]
+                    if best is None or span < best["line_end"] - best["line_start"]:
+                        best = d
+            if best is not None:
+                truth.add(f"{path}::{best['qualname']}")
+    return truth
 
 
 def _recall_at(ranked: list[str], truth: set[str], n: int) -> float:
@@ -353,11 +568,13 @@ def run_eval(cfg: Config, home: Path, key: str | None, *, n: int | None = None) 
 
     per_commit: list[dict] = []
     scored_rows: list[dict] = []
+    symbol_scored_rows: list[dict] = []
     excluded_added_files_count = 0
     for sha, parent, ticket_key in commits:
         spec_path = store.spec_path(home, ticket_key)
         spec_text = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
         candidates = extract_mentions(spec_text)
+        path_line_hints = extract_path_line_mentions(spec_text)
         mention = resolve_mentions(repo, candidates, ref=parent)
         prior_edit = prior_edits(home, ticket_key)
         churn_files = churn(repo, ref=parent)
@@ -373,16 +590,28 @@ def run_eval(cfg: Config, home: Path, key: str | None, *, n: int | None = None) 
             "churn": churn_files,
             "merged": [h["path"] for h in merged],
         }
+        merged_paths = [h["path"] for h in merged]
+        symbol_truth = _symbol_truth(repo, parent, sha, parent_files)
+        symbol_new = ranked_symbol_map(repo, merged_paths, candidates, path_line_hints, ref=parent)
+        symbol_baseline = symbol_map(repo, merged_paths, ref=parent)
+        symbol_rankings = {
+            "symbol_new": [f"{r['path']}::{r['qualname']}" for r in symbol_new],
+            "symbol_baseline": [f"{r['path']}::{r['name']}" for r in symbol_baseline],
+        }
         row = {
             "key": ticket_key,
             "sha": sha,
             "scores": _score(rankings, truth),
+            "symbol_scores": _score(symbol_rankings, symbol_truth),
             "excluded_added_files": excluded_added,
             "scored": bool(truth),
+            "symbol_scored": bool(symbol_truth),
         }
         per_commit.append(row)
         if truth:
             scored_rows.append(row)
+        if symbol_truth:
+            symbol_scored_rows.append(row)
 
     stages = ("mention", "prior_edit", "churn", "merged")
     summary = {
@@ -393,10 +622,18 @@ def run_eval(cfg: Config, home: Path, key: str | None, *, n: int | None = None) 
         }
         for stage in stages
     }
+    for stage in ("symbol_new", "symbol_baseline"):
+        summary[stage] = {
+            "recall_at_5": _avg([c["symbol_scores"][stage] for c in symbol_scored_rows], "recall_at_5"),
+            "recall_at_10": _avg([c["symbol_scores"][stage] for c in symbol_scored_rows], "recall_at_10"),
+            "mrr": _avg([c["symbol_scores"][stage] for c in symbol_scored_rows], "mrr"),
+        }
     return {
         "commits_evaluated": len(per_commit),
         "commits_scored": len(scored_rows),
         "commits_excluded_no_prior_changes": len(per_commit) - len(scored_rows),
+        "commits_scored_symbols": len(symbol_scored_rows),
+        "commits_excluded_no_symbol_truth": len(per_commit) - len(symbol_scored_rows),
         "excluded_added_files_count": excluded_added_files_count,
         "baseline_mention_recall_at_5": summary["mention"]["recall_at_5"],
         "stages": summary,
