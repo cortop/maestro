@@ -777,7 +777,7 @@ _FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
 # skill's once-per-pass marker, the answered-command inbox record).
 _UNFOLDED = frozenset({
     E.NOTE, E.CHECKED, E.COMMAND_RECEIVED, E.JIRA_SYNCED, E.LINEAR_SYNCED,
-    E.LINEAR_STATUS_PUSHED, E.POST_QA_SKILL_SPAWNED,
+    E.LINEAR_STATUS_PUSHED, E.POST_QA_SKILL_SPAWNED, E.FAST_PATH_DECIDED,
 })
 
 # (e) DONE is absorbing. These event types are dropped outright once a ticket
