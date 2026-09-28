@@ -244,3 +244,118 @@ def test_locate_eval_respects_n_cap(home, tmp_path, capsys):
     result = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert result["commits_evaluated"] == 1
+
+
+# ---------------------------------------------------------------------------
+# T-141: strip the `<ref>:` prefix off a grep hit at a historical ref, and
+# don't score --eval's truth against files a commit only added.
+# ---------------------------------------------------------------------------
+
+def test_resolve_mentions_at_ref_strips_prefix_for_grep_hits(tmp_path):
+    _origin, repo = _make_origin_and_repo(tmp_path)
+    (repo / "target.py").write_text("def resolve_mentions_probe():\n    return 1\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "add target module", cwd=repo)
+    sha = locate._run_git(repo, ["rev-parse", "HEAD"])[0]
+    (repo / "unrelated.py").write_text("x = 1\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "add unrelated file", cwd=repo)
+
+    # The identifier is only findable via `git grep` -- it's not itself a path,
+    # basename or stem of any file -- so this exercises the ref-scoped grep
+    # branch for both a full sha and a symbolic ref.
+    for ref in (sha, "HEAD~1"):
+        hits = locate.resolve_mentions(repo, ["resolve_mentions_probe"], ref=ref)
+        assert hits == ["target.py"]
+        assert not any(h.startswith(f"{ref}:") for h in hits)
+
+
+def test_locate_eval_mention_scores_identifier_found_only_via_grep(home, tmp_path, capsys):
+    _origin, repo = _make_origin_and_repo(tmp_path)
+    (repo / "foo.py").write_text("def probe_symbol():\n    return 0\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "seed foo", cwd=repo)
+    (repo / "foo.py").write_text("def probe_symbol():\n    return 1\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "T-210: tweak probe_symbol", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    _write_spec(home, "T-210", "Fix `probe_symbol`.")
+    (home / "config.toml").write_text(f"[maestro]\nrepo_path = {str(repo)!r}\n", encoding="utf-8")
+
+    rc = cli.main(["--home", str(home), "locate", "--eval"])
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    # Before the fix, git grep's ref-scoped output kept the "<parent-sha>:"
+    # prefix, so this never matched foo.py and scored 0.0 on every stage.
+    assert result["stages"]["mention"]["recall_at_5"] == 1.0
+    assert result["stages"]["mention"]["mrr"] == 1.0
+
+
+def test_locate_eval_excludes_added_files_from_truth(home, tmp_path, capsys):
+    _origin, repo = _make_origin_and_repo(tmp_path)
+    (repo / "foo.py").write_text("def foo():\n    return 0\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "seed foo", cwd=repo)
+    (repo / "foo.py").write_text("def foo():\n    return 1\n")
+    (repo / "new_mod.py").write_text("x = 1\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "T-211: update foo, add new_mod", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    _write_spec(home, "T-211", "Update `foo.py`.")
+    (home / "config.toml").write_text(f"[maestro]\nrepo_path = {str(repo)!r}\n", encoding="utf-8")
+
+    rc = cli.main(["--home", str(home), "locate", "--eval"])
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    # new_mod.py didn't exist at the parent, so it can never be ranked -- it
+    # must not drag mention recall@5 down to 0.5.
+    assert result["stages"]["mention"]["recall_at_5"] == 1.0
+    row = result["per_commit"][0]
+    assert row["key"] == "T-211"
+    assert row["excluded_added_files"] == ["new_mod.py"]
+    assert result["excluded_added_files_count"] == 1
+
+
+def test_locate_eval_all_added_commit_matches_averages_of_solo_replay(home, tmp_path, capsys):
+    def _seed_and_update(repo):
+        (repo / "foo.py").write_text("def foo():\n    return 0\n")
+        _git("add", "-A", cwd=repo)
+        _git("commit", "-q", "-m", "seed foo", cwd=repo)
+        (repo / "foo.py").write_text("def foo():\n    return 1\n")
+        _git("add", "-A", cwd=repo)
+        _git("commit", "-q", "-m", "T-212: update foo module", cwd=repo)
+
+    _write_spec(home, "T-212", "Update `foo.py`.")
+    _write_spec(home, "T-213", "Add `brand_new.py`.")
+
+    _origin_a, repo_alone = _make_origin_and_repo(tmp_path, name="alone")
+    _seed_and_update(repo_alone)
+    _git("push", "-q", "origin", "main", cwd=repo_alone)
+    (home / "config.toml").write_text(f"[maestro]\nrepo_path = {str(repo_alone)!r}\n", encoding="utf-8")
+    rc_alone = cli.main(["--home", str(home), "locate", "--eval"])
+    result_alone = json.loads(capsys.readouterr().out)
+
+    _origin_b, repo_combo = _make_origin_and_repo(tmp_path, name="combo")
+    _seed_and_update(repo_combo)
+    (repo_combo / "brand_new.py").write_text("y = 1\n")
+    _git("add", "-A", cwd=repo_combo)
+    _git("commit", "-q", "-m", "T-213: add brand new module", cwd=repo_combo)
+    _git("push", "-q", "origin", "main", cwd=repo_combo)
+    (home / "config.toml").write_text(f"[maestro]\nrepo_path = {str(repo_combo)!r}\n", encoding="utf-8")
+    rc_combo = cli.main(["--home", str(home), "locate", "--eval"])
+    result_combo = json.loads(capsys.readouterr().out)
+
+    assert rc_alone == 0
+    assert rc_combo == 0
+    assert result_alone["commits_evaluated"] == 1
+    assert result_combo["commits_evaluated"] == 2
+    assert result_combo["commits_scored"] == 1
+    assert result_combo["commits_excluded_no_prior_changes"] == 1
+    by_key = {c["key"]: c for c in result_combo["per_commit"]}
+    assert by_key["T-213"]["scored"] is False
+    assert by_key["T-212"]["scored"] is True
+    # The all-added commit must not shift the averages away from what a solo
+    # replay of the one normal commit produces.
+    assert result_combo["stages"] == result_alone["stages"]
