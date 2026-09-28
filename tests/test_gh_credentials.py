@@ -342,9 +342,12 @@ def test_claude_cli_sessions_spawn_env_byte_identical_when_no_overlay(home):
     expected = dict(os.environ)
     expected["MAESTRO_HOME"] = str(home)
     # The board-wide Bash ceiling is the one other thing every spawn carries
-    # (`[maestro] bash_max_timeout` -> BASH_MAX_TIMEOUT_MS); still no credential.
+    # (`[maestro] bash_max_timeout` -> BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS);
+    # still no credential.
     from maestro import config as config_mod
-    expected["BASH_MAX_TIMEOUT_MS"] = str(config_mod.load(home).bash_max_timeout * 1000)
+    ceiling_ms = str(config_mod.load(home).bash_max_timeout * 1000)
+    expected["BASH_MAX_TIMEOUT_MS"] = ceiling_ms
+    expected["BASH_DEFAULT_TIMEOUT_MS"] = ceiling_ms
     assert env == expected
 
 

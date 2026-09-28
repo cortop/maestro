@@ -4,7 +4,9 @@ The skill itself is a markdown prompt; these tests cover the underlying
 behaviours it relies on so that regressions in the Python layer are caught
 without needing an end-to-end LLM call.
 """
+import os
 import re
+import subprocess
 from pathlib import Path
 
 from maestro import dispatcher as disp, inbox, snapshot as snap_mod, store
@@ -32,14 +34,30 @@ def test_skill_file_exists_in_commands_dir():
 # The Makefile's export is the single source of truth for the dogfood home.
 # Everything that tells a human or an agent which home to drive must agree with
 # it, because a doc that names a home nobody runs is worse than no doc: every
-# `make` target and every agent that read CLAUDE.md silently drove an empty
-# phantom `~/.maestro/maestro-dev` for weeks after the home moved.
+# `make` target and every agent that read CLAUDE.md named the phantom
+# `~/.maestro` instead of the real, `ok` board at `~/.maestro/maestro-dev` for
+# weeks after the home moved (T-135) -- a bare shell with no `chpwd` hook saw
+# 2 stale tickets instead of 193.
 _HOME_DOCS = (
     "CLAUDE.md",
     "DOGFOOD.md",
     "skills/maestro-task.md",
     ".claude/commands/maestro-task.md",
 )
+
+# Bare references to the phantom `~/.maestro/<subpath>` (never nested one more
+# level under the real `maestro-dev` child) -- these slip past
+# `test_every_documented_maestro_home_matches_the_makefile` above, which only
+# matches literal `MAESTRO_HOME=` assignments, not a path spelled out in prose
+# or a `$EDITOR`/`cat` example line.
+_BARE_PHANTOM_HOME_RE = re.compile(
+    r"~/\.maestro/(?:events|tickets|inbox|derived|worktrees|agent-logs|config\.toml)\b"
+)
+_BARE_PHANTOM_BACKUPS_RE = re.compile(r"~/\.maestro-backups\b")
+
+
+def _bare_home_drift(text: str) -> list[str]:
+    return _BARE_PHANTOM_HOME_RE.findall(text) + _BARE_PHANTOM_BACKUPS_RE.findall(text)
 
 
 def _makefile_home() -> str:
@@ -50,6 +68,29 @@ def _makefile_home() -> str:
 
 def test_makefile_declares_the_dogfood_home():
     assert _makefile_home().startswith("~/"), _makefile_home()
+
+
+def test_makefile_fleet_targets_go_through_maestro_fleet():
+    """fleet-up/fleet-down must route through `maestro fleet up`/`down` (which
+    sets the per-home launchd label) rather than shelling out to
+    install.sh directly -- install.sh refuses a non-default MAESTRO_HOME with
+    no MAESTRO_LABEL set (T-135), which would break these targets now that
+    the Makefile's default home is `~/.maestro/maestro-dev`."""
+    lines = (REPO_ROOT / "Makefile").read_text().splitlines()
+
+    def _recipe(target: str) -> str:
+        start = next(i for i, l in enumerate(lines) if l.startswith(f"{target}:"))
+        body = []
+        for l in lines[start + 1:]:
+            if not l.startswith("\t"):
+                break
+            body.append(l)
+        return "\n".join(body)
+
+    assert "maestro fleet up" in _recipe("fleet-up")
+    assert "maestro fleet down" in _recipe("fleet-down")
+    assert "install.sh" not in _recipe("fleet-up")
+    assert "install.sh" not in _recipe("fleet-down")
 
 
 def test_every_documented_maestro_home_matches_the_makefile():
@@ -63,6 +104,33 @@ def test_every_documented_maestro_home_matches_the_makefile():
                 if named != home:
                     drift.append(f"{rel}:{n} exports {named!r}, Makefile has {home!r}")
     assert not drift, "documented MAESTRO_HOME drifted from the Makefile:\n" + "\n".join(drift)
+
+
+def test_no_stale_phantom_negation_in_docs():
+    """No doc may still claim `~/.maestro/maestro-dev` doesn't exist -- 3f53f7e
+    got the direction backwards (T-135); the real, `ok` board lives there."""
+    needle = "There is no `~/.maestro/maestro-dev`"
+    offenders = [rel for rel in _HOME_DOCS if needle in (REPO_ROOT / rel).read_text()]
+    assert not offenders, f"stale phantom-home negation still present in: {offenders}"
+
+
+def test_bare_home_drift_detector_catches_the_old_dogfood_line():
+    """Unit test for `_bare_home_drift` itself: the exact stale line DOGFOOD.md
+    used to carry (a bare `~/.maestro/tickets/...` path, never a
+    `MAESTRO_HOME=` assignment) must be flagged."""
+    stale_line = "$EDITOR ~/.maestro/tickets/<KEY>/spec.md"
+    assert _bare_home_drift(stale_line) == ["~/.maestro/tickets"]
+
+
+def test_home_docs_have_no_bare_phantom_home_paths():
+    """The real, current `_HOME_DOCS` must carry no bare phantom-home path --
+    every reference to a state path is nested under the documented home."""
+    drift = []
+    for rel in _HOME_DOCS:
+        found = _bare_home_drift((REPO_ROOT / rel).read_text())
+        if found:
+            drift.append(f"{rel}: {found}")
+    assert not drift, "bare phantom-home paths found:\n" + "\n".join(drift)
 
 
 def test_skill_targets_dogfood_home():
@@ -80,6 +148,49 @@ def test_skill_mentions_quality_rubric():
     skill_text = (REPO_ROOT / "skills" / "maestro-task.md").read_text()
     for term in ("acceptance criteria", "clarifying questions", "rubric"):
         assert term in skill_text.lower(), f"quality rubric term missing: {term!r}"
+
+
+# ---------------------------------------------------------------------------
+# AC-3: Step 3's key-minting bash block, extracted from the skill markdown
+# and run for real against a partial-phantom `~/.maestro` (T-135) -- it must
+# read MAESTRO_HOME rather than a hardcoded `~/.maestro/tickets`, so it never
+# mints into the phantom when it's run against a healthy environment.
+# ---------------------------------------------------------------------------
+
+def _extract_key_mint_block(text: str) -> str:
+    for block in re.findall(r"```bash\n(.*?)\n```", text, re.DOTALL):
+        if "Minting $KEY" in block:
+            return block
+    raise AssertionError("Step 3 key-minting bash block not found in skill text")
+
+
+def test_skill_text_has_no_literal_bare_ticket_path():
+    text = (REPO_ROOT / ".claude" / "commands" / "maestro-task.md").read_text()
+    assert "~/.maestro/tickets" not in text
+
+
+def test_step3_key_mint_block_mints_under_the_real_home(tmp_path):
+    text = (REPO_ROOT / ".claude" / "commands" / "maestro-task.md").read_text()
+    block = _extract_key_mint_block(text)
+
+    phantom = tmp_path / ".maestro"
+    (phantom / "events").mkdir(parents=True)
+    real = phantom / "maestro-dev"
+    (real / "tickets" / "T-1").mkdir(parents=True)
+    (real / "tickets" / "T-7").mkdir(parents=True)
+
+    result = subprocess.run(
+        ["bash", "-c", block],
+        cwd=tmp_path,
+        env={**os.environ, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Minting T-8" in result.stdout
+    assert (real / "tickets" / "T-8").is_dir()
+    assert sorted(p.name for p in phantom.iterdir()) == ["events", "maestro-dev"]
 
 
 # ---------------------------------------------------------------------------

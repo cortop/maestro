@@ -40,11 +40,12 @@ below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on 
 
 ## ⚠️ Safety — read before any `maestro` command
 
-- **The dogfood home is `~/.maestro`**, which is where bare `maestro` resolves. The
-  `Makefile` exports `MAESTRO_HOME=$(HOME)/.maestro` (`maestro env` prints resolved paths).
-  There is no `~/.maestro/maestro-dev` (the old home — `maestro` happily initialises a
-  phantom there and reports it healthy). If the home ever moves, grep the whole repo for
-  the old path; `tests/test_maestro_task_skill.py` pins every documented home to the Makefile.
+- **The dogfood home is `~/.maestro/maestro-dev`**. The `Makefile` exports
+  `MAESTRO_HOME=$(HOME)/.maestro/maestro-dev` (`maestro env` prints resolved paths). Bare
+  `maestro` (no `MAESTRO_HOME` exported) instead resolves to the phantom `~/.maestro` — it
+  happily initialises there and reports it healthy, but it is not this board. If the home
+  ever moves, grep the whole repo for the old path; `tests/test_maestro_task_skill.py` pins
+  every documented home to the Makefile.
 - **Never delete or move a home's `events/`, `tickets/`, `inbox/` or `config.toml`** — not
   with `rm -rf`, `git clean`, or anything else, not even the dogfood board. The event logs
   have no other copy; this is how the board was lost on 2026-07-18. A genuine reset needs
@@ -161,7 +162,7 @@ Each is default-on, pinned by the named tests. Rationale lives in DESIGN.md and 
 | `gh pr merge` is denied to every reconciler | `dispatcher.MERGE_DENYLIST` | `test_dispatcher.py`, `test_sessions.py` |
 | PR is undrafted only once CI passes, no `CHANGES_REQUESTED`, every AC QA-passed | `dispatcher._maybe_undraft` | `test_undraft.py` |
 | Unknown `language` / malformed `test_selector` fail `config.load()` closed | `config.load` | `test_repos.py`, `test_testlang.py` |
-| `no_output_timeout` must cover `bash_max_timeout` (exported as `BASH_MAX_TIMEOUT_MS`) | `config.load` | `test_dispatcher.py` |
+| `no_output_timeout` must cover `bash_max_timeout` (exported as `BASH_MAX_TIMEOUT_MS`/`BASH_DEFAULT_TIMEOUT_MS`) | `config.load` | `test_dispatcher.py` |
 
 ## Git
 

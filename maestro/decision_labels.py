@@ -2,11 +2,13 @@
 
 The board cannot yet evaluate any automatic routing -- nothing joins a human's
 answer to what the reconciler then did with it. For each ``QuestionAnswered``,
-this finds the next non-dispatcher ``PhaseChanged`` and classifies its reason
-into a coarse label, producing the labeled answer->route stream
-``derived/labels/answers.jsonl`` -- what finally makes T-122's shadow
-``would_route_answer``/``answer_routed`` ledger outcomes auditable from events
-instead of "by eye". Read-only throughout: ``regenerate`` overwrites the jsonl
+this finds the round's actual route -- the next ``PhaseChanged`` whose actor
+isn't ``"dispatcher"``, or one that is but whose reason marks a T-122
+``answer_fast_path`` route -- and classifies its reason into a coarse label,
+producing the labeled answer->route stream ``derived/labels/answers.jsonl``
+-- what finally makes T-122's shadow ``would_route_answer``/``answer_routed``
+decisions (``events.FAST_PATH_DECIDED``) auditable from events instead of "by
+eye". Read-only throughout: ``regenerate`` overwrites the jsonl
 (a disposable projection, same posture as ``derived/context/*.md``) but never
 appends an event.
 """
@@ -18,15 +20,9 @@ from pathlib import Path
 
 from . import event_log, store
 from . import events as E
-from .dispatcher import dispatch_ledger_path, list_keys
+from .dispatcher import list_keys
 
 _QID_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{16}$")
-
-# T-122's shadow/live ledger outcomes this fold joins against, keyed by
-# (key, qid) -- see `_ledger_routes` below. T-122 is independent and
-# currently unmerged; this module reads whatever shape it eventually writes
-# and degrades to `agreement() -> None` (nothing to report) until it exists.
-_LEDGER_OUTCOMES = ("would_route_answer", "answer_routed")
 
 
 def _qid_class(qid: str) -> str:
@@ -50,28 +46,39 @@ def _classify_reason(reason: str) -> str:
     return "unclassified"
 
 
+def _is_route(payload: dict, actor: str | None) -> bool:
+    """A ``PhaseChanged`` counts as the round's route if a human (or a
+    reconciler acting on their behalf) drove it, OR -- T-122's
+    `answer_fast_path = "on"` -- the dispatcher drove it itself but the
+    reason marks an automatic fast-path approval (the same
+    ``"approved: "``-prefix predicate `projection._recent_fast_path_routes`
+    already uses). Any OTHER dispatcher-actor reroute (e.g. a review-feedback
+    bounce landing in the same window) is not that decision -- skipped over,
+    left for a later answer/PhaseChanged pair to match against."""
+    if actor != "dispatcher":
+        return True
+    return payload.get("reason", "").startswith("approved: ")
+
+
 def fold_answers(key: str, events: list[dict]) -> list[dict]:
     """One labeled row per ``QuestionAnswered`` in *events* -- ``{key, qid,
     qid_class, answer, label, phase_before, phase_after, ts}`` -- each matched
-    to the next ``PhaseChanged`` whose ``actor`` is not ``"dispatcher"``: the
-    routing decision the answer actually produced (an automatic dispatcher
-    reroute landing in the same window, e.g. a review-feedback bounce, is not
-    that decision and is skipped over, left for a LATER answer/PhaseChanged
-    pair to match against). A trailing answer with no matching PhaseChanged
-    yet (still `awaiting-human` at fold time) is omitted -- there is nothing
-    to label yet; the fold is re-run any time via `regenerate`, so it appears
-    the moment its route lands.
+    to the round's route (see `_is_route`). A round can hold several
+    ``QuestionAnswered`` events (one untargeted human ``ans`` folds to one per
+    then-open qid) -- ALL of them are drained and labeled from that SAME
+    route, not just the first, since they're all answers to the one round the
+    route decided. A trailing answer with no matching route yet (still
+    `awaiting-human` at fold time) is omitted -- there is nothing to label
+    yet; the fold is re-run any time via `regenerate`, so it appears the
+    moment its route lands.
     """
-    asked: dict[str, str] = {}
     pending: list[dict] = []
     current_phase: str | None = None
     rows: list[dict] = []
     for ev in events:
         t = ev.get("type")
         p = ev.get("payload") or {}
-        if t == E.QUESTION_ASKED:
-            asked[p.get("qid", "")] = p.get("text", "")
-        elif t == E.QUESTION_ANSWERED:
+        if t == E.QUESTION_ANSWERED:
             qid = p.get("qid", "")
             pending.append({
                 "key": key,
@@ -85,11 +92,13 @@ def fold_answers(key: str, events: list[dict]) -> list[dict]:
             })
         elif t == E.PHASE_CHANGED:
             new_phase = p.get("phase", "")
-            if ev.get("actor") != "dispatcher" and pending:
-                row = pending.pop(0)
-                row["phase_after"] = new_phase
-                row["label"] = _classify_reason(p.get("reason", ""))
-                rows.append(row)
+            if pending and _is_route(p, ev.get("actor")):
+                label = _classify_reason(p.get("reason", ""))
+                for row in pending:
+                    row["phase_after"] = new_phase
+                    row["label"] = label
+                    rows.append(row)
+                pending = []
             current_phase = new_phase
     return rows
 
@@ -124,38 +133,38 @@ def label_counts(rows: list[dict]) -> dict[str, int]:
     return counts
 
 
-def _ledger_routes(home: Path) -> dict[tuple[str, str], str]:
-    """``(key, qid) -> route`` for the most recently recorded
-    ``would_route_answer``/``answer_routed`` decision in the dispatch ledger
-    (``derived/dispatch.jsonl``). The ledger's existing ``decisions`` dict is
-    keyed by ticket key only (one entry per key per sweep), so the qid has to
-    travel inside the decision payload itself to join back to one specific
-    answer -- this reads ``decision["qid"]``/``decision["route"]`` off any
-    decision whose ``outcome`` is one of ``_LEDGER_OUTCOMES``. Later ledger
-    records overwrite earlier ones for the same ``(key, qid)``, so a
-    re-shadowed sweep's freshest guess wins.
+def _fast_path_decisions(home: Path) -> dict[tuple[str, str], str]:
+    """``(key, qid) -> route`` for the most recently recorded T-122
+    `events.FAST_PATH_DECIDED` decision, read directly from each ticket's own
+    event log -- durable and uncapped, unlike `derived/dispatch.jsonl`'s
+    500-line-per-sweep ledger (which this replaces as the join source: that
+    ledger is trimmed/rebuilt continuously and was never meant as a durable
+    store). Later events (higher seq) overwrite earlier ones for the same
+    ``(key, qid)``, so a re-shadowed round's freshest guess wins.
     """
     routes: dict[tuple[str, str], str] = {}
-    for record in store.read_jsonl(dispatch_ledger_path(home)):
-        for key, decision in (record.get("decisions") or {}).items():
-            if not isinstance(decision, dict) or decision.get("outcome") not in _LEDGER_OUTCOMES:
+    for key in list_keys(home):
+        for ev in event_log.read(home, key):
+            if ev.get("type") != E.FAST_PATH_DECIDED:
                 continue
-            qid = decision.get("qid")
-            route = decision.get("route")
-            if qid and route:
+            p = ev.get("payload") or {}
+            route = p.get("route")
+            if not route:
+                continue
+            for qid in p.get("qid") or []:
                 routes[(key, qid)] = route
     return routes
 
 
 def agreement(rows: list[dict], home: Path) -> dict | None:
     """Agreement between each row's own ``label`` (the ACTUAL route a human's
-    answer produced) and the ledger's ``would_route_answer``/
+    answer produced) and the durably recorded T-122 ``would_route_answer``/
     ``answer_routed`` guess for that same ``(key, qid)``, in *rows* order
     (chronological, since ``label_answers`` sorts by ts). Returns ``None``
-    when the ledger holds no such outcome at all for any row -- the "when
+    when no such decision is on record at all for any row -- the "when
     present" gate ``cmd_scorecard`` applies before printing this section.
     """
-    routes = _ledger_routes(home)
+    routes = _fast_path_decisions(home)
     if not routes:
         return None
     matched = [routes[(r["key"], r["qid"])] == r["label"]

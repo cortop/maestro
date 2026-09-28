@@ -128,6 +128,20 @@ LINEAR_SYNCED = "LinearSynced"          # {linear_updated_ts, status, last_comme
 # (or a different phase mapped to the same status) doesn't re-mutate.
 LINEAR_STATUS_PUSHED = "LinearStatusPushed"  # {phase, status}
 
+# T-139: durable record of one T-122 answer_fast_path decision (shadow OR on),
+# appended by the dispatcher itself (dispatcher._record_fast_path_decision) so
+# `decision_labels.agreement()` can join a route's guess against the answer's
+# real label long after `derived/dispatch.jsonl`'s 500-line sweep ledger has
+# trimmed (or lost) the sweep that made it. `step_id` is content-keyed on
+# (qid(s), verbatim answer, route) -- shadow re-evaluates the same open round
+# every sweep until it's answered away, so a repeat decision is a no-op,
+# never a second event. Folds to nothing (see snapshot._UNFOLDED);
+# decision_labels reads the raw log itself, across every key.
+FAST_PATH_DECIDED = "FastPathDecided"   # {qid, route, outcome, reason}
+                                         # qid: [str, ...]; route: a label value
+                                         # (e.g. "approve"); outcome:
+                                         # "would_route_answer"|"answer_routed"
+
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket
 FAILED = "Failed"                       # {error, kind?, state?}  increments failure_count

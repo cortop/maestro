@@ -68,7 +68,9 @@ def _list_files(repo: Path, ref: str | None) -> list[str]:
 
 def _grep_word(repo: Path, term: str, ref: str | None) -> list[str]:
     if ref:
-        return _run_git(repo, ["grep", "-lw", "-I", term, ref, "--"])
+        prefix = f"{ref}:"
+        lines = _run_git(repo, ["grep", "-lw", "-I", term, ref, "--"])
+        return [line[len(prefix):] if line.startswith(prefix) else line for line in lines]
     return _run_git(repo, ["grep", "-lw", "-I", "--", term])
 
 
@@ -117,7 +119,8 @@ def resolve_mentions(repo: Path, candidates: list[str], *, ref: str | None = Non
         if not hit and grep_calls < MAX_GREP_CANDIDATES and _BARE_IDENTIFIER_RE.match(cand_clean):
             grep_calls += 1
             for f in _grep_word(repo, cand_clean, ref):
-                matched.setdefault(f, None)
+                if f in file_set:
+                    matched.setdefault(f, None)
     return list(matched)
 
 
@@ -295,7 +298,7 @@ def _merged_commits(repo: Path, home: Path, base: str) -> list[tuple[str, str, s
 
 
 def _changed_files(repo: Path, parent: str, sha: str) -> set[str]:
-    return set(_run_git(repo, ["diff", "--name-only", parent, sha]))
+    return set(_run_git(repo, ["diff", "--no-renames", "--name-only", parent, sha]))
 
 
 def _recall_at(ranked: list[str], truth: set[str], n: int) -> float:
@@ -333,7 +336,11 @@ def run_eval(cfg: Config, home: Path, key: str | None, *, n: int | None = None) 
     board-wide default binding if *key* is None): rank the files that existed
     at the PARENT commit -- content taken from the parent, never the working
     tree -- per stage, and score recall@5, recall@10 and MRR against that
-    commit's actual changed files. Read-only; never mutates the board.
+    commit's changed files that ALSO existed at the parent (a file the commit
+    only added can never be ranked, so it's excluded from truth and reported
+    under `excluded_added_files`). A commit with no such pre-existing changed
+    file is still listed in `per_commit` (`scored: false`) but left out of the
+    `stages` averages. Read-only; never mutates the board.
     """
     from . import repos as repos_mod
     binding = repos_mod.resolve(cfg, home, key) if key else repos_mod.implicit_default(cfg)
@@ -345,6 +352,8 @@ def run_eval(cfg: Config, home: Path, key: str | None, *, n: int | None = None) 
         commits = commits[:n]
 
     per_commit: list[dict] = []
+    scored_rows: list[dict] = []
+    excluded_added_files_count = 0
     for sha, parent, ticket_key in commits:
         spec_path = store.spec_path(home, ticket_key)
         spec_text = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
@@ -353,26 +362,42 @@ def run_eval(cfg: Config, home: Path, key: str | None, *, n: int | None = None) 
         prior_edit = prior_edits(home, ticket_key)
         churn_files = churn(repo, ref=parent)
         merged = merge_hints(mention, prior_edit, churn_files)
-        truth = _changed_files(repo, parent, sha)
+        changed = _changed_files(repo, parent, sha)
+        parent_files = set(_list_files(repo, parent))
+        truth = changed & parent_files
+        excluded_added = sorted(changed - parent_files)
+        excluded_added_files_count += len(excluded_added)
         rankings = {
             "mention": mention,
             "prior_edit": prior_edit,
             "churn": churn_files,
             "merged": [h["path"] for h in merged],
         }
-        per_commit.append({"key": ticket_key, "sha": sha, "scores": _score(rankings, truth)})
+        row = {
+            "key": ticket_key,
+            "sha": sha,
+            "scores": _score(rankings, truth),
+            "excluded_added_files": excluded_added,
+            "scored": bool(truth),
+        }
+        per_commit.append(row)
+        if truth:
+            scored_rows.append(row)
 
     stages = ("mention", "prior_edit", "churn", "merged")
     summary = {
         stage: {
-            "recall_at_5": _avg([c["scores"][stage] for c in per_commit], "recall_at_5"),
-            "recall_at_10": _avg([c["scores"][stage] for c in per_commit], "recall_at_10"),
-            "mrr": _avg([c["scores"][stage] for c in per_commit], "mrr"),
+            "recall_at_5": _avg([c["scores"][stage] for c in scored_rows], "recall_at_5"),
+            "recall_at_10": _avg([c["scores"][stage] for c in scored_rows], "recall_at_10"),
+            "mrr": _avg([c["scores"][stage] for c in scored_rows], "mrr"),
         }
         for stage in stages
     }
     return {
         "commits_evaluated": len(per_commit),
+        "commits_scored": len(scored_rows),
+        "commits_excluded_no_prior_changes": len(per_commit) - len(scored_rows),
+        "excluded_added_files_count": excluded_added_files_count,
         "baseline_mention_recall_at_5": summary["mention"]["recall_at_5"],
         "stages": summary,
         "per_commit": per_commit,

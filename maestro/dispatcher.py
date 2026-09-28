@@ -257,8 +257,8 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
     "implementing": ("append", "ask", "env", "events", "fail", "finalize", "fold-inbox",
                       "impl-turn", "local-backup", "locate", "observe-spec", "pr-size", "release",
                       "reply-review", "set-phase", "snapshot", "verify-ac", "worktree"),
-    "qa": ("append", "ask", "env", "fold-inbox", "locate", "observe-spec", "qa-brief", "qa-verdict",
-           "release", "set-phase", "snapshot"),
+    "qa": ("append", "ask", "env", "fail", "fold-inbox", "locate", "observe-spec", "qa-brief",
+           "qa-verdict", "release", "set-phase", "snapshot"),
     "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",
                 "observe-spec", "release", "set-phase", "show", "snapshot"),
 }
@@ -594,11 +594,11 @@ def _fast_path_answer_source(home: Path, key: str,
 
 
 def _answer_fast_path_eligible(home: Path, key: str, snap: snap_mod.Snapshot,
-                               due_reason: str) -> str | None:
-    """The verbatim literal answer text an answer_fast_path route would act
-    on, or ``None`` if *key* isn't eligible right now -- see T-122's spec
-    Notes for the full eligibility list this enforces. Pure/read-only, so
-    it's safe to call under ``shadow`` or a ``dry_run`` preview -- only the
+                               due_reason: str) -> tuple[list[str], str] | None:
+    """The qid(s) and verbatim literal answer text an answer_fast_path route
+    would act on, or ``None`` if *key* isn't eligible right now -- see T-122's
+    spec Notes for the full eligibility list this enforces. Pure/read-only,
+    so it's safe to call under ``shadow`` or a ``dry_run`` preview -- only the
     caller decides whether to actually apply what this predicts.
     """
     if snap.phase != Phase.AWAITING_HUMAN.value:
@@ -620,7 +620,7 @@ def _answer_fast_path_eligible(home: Path, key: str, snap: snap_mod.Snapshot,
     normalized = {_normalize_fast_path_answer(t) for t in answers.values()}
     if len(normalized) != 1 or next(iter(normalized)) not in _FAST_PATH_LITERAL_ANSWERS:
         return None
-    return next(iter(answers.values()))
+    return list(answers), next(iter(answers.values()))
 
 
 def _apply_answer_fast_path(cfg: Config, key: str, reason: str, *, actor: str) -> None:
@@ -3613,28 +3613,57 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
     return snap, res.reason
 
 
+def _record_fast_path_decision(home: Path, key: str, *, qids: list[str], answer: str,
+                               route: str, outcome: str, reason: str) -> None:
+    """T-139: durably append one `events.FAST_PATH_DECIDED` record to *key*'s
+    own log -- what makes `decision_labels.agreement()` survive
+    `derived/dispatch.jsonl`'s 500-line trim (or the file's outright loss).
+    The step-id is content-keyed on exactly (qids, answer, route) -- NOT
+    outcome/reason, which differ between a "shadow" preview and an "on" live
+    route of the very same round -- so a shadow decision recomputed every
+    sweep against an unchanged pending answer is a no-op append, never a
+    second event or an extra `observed_seq` bump."""
+    payload = {"qid": sorted(qids), "route": route, "outcome": outcome, "reason": reason}
+    content = json.dumps({"qid": sorted(qids), "answer": answer, "route": route},
+                        sort_keys=True)
+    sid = "fastpath-" + content_hash(content)
+    event_log.append(home, key, E.FAST_PATH_DECIDED, payload, actor="dispatcher", step_id=sid)
+    # Keep the persisted snapshot cache in step with the log, like every
+    # other append path (`ops._append`) does -- otherwise a caller's
+    # subsequent `snap_mod.load` (not a live fold) under-reports `observed_seq`
+    # by one and a fencing `expect=` computed from it goes stale immediately.
+    snap_mod.rebuild(home, key)
+
+
 def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bool:
     """T-122: route an exact-literal human approval straight to `ready` in this
     sweep instead of spawning an awaiting-human reconciler just to read "ok".
     Returns True when it fully decided *key*'s outcome. `answer_fast_path =
     "off"` (default) never computes eligibility; "shadow" (or "on" under
-    dry_run) only predicts."""
+    dry_run) only predicts. T-139: a real (non-dry-run) "shadow" or "on"
+    decision is also recorded durably (`_record_fast_path_decision`) -- GA-4
+    still holds, since `dry_run` never reaches that call."""
     cfg, home, now = sweep.cfg, sweep.home, sweep.now
     decisions = sweep.decisions
     if cfg.answer_fast_path == "off":
         return False
-    answer = _answer_fast_path_eligible(home, key, snap, due_reason)
-    if answer is None:
+    eligible = _answer_fast_path_eligible(home, key, snap, due_reason)
+    if eligible is None:
         return False
+    qids, answer = eligible
+    route = "approve"  # T-122's allowlist is approval-only -- see its module comment.
     if cfg.answer_fast_path == "on" and not sweep.dry_run:
         reason = f"approved: {answer}"
         try:
             _apply_answer_fast_path(cfg, key, reason, actor="dispatcher")
         except Exception as e:  # noqa: BLE001 -- a lost race must not abort the sweep
             sweep.hook_errors[f"answer_fast_path:{key}"] = f"{type(e).__name__}: {e}"
-            answer = None
+            eligible = None
         else:
-            decisions[key] = {"outcome": "answer_routed", "reason": reason}
+            _record_fast_path_decision(home, key, qids=qids, answer=answer, route=route,
+                                       outcome="answer_routed", reason=reason)
+            decisions[key] = {"outcome": "answer_routed", "reason": reason,
+                              "qid": qids, "route": route}
             refreshed = snap_mod.load(home, key)
             sweep.observed_seq[key] = refreshed.observed_seq
             sweep.phase[key] = refreshed.phase
@@ -3644,10 +3673,16 @@ def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> b
             if res.due:
                 sweep.due.append((key, res.reason))
             return True
-    if answer is None:
+    if eligible is None:
         return False
-    decisions[key] = {"outcome": "would_route_answer",
-                      "reason": f"would approve: {answer}"}
+    reason = f"would approve: {answer}"
+    if not sweep.dry_run:
+        _record_fast_path_decision(home, key, qids=qids, answer=answer, route=route,
+                                   outcome="would_route_answer", reason=reason)
+        refreshed = snap_mod.load(home, key)
+        sweep.observed_seq[key] = refreshed.observed_seq
+    decisions[key] = {"outcome": "would_route_answer", "reason": reason,
+                      "qid": qids, "route": route}
     sweep.due.append((key, due_reason))
     return True
 
