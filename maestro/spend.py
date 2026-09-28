@@ -9,16 +9,30 @@ cursor/state files under different names, so the two gates stay independently
 disable-able.
 
 ``probe`` runs on every real dispatcher sweep (via ``_run_hook``, never on a
-cadence) and sums every un-drained stream-json session's terminal ``result``
-record's ``total_cost_usd`` into a bucket keyed by the current UTC date
-(``derived/.spend.json``) — not just each key's newest log, so an older log
-left un-drained by a differently-formatted newer log still gets folded — reading
-only bytes appended since the last sweep, per log (``derived/.spend_cursor.json``). A
-session SIGTERM'd by ``run_watchdog`` before it can write a ``result`` record
-would otherwise silently cost $0 in this meter -- once such a log has been
-drained to its current end with no ``result`` ever seen AND its key is no
-longer live (:func:`maestro.claims.active_keys`), it is counted explicitly as
-``unattributed_sessions`` rather than folded into ``total_usd`` or dropped.
+cadence) and folds every un-drained stream-json session's cost into a bucket
+keyed by the current UTC date (``derived/.spend.json``) — not just each key's
+newest log, so an older log left un-drained by a differently-formatted newer
+log still gets folded. A ``result`` record's ``total_cost_usd`` is a *running
+total for the whole session*, not a per-turn charge, and a session writes a
+new one every time a finished background task restarts it — so folding counts
+only the *last* (highest) cumulative value seen for a session, never the sum
+of its results. Concretely: per log, we remember the highest ``total_cost_usd``
+counted so far (``derived/.spend_cursor.json``, alongside that log's byte
+cursor) and add only ``max(0, cost - already_counted)`` when a later ``result``
+arrives, so a session whose results straddle a UTC day change adds its true
+increase to the new day and nothing twice. That per-log memory — the cost
+counted so far, and whether the log has been *settled* (a terminal marker
+seen, or already counted as unattributed) — lives in the cursor file precisely
+because it must survive a day change: only the daily ``total_usd`` /
+``unattributed_sessions`` buckets reset at UTC rollover, never the knowledge of
+which logs are already settled, or a settled log would get re-flagged
+unattributed on the first sweep of every new day. A session SIGTERM'd by
+``run_watchdog`` before it can write a ``result`` record would otherwise
+silently cost $0 in this meter -- once such a log has been drained to its
+current end with no ``result`` ever seen AND its key is no longer live
+(:func:`maestro.claims.active_keys`), it is counted explicitly as
+``unattributed_sessions`` rather than folded into ``total_usd`` or dropped --
+and settled, so it is never counted again.
 
 Sub-agent (``Agent``-tool) spend is already included: those run inside the
 parent ``claude`` process, so the parent's ``result.total_cost_usd`` already
@@ -69,9 +83,10 @@ def _cursor_path(home: Path) -> Path:
 
 def probe(cfg: Config, now: float) -> dict:
     """One sweep's worth of spend folding. Reads only bytes appended since the
-    last sweep from every spawn-ledger key's newest stream-json session log
-    (mirrors ``ratelimit.probe``'s candidate selection), sums each session's
-    terminal ``total_cost_usd`` into today's UTC-date bucket, and persists to
+    last sweep from every spawn-ledger key's stream-json/pi session logs
+    (mirrors ``ratelimit.probe``'s candidate selection), adds each session's
+    *increase* over its last-seen cumulative ``total_cost_usd`` into today's
+    UTC-date bucket (never the sum of its results), and persists to
     ``derived/.spend.json``. Returns the resulting state dict.
 
     Callers MUST route this through ``dispatcher._run_hook`` (like
@@ -95,16 +110,18 @@ def probe(cfg: Config, now: float) -> dict:
     raw = store.read_json(state_path, None)
     if raw is None:
         state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0,
-                 "settled_logs": [], "unavailable": False}
+                 "unavailable": False}
     else:
         state = raw  # may raise below if this is garbage -- see docstring
         if state.get("date") != today:
+            # Only the daily buckets reset here -- which logs are already
+            # settled lives in the cursor file instead (see below), precisely
+            # so a day change never re-flags an already-drained log.
             state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0,
-                     "settled_logs": [], "unavailable": False}
+                     "unavailable": False}
 
     total = float(state.get("total_usd", 0.0) or 0.0)
     unattributed = int(state.get("unattributed_sessions", 0) or 0)
-    settled = set(state.get("settled_logs", []) or [])
 
     # Lazy: dispatcher imports us at module load time, so importing dispatcher
     # back at our own module level would be a load-time cycle (mirrors
@@ -131,9 +148,38 @@ def probe(cfg: Config, now: float) -> dict:
                 size = path.stat().st_size
             except OSError:
                 continue
-            start = cursor.get(log_id, 0)
+            entry = cursor.get(log_id)
+            migrated_legacy = False
+            if isinstance(entry, dict):
+                start = entry.get("pos", 0)
+                counted = float(entry.get("counted", 0.0) or 0.0)
+                log_settled = bool(entry.get("settled", False))
+            elif entry is not None:
+                # Pre-upgrade cursor: a bare byte offset, no per-log memory of
+                # cost already counted or settledness yet.
+                start = entry if isinstance(entry, (int, float)) else 0
+                counted = 0.0
+                log_settled = False
+                migrated_legacy = True
+            else:
+                start = 0
+                counted = 0.0
+                log_settled = False
             if not isinstance(start, (int, float)) or start > size:
                 start = 0
+                counted = 0.0
+                log_settled = False
+                migrated_legacy = False
+            if migrated_legacy and start >= size:
+                # Fully drained already under the pre-upgrade cursor, with no
+                # bytes left for us to inspect for a terminal marker -- we
+                # cannot recover whether one was ever seen for those bytes,
+                # so don't guess. Settle it quietly instead of guessing "no
+                # marker seen": an ambiguous legacy log must never spuriously
+                # join unattributed_sessions on the very sweep that migrates
+                # it (an already-drained log must not be disturbed by the
+                # upgrade -- see the ticket's Notes).
+                log_settled = True
             pos = start
             for offset, record in steplog.iter_records(path, start=start):
                 pos = offset
@@ -141,33 +187,50 @@ def probe(cfg: Config, now: float) -> dict:
                     if record.get("type") == "result":
                         cost = record.get("total_cost_usd")
                         if isinstance(cost, (int, float)):
-                            total += float(cost)
-                        settled.add(log_id)
+                            # `total_cost_usd` is a cumulative running total
+                            # for the whole session, not a per-turn charge --
+                            # count only the increase over what we've already
+                            # counted for this log, never the sum of results.
+                            cost = float(cost)
+                            delta = cost - counted
+                            if delta > 0:
+                                total += delta
+                            counted = max(counted, cost)
+                        log_settled = True
                 else:  # T-58 (AC8): pi -- see module docstring for the shape
                     if record.get("type") == "agent_end":
-                        settled.add(log_id)
+                        log_settled = True
                     elif record.get("type") == "message_end":
                         msg = record.get("message") or {}
                         if msg.get("role") == "assistant":
                             cost = ((msg.get("usage") or {}).get("cost") or {}).get("total")
                             if isinstance(cost, (int, float)):
                                 total += float(cost)
-            if pos != start:
-                cursor[log_id] = pos
-                cursor_changed = True
             # Trap: a session SIGTERM'd by run_watchdog mid-stream may never
             # write its terminal marker (`result` for stream-json, `agent_end`
             # for pi), so its cost would otherwise silently count as zero. Once
             # we've drained a log to its current end with no terminal marker
             # ever seen AND its key is no longer live, count it explicitly
             # instead of dropping it -- and mark it settled so we don't
-            # recount the same dead log every subsequent sweep.
-            if pos >= size and log_id not in settled:
+            # recount the same dead log ever again, even across a day change.
+            if pos >= size and not log_settled:
                 if live_keys is None:
                     live_keys = claims.active_keys(home)
                 if key not in live_keys:
                     unattributed += 1
-                    settled.add(log_id)
+                    log_settled = True
+            new_entry = {"pos": pos, "counted": round(counted, 6), "settled": log_settled}
+            if new_entry != entry:
+                cursor[log_id] = new_entry
+                cursor_changed = True
+
+    # Prune cursor entries for logs no longer on disk -- the persistent
+    # settled/counted memory only needs to survive as long as its log does.
+    stale = [log_id for log_id in cursor if not Path(log_id).exists()]
+    if stale:
+        for log_id in stale:
+            del cursor[log_id]
+        cursor_changed = True
 
     if cursor_changed:
         store.write_json(cursor_path, cursor)
@@ -176,7 +239,6 @@ def probe(cfg: Config, now: float) -> dict:
         "date": today,
         "total_usd": round(total, 6),
         "unattributed_sessions": unattributed,
-        "settled_logs": sorted(settled),
         "unavailable": False,
     }
     store.write_json(state_path, state)
