@@ -30,6 +30,10 @@ def _spawn_env(home, env_overlay: dict | None) -> dict:
     ``BASH_MAX_TIMEOUT_MS`` carries ``[maestro] bash_max_timeout`` (seconds, so
     x1000) -- the ceiling the runner's Bash tool will accept for one foreground
     call, i.e. the budget the implementing skill's test run must fit in.
+    ``BASH_DEFAULT_TIMEOUT_MS`` is set to the same value, so a bare Bash call
+    with no explicit timeout (any call the reconciler forgets to annotate)
+    also stays in the foreground up to that ceiling instead of backgrounding
+    at the runner's own 120s default.
 
     ``config.runner_path`` prepends each configured ``[runner.<name>] bin``
     directory. That is what lets a launchd dispatcher -- whose PATH is the
@@ -47,6 +51,11 @@ def _spawn_env(home, env_overlay: dict | None) -> dict:
     # own default). Harmless to the other runners, which ignore the variable.
     if cfg.bash_max_timeout > 0:
         env["BASH_MAX_TIMEOUT_MS"] = str(cfg.bash_max_timeout * 1000)
+        # Same value as the default for a bare Bash call with no explicit timeout,
+        # so it doesn't background at the runner's own 120s default and silently
+        # lift the ceiling config.load validated (BASH_MAX_TIMEOUT_MS,
+        # BASH_DEFAULT_TIMEOUT_MS).
+        env["BASH_DEFAULT_TIMEOUT_MS"] = str(cfg.bash_max_timeout * 1000)
     if env_overlay:
         env.update(env_overlay)
     return env

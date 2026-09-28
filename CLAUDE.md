@@ -161,7 +161,7 @@ Each is default-on, pinned by the named tests. Rationale lives in DESIGN.md and 
 | `gh pr merge` is denied to every reconciler | `dispatcher.MERGE_DENYLIST` | `test_dispatcher.py`, `test_sessions.py` |
 | PR is undrafted only once CI passes, no `CHANGES_REQUESTED`, every AC QA-passed | `dispatcher._maybe_undraft` | `test_undraft.py` |
 | Unknown `language` / malformed `test_selector` fail `config.load()` closed | `config.load` | `test_repos.py`, `test_testlang.py` |
-| `no_output_timeout` must cover `bash_max_timeout` (exported as `BASH_MAX_TIMEOUT_MS`) | `config.load` | `test_dispatcher.py` |
+| `no_output_timeout` must cover `bash_max_timeout` (exported as `BASH_MAX_TIMEOUT_MS`/`BASH_DEFAULT_TIMEOUT_MS`) | `config.load` | `test_dispatcher.py` |
 
 ## Git
 
