@@ -142,7 +142,7 @@ def check_bash(command: str, cwd: Path, home: Path, data: dict) -> str | None:
 
 
 def check_path(path_str: str, cwd: Path, home: Path) -> str | None:
-    if core._is_protected(path_str, cwd, home):
+    if core._is_protected(path_str, cwd, core.protected_roots(home)):
         return f"write/edit target {path_str!r} is a protected MAESTRO_HOME path"
     try:
         p = Path(path_str)
