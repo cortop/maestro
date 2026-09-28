@@ -56,7 +56,7 @@
   <key>StandardErrorPath</key>
   <string>@MAESTRO_HOME@/agent-logs/dispatch.err.log</string>
 
-  <key>ProcessType</key>
-  <string>Background</string>
+  <!-- No ProcessType=Background: launchd would give every reconciler, bazel and git
+       descendant background QoS (throttled CPU and disk), which stalls monorepo work. -->
 </dict>
 </plist>
