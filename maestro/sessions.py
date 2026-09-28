@@ -41,9 +41,15 @@ def _spawn_env(home, env_overlay: dict | None) -> dict:
     tools the runner itself shells out for (``[runner.pi] api_key`` is a
     resolver expression pi executes on its own). Boards that configure no
     ``bin`` get their PATH back unchanged.
+
+    T-144: starts from ``config.scrubbed_env`` -- not a raw ``dict(os.environ)``
+    -- so a reconciler (and any test/AC-check command it goes on to run) never
+    inherits a secret it doesn't need: another repo's ``token_env``, the
+    configured tracker's key, or a ``[maestro] scrub_env`` entry. A board that
+    configures none of those gets an unchanged, byte-identical env.
     """
     cfg = config.load(home)
-    env = dict(os.environ)
+    env = config.scrubbed_env(cfg)
     env["MAESTRO_HOME"] = str(home)  # pin the home for the worker
     env["PATH"] = config.runner_path(cfg, env.get("PATH", ""))
     # Lift Claude Code's 600s Bash-tool ceiling so the implementing skill's single
