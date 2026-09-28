@@ -184,7 +184,21 @@ def _candidate_paths(clause: str, *, skip_leading: str | None = None) -> list[st
     return out
 
 
-def _is_protected(path_str: str, cwd: Path, roots: list[Path]) -> bool:
+def _is_protected(
+    path_str: str, cwd: Path, roots: list[Path], *, check_ancestor: bool = True
+) -> bool:
+    """check_ancestor gates only the root-ancestor rule below. A caller
+    checking an EXPLICIT path token typed in the command (a real argument to
+    a risky verb, or a redirect target) leaves it True. A caller checking
+    the AMBIENT cwd through the implicit dot-fallback (a bare verb with no
+    path argument, or a bare git-clean) must pass False: cwd is always some
+    real filesystem ancestor of wherever a board root happens to sit
+    whenever the process just happens to be running from deeper in the tree
+    (every tmp-based test home nests under the system tmp dir; any ordinary
+    reconciler cwd nests under its own worktree, itself under the board) --
+    honoring the ancestor rule there would false-block an unrelated ambient
+    command, since it has no bearing on whether that command actually acts
+    on the ancestor path, unlike a real typed reference to it."""
     path_str = _strip_trailing_glob(path_str)
     try:
         p = Path(path_str)
@@ -213,7 +227,7 @@ def _is_protected(path_str: str, cwd: Path, roots: list[Path]) -> bool:
                 # That false-positived nearly every ordinary Bash call (rm
                 # of a build dir, mv, a plain redirect) once this hook was
                 # first wired in.
-                if p in target.parents:
+                if check_ancestor and p in target.parents:
                     return True
             else:
                 # The named subtrees (events/tickets/inbox): matching
@@ -262,7 +276,7 @@ def check_command(command: str, cwd: Path, home: Path) -> str | None:
         # take an explicit pathspec -- check both, ignoring the "git"/"clean"
         # tokens themselves so the block message names a real path.
         if _GIT_CLEAN_RE.search(clause):
-            if _is_protected(".", cwd, roots):
+            if _is_protected(".", cwd, roots, check_ancestor=False):
                 return f"{clause!r} would run inside protected MAESTRO_HOME path {cwd}"
             for p in _candidate_paths(clause):
                 if p in ("git", "clean"):
@@ -280,7 +294,7 @@ def check_command(command: str, cwd: Path, home: Path) -> str | None:
         # A bare `rm`/`mv`/`truncate` with no real path token -- e.g. `rm -rf`
         # or `rm -rf *` (a glob has nothing to resolve to) -- implicitly acts
         # on the cwd, so check that too.
-        if risky_verb and not paths and _is_protected(".", cwd, roots):
+        if risky_verb and not paths and _is_protected(".", cwd, roots, check_ancestor=False):
             return f"{clause!r} would act on protected MAESTRO_HOME path {cwd}"
     return None
 
