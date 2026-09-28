@@ -21,11 +21,14 @@ class Config:
     home: Path
     max_concurrency: int = 12
     reconcile_steady_interval: int = 300   # seconds between awaiting-ci re-checks
-    # Hard floor on how often ONE key may be re-spawned, regardless of why it is due.
-    # Independent of claim liveness (a session that dies in <1s frees its claim
-    # instantly) and of the launchd cadence, so it still bounds the fleet when the
-    # dispatcher is invoked faster than intended. None = fall back to
-    # reconcile_steady_interval. Human signals (inbox/spec edit) bypass it.
+    # Hard floor on how often ONE key may be re-spawned WITHOUT a phase change,
+    # regardless of why it is due. Independent of claim liveness (a session that dies
+    # in <1s frees its claim instantly) and of the launchd cadence, so it still bounds
+    # the fleet when the dispatcher is invoked faster than intended. None = fall back
+    # to reconcile_steady_interval. Human signals (inbox/spec edit) bypass it, and so
+    # does a phase hand-off (T-136) -- a key whose folded phase differs from the phase
+    # it was last spawned in already made progress, so only a same-phase respawn (no
+    # progress) is held to this floor.
     min_spawn_interval: int | None = None
     backoff_base: int = 30                 # seconds; exp backoff on transient failure
     backoff_cap: int = 3600
@@ -1073,9 +1076,11 @@ reconcile_steady_interval = 300
                                   # default: unset, uses the built-in prompt in
                                   # ops.SUGGEST_ACS_PROMPT. A template lacking {spec}, or
                                   # naming another placeholder, fails config load closed.
-# min_spawn_interval = 300        # hard floor between two spawns of the SAME key
-                                  # (default: reconcile_steady_interval). Bounds the
-                                  # fleet even if the dispatcher is fired too often.
+# min_spawn_interval = 300        # hard floor between two spawns of the SAME key IN
+                                  # THE SAME PHASE (default: reconcile_steady_interval).
+                                  # Bounds the fleet even if the dispatcher is fired too
+                                  # often. A phase hand-off since the last spawn bypasses
+                                  # it -- only a same-phase respawn is held to this floor.
                                   # 0 disables the floor entirely for that key (a
                                   # legitimate debugging mode -- `maestro doctor` warns
                                   # when the effective value is 0). Negative is rejected

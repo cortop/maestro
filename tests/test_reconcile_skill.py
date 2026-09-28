@@ -1163,3 +1163,16 @@ def test_implementing_skill_pr_titles_use_display_key_not_key():
         assert text.count('--title "<DISPLAY_KEY>:') == 2, \
             f'{path}: expected exactly 2 gh pr create titles built from <DISPLAY_KEY> ' \
             f'(the single-PR create and the stack entry 1 create)'
+
+
+def test_implementing_qa_handoffs_carry_no_leftover_requeue():
+    """T-136 AC3: the qa hand-off's `--requeue 300` was a leftover from RF-7's
+    CI-poll delay (qa has nothing external to wait on) -- the spawn-floor
+    hand-off exemption is what lets the next sweep spawn qa immediately
+    instead. The awaiting-ci CI-poll delays are real and must stay."""
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "qa --requeue" not in text, \
+            f'{path}: a set-phase ... qa hand-off still carries a leftover --requeue'
+        assert text.count("awaiting-ci --requeue 300") == 2, \
+            f'{path}: expected the two real CI-poll awaiting-ci --requeue 300 lines to remain'

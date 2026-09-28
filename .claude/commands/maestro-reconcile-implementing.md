@@ -264,7 +264,7 @@ Otherwise implement the spec's Acceptance criteria:
    ```bash
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
    ```
-   - **Fix round**: `maestro set-phase "$KEY" qa --requeue 300` (a PR already open already has its
+   - **Fix round**: `maestro set-phase "$KEY" qa` (a PR already open already has its
      `PrOpened` event — do not append another).
    - **Review-feedback round**: `maestro set-phase "$KEY" awaiting-ci --requeue 300` instead of
      `qa` — a human is already reviewing this PR directly on GitHub, so this hands back to
@@ -311,7 +311,7 @@ Otherwise implement the spec's Acceptance criteria:
    resolved from `maestro env --key`):
    ```bash
    maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr-number>,\"url\":\"<pr-url>\",\"draft\":true}" --step-id "pr-$KEY"
-   maestro set-phase "$KEY" qa --requeue 300
+   maestro set-phase "$KEY" qa
    ```
 
    **`exceeds: true`** — do not push or open/grow the PR yet. Split the diff into an ordered stack
@@ -345,7 +345,7 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    Record entry 0 and every later entry exactly as the `git` path does below (same
    `PrOpened`/`stack`-sub-payload shape, same root-first ordering, same
-   `maestro set-phase "$KEY" qa --requeue 300`) — `gt submit` already supplied the push and the PR
+   `maestro set-phase "$KEY" qa`) — `gt submit` already supplied the push and the PR
    create/update, so skip straight to appending those events; never run `git push`/`gh pr create`
    yourself on this path.
 
@@ -368,7 +368,7 @@ Otherwise implement the spec's Acceptance criteria:
    ```bash
    maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr1-number>,\"url\":\"<pr1-url>\",\"draft\":true,\"stack\":{\"index\":0,\"total\":<N>,\"branch\":\"<PREFIX>$KEY-1\",\"base\":\"<BASE>\"}}" --step-id "pr-$KEY"
    maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr2-number>,\"url\":\"<pr2-url>\",\"draft\":true,\"stack\":{\"index\":1,\"total\":<N>,\"branch\":\"<PREFIX>$KEY-2\",\"base\":\"<PREFIX>$KEY-1\"}}" --step-id "pr-stack-$KEY-1"
-   maestro set-phase "$KEY" qa --requeue 300
+   maestro set-phase "$KEY" qa
    ```
    (one `PrOpened` append per entry, `index` 0-based in stack order, `step-id` `"pr-$KEY"` for
    index 0 and `"pr-stack-$KEY-<index>"` for every later one, so a crash-and-respawn mid-step never
