@@ -11,6 +11,7 @@ import pytest
 from maestro import config as config_mod, diagram
 from maestro import dispatcher as disp
 from maestro import event_log, inbox, ops, projection, snapshot as snap_mod, store
+from maestro.idempotency import content_hash
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
@@ -64,7 +65,8 @@ def test_shadow_records_would_route_answer_and_still_spawns(cfg):
 
     assert report.spawned == ["T-1"]
     assert _ledger_decisions(cfg)["T-1"] == {
-        "outcome": "would_route_answer", "reason": "would approve: ok"}
+        "outcome": "would_route_answer", "reason": "would approve: ok",
+        "qid": [content_hash("Proceed?")], "route": "approve"}
     assert snap_mod.load(cfg.home, "T-1").phase == Phase.AWAITING_HUMAN.value
     assert inbox.pending(cfg.home, "T-1")
     assert not _dispatcher_phase_changes(cfg, "T-1")
@@ -106,7 +108,8 @@ def test_on_routes_literal_ok_to_ready_same_sweep(cfg):
     # the `ready` reconciler spawns instead, in this same sweep.
     assert report.spawned == ["T-1"]
     assert _ledger_decisions(cfg)["T-1"] == {
-        "outcome": "answer_routed", "reason": "approved: ok"}
+        "outcome": "answer_routed", "reason": "approved: ok",
+        "qid": [content_hash("Proceed?")], "route": "approve"}
 
 
 def test_on_uses_the_verbatim_answer_case(cfg):
@@ -134,7 +137,8 @@ def test_on_records_answer_routed_when_dependency_still_blocks_ready(cfg):
     report = disp.dispatch(cfg, DryRunSessions(), now=1000)
 
     assert _ledger_decisions(cfg)["T-1"] == {
-        "outcome": "answer_routed", "reason": "approved: ok"}
+        "outcome": "answer_routed", "reason": "approved: ok",
+        "qid": [content_hash("Proceed?")], "route": "approve"}
     assert "T-1" not in report.spawned
     assert snap_mod.load(cfg.home, "T-1").phase == Phase.READY.value
 
