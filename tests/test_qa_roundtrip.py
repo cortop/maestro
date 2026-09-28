@@ -60,7 +60,7 @@ def test_full_roundtrip_implementing_qa_fail_implementing_qa_pass_awaiting_ci(ho
     assert rc == 0
     event_log.append(home, "T-1", "PrOpened", {"number": 1, "url": "https://x/pull/1", "draft": True},
                      actor="reconciler", step_id="pr-T-1")
-    rc = cli.main(["--home", str(home), "set-phase", "T-1", "qa", "--requeue", "300"])
+    rc = cli.main(["--home", str(home), "set-phase", "T-1", "qa"])
     assert rc == 0
     assert snap_mod.load(home, "T-1").phase == Phase.QA.value
 
@@ -94,7 +94,7 @@ def test_full_roundtrip_implementing_qa_fail_implementing_qa_pass_awaiting_ci(ho
     rc = cli.main(["--home", str(home), "verify-ac", "T-1", "--ac", "1", "--what", "ran pytest",
                    "--where", "tests/test_widget.py", "--result", "PASSED (export fixed)"])
     assert rc == 0
-    rc = cli.main(["--home", str(home), "set-phase", "T-1", "qa", "--requeue", "300"])
+    rc = cli.main(["--home", str(home), "set-phase", "T-1", "qa"])
     assert rc == 0
 
     # -- qa round 2: PASS, routes onward to awaiting-ci --

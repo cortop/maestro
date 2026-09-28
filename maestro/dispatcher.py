@@ -3150,7 +3150,12 @@ class DispatchReport:
 
 # Due-reasons that represent a HUMAN acting right now. These bypass the spawn-rate
 # floor: a person who answers a question or edits a spec must get an immediate
-# reconcile, and their own hands are the rate limit. Everything else is throttled.
+# reconcile, and their own hands are the rate limit. Everything else is throttled,
+# EXCEPT a phase hand-off (T-136, a separate check in `_gate_due`, not a member of
+# this set): a key whose folded phase differs from the phase it was last spawned in
+# also bypasses the floor, since a session that moved the ticket forward already made
+# progress. A same-phase respawn -- no progress, the GA-8 runaway shape -- is still
+# throttled exactly as before.
 _UNTHROTTLED_REASONS = frozenset({"inbox", "spec-changed", "answered-pending"})
 
 
@@ -3706,7 +3711,10 @@ def _gate_due(sweep: _Sweep, active: set[str], bindings_by_key: dict,
 
     # Spawn-rate floor: the ledger outlives a session that dies in <1s (whose
     # claim vanishes with it), so it bounds the per-key rate however often the
-    # dispatcher itself fires. A human signal bypasses it.
+    # dispatcher itself fires. A human signal bypasses it, and so does a phase
+    # hand-off (T-136): a session that moved the ticket on to its next phase
+    # already made progress, so the floor is not the thing bounding it -- only
+    # a same-phase respawn (the GA-8 runaway shape) is throttled.
     floor = spawn_floor(cfg)
     throttled: list[str] = []
     eligible: list[tuple[str, str]] = []
@@ -3714,7 +3722,9 @@ def _gate_due(sweep: _Sweep, active: set[str], bindings_by_key: dict,
         if floor:
             entry = ledger.get(key)
             last = entry.get("last") if isinstance(entry, dict) else entry
-            if (reason not in _UNTHROTTLED_REASONS
+            spawned_phase = entry.get("phase") if isinstance(entry, dict) else None
+            hand_off = spawned_phase is not None and spawned_phase != sweep.phase.get(key)
+            if (reason not in _UNTHROTTLED_REASONS and not hand_off
                     and isinstance(last, (int, float)) and now - last < floor):
                 throttled.append(key)
                 decisions[key]["outcome"] = "throttled"
@@ -3772,9 +3782,12 @@ def _preview_spawns(sweep: _Sweep, to_spawn: list, bindings_by_key: dict,
     return spawned
 
 
-def _record_spawn(ledger: dict, key: str, now: float, weight) -> None:
+def _record_spawn(ledger: dict, key: str, now: float, weight, phase: str) -> None:
     """Append this spawn to *key*'s spawn-ledger entry, keeping only the
-    health window's worth of recent entries."""
+    health window's worth of recent entries. *phase* (T-136) is the folded
+    phase this spawn is going out to spawn a reconciler INTO -- the floor
+    exemption compares it against the folded phase at the NEXT due check to
+    tell a hand-off from a same-phase respawn."""
     from . import health  # lazy: health -> dispatcher would cycle at import time
     prev = ledger.get(key)
     recent = list(prev.get("recent", [])) if isinstance(prev, dict) else []
@@ -3782,7 +3795,7 @@ def _record_spawn(ledger: dict, key: str, now: float, weight) -> None:
     recent = [e for e in recent
               if (ts := _ledger_entry_ts(e)) is not None
               and now - ts <= health.WINDOW_SECONDS][-_LEDGER_RECENT_CAP:]
-    ledger[key] = {"last": now, "recent": recent}
+    ledger[key] = {"last": now, "recent": recent, "phase": phase}
 
 
 def _admit_for_spawn(sweep: _Sweep, key: str, binding, active: set[str],
@@ -3932,7 +3945,7 @@ def _spawn_due(sweep: _Sweep, sessions: SessionManager, to_spawn: list, active: 
         repo_name = binding.name if binding is not None else "default"
         rotation_cursor.setdefault(repo_name, {})[str(spec_priority(home, key))] = key
         rotation_changed = True
-        _record_spawn(ledger, key, now, spawn_weight(cfg, phase))
+        _record_spawn(ledger, key, now, spawn_weight(cfg, phase), phase)
 
     if spawned or attempts_changed:
         # Drop entries for keys that no longer exist, so neither ledger grows unbounded.
