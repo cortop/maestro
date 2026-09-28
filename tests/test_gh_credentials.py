@@ -350,6 +350,14 @@ def test_claude_cli_sessions_spawn_env_byte_identical_when_no_overlay(home):
     expected["BASH_DEFAULT_TIMEOUT_MS"] = ceiling_ms
     assert env == expected
 
+    # T-144: `config.scrubbed_env` builds the child env from a COPY of
+    # `os.environ` -- it must never mutate the dispatcher process's own
+    # environment, even across a real sweep (which loads config and resolves
+    # credentials for every due key).
+    ambient_before = dict(os.environ)
+    disp.dispatch(config_mod.load(home), DryRunSessions(), now=1000)
+    assert dict(os.environ) == ambient_before
+
 
 # --- AC: dispatcher spawn site resolves + threads the overlay --------------
 

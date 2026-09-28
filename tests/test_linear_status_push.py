@@ -1,17 +1,24 @@
 """T-104: push maestro phase transitions to Linear status.
 
-The only mock anywhere in this file is `FakeLinearTransport` -- the external
-Linear HTTP boundary. Everything else (the phase-change gates, the exhaustive
-phase->status mapping, the idempotent push, the soft-degrade on failure) is
-exercised via the real `ops.set_phase`/`ops.finalize` entry points -- the ONLY
-two places a `PhaseChanged`/`Finalized` event is ever appended, and so the
-only two places T-104's push can ever fire from.
+T-144: the push moved OUT of `ops.set_phase`/`ops.finalize` (a reconciler
+session must never hold `LINEAR_API_KEY` -- see `config.scrubbed_env`, which
+now strips it from every spawned env) and INTO `dispatcher.sync_linear_status`,
+a dispatcher-sweep-owned hook. The only mock anywhere in this file is
+`FakeLinearTransport` -- the external Linear HTTP boundary. Everything else
+(the phase-change gates, the exhaustive phase->status mapping, the idempotent
+push, the soft-degrade on failure) is exercised via the real
+`ops.set_phase`/`ops.finalize` entry points (which append `PhaseChanged`/
+`Finalized` and now make zero Linear calls of their own) plus the real
+`dispatcher.sync_linear_status`/`dispatcher.dispatch`, which is the only place
+T-104's push can fire from now.
 """
 import pytest
 
+from maestro import dispatcher as disp
 from maestro import event_log, ops, providers, snapshot as snap_mod, store
 from maestro.dispatcher import spec_hash_on_disk
 from maestro.providers.linear import LinearTracker, STATUS_BY_PHASE, _assert_exhaustive
+from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 ALL_STATES = [
@@ -147,15 +154,19 @@ def test_transition_raises_when_issue_not_found():
         tracker.transition("ENG-9", "To do")
 
 
-# --- The real phase walk (AC2) --------------------------------------------------
+# --- The real phase walk (AC2), now driven by the dispatcher sweep (T-144) ------
 
 def test_walk_ready_to_done_produces_exactly_the_mapped_pushes_in_order(cfg, monkeypatch):
     key, transport, _ = _seed_linear_ticket(cfg, monkeypatch, "ENG-10")
 
     ops.set_phase(cfg, key, Phase.READY, actor="r")
+    disp.sync_linear_status(cfg, now=0)
     ops.set_phase(cfg, key, Phase.IMPLEMENTING, actor="r")
+    disp.sync_linear_status(cfg, now=0)
     ops.set_phase(cfg, key, Phase.AWAITING_CI, actor="r", force=True)
+    disp.sync_linear_status(cfg, now=0)
     ops.finalize(cfg, key, actor="r")
+    disp.sync_linear_status(cfg, now=0)
 
     pushed = [e["payload"]["status"] for e in event_log.read(cfg.home, key)
               if e["type"] == "LinearStatusPushed"]
@@ -165,18 +176,62 @@ def test_walk_ready_to_done_produces_exactly_the_mapped_pushes_in_order(cfg, mon
     assert [c[2] for c in update_calls] == ["s-todo", "s-prog", "s-review", "s-done"]
 
 
+# --- T-144: set_phase/finalize themselves never touch Linear anymore -----------
+
+def test_set_phase_makes_no_linear_call_on_its_own(cfg, monkeypatch):
+    """AC: a reconciler drives phase changes through `set_phase`/`finalize`
+    directly (never `sync_linear_status`) -- those two must make ZERO Linear
+    calls now, since a reconciler process never holds `LINEAR_API_KEY`."""
+    key, transport, _ = _seed_linear_ticket(cfg, monkeypatch, "ENG-14")
+
+    ops.set_phase(cfg, key, Phase.READY, actor="r")
+    ops.set_phase(cfg, key, Phase.IMPLEMENTING, actor="r")
+    ops.set_phase(cfg, key, Phase.AWAITING_CI, actor="r", force=True)
+    ops.finalize(cfg, key, actor="r")
+
+    assert transport.calls == []
+    assert not any(e["type"] == "LinearStatusPushed" for e in event_log.read(cfg.home, key))
+
+
+def test_real_dispatch_sweep_pushes_once_then_nothing_on_the_next(cfg, monkeypatch):
+    """AC: a real `dispatch()` sweep -- not a direct `sync_linear_status` call --
+    sends the mapped status to the Linear transport exactly once for a phase
+    change, and a further sweep with no phase change sends nothing."""
+    key, transport, _ = _seed_linear_ticket(cfg, monkeypatch, "ENG-15")
+    ops.set_phase(cfg, key, Phase.READY, actor="r")
+    assert transport.calls == []  # confirms set_phase itself pushed nothing
+
+    cfg.min_spawn_interval = 0
+    disp.dispatch(cfg, DryRunSessions(), now=1000)
+
+    update_calls = [c for c in transport.calls if c[0] == "update_issue_state"]
+    assert len(update_calls) == 1
+    pushed = [e["payload"]["status"] for e in event_log.read(cfg.home, key)
+              if e["type"] == "LinearStatusPushed"]
+    assert pushed == ["To do"]
+
+    disp.dispatch(cfg, DryRunSessions(), now=2000)
+
+    assert len([c for c in transport.calls if c[0] == "update_issue_state"]) == 1
+    pushed_after = [e["payload"]["status"] for e in event_log.read(cfg.home, key)
+                    if e["type"] == "LinearStatusPushed"]
+    assert pushed_after == ["To do"]
+
+
 # --- Idempotency (AC3) -----------------------------------------------------------
 
 def test_rerunning_the_same_phase_pushes_nothing(cfg, monkeypatch):
     key, transport, _ = _seed_linear_ticket(cfg, monkeypatch, "ENG-11")
 
     ops.set_phase(cfg, key, Phase.READY, actor="r")
+    disp.sync_linear_status(cfg, now=0)
     assert len([c for c in transport.calls if c[0] == "update_issue_state"]) == 1
 
     # A second, genuinely new PhaseChanged event for the SAME phase (bounce
     # away and back, so this isn't just a step-id-deduped crash-replay).
     ops.set_phase(cfg, key, Phase.TRIAGING, actor="r")
     ops.set_phase(cfg, key, Phase.READY, actor="r")
+    disp.sync_linear_status(cfg, now=0)
 
     assert len([c for c in transport.calls if c[0] == "update_issue_state"]) == 1
 
@@ -187,10 +242,12 @@ def test_a_different_phase_at_the_same_target_status_pushes_nothing(cfg, monkeyp
     ops.set_phase(cfg, key, Phase.READY, actor="r")
     ops.set_phase(cfg, key, Phase.IMPLEMENTING, actor="r")
     ops.set_phase(cfg, key, Phase.AWAITING_CI, actor="r", force=True)
+    disp.sync_linear_status(cfg, now=0)
     updates_before = len([c for c in transport.calls if c[0] == "update_issue_state"])
 
     # awaiting-ci and in-review both map to "In Review" -- already at target.
     ops.set_phase(cfg, key, Phase.IN_REVIEW, actor="r", force=True)
+    disp.sync_linear_status(cfg, now=0)
 
     updates_after = len([c for c in transport.calls if c[0] == "update_issue_state"])
     assert updates_after == updates_before
@@ -214,6 +271,7 @@ def test_no_linear_identifier_makes_zero_linear_calls(cfg, monkeypatch):
     ops.set_phase(cfg, key, Phase.IMPLEMENTING, actor="r")
     ops.set_phase(cfg, key, Phase.AWAITING_CI, actor="r", force=True)
     ops.finalize(cfg, key, actor="r")
+    disp.sync_linear_status(cfg, now=0)
 
     assert transport.calls == []
     assert not any(e["type"] == "LinearStatusPushed" for e in event_log.read(cfg.home, key))
@@ -225,6 +283,7 @@ def test_failed_push_degrades_soft_instead_of_wedging_the_reconcile(cfg, monkeyp
     key, transport, _ = _seed_linear_ticket(cfg, monkeypatch, "ENG-13", states=[])
 
     ev = ops.set_phase(cfg, key, Phase.READY, actor="r")
+    disp.sync_linear_status(cfg, now=0)
 
     assert ev is not None  # the phase change itself succeeded -- never wedged
     assert snap_mod.load(cfg.home, key).phase == Phase.READY.value
