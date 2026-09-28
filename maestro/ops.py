@@ -198,7 +198,6 @@ def set_phase(cfg: Config, key: str, phase: Phase, *, reason: str = "", actor: s
         _warn_unverified_acs(cfg, key, actor=actor)
     if requeue_in is not None:
         requeue(cfg, key, requeue_in, actor=actor)
-    _push_linear_status(cfg, key, phase, actor=actor)
     return ev
 
 
@@ -231,28 +230,6 @@ def _enforce_qa_gate(cfg: Config, key: str, snap, dest: Phase, *,
     _refuse_if_qa_failing(cfg, key, snap)
     _refuse_if_qa_incomplete(cfg, key, snap)
     return unverified
-
-
-def _push_linear_status(cfg: Config, key: str, phase: Phase, *, actor: str) -> None:
-    """T-104: push *phase*'s mapped Linear status for a Linear-linked ticket.
-    ``set_phase`` (above) and ``finalize`` (below) are the ONLY two places
-    ``PhaseChanged``/``Finalized`` are ever appended -- see ``ops.py``'s
-    module docstring and ``events.SIDE_EFFECTING`` -- so calling this from
-    both is exhaustive over every real phase change, not merely the common
-    path. Ships dark for everything else: only a ticket carrying the T-103
-    Linear identifier (``external_source == "linear"``) makes any call at
-    all -- everything else is byte-identical to before this ticket. Never
-    raises: ``LinearTracker.push_phase_status`` degrades a failed push to a
-    ``Note`` event on its own, so a Linear-side error never wedges the
-    reconcile."""
-    snap = snap_mod.load(cfg.home, key)
-    if snap.external_source != "linear" or not snap.external_id:
-        return
-    from . import providers
-    tracker = providers.get_trackers(cfg).get("linear")
-    if tracker is None:
-        return
-    tracker.push_phase_status(cfg.home, key, snap.external_id, phase, actor=actor)
 
 
 def _annotations_active(cfg: Config, key: str) -> bool:
@@ -1372,7 +1349,8 @@ def capture_tests(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
         return {**cached, "tree_key": tree_key, "cached": True}
     try:
         proc = subprocess.run(binding.test_command, shell=True, cwd=cwd,
-                              capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT)
+                              capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT,
+                              env=config_mod.scrubbed_env(cfg))
         exit_code = proc.returncode
         output = (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
@@ -1397,10 +1375,16 @@ def _record_ac_check(cfg: Config, key: str, *, tree_key: str, h: str, ac_index: 
     return payload
 
 
-def _run_shell(command: str, cwd: Path) -> tuple[int, str]:
+def _run_shell(command: str, cwd: Path, env: dict | None = None) -> tuple[int, str]:
+    """*env* (T-144) is the caller's already-scrubbed child env
+    (`config.scrubbed_env`) -- an AC `check:` command runs with the same
+    secret-free env a test run does, never the raw ambient one. None (a caller
+    that hasn't been updated) falls back to the ambient environment,
+    byte-identical to before this ticket."""
     try:
         proc = subprocess.run(command, shell=True, cwd=cwd,
-                              capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT)
+                              capture_output=True, text=True, timeout=_TEST_RUN_TIMEOUT,
+                              env=env)
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
         return -1, f"[maestro] check timed out after {_TEST_RUN_TIMEOUT}s"
@@ -1655,7 +1639,8 @@ def _diff_added_test_names(cwd: Path, base: str, rel_path: str,
 
 def _run_named_test(profile: "testlang.LanguageProfile", test_command: str, cwd: Path,
                     base: str, ann: "snap_mod.AcAnnotation",
-                    test_selector: str | None = None) -> tuple[str, int, str]:
+                    test_selector: str | None = None,
+                    env: dict | None = None) -> tuple[str, int, str]:
     """Run (or refuse to run) a `test:` annotation's check -- returns
     ``(command, exit_code, output)``, mirroring `_run_shell`'s shape so
     `run_ac_checks` can record either uniformly. *test_command* is the
@@ -1708,7 +1693,7 @@ def _run_named_test(profile: "testlang.LanguageProfile", test_command: str, cwd:
     if not_found:
         return command, 1, not_found_msg
 
-    exit_code, output = _run_shell(command, cwd)
+    exit_code, output = _run_shell(command, cwd, env)
     return command, exit_code, output
 
 
@@ -1761,6 +1746,7 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
     tree_key = _tree_state_key(cwd, timeout=binding.worktree_timeout)
     snap = snap_mod.load(cfg.home, key)
     cached = snap.ac_checks.get(tree_key, {})
+    env = config_mod.scrubbed_env(cfg)  # T-144: every AC check: /test: run scrubbed, not ambient
 
     all_passed = True
     failures = []
@@ -1775,7 +1761,7 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
         if rec is None:
             if ann.kind == "check":
                 command = ann.command
-                exit_code, output = _run_shell(ann.command, cwd)
+                exit_code, output = _run_shell(ann.command, cwd, env)
             else:
                 try:
                     # T-96: resolve_strict, not resolve -- an UNSET language
@@ -1791,7 +1777,8 @@ def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher"
                     continue
                 command, exit_code, output = _run_named_test(profile, binding.test_command,
                                                               cwd, base, ann,
-                                                              test_selector=binding.test_selector)
+                                                              test_selector=binding.test_selector,
+                                                              env=env)
             rec = _record_ac_check(cfg, key, tree_key=tree_key, h=h, ac_index=i, ac_text=t,
                                    kind=ann.kind, command=command, exit_code=exit_code,
                                    output=output, actor=actor)
@@ -2597,7 +2584,6 @@ def finalize(cfg: Config, key: str, *, actor: str = "reconciler") -> None:
     if binding.mode != "local" and _qa_gate_applies(cfg, Phase(snap.phase), Phase.DONE):
         _enforce_qa_gate(cfg, key, snap, Phase.DONE, forceable=False)
     _append(cfg, key, E.FINALIZED, {}, actor=actor, sid=f"finalize-{key}")
-    _push_linear_status(cfg, key, Phase.DONE, actor=actor)
 
 
 def _prune_plan(cfg: Config, key: str, *, now: float | None = None) -> list[dict]:
