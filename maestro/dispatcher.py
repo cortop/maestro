@@ -24,7 +24,7 @@ import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, NamedTuple
 
 from . import alarm, claims, credentials, events as E
 from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
@@ -556,50 +556,161 @@ _FAST_PATH_LITERAL_ANSWERS = frozenset({
 # means something other than "route to ready".
 _FAST_PATH_QID_RE = re.compile(r"^[0-9a-f]{16}$")
 
+# T-140: a short, unqualified approval prefix -- one of these words at the
+# START of the answer, at most 80 chars, with no contrastive/hedging word and
+# no "?"/";" anywhere in it. Measured against 84 labeled human answers (see
+# the spec's Notes) -- deliberately conservative, since a false POSITIVE here
+# (routing an answer that was actually qualifying/declining) is unsafe while
+# a false negative (falling through to a spawn) never is.
+_FAST_PATH_PREFIX_RE = re.compile(r"^(yes|ok|approved?|lgtm|go ahead|proceed)\b", re.IGNORECASE)
+_FAST_PATH_PREFIX_BLOCK_RE = re.compile(
+    r"\b(but|not|except|only|wait|instead|however|unless|first|also|and then)\b",
+    re.IGNORECASE)
+_FAST_PATH_PREFIX_MAX_LEN = 80
+
+# T-140: defense in depth -- never treat accepting a recommendation as
+# "proceed", no matter what kind the asker declared, when the recommendation
+# text itself starts with a rejection/discard word (T-72's shape: "Reject/
+# close T-72 as not a real defect"). A stale or mistaken `recommend_kind` on
+# the QuestionAsked must not be enough on its own to reopen that hole.
+_FAST_PATH_REJECT_RE = re.compile(
+    r"^(reject|close|won't|do not|don't|drop|abandon)\b", re.IGNORECASE)
+
 
 def _normalize_fast_path_answer(text: str) -> str:
-    return re.sub(r"[\s.,!?;:]+$", "", text.strip().lower())
+    # T-140: "?" and ";" are deliberately NOT in the trailing-punctuation strip
+    # set (unlike ".", ",", "!", ":", which are just decoration) -- a
+    # question mark changes the answer's meaning ("yes?" is not the same as
+    # "yes"), so it must keep defeating every rule (literal/echo/marker too,
+    # not just the prefix rule's own explicit "?"/";" check), never get
+    # silently normalized away first.
+    return re.sub(r"[\s.,!:]+$", "", text.strip().lower())
+
+
+def _fast_path_matches_prefix(text: str) -> bool:
+    """T-140's short-unqualified-approval rule, against the verbatim (not
+    normalized) answer -- length and the "?"/";" checks care about the raw
+    text, not the trailing-punctuation-stripped form
+    `_normalize_fast_path_answer` builds for the literal/echo comparisons."""
+    stripped = text.strip()
+    if not stripped or len(stripped) > _FAST_PATH_PREFIX_MAX_LEN:
+        return False
+    if "?" in stripped or ";" in stripped:
+        return False
+    if not _FAST_PATH_PREFIX_RE.match(stripped):
+        return False
+    return not _FAST_PATH_PREFIX_BLOCK_RE.search(stripped)
+
+
+class _AnswerInfo(NamedTuple):
+    """One (qid, answer) pair's raw material for eligibility: the verbatim
+    answer text, and whether it carried T-140's TUI accept-recommendation
+    marker (``accepted_recommendation``)."""
+    text: str
+    marker: bool
 
 
 def _fast_path_answer_source(home: Path, key: str,
-                             snap: snap_mod.Snapshot) -> dict[str, str] | None:
-    """``{qid: verbatim answer text}`` an answer_fast_path route would act on,
-    or ``None`` if the ticket's pending inbox / already-folded answer doesn't
-    have the single-answer shape the fast path requires.
+                             snap: snap_mod.Snapshot) -> dict[str, _AnswerInfo] | None:
+    """``{qid: _AnswerInfo}`` an answer_fast_path route would act on, or
+    ``None`` if the ticket's pending inbox / already-folded answers don't have
+    a shape the fast path recognizes.
 
     Two shapes, matching ``is_due``'s own ``"inbox"``/``"answered-pending"``
-    reasons: exactly one pending ``ans``/``answer`` inbox command (never
-    more -- a second pending entry, e.g. an "ok" followed by a rejection in
-    the same fold as on T-72, always falls through here); or, when nothing
-    is pending (the ``answered-pending`` crash-recovery shape: a reconciler
-    folded the inbox and died before the phase transition), the already-
-    folded ``answered_questions``.
+    reasons: one or more pending ``ans``/``answer`` inbox commands -- a lone
+    untargeted one still applies to every currently open qid, same as T-122;
+    T-140 additionally allows several pending commands to route as one round,
+    but only when EVERY one of them names an explicit qid and no qid is named
+    twice (T-72's shape -- two untargeted commands, or two commands naming the
+    same qid, e.g. "ok" then an echo -- still falls through here exactly as
+    before); or, when nothing is pending (the ``answered-pending`` crash-
+    recovery shape: a reconciler folded the inbox and died before the phase
+    transition), the already-folded ``answered_questions``/``answered_markers``.
     """
     pend = inbox.pending(home, key)
     if pend:
-        if len(pend) != 1:
-            return None
+        if len(pend) > 1:
+            qids: list[str] = []
+            for cmd in pend:
+                if cmd.get("command") not in ("ans", "answer"):
+                    return None
+                target = cmd.get("args", {}).get("qid")
+                if not target:
+                    return None
+                qids.append(target)
+            if len(set(qids)) != len(qids):
+                return None
+            return {
+                cmd["args"]["qid"]: _AnswerInfo(
+                    cmd.get("args", {}).get("text", cmd.get("command")),
+                    bool(cmd.get("args", {}).get("accepted_recommendation")),
+                )
+                for cmd in pend
+            }
         cmd = pend[0]
         if cmd.get("command") not in ("ans", "answer"):
             return None
         text = cmd.get("args", {}).get("text", cmd.get("command"))
+        marker = bool(cmd.get("args", {}).get("accepted_recommendation"))
         target = cmd.get("args", {}).get("qid")
         qids = [target] if target else list(snap.open_questions.keys())
         if not qids:
             return None
-        return {qid: text for qid in qids}
+        return {qid: _AnswerInfo(text, marker) for qid in qids}
     if snap.answered_questions:
-        return dict(snap.answered_questions)
+        return {
+            qid: _AnswerInfo(text, snap.answered_markers.get(qid, False))
+            for qid, text in snap.answered_questions.items()
+        }
     return None
 
 
-def _answer_fast_path_eligible(home: Path, key: str, snap: snap_mod.Snapshot,
-                               due_reason: str) -> tuple[list[str], str] | None:
-    """The qid(s) and verbatim literal answer text an answer_fast_path route
-    would act on, or ``None`` if *key* isn't eligible right now -- see T-122's
-    spec Notes for the full eligibility list this enforces. Pure/read-only,
-    so it's safe to call under ``shadow`` or a ``dry_run`` preview -- only the
-    caller decides whether to actually apply what this predicts.
+def _fast_path_match_rule(info: _AnswerInfo, recommend: str | None) -> str | None:
+    """Which T-140 rule this (qid, answer) pair matches -- "marker", "echo",
+    "literal" or "prefix" -- or ``None`` if it matches none. Ignores the
+    recommendation's declared kind and the reject-word defense in depth; the
+    caller (`_fast_path_pair_eligible`) applies both, once, for the pair as a
+    whole."""
+    normalized = _normalize_fast_path_answer(info.text)
+    if recommend is not None and normalized == _normalize_fast_path_answer(recommend):
+        # The dispatcher trusts the accept marker only when the text equals
+        # that qid's recommendation VERBATIM (not just after normalizing) --
+        # a marker on text that merely echoes the recommendation loosely is
+        # labeled "echo" instead, same gating either way.
+        return "marker" if info.marker and info.text == recommend else "echo"
+    if normalized in _FAST_PATH_LITERAL_ANSWERS:
+        return "literal"
+    if _fast_path_matches_prefix(info.text):
+        return "prefix"
+    return None
+
+
+def _fast_path_pair_eligible(info: _AnswerInfo, recommend: str | None,
+                             kind: str | None) -> str | None:
+    """The matched rule name if this (qid, answer) pair qualifies for T-140's
+    widened fast path, else ``None`` -- see the spec's Notes ("Eligibility
+    for each (qid, answer) pair") for the exact rules this enforces."""
+    rule = _fast_path_match_rule(info, recommend)
+    if rule is None:
+        return None
+    if recommend is not None:
+        if _FAST_PATH_REJECT_RE.match(recommend.strip()):
+            return None
+        if kind != "proceed":  # undeclared (None) kind fails closed too
+            return None
+    return rule
+
+
+def _answer_fast_path_eligible(
+    home: Path, key: str, snap: snap_mod.Snapshot, due_reason: str,
+) -> tuple[list[str], dict[str, _AnswerInfo], dict[str, str]] | None:
+    """``(qids, answers, rules)`` an answer_fast_path route would act on --
+    *qids* in stable (answer-source) order, *answers* the verbatim
+    ``_AnswerInfo`` per qid, *rules* the matched rule name per qid -- or
+    ``None`` if *key* isn't eligible right now. See the spec's Notes for the
+    full eligibility list this enforces. Pure/read-only, so it's safe to call
+    under ``shadow`` or a ``dry_run`` preview -- only the caller decides
+    whether to actually apply what this predicts.
     """
     if snap.phase != Phase.AWAITING_HUMAN.value:
         return None
@@ -617,18 +728,23 @@ def _answer_fast_path_eligible(home: Path, key: str, snap: snap_mod.Snapshot,
         return None
     if not all(_FAST_PATH_QID_RE.match(qid) for qid in answers):
         return None
-    normalized = {_normalize_fast_path_answer(t) for t in answers.values()}
-    if len(normalized) != 1 or next(iter(normalized)) not in _FAST_PATH_LITERAL_ANSWERS:
-        return None
-    return list(answers), next(iter(answers.values()))
+    qids = list(answers)
+    rules: dict[str, str] = {}
+    for qid in qids:
+        rule = _fast_path_pair_eligible(
+            answers[qid], snap.question_recommends.get(qid), snap.question_kinds.get(qid))
+        if rule is None:
+            return None
+        rules[qid] = rule
+    return qids, answers, rules
 
 
 def _apply_answer_fast_path(cfg: Config, key: str, reason: str, *, actor: str) -> None:
     """Execute an eligible fast-path route: fold the inbox, advance straight
-    to `ready` with *reason* (``"approved: <verbatim answer>"``), then ack --
-    the same fold -> set_phase -> ack sequence the `awaiting-human` reconciler
-    itself would run, just performed inline in the sweep instead of spawning
-    a session to do it."""
+    to `ready` with *reason* (``"approved: <verbatim answer(s)>"``), then ack
+    -- the same fold -> set_phase -> ack sequence the `awaiting-human`
+    reconciler itself would run, just performed inline in the sweep instead
+    of spawning a session to do it."""
     from . import ops
     ops.fold_inbox(cfg, key)
     fresh = snap_mod.load(cfg.home, key)
@@ -3656,16 +3772,22 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
 
 
 def _record_fast_path_decision(home: Path, key: str, *, qids: list[str], answer: str,
-                               route: str, outcome: str, reason: str) -> None:
+                               route: str, outcome: str, reason: str,
+                               rules: dict[str, str]) -> None:
     """T-139: durably append one `events.FAST_PATH_DECIDED` record to *key*'s
     own log -- what makes `decision_labels.agreement()` survive
     `derived/dispatch.jsonl`'s 500-line trim (or the file's outright loss).
     The step-id is content-keyed on exactly (qids, answer, route) -- NOT
-    outcome/reason, which differ between a "shadow" preview and an "on" live
-    route of the very same round -- so a shadow decision recomputed every
-    sweep against an unchanged pending answer is a no-op append, never a
-    second event or an extra `observed_seq` bump."""
-    payload = {"qid": sorted(qids), "route": route, "outcome": outcome, "reason": reason}
+    outcome/reason/rules, which differ between a "shadow" preview and an "on"
+    live route of the very same round -- so a shadow decision recomputed
+    every sweep against an unchanged pending answer is a no-op append, never
+    a second event or an extra `observed_seq` bump. T-140: *rules* (qid ->
+    "marker"/"echo"/"literal"/"prefix") rides along additively on the payload
+    so agreement can be read per matched rule before anyone flips the knob to
+    "on" -- it is a pure function of the already-hashed (qid, answer) inputs,
+    so it doesn't need to be part of the step-id itself."""
+    payload = {"qid": sorted(qids), "route": route, "outcome": outcome, "reason": reason,
+               "rules": {qid: rules[qid] for qid in sorted(rules)}}
     content = json.dumps({"qid": sorted(qids), "answer": answer, "route": route},
                         sort_keys=True)
     sid = "fastpath-" + content_hash(content)
@@ -3678,13 +3800,15 @@ def _record_fast_path_decision(home: Path, key: str, *, qids: list[str], answer:
 
 
 def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bool:
-    """T-122: route an exact-literal human approval straight to `ready` in this
-    sweep instead of spawning an awaiting-human reconciler just to read "ok".
-    Returns True when it fully decided *key*'s outcome. `answer_fast_path =
-    "off"` (default) never computes eligibility; "shadow" (or "on" under
-    dry_run) only predicts. T-139: a real (non-dry-run) "shadow" or "on"
-    decision is also recorded durably (`_record_fast_path_decision`) -- GA-4
-    still holds, since `dry_run` never reaches that call."""
+    """T-122/T-140: route an accepted-recommendation, echoed, literal or short
+    unqualified approval -- a single question or a whole multi-question round
+    -- straight to `ready` in this sweep instead of spawning an
+    awaiting-human reconciler just to read it. Returns True when it fully
+    decided *key*'s outcome. `answer_fast_path = "off"` (default) never
+    computes eligibility; "shadow" (or "on" under dry_run) only predicts.
+    T-139: a real (non-dry-run) "shadow" or "on" decision is also recorded
+    durably (`_record_fast_path_decision`) -- GA-4 still holds, since
+    `dry_run` never reaches that call."""
     cfg, home, now = sweep.cfg, sweep.home, sweep.now
     decisions = sweep.decisions
     if cfg.answer_fast_path == "off":
@@ -3692,18 +3816,21 @@ def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> b
     eligible = _answer_fast_path_eligible(home, key, snap, due_reason)
     if eligible is None:
         return False
-    qids, answer = eligible
-    route = "approve"  # T-122's allowlist is approval-only -- see its module comment.
+    qids, answers, rules = eligible
+    # T-122's allowlist (and its T-140 widening) is approval-only -- see the
+    # module comment above `_FAST_PATH_LITERAL_ANSWERS`.
+    route = "approve"
+    answer_summary = "; ".join(answers[qid].text for qid in qids)
     if cfg.answer_fast_path == "on" and not sweep.dry_run:
-        reason = f"approved: {answer}"
+        reason = f"approved: {answer_summary}"
         try:
             _apply_answer_fast_path(cfg, key, reason, actor="dispatcher")
         except Exception as e:  # noqa: BLE001 -- a lost race must not abort the sweep
             sweep.hook_errors[f"answer_fast_path:{key}"] = f"{type(e).__name__}: {e}"
             eligible = None
         else:
-            _record_fast_path_decision(home, key, qids=qids, answer=answer, route=route,
-                                       outcome="answer_routed", reason=reason)
+            _record_fast_path_decision(home, key, qids=qids, answer=answer_summary, route=route,
+                                       outcome="answer_routed", reason=reason, rules=rules)
             decisions[key] = {"outcome": "answer_routed", "reason": reason,
                               "qid": qids, "route": route}
             refreshed = snap_mod.load(home, key)
@@ -3717,10 +3844,10 @@ def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> b
             return True
     if eligible is None:
         return False
-    reason = f"would approve: {answer}"
+    reason = f"would approve: {answer_summary}"
     if not sweep.dry_run:
-        _record_fast_path_decision(home, key, qids=qids, answer=answer, route=route,
-                                   outcome="would_route_answer", reason=reason)
+        _record_fast_path_decision(home, key, qids=qids, answer=answer_summary, route=route,
+                                   outcome="would_route_answer", reason=reason, rules=rules)
         refreshed = snap_mod.load(home, key)
         sweep.observed_seq[key] = refreshed.observed_seq
     decisions[key] = {"outcome": "would_route_answer", "reason": reason,

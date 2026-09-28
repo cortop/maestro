@@ -43,13 +43,17 @@ Two rules apply whenever you reach for `maestro ask`:
 
 **(a) Ask the whole settled frontier in one round.** If you have more than one question whose
 prerequisites are already met, post them together in a single `maestro ask` call via the
-repeatable `--question TEXT RECOMMENDED QID` flag (one triple per question; pass `""` for
-RECOMMENDED when you have no recommendation, and `""` for QID to auto-derive it — only pin an
-explicit QID when a later step routes on its prefix, e.g. `research-approval-<key>`):
+repeatable `--question TEXT RECOMMENDED QID KIND` flag (one quadruple per question; pass `""` for
+RECOMMENDED when you have no recommendation, `""` for QID to auto-derive it — only pin an explicit
+QID when a later step routes on its prefix, e.g. `research-approval-<key>` — and, whenever
+RECOMMENDED is non-empty, KIND declaring what accepting it means: `proceed` for a pickup approval
+or a design choice inside the approved scope, `other` for anything else, e.g. reject/close/discard.
+An undeclared KIND (pass `""`) is always safe, just slower — the dispatcher's answer_fast_path
+never routes it automatically):
 ```bash
 maestro ask "$KEY" \
-  --question "<question 1>" "<your recommended answer, or \"\">" "" \
-  --question "<question 2>" "<your recommended answer, or \"\">" ""
+  --question "<question 1>" "<your recommended answer, or \"\">" "" "proceed" \
+  --question "<question 2>" "<your recommended answer, or \"\">" "" "proceed"
 ```
 One question per round is the most expensive schedule available here: each round costs a
 dispatcher wake, an hours-long human round-trip, and a full reconciler spawn — pay that once
@@ -71,8 +75,8 @@ dispatch a sub-agent rather than asking), then ask the whole settled frontier in
 each numbered with your recommended answer:
 ```bash
 maestro ask "$KEY" \
-  --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?" "<your recommendation>" "" \
-  --question "<other settled question, if any>" "<your recommendation>" ""
+  --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?" "<your recommendation>" "" "proceed" \
+  --question "<other settled question, if any>" "<your recommendation>" "" "proceed"
 ```
 This appends `QuestionAsked` and moves the ticket to `awaiting-human`, where
 `maestro-reconcile-awaiting-human.md` applies the answer and routes it onward (`ready` on

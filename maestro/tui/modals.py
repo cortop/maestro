@@ -22,6 +22,16 @@ from ..statemachine import Phase
 _ACCEPT_ALL = object()
 
 
+class _AcceptedRecommendation(str):
+    """T-140: what `action_accept_recommendation` (Ctrl+R) dismisses with --
+    a plain `str` subclass equal to the recommendation text, but
+    distinguishable via `isinstance` from an identical TYPED answer (which
+    dismisses as a bare `str`). Lets the caller (`MaestroTUI._walk_questions`)
+    carry the accept marker onto the queued `ans` command only for a real
+    Ctrl+R/Ctrl+G accept, never for a human who happened to type the same
+    words as the recommendation."""
+
+
 class _AnswerModal(ModalScreen):
     """Single-question input modal; dismisses with the answer string, `_ACCEPT_ALL`,
     or None on cancel."""
@@ -124,7 +134,7 @@ class _AnswerModal(ModalScreen):
         if not self._recommend:
             self.notify("No recommendation for this question", severity="warning")
             return
-        self.dismiss(self._recommend)
+        self.dismiss(_AcceptedRecommendation(self._recommend))
 
     def action_accept_all_remaining(self) -> None:
         self.dismiss(_ACCEPT_ALL)
