@@ -222,6 +222,10 @@ Otherwise implement the spec's Acceptance criteria:
    (`maestro/dispatcher.py:1369`) already runs this session with `<WT>` as cwd — so the relative
    form is both correct and the only one that avoids a permission prompt. Do not "fix" this back
    to an absolute path.
+   In a Bazel repo (`bzl test`), scope the run to the packages you changed — `//<pkg>/...` or
+   the exact `:target`, plus `--test_filter` when you know the test names. Never test the whole
+   app tree (`//<app>/...:all`) and never pass `--cache_test_results=no`: both throw away
+   cached passes and turn a minutes-long run into a 20+ minute one that blows the timeout.
    If red, fix and re-run — stay on this step until green. If the suite cannot complete inside
    that foreground timeout budget, do not exit to wait for it — run
    `maestro fail "$KEY" "suite exceeds tool timeout: <why>"` and exit; the dispatcher-owned
