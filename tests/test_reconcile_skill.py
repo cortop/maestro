@@ -1065,6 +1065,22 @@ def test_implementing_skill_test_step_timeout_matches_exported_bash_ceiling():
     assert 'maestro fail "$KEY" "suite exceeds tool timeout: <why>"' in body
 
 
+def test_qa_skill_test_step_timeout_matches_exported_bash_ceiling():
+    """T-137: QA sessions run the suite to judge ACs too, and had no foreground
+    rule -- 6 of 18 dead-ended by backgrounding at Claude Code's 120s bare-call
+    default. The QA skill must carry the same foreground-with-explicit-timeout
+    rule the implementing skill already has, in all three copies (T-22
+    mirror-sync: `.claude/commands/`, `skills/`, `maestro/_skill_commands/`)."""
+    from maestro.config import Config
+    ceiling_ms = Config(home=Path("/nonexistent")).bash_max_timeout * 1000
+    for path in (_commands_path("qa"), _skills_path("qa"), _skill_commands_path("qa")):
+        body = _strip_frontmatter(path.read_text())
+        assert f"{ceiling_ms}ms" in body
+        assert "run_in_background" in body
+        assert "ScheduleWakeup" in body
+        assert 'maestro fail "$KEY" "suite exceeds tool timeout: <why>"' in body
+
+
 # ---------------------------------------------------------------------------
 # T-126: the implementing skill checks pr_split_threshold before opening or
 # growing a PR, proposing a stack under a split-<KEY>-<tree> qid on exceed.

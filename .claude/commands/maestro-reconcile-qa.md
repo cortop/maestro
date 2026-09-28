@@ -48,6 +48,14 @@ If the snapshot shows pending inbox commands, fold them before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
 ## `qa`: judge the diff, never edit it
+**Running tests to judge an AC (T-137).** If judging an AC means running the suite or a single
+test file, that run is ONE foreground Bash call with an explicit timeout of 1800000ms (the
+exported `BASH_MAX_TIMEOUT_MS` — same ceiling the implementing skill's own test step uses). Never
+`run_in_background`, never `ScheduleWakeup`/`Monitor`, and never a sleep/tail/pid poll loop on a
+test log — a backgrounded run here dead-ends this session exactly like an unannotated Bash call
+does anywhere else. If the run can't finish inside that budget, don't exit to wait for it: run
+`maestro fail "$KEY" "suite exceeds tool timeout: <why>"` and exit instead.
+
 1. `maestro qa-brief "$KEY"` — the deterministic hand-off packet: every spec AC (content-hash
    keyed, the same key `verify-ac`/`qa-verdict` use) plus a diff anchored on the merge-base with
    `<BASE>`, untracked files included via `git diff --no-index`. Read-only; safe to call again.

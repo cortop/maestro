@@ -112,12 +112,13 @@ class Config:
     # unset inherits this board-wide default -- see `repos.RepoBinding.prime_timeout`.
     prime_timeout: int = 600
     # Ceiling (seconds) on a single foreground Bash call inside a reconciler session,
-    # exported to every spawned runner as `BASH_MAX_TIMEOUT_MS` (Claude Code's own
-    # knob; the built-in ceiling is 600s, which maestro's own ~2700-test suite cannot
-    # finish inside). The implementing skill runs the suite as ONE foreground call
-    # bounded by this, so it is the budget the suite must fit in. 0 = don't export
-    # (runner default). Not per-repo: the env is fixed at spawn, before the ticket's
-    # repo binding is consulted by the skill.
+    # exported to every spawned runner as `BASH_MAX_TIMEOUT_MS` AND `BASH_DEFAULT_TIMEOUT_MS`
+    # (Claude Code's own knobs; the built-in ceiling is 600s, which maestro's own ~2700-test
+    # suite cannot finish inside, and the built-in default for a bare call with no explicit
+    # timeout is 120s, which backgrounds a reconciler's own unannotated Bash calls). The
+    # implementing skill runs the suite as ONE foreground call bounded by this, so it is the
+    # budget the suite must fit in. 0 = don't export (runner default). Not per-repo: the env
+    # is fixed at spawn, before the ticket's repo binding is consulted by the skill.
     bash_max_timeout: int = 1800
     # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
     # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
@@ -1106,9 +1107,10 @@ max_impl_turns = 20
                                   # runs) -- config.load refuses an explicit shorter value;
                                   # with bash_max_timeout unset, the ceiling shrinks to fit.
 # bash_max_timeout = 1800         # ceiling on ONE foreground Bash call inside a reconciler
-                                  # (exported as BASH_MAX_TIMEOUT_MS to the spawned runner;
-                                  # Claude Code's built-in ceiling is 600s). This is the
-                                  # budget the implementing skill's single foreground test
+                                  # (exported as BASH_MAX_TIMEOUT_MS and BASH_DEFAULT_TIMEOUT_MS
+                                  # to the spawned runner; Claude Code's built-in ceiling is
+                                  # 600s and its built-in bare-call default is 120s). This is
+                                  # the budget the implementing skill's single foreground test
                                   # run must fit in -- raise it for a slower suite, and raise
                                   # no_output_timeout above with it. 0 = don't export.
 # max_turn_wallclock_seconds = 900  # RB-15: dispatcher-side backstop for max_session_turns

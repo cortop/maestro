@@ -274,21 +274,30 @@ def _capture_env(home, key="T-1"):
 def test_spawn_env_exports_bash_max_timeout_ms_by_default(home):
     """The implementing skill runs the suite as ONE foreground Bash call; the
     runner's built-in 600s ceiling can't hold it, so the spawn env carries
-    BASH_MAX_TIMEOUT_MS from the board-wide default (seconds x1000)."""
+    BASH_MAX_TIMEOUT_MS from the board-wide default (seconds x1000). T-137:
+    BASH_DEFAULT_TIMEOUT_MS carries the same value, so even a bare Bash call
+    with no explicit timeout stays in the foreground instead of backgrounding
+    at the runner's own 120s default."""
     from maestro import config as config_mod
     env = _capture_env(home)
     assert env["BASH_MAX_TIMEOUT_MS"] == str(config_mod.load(home).bash_max_timeout * 1000)
     assert env["BASH_MAX_TIMEOUT_MS"] == "1800000"
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == env["BASH_MAX_TIMEOUT_MS"]
     assert env["MAESTRO_HOME"] == str(home)  # the rest of the env is untouched
 
 
 def test_spawn_env_bash_max_timeout_follows_config(home):
     store.atomic_write(home / "config.toml",
                        "[maestro]\nbash_max_timeout = 2400\nno_output_timeout = 2400\n")
-    assert _capture_env(home)["BASH_MAX_TIMEOUT_MS"] == "2400000"
+    env = _capture_env(home)
+    assert env["BASH_MAX_TIMEOUT_MS"] == "2400000"
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == "2400000"
 
 
 def test_spawn_env_bash_max_timeout_zero_leaves_runner_default(home, monkeypatch):
     monkeypatch.delenv("BASH_MAX_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("BASH_DEFAULT_TIMEOUT_MS", raising=False)
     store.atomic_write(home / "config.toml", "[maestro]\nbash_max_timeout = 0\n")
-    assert "BASH_MAX_TIMEOUT_MS" not in _capture_env(home)
+    env = _capture_env(home)
+    assert "BASH_MAX_TIMEOUT_MS" not in env
+    assert "BASH_DEFAULT_TIMEOUT_MS" not in env
