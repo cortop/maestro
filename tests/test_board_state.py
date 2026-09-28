@@ -171,6 +171,26 @@ def test_create_against_an_ok_board_is_unaffected(tmp_path):
     assert "queued create" in out
 
 
+def test_create_against_a_partial_home_suggests_the_ok_child(tmp_path):
+    """T-135: the `~/.maestro` vs `~/.maestro/maestro-dev` trap -- a bare
+    default home with stray events/inbox files but no tickets/config.toml
+    must refuse and point at the real, `ok` board nested underneath it."""
+    home = tmp_path / ".maestro"
+    (home / "events").mkdir(parents=True)
+    (home / "inbox").mkdir(parents=True)
+    real = home / "maestro-dev"
+    _run(real, "init")
+
+    before = sorted(p.name for p in home.iterdir() if p.name != "maestro-dev")
+    code, _, err = _run(home, "create", "x", "--no-nudge")
+    after = sorted(p.name for p in home.iterdir() if p.name != "maestro-dev")
+
+    assert code == 2
+    assert after == before
+    assert "tickets" in err and "config.toml" in err
+    assert err.rstrip("\n").endswith(f"(did you mean --home {real}?)")
+
+
 # --- AC4/AC5: health.check_home_structure + doctor exit code ----------------
 
 def test_check_home_structure_is_first_in_checks_registry():

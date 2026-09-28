@@ -282,14 +282,22 @@ def cmd_create(args) -> int:
     cfg = _cfg(args)
     # T-99 AC6: a missing/uninitialized home used to silently materialize a
     # partial one (`inbox.append_new`'s own `store.append_line` mkdir's just
-    # enough for the queued create to sit in limbo -- Repro 3). Checked before
+    # enough for the queued create to sit in limbo -- Repro 3). A `partial`
+    # home (T-135) is refused too -- e.g. the `~/.maestro` vs
+    # `~/.maestro/maestro-dev` trap, where the bare default has stray
+    # `events`/`inbox` files but no `tickets`/`config.toml`. Checked before
     # any prompt or write below; `store.board_state` itself is read-only, so
     # this refusal creates no files or directories either.
     board = store.board_state(cfg.home)
-    if board["state"] in ("missing", "uninitialized"):
-        print(f"error: {cfg.home} is not a maestro board ({board['state']}) -- "
-              f"run `maestro --home {cfg.home} init` before creating a ticket",
-              file=sys.stderr)
+    if board["state"] in ("missing", "uninitialized", "partial"):
+        missing = ", ".join(board["missing_paths"])
+        msg = (f"error: {cfg.home} is not a maestro board ({board['state']}, "
+               f"missing {missing}) -- run `maestro --home {cfg.home} init` "
+               f"before creating a ticket")
+        hint = store.find_did_you_mean(cfg.home)
+        if hint is not None:
+            msg += f" (did you mean --home {hint}?)"
+        print(msg, file=sys.stderr)
         return 2
     title_flag = getattr(args, "title_flag", None)
     if title_flag is not None and args.title is not None:
