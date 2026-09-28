@@ -20,8 +20,8 @@ from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
 from .modals import (
-    _ACCEPT_ALL, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal, _CreateModal,
-    _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
+    _ACCEPT_ALL, _AcceptedRecommendation, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal,
+    _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
 )
 from .render import _render_badge, _styled_row
 from .screens import (
@@ -523,14 +523,18 @@ class MaestroTUI(App):
                 # Queue the recommendation for every remaining question that has
                 # one; keep walking (via modal, one at a time) only the ones that
                 # don't -- fast-tracks the recommended ones without silently
-                # skipping the ones that still need a typed answer.
+                # skipping the ones that still need a typed answer. T-140: each
+                # queued command carries the accept marker, same as a lone
+                # Ctrl+R (below) -- Ctrl+G is just "Ctrl+R for every remaining
+                # recommended question in the round".
                 queued = 0
                 unanswered: list[tuple[str, str]] = []
                 for q_qid, q_text in questions[idx:]:
                     _, _, _, q_recommend = ops_mod.parse_round_question(q_text)
                     if q_recommend:
-                        inbox.append_command(self._home, key, "ans",
-                                             {"qid": q_qid, "text": q_recommend})
+                        inbox.append_command(
+                            self._home, key, "ans",
+                            {"qid": q_qid, "text": q_recommend, "accepted_recommendation": True})
                         queued += 1
                     else:
                         unanswered.append((q_qid, q_text))
@@ -538,7 +542,14 @@ class MaestroTUI(App):
                     self.notify(f"{queued} recommendation(s) queued for {key}")
                 self._walk_questions(key, unanswered, 0, answered + queued)
                 return
-            inbox.append_command(self._home, key, "ans", {"qid": qid, "text": answer})
+            # T-140: Ctrl+R dismisses with an `_AcceptedRecommendation` (a str
+            # subclass equal to the recommendation) -- carry the accept marker
+            # onto the queued command only then, never for an identical TYPED
+            # answer (a plain `str`, no marker).
+            args = {"qid": qid, "text": str(answer)}
+            if isinstance(answer, _AcceptedRecommendation):
+                args["accepted_recommendation"] = True
+            inbox.append_command(self._home, key, "ans", args)
             self._walk_questions(key, questions, idx + 1, answered + 1)
 
         self.push_screen(

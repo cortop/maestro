@@ -2477,6 +2477,87 @@ def test_answer_flow_ctrl_g_accepts_all_remaining_recommendations(home):
     assert answers[_qid_for(home, "T-4", "Who owns")] == "the reconciler"
 
 
+def test_answer_flow_ctrl_r_carries_accept_marker_typed_answer_does_not(home):
+    """T-140 AC1: Ctrl+R queues an `ans` command carrying the
+    `accepted_recommendation` marker; an identical TYPED answer (no Ctrl+R)
+    carries none, even though its text matches the recommendation verbatim.
+    The marker survives `ops.fold_inbox` onto the folded `QuestionAnswered`."""
+    _seed_round(home, "T-6", [
+        ("Use Postgres or SQLite?", "Postgres"),
+        ("Cut a v2 API or extend v1?", "extend v1"),
+    ])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-6"
+            await app.run_action("answer")
+            await pilot.pause()
+
+            # Q1 -- Ctrl+R accepts the recommendation.
+            assert app.screen_stack[-1]._recommend == "Postgres"
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            assert app._exception is None
+
+            # Q2 -- type the SAME text as the recommendation by hand.
+            modal2 = app.screen_stack[-1]
+            assert modal2._recommend == "extend v1"
+            await pilot.press("e", "x", "t", "e", "n", "d", " ", "v", "1")
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1  # walk finished
+
+    asyncio.run(_inner())
+
+    q1_qid = _qid_for(home, "T-6", "Use Postgres")
+    q2_qid = _qid_for(home, "T-6", "Cut a v2 API")
+    pending = {p["args"]["qid"]: p["args"] for p in inbox.pending(home, "T-6")}
+    assert pending[q1_qid]["text"] == "Postgres"
+    assert pending[q1_qid]["accepted_recommendation"] is True
+    assert pending[q2_qid]["text"] == "extend v1"
+    assert "accepted_recommendation" not in pending[q2_qid]
+
+    ops_mod.fold_inbox(config_mod.Config(home=home), "T-6")
+    answered = {e["payload"]["qid"]: e["payload"] for e in event_log.read(home, "T-6")
+                if e["type"] == "QuestionAnswered"}
+    assert answered[q1_qid]["accepted_recommendation"] is True
+    assert "accepted_recommendation" not in answered[q2_qid]
+
+
+def test_answer_flow_ctrl_g_carries_accept_marker_on_every_queued_answer(home):
+    """T-140 AC1: Ctrl+G's queued answers (one per remaining recommended
+    question) each carry the accept marker too -- it's the same accept action
+    as Ctrl+R, just for every remaining recommendation in the round at once."""
+    _seed_round(home, "T-7", [
+        ("Use Postgres or SQLite?", "Postgres"),
+        ("Who owns the migration script?", "the reconciler"),
+    ])
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-7"
+            await app.run_action("answer")
+            await pilot.pause()
+
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1  # walk finished, nothing left unanswered
+
+    asyncio.run(_inner())
+
+    q1_qid = _qid_for(home, "T-7", "Use Postgres")
+    q2_qid = _qid_for(home, "T-7", "Who owns")
+    pending = {p["args"]["qid"]: p["args"] for p in inbox.pending(home, "T-7")}
+    assert pending[q1_qid]["accepted_recommendation"] is True
+    assert pending[q2_qid]["accepted_recommendation"] is True
+
+
 # --------------------------------------------------------------------------- #
 # T-109: multi-line text in the inbox answer input                            #
 # --------------------------------------------------------------------------- #

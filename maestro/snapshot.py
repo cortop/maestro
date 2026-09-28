@@ -234,6 +234,29 @@ class Snapshot:
     # Survives crash-and-respawn so the reconciler can act on a folded answer
     # even when observed_seq has already advanced past the QuestionAnswered event.
     answered_questions: dict[str, str] = field(default_factory=dict)
+    # T-140: qid → True if that answer carried the TUI's accept-recommendation
+    # marker (`accepted_recommendation` on QuestionAnswered) -- distinguishes a
+    # Ctrl+R/Ctrl+G accept from a typed answer that merely happens to match the
+    # recommendation. Same lifetime as `answered_questions` (reset alongside it
+    # below), so it survives the same crash-and-respawn window.
+    answered_markers: dict[str, bool] = field(default_factory=dict)
+    # T-140: qid → the recorded "proceed"/"other" kind for that question's
+    # recommendation (absent if none was declared), and qid → the
+    # recommendation text itself (absent if the question carries none) --
+    # both from QuestionAsked, folded at ask time. NEVER reset by a
+    # PhaseChanged (unlike `answered_questions`/`answered_markers` above) --
+    # the `ask`/`ask_round` call that sets them is itself immediately followed
+    # by the very PhaseChanged that carries the ticket into `awaiting-human`,
+    # so a same-lifetime reset would wipe them before anything ever reads
+    # them. Safe to keep forever instead: qids are never reused
+    # (`ops._resolved_qids`), so a resolved qid's leftover entry is just inert
+    # clutter, the same posture `ac_verified`/`qa_verdicts` already have. Kept
+    # even after the qid is popped from `open_questions` on answer, since the
+    # answer_fast_path dispatcher route (`dispatcher._answer_fast_path_eligible`)
+    # needs both still readable for the "answered-pending" crash-recovery
+    # shape, where the qid is already gone from `open_questions`.
+    question_kinds: dict[str, str] = field(default_factory=dict)
+    question_recommends: dict[str, str] = field(default_factory=dict)
     impl_turns: int = 0
     last_step: str | None = None
     kind: str = "implementation"
@@ -537,13 +560,30 @@ def _fold_phase_changed(s: Snapshot, p: dict, seq, t: str) -> None:
     s.last_error_state = None
     s.next_requeue_at = None
     s.answered_questions = {}
+    s.answered_markers = {}
     s.unresolved_reviews = 0
     if warn:
         _warn(s, seq, t, warn)
 
 
+# T-140: the exact separator `ops.ask_round` embeds between a question's body
+# and its recommendation (`ops._RECOMMEND_SEP`) -- duplicated here, not
+# imported, since `ops` imports this module (snapshot must stay lower-level
+# to avoid a cycle). Both sides must be kept in sync if the wire format ever
+# changes; `test_frontier_ask.py` and this module's own fold tests pin it.
+_RECOMMEND_SEP = "\n   Recommended: "
+
+
 def _fold_question_asked(s: Snapshot, p: dict, seq, t: str) -> None:
-    s.open_questions[p.get("qid", str(seq))] = p.get("text", "")
+    qid = p.get("qid", str(seq))
+    text = p.get("text", "")
+    s.open_questions[qid] = text
+    kind = p.get("recommend_kind")
+    if kind:
+        s.question_kinds[qid] = kind
+    _, sep, recommend = text.partition(_RECOMMEND_SEP)
+    if sep:
+        s.question_recommends[qid] = recommend
 
 
 def _fold_question_answered(s: Snapshot, p: dict, seq, t: str) -> None:
@@ -551,6 +591,8 @@ def _fold_question_answered(s: Snapshot, p: dict, seq, t: str) -> None:
     s.open_questions.pop(qid, None)
     if qid:
         s.answered_questions[qid] = p.get("answer", "")
+        if p.get("accepted_recommendation"):
+            s.answered_markers[qid] = True
 
 
 def _fold_pr_opened(s: Snapshot, p: dict, seq, t: str) -> None:

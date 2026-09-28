@@ -29,6 +29,17 @@ from .statemachine import Phase, can_transition
 
 ANSWER_COMMANDS = {"ans", "answer", "approve", "yes", "ok", "no", "reject", "discard", "retry"}
 
+# T-140: the whole recognized `recommend_kind` value set an asker may declare
+# for a recommendation -- "proceed" (a pickup approval, or a design choice
+# inside the approved scope; accepting it means keep going) or "other"
+# (reject, close, discard, research more, or anything else where accepting
+# the recommendation does NOT mean proceed). An undeclared kind (the 3-arg
+# `--question` form, or `recommend_kind=""`) fails closed in the dispatcher's
+# own eligibility check (`dispatcher._fast_path_pair_eligible`) rather than
+# here -- this set only guards against a typo'd kind silently recording
+# something neither value nor a clean "undeclared".
+_RECOMMEND_KINDS = frozenset({"proceed", "other"})
+
 
 def _refuse_unminted(cfg: Config, key: str) -> None:
     """RB-17: refuse to append the FIRST event ever recorded for *key*.
@@ -1873,7 +1884,9 @@ def ask(cfg: Config, key: str, text: str, *, qid: str | None = None, actor: str 
     return qid
 
 
-def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str | None]], *,
+def ask_round(cfg: Config, key: str,
+             questions: list[tuple[str, str | None, str | None]
+                          | tuple[str, str | None, str | None, str | None]], *,
              actor: str = "reconciler") -> list[str]:
     """Ask the whole settled frontier in one round: N questions, numbered, each
     optionally carrying a recommended answer -- one dispatcher wake and one
@@ -1882,10 +1895,18 @@ def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str 
     available here (a dispatcher wake + an hours-long human round-trip +
     a full reconciler spawn, paid once per question instead of once per round).
 
-    Each item is `(text, recommend, qid)`; `recommend`/`qid` may be None to
-    auto-derive (qid defaults to `content_hash(text)`, same as plain `ask`) --
-    an explicit qid is only needed for a question a later reconcile step
-    routes on by qid prefix (e.g. `research-approval-<key>`).
+    Each item is `(text, recommend, qid)` or, additively (T-140), `(text,
+    recommend, qid, kind)`; `recommend`/`qid`/`kind` may be None. `qid`
+    auto-derives to `content_hash(text)`, same as plain `ask` -- an explicit
+    qid is only needed for a question a later reconcile step routes on by qid
+    prefix (e.g. `research-approval-<key>`). `kind` (one of `_RECOMMEND_KINDS`)
+    declares what ACCEPTING *recommend* means -- "proceed" (a pickup approval,
+    or a design choice inside the approved scope) or "other" (anything else,
+    e.g. reject/close/discard). Only meaningful alongside a *recommend*;
+    recorded on `QuestionAsked` as `recommend_kind` when given, omitted
+    (undeclared) otherwise -- `dispatcher._fast_path_pair_eligible` fails
+    closed on an undeclared kind, so omitting it is always safe, just slower
+    (no fast-path route for that question).
 
     `open_questions` is already a qid-keyed dict (`ask` above), so this needs
     no event-shape change: one QuestionAsked per question, numbered in the
@@ -1896,7 +1917,16 @@ def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str 
     """
     if not questions:
         raise store.MaestroError(f"{key}: ask_round needs at least one question")
-    qids = [qid or content_hash(text) for text, _recommend, qid in questions]
+    normalized: list[tuple[str, str | None, str | None, str | None]] = []
+    for item in questions:
+        text, recommend, qid, *rest = item
+        kind = rest[0] if rest else None
+        if kind and kind not in _RECOMMEND_KINDS:
+            raise store.MaestroError(
+                f"{key}: unrecognized recommend kind {kind!r} for {text!r} -- "
+                f"must be one of {sorted(_RECOMMEND_KINDS)} or omitted/empty")
+        normalized.append((text, recommend, qid, kind))
+    qids = [qid or content_hash(text) for text, _recommend, qid, _kind in normalized]
     stale = sorted(set(qids) & _resolved_qids(cfg, key))
     if stale:
         raise store.MaestroError(
@@ -1904,12 +1934,15 @@ def ask_round(cfg: Config, key: str, questions: list[tuple[str, str | None, str 
             f"earlier in this ticket's lifetime; see `_resolved_qids` for why reusing one "
             f"would silently no-op the append and still flip the ticket to awaiting-human "
             f"with nothing newly open. Pass fresh, distinct qids for this round.")
-    total = len(questions)
-    for i, ((text, recommend, _qid), qid) in enumerate(zip(questions, qids), start=1):
+    total = len(normalized)
+    for i, ((text, recommend, _qid, kind), qid) in enumerate(zip(normalized, qids), start=1):
         numbered = f"{i}/{total}. {text}" if total > 1 else text
         if recommend:
-            numbered += f"\n   Recommended: {recommend}"
-        _append(cfg, key, E.QUESTION_ASKED, {"qid": qid, "text": numbered},
+            numbered += f"{_RECOMMEND_SEP}{recommend}"
+        payload = {"qid": qid, "text": numbered}
+        if recommend and kind:
+            payload["recommend_kind"] = kind
+        _append(cfg, key, E.QUESTION_ASKED, payload,
                 actor=actor, sid=f"ask-{key}-{qid}")
     # Same fencing rationale as `ask` above: reload after the last QuestionAsked
     # append and fence the phase transition against that observed tail.
@@ -2517,8 +2550,16 @@ def fold_inbox(cfg: Config, key: str) -> list[dict]:
             target = cmd.get("args", {}).get("qid")
             qids = [target] if target else open_qids
             answer = cmd.get("args", {}).get("text", command)
+            # T-140: carry the TUI's accept-recommendation marker additively
+            # onto QuestionAnswered -- see snapshot._fold_question_answered /
+            # dispatcher._fast_path_answer_source, which trust it only when
+            # the answer text equals that qid's own recommendation verbatim.
+            marker = bool(cmd.get("args", {}).get("accepted_recommendation"))
             for qid in qids:
-                _append(cfg, key, E.QUESTION_ANSWERED, {"qid": qid, "answer": answer},
+                payload = {"qid": qid, "answer": answer}
+                if marker:
+                    payload["accepted_recommendation"] = True
+                _append(cfg, key, E.QUESTION_ANSWERED, payload,
                         actor="human", sid=f"ans-{key}-{idx}-{qid}")
     return pend
 
