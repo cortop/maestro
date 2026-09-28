@@ -9,6 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from maestro import cli
+
 HOOK = Path(__file__).resolve().parents[1] / ".claude" / "hooks" / "block-home-deletion.py"
 
 
@@ -249,3 +253,103 @@ def test_hook_works_with_no_maestro_package_importable(home):
         env={**env, "MAESTRO_HOME": str(home)},
     )
     assert result_ok.returncode == 0
+
+
+def test_angle_bracketed_email_in_a_commit_message_is_not_falsely_blocked(home):
+    """Regression: an angle-bracketed email address (e.g. a git commit's own
+    Co-Authored-By trailer) can look like a truncating redirect followed by a
+    bare closing quote once the redirect regex fires on the trailing `>` --
+    that stripped-to-empty "target" must never resolve to the filesystem
+    root and trip the new ancestor-of-every-board-root check."""
+    command = ('git commit -q -m "fix things\\n\\n'
+               'Co-Authored-By: Someone <someone@example.com>"')
+    result = run_hook(command, cwd="/tmp", home=home)
+    assert result.returncode == 0, result.stderr
+
+
+# --- T-145: parent-of-a-board protection + default-home scanning -----------
+#
+# These tests set HOME to a tmp dir (never the real one) so `~` and the
+# default-home scan resolve entirely under it -- the real ~/.maestro is
+# never touched.
+
+@pytest.fixture
+def fake_user_home(tmp_path):
+    fake_home = tmp_path / "userhome"
+    fake_home.mkdir()
+    return fake_home
+
+
+def _seed_board(board_dir):
+    """A real, initialized board -- `events/`+`tickets/`+`config.toml`, the
+    exact shape `_looks_like_board` checks for."""
+    rc = cli.main(["--home", str(board_dir), "init"])
+    assert rc == 0
+    return board_dir
+
+
+def _run_with_env(command, cwd, env):
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)}
+    return subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=json.dumps(payload), capture_output=True, text=True, env=env,
+    )
+
+
+def test_blocks_ancestors_of_a_differently_named_board_with_maestro_home_set(fake_user_home):
+    """AC1: MAESTRO_HOME points at a board nested two levels under the fake
+    $HOME (mirrors the real ~/.maestro/maestro-dev layout) -- deleting or
+    moving an ANCESTOR of it (the default home, or the user's own home) must
+    still block, even though neither literal path equals MAESTRO_HOME."""
+    board = _seed_board(fake_user_home / ".maestro" / "maestro-dev")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_user_home), "MAESTRO_HOME": str(board)}
+    for command in ("rm -rf ~/.maestro", "mv ~/.maestro ~/old", "rm -rf ~"):
+        result = _run_with_env(command, cwd=board, env=env)
+        assert result.returncode == 2, f"{command!r} should block: {result.stderr}"
+        assert "BLOCKED by block-home-deletion hook" in result.stderr
+
+
+def test_blocks_the_scanned_board_and_its_subtrees_with_maestro_home_unset(fake_user_home):
+    """AC2: no MAESTRO_HOME at all (no repo chpwd hook: CI, the desktop/web
+    app) -- the guard falls back to the default home, finds the real board
+    nested under it, and protects that board and its subtrees, not just the
+    (here, phantom) default home itself."""
+    board = _seed_board(fake_user_home / ".maestro" / "maestro-dev")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_user_home)}  # MAESTRO_HOME unset
+    for command in (f"rm -rf {board}", f"rm -rf {board}/events", f"rm -rf {board}/tickets/T-1"):
+        result = _run_with_env(command, cwd=board, env=env)
+        assert result.returncode == 2, f"{command!r} should block: {result.stderr}"
+    result = _run_with_env(f"echo x > {board}/config.toml", cwd=board, env=env)
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("maestro_home_set", [True, False])
+def test_worktree_unrelated_and_non_board_sibling_stay_allowed(fake_user_home, maestro_home_set):
+    """AC3: in both environments (MAESTRO_HOME set to the board, and unset),
+    the new ancestor/default-home protection must not swallow a
+    reconciler's own worktree, a relative rm from inside it, an unrelated
+    tmp path, or a sibling of the default home that isn't itself a board."""
+    board = _seed_board(fake_user_home / ".maestro" / "maestro-dev")
+    non_board_sibling = fake_user_home / ".maestro" / "notes-dir"
+    non_board_sibling.mkdir(parents=True)
+    (non_board_sibling / "notes.txt").write_text("hi")
+    worktree = board / "worktrees" / "T-1"
+    worktree.mkdir(parents=True)
+    unrelated = fake_user_home / "scratch" / "unrelated"
+    unrelated.mkdir(parents=True)
+
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_user_home)}
+    if maestro_home_set:
+        env["MAESTRO_HOME"] = str(board)
+
+    result = _run_with_env(f"rm -rf {worktree}", cwd=board, env=env)
+    assert result.returncode == 0, result.stderr
+
+    result = _run_with_env("rm -rf build", cwd=worktree, env=env)
+    assert result.returncode == 0, result.stderr
+
+    result = _run_with_env(f"rm -rf {unrelated}", cwd=fake_user_home, env=env)
+    assert result.returncode == 0, result.stderr
+
+    result = _run_with_env(f"rm -rf {non_board_sibling}", cwd=fake_user_home, env=env)
+    assert result.returncode == 0, result.stderr

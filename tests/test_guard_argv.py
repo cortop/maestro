@@ -105,3 +105,68 @@ def test_missing_command_argument_fails_closed(home):
         [sys.executable, str(ADAPTER)], capture_output=True, text=True, env=_env(home),
     )
     assert result.returncode != 0
+
+
+# --- T-145 AC4: same allow/block verdict as the Claude hook for the parent-of-
+# a-board and default-home-scanning cases (tests/test_hook_block_home_deletion.py
+# carries the same scenarios against the Claude hook) --------------------------
+
+@pytest.fixture
+def fake_user_home(tmp_path):
+    fake_home = tmp_path / "userhome"
+    fake_home.mkdir()
+    return fake_home
+
+
+def _seed_board(board_dir):
+    from maestro import cli
+    rc = cli.main(["--home", str(board_dir), "init"])
+    assert rc == 0
+    return board_dir
+
+
+def _run_check_with_env(command, cwd, env):
+    return subprocess.run(
+        [sys.executable, str(ADAPTER), "--check", command],
+        cwd=str(cwd), capture_output=True, text=True, env=env,
+    )
+
+
+def test_argv_adapter_blocks_ancestors_of_a_differently_named_board(fake_user_home):
+    board = _seed_board(fake_user_home / ".maestro" / "maestro-dev")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_user_home), "MAESTRO_HOME": str(board)}
+    for command in ("rm -rf ~/.maestro", "mv ~/.maestro ~/old", "rm -rf ~"):
+        result = _run_check_with_env(command, cwd=board, env=env)
+        assert result.returncode == 2, f"{command!r} should block: {result.stderr}"
+        assert "BLOCKED" in result.stderr
+
+
+def test_argv_adapter_blocks_the_scanned_board_with_maestro_home_unset(fake_user_home):
+    board = _seed_board(fake_user_home / ".maestro" / "maestro-dev")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_user_home)}  # MAESTRO_HOME unset
+    for command in (f"rm -rf {board}", f"rm -rf {board}/events", f"rm -rf {board}/tickets/T-1"):
+        result = _run_check_with_env(command, cwd=board, env=env)
+        assert result.returncode == 2, f"{command!r} should block: {result.stderr}"
+    result = _run_check_with_env(f"> {board}/config.toml", cwd=board, env=env)
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("maestro_home_set", [True, False])
+def test_argv_adapter_allows_worktree_unrelated_and_non_board_sibling(fake_user_home, maestro_home_set):
+    board = _seed_board(fake_user_home / ".maestro" / "maestro-dev")
+    non_board_sibling = fake_user_home / ".maestro" / "notes-dir"
+    non_board_sibling.mkdir(parents=True)
+    (non_board_sibling / "notes.txt").write_text("hi")
+    worktree = board / "worktrees" / "T-1"
+    worktree.mkdir(parents=True)
+    unrelated = fake_user_home / "scratch" / "unrelated"
+    unrelated.mkdir(parents=True)
+
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_user_home)}
+    if maestro_home_set:
+        env["MAESTRO_HOME"] = str(board)
+
+    assert _run_check_with_env(f"rm -rf {worktree}", cwd=board, env=env).returncode == 0
+    assert _run_check_with_env("rm -rf build", cwd=worktree, env=env).returncode == 0
+    assert _run_check_with_env(f"rm -rf {unrelated}", cwd=fake_user_home, env=env).returncode == 0
+    assert _run_check_with_env(f"rm -rf {non_board_sibling}", cwd=fake_user_home, env=env).returncode == 0
