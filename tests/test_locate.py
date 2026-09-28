@@ -359,3 +359,141 @@ def test_locate_eval_all_added_commit_matches_averages_of_solo_replay(home, tmp_
     # The all-added commit must not shift the averages away from what a solo
     # replay of the one normal commit produces.
     assert result_combo["stages"] == result_alone["stages"]
+
+
+# ---------------------------------------------------------------------------
+# T-142: symbol-level hints -- enclosing def/line-range, not just the file
+# ---------------------------------------------------------------------------
+
+def test_locate_symbol_hints_point_at_enclosing_defs_in_hub_file(home, tmp_path):
+    """AC1: a spec-backticked identifier used only inside one function of a
+    hub-sized module, plus a second function named directly, both surface as
+    enclosing defs with exact line ranges -- and no other def of that module
+    (the module has 40 unrelated padding functions the spec never mentions)."""
+    _origin, repo = _make_origin_and_repo(tmp_path)
+    (repo / "maestro").mkdir(exist_ok=True)
+    padding = "".join(
+        f"def padding_fn_{i}():\n    x = {i}\n    y = x + 1\n    return y\n\n\n"
+        for i in range(40)
+    )
+    hub_src = (
+        padding
+        + "def function_a():\n    return probe_only_here()\n\n\n"
+        + "def function_b():\n    return 2\n"
+    )
+    assert hub_src.count("\n") + 1 >= locate.HUB_FILE_LINE_THRESHOLD
+    (repo / "maestro" / "hub_module.py").write_text(hub_src)
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "add hub module", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    cfg = Config(home=home, repo_path=str(repo), file_hints=True)
+    key = "T-1"
+    _create(cfg, key,
+            "In `maestro/hub_module.py`, fix `probe_only_here` and check `function_b`.")
+    _add_worktree(repo, home, key, branch=f"maestro/{key}")
+
+    ops.locate(cfg, key)
+    text = context.context_path(home, key).read_text(encoding="utf-8")
+    assert "maestro/hub_module.py:" in text
+    assert "function_a" in text
+    assert "function_b" in text
+    assert "padding_fn_" not in text
+
+
+def test_locate_symbol_cap_drops_lowest_ranked_not_earliest_walked(home, tmp_path):
+    """AC2: a hub module with 31 spec-matched defs -- 30 pinned by an exact
+    `path:line` spec reference (including the very first def in the file) and
+    1 matched only via a weaker body-reference -- exceeds the 30-row symbol
+    cap by exactly one. The cap must drop the weakest match (the last def,
+    lowest-ranked), not whichever def the old last-N-walked cap would have
+    dropped (which was the FIRST def, since it's walked before the other 30)."""
+    _origin, repo = _make_origin_and_repo(tmp_path)
+    (repo / "maestro").mkdir(exist_ok=True)
+
+    def block(name, body_lines):
+        return f"def {name}():\n" + "".join(f"    {b}\n" for b in body_lines) + "\n"
+
+    n_hinted = 30
+    pieces = []
+    line_hints = []
+    current_line = 1
+    for i in range(n_hinted):
+        name = f"ranked_fn_{i}"
+        text = block(name, ["a = 1", "b = 2", "c = 3", "d = 4", "return a + b + c + d"])
+        pieces.append(text)
+        line_hints.append((name, current_line))
+        current_line += text.count("\n")
+    tail_name = "unranked_tail_fn"
+    pieces.append(block(tail_name, ["return shared_helper()"]))
+
+    src = "".join(pieces)
+    assert src.count("\n") + 1 >= locate.HUB_FILE_LINE_THRESHOLD
+    (repo / "maestro" / "hub_cap.py").write_text(src)
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "add hub_cap module", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    hint_refs = " ".join(f"`maestro/hub_cap.py:{ln}`" for _, ln in line_hints)
+    intent = f"In `maestro/hub_cap.py`, fix `shared_helper` call sites. {hint_refs}"
+
+    cfg = Config(home=home, repo_path=str(repo), file_hints=True)
+    key = "T-1"
+    _create(cfg, key, intent)
+    _add_worktree(repo, home, key, branch=f"maestro/{key}")
+
+    ops.locate(cfg, key)
+    result = json.loads((home / "derived" / "locate" / f"{key}.json").read_text(encoding="utf-8"))
+    names = {s["name"] for s in result["symbols"]}
+
+    assert len(result["symbols"]) == 30
+    assert result["symbols_dropped"] == 1
+    assert all(f"ranked_fn_{i}" in names for i in range(n_hinted))  # top-of-file one included
+    assert tail_name not in names  # lowest-ranked (weakest match) dropped by the cap
+
+
+# ---------------------------------------------------------------------------
+# AC3: `locate --eval` symbol-level recall@5/10/MRR (new ranking + baseline)
+# ---------------------------------------------------------------------------
+
+def test_locate_eval_reports_symbol_level_metrics(home, tmp_path, capsys):
+    _origin, repo = _make_origin_and_repo(tmp_path)
+    mod_src = (
+        "def alpha():\n    return 0\n\n\n"
+        "def beta():\n    return 0\n\n\n"
+        "def target_fn():\n    return 0\n"
+    )
+    (repo / "mod.py").write_text(mod_src)
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "seed mod", cwd=repo)
+    (repo / "mod.py").write_text(
+        mod_src.replace("def target_fn():\n    return 0\n", "def target_fn():\n    return 1\n"))
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "T-300: fix target_fn", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    _write_spec(home, "T-300", "Fix `target_fn`.")
+    (home / "config.toml").write_text(f"[maestro]\nrepo_path = {str(repo)!r}\n", encoding="utf-8")
+
+    rc = cli.main(["--home", str(home), "locate", "--eval"])
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    # Existing file-level stage keys are unchanged.
+    for stage in ("mention", "prior_edit", "churn", "merged"):
+        assert set(result["stages"][stage]) == {"recall_at_5", "recall_at_10", "mrr"}
+    for stage in ("symbol_new", "symbol_baseline"):
+        assert set(result["stages"][stage]) == {"recall_at_5", "recall_at_10", "mrr"}
+    assert result["stages"]["symbol_new"]["recall_at_5"] == 1.0
+    assert result["stages"]["symbol_new"]["mrr"] == 1.0
+    row = result["per_commit"][0]
+    assert row["symbol_scored"] is True
+    assert set(row["symbol_scores"]["symbol_new"]) == {"recall_at_5", "recall_at_10", "mrr"}
+
+    # A working-tree edit made after the replayed commits leaves the scores
+    # unchanged -- symbol content, like file content, always comes from the
+    # PARENT commit, never the working tree.
+    (repo / "mod.py").write_text("def target_fn():\n    return 999\n")
+    rc2 = cli.main(["--home", str(home), "locate", "--eval"])
+    result2 = json.loads(capsys.readouterr().out)
+    assert rc2 == 0
+    assert result2["stages"] == result["stages"]
