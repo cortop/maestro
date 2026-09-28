@@ -5,6 +5,7 @@ sweep over a temp home, or the real `maestro` CLI -- never a mocked spend module
 Only the `claude -p` spawn (DryRunSessions) is mocked, per CLAUDE.md.
 """
 import json
+from datetime import datetime, timezone
 
 from maestro import dispatcher as disp
 from maestro import spend, store
@@ -186,7 +187,12 @@ def test_second_probe_does_not_refold_already_drained_older_log(home, cfg):
 def test_all_stream_json_home_spend_state_byte_identical_to_baseline(home, cfg):
     """A home where every key has exactly one (newest-and-only) stream-json log
     exercises the single-candidate loop body, unchanged by the multi-candidate
-    fix -- its on-disk state must match the pre-fix baseline byte-for-byte."""
+    fix -- its on-disk state must match the baseline byte-for-byte.
+
+    T-143 intentionally drops ``settled_logs`` from this day-scoped state: which
+    logs are settled now lives in the per-log cursor entry instead (``pos``/
+    ``counted``/``settled``), precisely so that memory survives a day change
+    that this file's own ``total_usd``/``unattributed_sessions`` do not."""
     t0 = 1_000_000
     _spawn_and_seed_ledger(home, cfg, "T-1", t0)
     path = _write_stream_log(home, "T-1", t0, [_result_record(2.5)])
@@ -197,11 +203,152 @@ def test_all_stream_json_home_spend_state_byte_identical_to_baseline(home, cfg):
         "date": store.utc_date(t0 + 10),
         "total_usd": 2.5,
         "unattributed_sessions": 0,
-        "settled_logs": [str(path)],
         "unavailable": False,
     }
     expected_bytes = json.dumps(expected, indent=2, sort_keys=True).encode("utf-8")
     assert (home / "derived" / ".spend.json").read_bytes() == expected_bytes
+
+    cursor = store.read_json(home / "derived" / ".spend_cursor.json", {})
+    assert cursor[str(path)]["counted"] == 2.5
+    assert cursor[str(path)]["settled"] is True
+
+
+# --- AC1 (T-143): a cumulative result stream folds to its last value, never --
+# --- the sum, whether read in one probe or across several -------------------
+
+def test_probe_counts_last_cumulative_result_once_read_in_one_probe(home, cfg):
+    t0 = 1_900_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(0.80), _result_record(1.09),
+                                         _result_record(1.11), _result_record(1.14)])
+    st = spend.probe(cfg, t0 + 10)
+    assert st["total_usd"] == 1.14
+
+    # A further probe with no new bytes leaves the total unchanged.
+    st2 = spend.probe(cfg, t0 + 20)
+    assert st2["total_usd"] == 1.14
+
+
+def test_probe_counts_last_cumulative_result_once_read_across_probes(home, cfg):
+    t0 = 1_950_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    path = _write_stream_log(home, "T-1", t0, [_result_record(0.80)])
+    st1 = spend.probe(cfg, t0 + 10)
+    assert st1["total_usd"] == 0.80
+
+    with path.open("a", encoding="utf-8") as fh:
+        for cost in (1.09, 1.11, 1.14):
+            fh.write(json.dumps(_result_record(cost)) + "\n")
+    st2 = spend.probe(cfg, t0 + 20)
+    assert st2["total_usd"] == 1.14
+
+
+def test_probe_folds_two_identical_consecutive_results_once(home, cfg):
+    t0 = 2_000_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(12.06), _result_record(12.06)])
+    st = spend.probe(cfg, t0 + 10)
+    assert st["total_usd"] == 12.06
+
+
+# --- AC2 (T-143): a session straddling a UTC day change is split, not double-
+# --- counted -- each day's bucket gets only its own increase ----------------
+
+def test_probe_splits_a_session_straddling_the_day_change(home, cfg):
+    d0 = datetime(2026, 1, 5, 23, 59, 50, tzinfo=timezone.utc).timestamp()
+    d1 = datetime(2026, 1, 6, 0, 0, 10, tzinfo=timezone.utc).timestamp()
+    assert store.utc_date(d0) != store.utc_date(d1)
+
+    _spawn_and_seed_ledger(home, cfg, "T-1", d0)
+    path = _write_stream_log(home, "T-1", d0, [_result_record(0.80)])
+    st_d = spend.probe(cfg, d0)
+    assert st_d["total_usd"] == 0.80
+
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_result_record(1.14)) + "\n")
+    st_d1 = spend.probe(cfg, d1)
+    assert round(st_d1["total_usd"], 2) == 0.34
+    assert round(0.80 + st_d1["total_usd"], 2) == 1.14
+
+
+# --- AC3 (T-143): rollover forgets only the daily counters, never which logs -
+# --- are already settled -----------------------------------------------------
+
+def test_settled_log_is_not_recounted_after_a_day_change(home, cfg):
+    d0 = datetime(2026, 1, 5, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+    d1 = datetime(2026, 1, 6, 0, 5, 0, tzinfo=timezone.utc).timestamp()
+    d1_later = d1 + 300
+    assert store.utc_date(d0) != store.utc_date(d1)
+
+    _spawn_and_seed_ledger(home, cfg, "T-1", d0)
+    _write_stream_log(home, "T-1", d0, [_result_record(5.0)])
+    st0 = spend.probe(cfg, d0 + 5)
+    assert st0["total_usd"] == 5.0
+    assert st0["unattributed_sessions"] == 0
+
+    st1 = spend.probe(cfg, d1)
+    assert st1["total_usd"] == 0.0
+    assert st1["unattributed_sessions"] == 0
+
+    st2 = spend.probe(cfg, d1_later)
+    assert st2["total_usd"] == 0.0
+    assert st2["unattributed_sessions"] == 0
+
+
+def test_dead_log_with_no_result_counted_unattributed_once_not_recounted_later(home, cfg):
+    """A log drained with no terminal `result` while its key is not live is
+    counted as unattributed exactly once, and never again after a later day
+    change -- DryRunSessions never writes a real claim, so T-1 is never live."""
+    d0 = datetime(2026, 1, 5, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+    d1 = datetime(2026, 1, 6, 0, 5, 0, tzinfo=timezone.utc).timestamp()
+    assert store.utc_date(d0) != store.utc_date(d1)
+
+    _spawn_and_seed_ledger(home, cfg, "T-1", d0)
+    path = home / "agent-logs" / "T-1" / f"reconcile-T-1-{d0:.6f}.stream.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"type": "system", "subtype": "init"}) + "\n", encoding="utf-8")
+
+    st0 = spend.probe(cfg, d0 + 5)
+    assert st0["unattributed_sessions"] == 1
+    assert st0["total_usd"] == 0.0
+
+    st1 = spend.probe(cfg, d1)
+    assert st1["unattributed_sessions"] == 0
+    assert st1["total_usd"] == 0.0
+
+
+# --- AC4: the ceiling gate reads the folded last-cumulative total, not a sum -
+
+def test_dispatch_ceiling_gate_uses_last_cumulative_not_sum(home, cfg):
+    t0 = 1_050_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(6.00), _result_record(9.00)])
+    spend.probe(cfg, t0 + 5)
+
+    cfg.daily_spend_ceiling_usd = 10.00
+    cfg.min_spawn_interval = 0
+    seed_phase(home, "T-2", Phase.READY)
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
+    assert "T-2" in report.spawned
+    assert report.spend_ceiling_reason is None
+
+
+def test_dispatch_ceiling_gate_blocks_at_final_cumulative_result(home, cfg):
+    t0 = 1_150_000
+    _spawn_and_seed_ledger(home, cfg, "T-1", t0)
+    _write_stream_log(home, "T-1", t0, [_result_record(6.00), _result_record(10.00)])
+    spend.probe(cfg, t0 + 5)
+
+    cfg.daily_spend_ceiling_usd = 10.00
+    seed_phase(home, "T-2", Phase.READY)
+    ledger_before = store.read_json(home / "derived" / ".spawn_ledger.json", {})
+
+    report = disp.dispatch(cfg, DryRunSessions(), now=t0 + 10)
+    assert report.spawned == []
+    assert report.spend_ceiling_reason is not None
+    ledger_after = store.read_json(home / "derived" / ".spawn_ledger.json", {})
+    assert ledger_after == ledger_before
 
 
 # --- AC4/AC5: the ceiling gate, proven to fire at the boundary ---------------
