@@ -12,8 +12,14 @@ PHASE_CHANGED = "PhaseChanged"          # {phase, reason, forced_by?}  forced_by
 FINALIZED = "Finalized"                 # {}  tombstone -> swept to archive
 
 # Human-in-the-loop
-QUESTION_ASKED = "QuestionAsked"        # {qid, text}
-QUESTION_ANSWERED = "QuestionAnswered"  # {qid, answer}
+QUESTION_ASKED = "QuestionAsked"        # {qid, text, recommend_kind?}
+                                         # recommend_kind (T-140): "proceed"|"other",
+                                         # only when `text` carries a recommendation --
+                                         # see ops.ask_round / ops._RECOMMEND_KINDS
+QUESTION_ANSWERED = "QuestionAnswered"  # {qid, answer, accepted_recommendation?}
+                                         # accepted_recommendation (T-140): True when the
+                                         # TUI's Ctrl+R/Ctrl+G queued this answer as a
+                                         # verbatim accept -- see ops.fold_inbox
 COMMAND_RECEIVED = "CommandReceived"    # {command, args}  folded from the inbox
 
 # Implementation / VCS
@@ -137,10 +143,13 @@ LINEAR_STATUS_PUSHED = "LinearStatusPushed"  # {phase, status}
 # every sweep until it's answered away, so a repeat decision is a no-op,
 # never a second event. Folds to nothing (see snapshot._UNFOLDED);
 # decision_labels reads the raw log itself, across every key.
-FAST_PATH_DECIDED = "FastPathDecided"   # {qid, route, outcome, reason}
+FAST_PATH_DECIDED = "FastPathDecided"   # {qid, route, outcome, reason, rules}
                                          # qid: [str, ...]; route: a label value
                                          # (e.g. "approve"); outcome:
-                                         # "would_route_answer"|"answer_routed"
+                                         # "would_route_answer"|"answer_routed";
+                                         # rules (T-140): {qid: "marker"|"echo"|
+                                         # "literal"|"prefix"}, the matched rule
+                                         # per qid -- see dispatcher._fast_path_match_rule
 
 # Control
 REQUEUE_SCHEDULED = "RequeueScheduled"  # {at}  epoch seconds to re-wake a sleeping ticket

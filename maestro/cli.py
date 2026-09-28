@@ -907,8 +907,16 @@ def cmd_ask(args) -> int:
         if args.text:
             raise store.MaestroError(
                 "maestro ask: pass either TEXT or --question (repeatable), not both")
-        triples = [(text, recommend or None, qid or None) for text, recommend, qid in args.questions]
-        qids = ops.ask_round(cfg, args.key, triples, actor=args.actor)
+        items = []
+        for q in args.questions:
+            if len(q) not in (3, 4):
+                raise store.MaestroError(
+                    "maestro ask: --question takes TEXT RECOMMENDED QID, optionally "
+                    f"followed by KIND (3 or 4 values) -- got {len(q)}: {q!r}")
+            text, recommend, qid = q[0], q[1] or None, q[2] or None
+            kind = (q[3] or None) if len(q) == 4 else None
+            items.append((text, recommend, qid, kind))
+        qids = ops.ask_round(cfg, args.key, items, actor=args.actor)
         _print({"asked": qids})
         return 0
     if not args.text:
@@ -1722,13 +1730,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("text", nargs="?", default=None,
                      help="single-question text (omit when using --question)")
     sp.add_argument("--qid")
-    sp.add_argument("--question", dest="questions", action="append", nargs=3,
-                     metavar=("TEXT", "RECOMMENDED", "QID"),
+    sp.add_argument("--question", dest="questions", action="append", nargs="+",
+                     metavar="TEXT RECOMMENDED QID [KIND]",
                      help="repeatable: post one question of a multi-question frontier round "
                           "in this single call -- pass '' for RECOMMENDED when that question "
                           "has no recommended answer, and '' for QID to auto-derive it (only "
                           "give an explicit QID when a later step routes on its prefix, e.g. "
-                          "research-approval-<key>). Mutually exclusive with TEXT/--qid.")
+                          "research-approval-<key>). An optional 4th value, KIND, declares what "
+                          "accepting RECOMMENDED means: 'proceed' (a pickup approval or an "
+                          "in-scope design choice) or 'other' (anything else, e.g. reject/close) "
+                          "-- omit it (or the whole 4th value) to record no kind. Mutually "
+                          "exclusive with TEXT/--qid.")
     sp.add_argument("--actor", default="reconciler")
 
     sp = add("fold-inbox", cmd_fold_inbox, "[agent] fold pending human commands into events")
