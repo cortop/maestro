@@ -38,7 +38,10 @@ this preamble reads no file via the shell — load:
   means no context has been folded yet, not a failure.
 
 If the snapshot shows pending inbox commands, fold them before deciding:
-`maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
+`maestro fold-inbox "$KEY"`. Once you have made your decision below (whichever branch it is), ack
+the inbox: `maestro inbox-ack "$KEY"` (a no-op if nothing was pending -- safe to call on every exit
+path, not just the ones that actually folded something). Finish every exit path with
+`maestro release "$KEY"` (drop your claim).
 
 ## `ready`: honor dependsOn, then start the next phase
 Honor `dependsOn` in the spec: if any listed ticket isn't `done`, sleep
@@ -81,4 +84,4 @@ maestro set-phase "$KEY" researching --reason "research ticket: beginning explor
 else runs this step), you asked via `maestro ask ... --qid "wt-$KEY"` (`worktree ensure`
 refused — nothing else runs this step), or you appended exactly one `set-phase` event
 (`researching`, or `implementing` once local mode needs no setup or the git worktree/branch
-exists), and `maestro release "$KEY"` has run.
+exists). Either way, `maestro inbox-ack "$KEY"` has run and `maestro release "$KEY"` has run.

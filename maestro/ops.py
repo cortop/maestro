@@ -1038,7 +1038,7 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
     else:
         health = worktree_health(wt, timeout=worktree_timeout)
         if not health["healthy"]:
-            raise store.MaestroError(
+            raise store.WorktreeHealthRefused(
                 f"{key}: worktree at {wt} already completed creation but now fails its health "
                 f"check ({health['reason']}) -- refusing to `--force` remove a worktree that may "
                 f"be carrying uncommitted work. Inspect it by hand (e.g. `git -C {wt} status`); "

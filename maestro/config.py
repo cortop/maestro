@@ -356,6 +356,19 @@ class Config:
     # answers for one key) keeps today's spawn. An unrecognized value fails
     # `config.load()` closed -- see `_ANSWER_FAST_PATH_MODES`.
     answer_fast_path: str = "off"
+    # T-138: whether the dispatcher's own sweep applies the `ready` phase's
+    # fully-scripted rules directly (dependsOn check, kind/mode branch,
+    # `worktree_ensure`, `set-phase`) instead of spawning a `claude -p`
+    # reconciler whose job never varies. "off" (default): byte-identical to
+    # before this knob existed -- every `ready` ticket still gets today's
+    # spawn. "on": the dispatcher decides inline for whatever the rules CAN
+    # decide (see `dispatcher._route_ready_fast_path`), and falls back to
+    # today's spawn only for what they can't (a free-text inbox command, a
+    # `prime`/`node_modules`-heavy binding, a `worktree_ensure` failure other
+    # than the T-81 witnessed-worktree refusal). No "shadow" mode -- the
+    # rules are deterministic, so there is nothing to A/B. An unrecognized
+    # value fails `config.load()` closed -- see `_READY_FAST_PATH_MODES`.
+    ready_fast_path: str = "off"
     # Maintenance ticks (dispatcher.run_compact_tick / run_archive_tick).
     compact_interval: int = 0          # seconds between dispatcher-driven compact sweeps (0 disables)
     compact_min_events: int = 200      # only compact a key once its folded log reaches this many events
@@ -479,6 +492,11 @@ _STACK_TOOLS = frozenset({"auto", "git"})
 # (raises at config.load, naming the knob) on anything outside it, same
 # posture as _BASE_DRIFT_POLICIES just above.
 _ANSWER_FAST_PATH_MODES = frozenset({"off", "shadow", "on"})
+
+# T-138: ready_fast_path's whole recognized value set -- fails closed at
+# config.load, same posture as _ANSWER_FAST_PATH_MODES. No "shadow": the
+# `ready` rules are deterministic, so there is no A/B signal to collect.
+_READY_FAST_PATH_MODES = frozenset({"off", "on"})
 
 # OC-4/T-54: [runner.opencode]'s whole recognized key set. Unlike every other
 # [runner.<name>] table (free-form, riding cfg.provider_config with zero
@@ -917,6 +935,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("qa_phase_gate", _bool),
     Knob("awaiting_ci_qa_gate", _bool),
     Knob("answer_fast_path", _choice(_ANSWER_FAST_PATH_MODES)),
+    Knob("ready_fast_path", _choice(_READY_FAST_PATH_MODES)),
     Knob("compact_interval", _int),
     Knob("compact_min_events", _int),
     Knob("archive_after", _int),
@@ -1357,6 +1376,16 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # "dispatcher", acks, and records answer_routed; every other
                                   # answer shape keeps today's spawn. Unknown value fails config
                                   # load closed (see _ANSWER_FAST_PATH_MODES).
+# ready_fast_path = "off"          # T-138: "off" | "on" -- whether the dispatcher's own sweep
+                                  # applies the `ready` phase's fully-scripted rules inline
+                                  # (dependsOn, kind/mode, worktree_ensure, set-phase) instead of
+                                  # spawning a claude -p reconciler for it. Default "off":
+                                  # byte-identical to today. "on" falls back to today's spawn only
+                                  # for a free-text inbox command, a prime/node_modules-heavy
+                                  # binding, or a worktree_ensure failure other than the T-81
+                                  # witnessed-worktree refusal (which parks awaiting-human
+                                  # instead). Unknown value fails config load closed (see
+                                  # _READY_FAST_PATH_MODES).
 # ci_auto_rerun = true             # T-123: on a failing PR poll, request one `gh run
                                   # rerun --failed` for the head SHA instead of
                                   # immediately routing to `implementing` -- measured:
