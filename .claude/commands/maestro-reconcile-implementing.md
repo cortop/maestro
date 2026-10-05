@@ -53,7 +53,7 @@ with the **Read** tool — never `cat`/`sed`, this preamble reads no file via th
   `awaiting-human -> implementing` with a reason starting `pr split decision:`, means a PR-split
   proposal (T-126) was just answered — see step 1's fourth case.
 
-If the snapshot shows pending inbox commands, fold them before deciding:
+If the snapshot's `inbox_pending` is non-zero, fold those commands before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
 ## `implementing`: code the ACs, prove them, open a PR
