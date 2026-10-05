@@ -33,6 +33,7 @@ from .screens import (
     LogsScreen,
     ScheduleScreen,
     SpecScreen,
+    edit_in_editor,
 )
 
 _NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
@@ -100,6 +101,7 @@ class MaestroTUI(App):
         Binding("e", "env_panel", "Env", show=False),
         Binding("S", "schedule_panel", "Schedule", show=False),
         Binding("s", "show_spec", "Spec", show=False),
+        Binding("E", "edit_spec", "Edit spec", show=False),
         Binding("t", "toggle_tail", "Tail/Full", show=False),
         Binding("x", "compact", "Compact", show=False),
         Binding("z", "release", "Release", show=False),
@@ -220,6 +222,10 @@ class MaestroTUI(App):
             detail.update("[dim]Select a ticket[/dim]")
             self.query_one("#events", RichLog).clear()
             return
+        self._show_detail(key)
+
+    def _show_detail(self, key: str) -> None:
+        detail = self.query_one("#detail", Static)
         snap = snap_mod.load(self._home, key)
         runner, runner_model = spec_runner(self._home, key)
         detail.update(_render_detail(snap, snap_mod.display_title(self._home, snap),
@@ -284,6 +290,17 @@ class MaestroTUI(App):
             self.notify("Select a ticket first", severity="warning")
             return
         self.push_screen(SpecScreen(self._home, self._selected_key))
+
+    def action_edit_spec(self) -> None:
+        key = self._selected_key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        warning = edit_in_editor(self, self._home / "tickets" / key / "spec.md")
+        if warning:
+            self.notify(warning, severity="warning")
+            return
+        self._show_detail(key)
 
     def action_runner(self) -> None:
         """UX-2: open the runner modal for the selected ticket. All state
