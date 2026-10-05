@@ -18,7 +18,7 @@ import os
 
 import pytest
 
-from maestro import ops, providers, snapshot as snap_mod, store
+from maestro import event_log, events as E, ops, providers, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
 from maestro.config import Config
 
@@ -194,6 +194,25 @@ def test_reply_review_non_inline_quotes_original_and_links(home, monkeypatch):
     assert posted_body.startswith("> Please rename this variable.")
     assert "pull/42#pullrequestreview-999" in posted_body
     assert posted_body.endswith("Renamed it in the latest commit.")
+
+
+def test_reply_review_targets_the_stack_entry_pr_the_comment_was_left_on(home, monkeypatch):
+    cfg = Config(home=home)
+    _seed_with_worktree(home, pr=42)
+    for cid in ("inline-555", "999"):
+        event_log.append(home, "T-1", E.REVIEW_FEEDBACK_RECEIVED,
+                         {"comment_id": cid, "state": "COMMENTED", "body": "Rename this.",
+                          "author": "octocat", "pr_number": 43, "stack_index": 1},
+                         actor="dispatcher")
+    fake = FakeVCS(reviews=[{"id": "999", "state": "COMMENTED", "body": "Rename this.",
+                            "author": "octocat"}])
+    _use_fake(cfg, monkeypatch, fake)
+
+    ops.reply_review(cfg, "T-1", "inline-555", "Renamed it.")
+    ops.reply_review(cfg, "T-1", "999", "Renamed it.")
+    assert [c[0] for c in fake.reply_calls] == [43]
+    assert [c[0] for c in fake.comment_calls] == [43]
+    assert "pull/43#pullrequestreview-999" in fake.comment_calls[0][1]
 
 
 # ---------------------------------------------------------------------------

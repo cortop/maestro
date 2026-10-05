@@ -1594,24 +1594,34 @@ def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
     repo_slug = repos_mod.resolve_vcs_slug(cfg, snap)
     vcs = providers.get_vcs(cfg)
 
+    # In a stack, a comment can sit on a later entry's PR than snap.pr_number;
+    # its feedback event records which one.
+    reply_pr = snap.pr_number
+    for ev in reversed(event_log.read(cfg.home, key)):
+        p = ev.get("payload") or {}
+        if (ev.get("type") == E.REVIEW_FEEDBACK_RECEIVED
+                and p.get("comment_id") == comment_id and p.get("pr_number")):
+            reply_pr = p["pr_number"]
+            break
+
     if comment_id.startswith("inline-"):
         kind = "inline"
         raw_id = comment_id[len("inline-"):]
-        result = vcs.reply_to_review_comment(snap.pr_number, raw_id, body,
+        result = vcs.reply_to_review_comment(reply_pr, raw_id, body,
                                              repo=repo_slug, env=cred.env)
     else:
         kind = "review"
         original = next(
-            (r for r in vcs.review_feedback(snap.pr_number, repo=repo_slug, env=cred.env)
+            (r for r in vcs.review_feedback(reply_pr, repo=repo_slug, env=cred.env)
              if r.get("id") == comment_id), None)
         first_line = ""
         if original and (original.get("body") or "").strip():
             first_line = original["body"].strip().splitlines()[0]
-        link = (f"https://github.com/{repo_slug}/pull/{snap.pr_number}"
+        link = (f"https://github.com/{repo_slug}/pull/{reply_pr}"
                 f"#pullrequestreview-{comment_id}") if repo_slug else None
         quote = f"> {first_line}" if first_line else "> (original comment)"
         parts = [quote] + ([link] if link else []) + [body]
-        result = vcs.comment_pr(snap.pr_number, "\n\n".join(parts), repo=repo_slug, env=cred.env)
+        result = vcs.comment_pr(reply_pr, "\n\n".join(parts), repo=repo_slug, env=cred.env)
 
     if not result.get("ok"):
         raise store.MaestroError(
