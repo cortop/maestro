@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
 
-from textual.app import ComposeResult
+from textual.app import ComposeResult, SuspendNotSupported
 from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
@@ -19,6 +21,36 @@ from .detail import render as _render_detail, render_pending as _render_pending
 from .events import render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line
 from .modals import _ConfirmModal, _IntervalModal, _ScheduleModal
 from .render import _fmt_epoch, _render_env, _render_fleet
+
+
+def editor_argv(path: Path) -> list[str]:
+    """`$VISUAL`, then `$EDITOR`, then `vi`, shlex-split, with `path` appended."""
+    cmd = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    return [*shlex.split(cmd), str(path)]
+
+
+def edit_in_editor(app, path: Path) -> str | None:
+    """Open `path` in the user's editor, suspending the TUI while it runs.
+
+    Returns None on success, else a human-readable warning (never raises for a
+    missing file/editor or a terminal that can't be suspended).
+    """
+    if not path.is_file():
+        return f"Spec not found: {path}"
+    try:
+        argv = editor_argv(path)
+    except ValueError as exc:
+        return f"Bad editor command: {exc}"
+    if not argv[:-1]:
+        return "Editor command is empty"
+    try:
+        with app.suspend():
+            subprocess.run(argv)
+    except SuspendNotSupported:
+        return "This terminal can't be suspended to run an editor"
+    except FileNotFoundError:
+        return f"Editor not found: {argv[0]}"
+    return None
 
 
 class EventsScreen(Screen):
@@ -426,11 +458,10 @@ class SpecScreen(Screen):
         )
 
     def action_edit_spec(self) -> None:
-        import os
         spec_path = self._home / "tickets" / self._key / "spec.md"
-        editor = os.environ.get("EDITOR", "vi")
-        with self.app.suspend():
-            subprocess.run([editor, str(spec_path)])
+        warning = edit_in_editor(self.app, spec_path)
+        if warning:
+            self.notify(warning, severity="warning")
         self._refresh()
 
     def action_refresh_spec(self) -> None:

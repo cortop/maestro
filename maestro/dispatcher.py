@@ -251,8 +251,8 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
     "triaging": ("ask", "env", "fold-inbox", "locate", "observe-spec", "release", "snapshot"),
     "awaiting-human": ("append", "create", "env", "finalize", "fold-inbox", "inbox-ack",
                         "observe-spec", "release", "set-phase", "snapshot"),
-    "ready": ("ask", "env", "fold-inbox", "observe-spec", "release", "requeue", "set-phase",
-              "snapshot", "worktree"),
+    "ready": ("ask", "env", "fold-inbox", "inbox-ack", "observe-spec", "release", "requeue",
+              "set-phase", "snapshot", "worktree"),
     "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
     "implementing": ("append", "ask", "env", "events", "fail", "finalize", "fold-inbox",
                       "impl-turn", "local-backup", "locate", "observe-spec", "pr-size", "release",
@@ -3837,9 +3837,13 @@ def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> b
             sweep.observed_seq[key] = refreshed.observed_seq
             sweep.phase[key] = refreshed.phase
             # Re-check against the just-routed `ready` snapshot so its
-            # reconciler spawns THIS sweep, not next interval.
+            # reconciler spawns THIS sweep, not next interval. T-138: send it
+            # through the ready fast-path route first -- when that's also
+            # "on" and decides the key itself (e.g. straight on to
+            # `implementing`), no `ready` reconciler spawns at all; when it's
+            # "off" (or can't decide), this falls back to today's queueing.
             res = _due_check(home, key, refreshed, now)
-            if res.due:
+            if res.due and not _route_ready_fast_path(sweep, key, refreshed, res.reason):
                 sweep.due.append((key, res.reason))
             return True
     if eligible is None:
@@ -3856,6 +3860,145 @@ def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> b
     return True
 
 
+def _ready_fast_path_git_eligible(binding) -> bool:
+    """T-138 Notes ("Lock hold"): `worktree_ensure` can block for
+    `worktree_timeout` + `prime_timeout` (600 + 600s) while it runs a
+    `prime` command, and `_prime_worktree_extras` makes a real rsync copy of
+    the source checkout's `node_modules`. Route inline only when neither can
+    happen -- no `prime` configured, and no `node_modules` directory in the
+    source checkout to mirror -- so the sweep's own spawn-region lock is
+    never held for that long. Everything else (a fast `git worktree add`,
+    the tiny GA-7 extras copy) is cheap enough to run inline."""
+    if binding.prime:
+        return False
+    if binding.path and (Path(binding.path) / "node_modules").is_dir():
+        return False
+    return True
+
+
+def _route_ready_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bool:
+    """T-138: apply the `ready` phase's fully-scripted rules (dependsOn,
+    kind/mode branch, `worktree_ensure`, `set-phase`) directly in the sweep,
+    instead of spawning a `claude -p` reconciler whose job is always the same
+    handful of deterministic moves. `cfg.ready_fast_path == "off"` (default)
+    never computes anything here, so a sweep with the knob unset is
+    byte-identical to before this route existed -- same as `answer_fast_path`
+    (T-122). Returns True once it has fully decided *key*'s outcome for this
+    sweep (an event appended, or a firm "nothing to do yet"); False leaves
+    *key* to fall through to today's `ready` spawn -- the only path for
+    whatever these rules genuinely can't decide inline: a free-text inbox
+    command, a pending answer with no open question, a priming/
+    node_modules-heavy binding, or a `worktree_ensure` failure that isn't
+    T-81's witnessed-worktree refusal (recorded into `hook_errors` instead).
+
+    Order matches the `ready` skill's own preamble: spec + inbox first (a
+    lone pending `discard` routes straight to `terminating`; anything else
+    pending falls back), then `dependsOn`, then the kind/mode branch. Only
+    the git-mode `worktree ready` branch re-queues *key* for an immediate
+    same-sweep spawn of its next phase (T-136's hand-off exemption is what
+    makes that possible) -- research/local-mode/terminating/blocked-dep all
+    land the very same sweep and pick up their own reconciler next sweep,
+    same cadence the answer-fast-path's own `ready` hand-off already runs at.
+    """
+    cfg, home, dry_run = sweep.cfg, sweep.home, sweep.dry_run
+    decisions, hook_errors = sweep.decisions, sweep.hook_errors
+    if cfg.ready_fast_path != "on" or Phase(snap.phase) != Phase.READY:
+        return False
+
+    from . import ops, repos as repos_mod
+
+    if not dry_run:
+        ops.observe_spec(cfg, key, actor="dispatcher")
+
+    pending = inbox.pending(home, key)
+    if pending:
+        if len(pending) == 1 and pending[0].get("command") == "discard":
+            reason = "human: discard"
+            if dry_run:
+                decisions[key] = {"outcome": "would_route_terminating", "reason": reason}
+                return True
+            ops.fold_inbox(cfg, key)
+            refreshed = snap_mod.load(home, key)
+            ops.set_phase(cfg, key, Phase.TERMINATING, reason=reason, actor="dispatcher",
+                          expect=refreshed.observed_seq)
+            inbox.ack(home, key)
+            decisions[key] = {"outcome": "route_terminating", "reason": reason}
+            return True
+        # A msg, an ans with no open question, a retry, or several commands at
+        # once -- the skill's own free-text/judgment fallback; today's spawn
+        # folds it instead.
+        return False
+
+    if _has_unmet_deps(home, key):
+        # The wake that got us here (inbox/spec-changed) is already consumed
+        # by `observe_spec` above -- no requeue needed, the next sweep's own
+        # `is_due` returns "blocked-dep" directly.
+        decisions[key] = {
+            "outcome": "would_route_blocked_dep" if dry_run else "route_blocked_dep",
+            "reason": "blocked-dep"}
+        return True
+
+    binding = repos_mod.resolve(cfg, home, key)
+
+    if snap.kind == "research":
+        reason = "research ticket: beginning exploration"
+        if dry_run:
+            decisions[key] = {"outcome": "would_route_researching", "reason": reason}
+            return True
+        refreshed = snap_mod.load(home, key)
+        ops.set_phase(cfg, key, Phase.RESEARCHING, reason=reason, actor="dispatcher",
+                      expect=refreshed.observed_seq)
+        decisions[key] = {"outcome": "route_researching", "reason": reason}
+        return True
+
+    if binding.mode == "local":
+        reason = "local target ready"
+        if dry_run:
+            decisions[key] = {"outcome": "would_route_implementing", "reason": reason}
+            return True
+        refreshed = snap_mod.load(home, key)
+        ops.set_phase(cfg, key, Phase.IMPLEMENTING, reason=reason, actor="dispatcher",
+                      expect=refreshed.observed_seq)
+        decisions[key] = {"outcome": "route_implementing", "reason": reason}
+        return True
+
+    # git mode: worktree_ensure inline, only when it can't hold the sweep's
+    # spawn-region lock for long.
+    if not _ready_fast_path_git_eligible(binding):
+        return False
+
+    reason = "worktree ready"
+    if dry_run:
+        decisions[key] = {"outcome": "would_route_implementing", "reason": reason}
+        return True
+
+    try:
+        ops.worktree_ensure(cfg, key)
+    except store.WorktreeHealthRefused as e:
+        _ask_park(cfg, key, f"worktree ensure refused: {e}", qid=f"wt-{key}",
+                  actor="dispatcher", hook_errors=hook_errors, decisions=decisions,
+                  outcome="worktree_refused")
+        return True
+    except store.MaestroError as e:
+        hook_errors[f"worktree_ensure:{key}"] = f"{type(e).__name__}: {e}"
+        return False
+
+    refreshed = snap_mod.load(home, key)
+    ops.set_phase(cfg, key, Phase.IMPLEMENTING, reason=reason, actor="dispatcher",
+                  expect=refreshed.observed_seq)
+    decisions[key] = {"outcome": "route_implementing", "reason": reason}
+    # T-136 hand-off: re-check due so `implementing` can spawn THIS sweep
+    # instead of waiting out a sweep interval -- the one branch worth
+    # chaining, since it's the median-293s-wait case T-138 exists to close.
+    refreshed = snap_mod.load(home, key)
+    sweep.observed_seq[key] = refreshed.observed_seq
+    sweep.phase[key] = refreshed.phase
+    res = _due_check(home, key, refreshed, sweep.now)
+    if res.due:
+        sweep.due.append((key, res.reason))
+    return True
+
+
 def _classify_key(sweep: _Sweep, key: str, active: set[str]) -> None:
     """Decide whether *key* is due this sweep, recording its outcome. Due keys
     are appended to `sweep.due`; every other outcome is final for this sweep."""
@@ -3864,6 +4007,8 @@ def _classify_key(sweep: _Sweep, key: str, active: set[str]) -> None:
         return
     snap, due_reason = candidate
     if _route_answer_fast_path(sweep, key, snap, due_reason):
+        return
+    if _route_ready_fast_path(sweep, key, snap, due_reason):
         return
     decisions = sweep.decisions
     sweep.due.append((key, due_reason))
@@ -4105,8 +4250,9 @@ def _spawn_due(sweep: _Sweep, sessions: SessionManager, to_spawn: list, active: 
                        disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
                        env_overlay=cred.env, runner=runner, runner_model=runner_model)
         spawned.append(key)
-        # T-122: a fast-pathed key keeps its more specific outcome.
-        if decisions[key]["outcome"] not in ("would_route_answer", "answer_routed"):
+        # T-122/T-138: a fast-pathed key keeps its more specific outcome.
+        if decisions[key]["outcome"] not in (
+                "would_route_answer", "answer_routed", "route_implementing"):
             decisions[key]["outcome"] = "spawned"
         _count_repo_spawn(binding, memo["per_repo"])
         # T-63: round-robin within a (repo, priority) group -- next sweep starts
@@ -4736,6 +4882,10 @@ def _ensure_scratch_dir(home: Path, key: str, repo_path: Path) -> Path:
 # appear under NEEDS-YOU's own `## Questions` and would double-report here.
 _SILENT_SKIP_OUTCOMES = frozenset({
     "runner_binary_missing", "runner_daemon_unreachable", "repo_blocked",
+    # T-138: the ready fast-path's own "blocked-dep" verdict -- same healthy,
+    # self-resolving wait as the plain `not_due`/"blocked-dep" case above,
+    # just reached via a consumed inbox/spec-changed wake instead.
+    "route_blocked_dep",
 })
 
 
