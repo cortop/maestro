@@ -824,7 +824,12 @@ def cmd_fleet(args) -> int:
 
 # --- agent state verbs (used inside a reconcile session) --------------------
 def cmd_snapshot(args) -> int:
-    _print(snap_mod.rebuild(_cfg(args).home, args.key).to_dict())
+    home = _cfg(args).home
+    out = snap_mod.rebuild(home, args.key).to_dict()
+    # The inbox is outside the event fold; reconciler skills read this to
+    # decide whether to `fold-inbox`.
+    out["inbox_pending"] = len(inbox.pending(home, args.key))
+    _print(out)
     return 0
 
 

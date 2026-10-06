@@ -1168,6 +1168,41 @@ def test_env_key_and_snapshot_display_key_falls_back_to_maestro_key(home, cfg, c
     assert snap_result["display_key"] == "T-129"
 
 
+def test_snapshot_reports_inbox_pending_until_acked(home, cfg, capsys):
+    """The phase skills fold the inbox only when `maestro snapshot` says
+    `inbox_pending` is non-zero -- without the field, an awaiting-human
+    reconciler saw an empty `answered_questions` and released, leaving the
+    human's answer unfolded forever."""
+    assert cli_main(["--home", str(home), "create", "asks a question",
+                     "--key", "T-130", "--no-nudge"]) == 0
+    dispatch(cfg, DryRunSessions(), now=1000)
+    assert cli_main(["--home", str(home), "ask", "T-130", "Proceed?", "--qid", "q1"]) == 0
+
+    def inbox_pending() -> int:
+        capsys.readouterr()
+        assert cli_main(["--home", str(home), "snapshot", "T-130"]) == 0
+        return json.loads(capsys.readouterr().out)["inbox_pending"]
+
+    assert inbox_pending() == 0
+    assert cli_main(["--home", str(home), "ans", "T-130", "yes", "--qid", "q1",
+                     "--no-nudge"]) == 0
+    assert inbox_pending() == 1
+
+    # Folding alone keeps it pending (acked only once the phase advances).
+    assert cli_main(["--home", str(home), "fold-inbox", "T-130"]) == 0
+    assert inbox_pending() == 1
+    assert cli_main(["--home", str(home), "inbox-ack", "T-130"]) == 0
+    assert inbox_pending() == 0
+
+
+def test_phase_skill_fold_step_keys_off_inbox_pending():
+    for phase in ("triaging", "researching", "awaiting-human", "ready", "implementing", "qa"):
+        for path in (_commands_path(phase), _skills_path(phase)):
+            text = path.read_text()
+            assert "If the snapshot's `inbox_pending` is non-zero" in text, \
+                f"{path}: the fold-inbox step must key off a field `maestro snapshot` emits"
+
+
 def test_implementing_skill_pr_titles_use_display_key_not_key():
     """AC2: neither copy builds a `gh pr create --title` from `$KEY` any more --
     both the single-PR and every stacked-entry title are built from

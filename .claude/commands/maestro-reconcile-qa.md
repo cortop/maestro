@@ -44,7 +44,7 @@ with the **Read** tool — never `cat`/`sed`, this preamble reads no file via th
   context from raw events. It may not exist yet for a brand-new ticket; a Read error there just
   means no context has been folded yet, not a failure.
 
-If the snapshot shows pending inbox commands, fold them before deciding:
+If the snapshot's `inbox_pending` is non-zero, fold those commands before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
 ## `qa`: judge the diff, never edit it

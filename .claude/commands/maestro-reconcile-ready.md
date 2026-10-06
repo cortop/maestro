@@ -37,7 +37,7 @@ this preamble reads no file via the shell — load:
   context from raw events. It may not exist yet for a brand-new ticket; a Read error there just
   means no context has been folded yet, not a failure.
 
-If the snapshot shows pending inbox commands, fold them before deciding:
+If the snapshot's `inbox_pending` is non-zero, fold those commands before deciding:
 `maestro fold-inbox "$KEY"`. Once you have made your decision below (whichever branch it is), ack
 the inbox: `maestro inbox-ack "$KEY"` (a no-op if nothing was pending -- safe to call on every exit
 path, not just the ones that actually folded something). Finish every exit path with
