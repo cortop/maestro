@@ -3,7 +3,7 @@ ticket back to implementing, and maestro never routes on its own replies. The
 only mocks are the GitHub boundary (a fake VCS / a stubbed `_run`)."""
 import json
 
-from maestro import config as config_mod, dispatcher as disp, event_log, ops, providers, \
+from maestro import dispatcher as disp, event_log, ops, providers, \
     snapshot as snap_mod, store
 from maestro.providers import cli as cli_mod
 from maestro.providers.cli import GitHubCliVCS
