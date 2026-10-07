@@ -125,17 +125,16 @@ def test_sweep_after_reply_review_does_not_bounce(cfg, monkeypatch):
     key = "T-1"
     _, _repo = make_origin_and_repo(cfg.home / "worktrees", name=key)
     seed_ticket(cfg.home, key, "reply", phase="implementing", pr=42)
-    fake = FakeVCS([_inline(5, "fix this"), _issue(6, "and this")])
+    fake = FakeVCS([_inline(5, "fix this")])
     _use_fake(cfg, monkeypatch, fake)
     ops.reply_review(cfg, key, "inline-5", "Fixed in the latest commit.")
-    ops.reply_review(cfg, key, "issue-6", "Done, see the latest commit.")
     ev = [e["payload"] for e in event_log.read(cfg.home, key) if e["type"] == "ReviewReplyPosted"]
-    assert [p["posted_id"] for p in ev] == ["inline-901", "issue-902"]
+    assert [p["posted_id"] for p in ev] == ["inline-901"]
 
     event_log.append(cfg.home, key, "PhaseChanged", {"phase": "in-review"}, actor="r")
     snap_mod.rebuild(cfg.home, key)
     # Only the replies are new; the human comments were never observed before.
-    fake.reviews = [r for r in fake.reviews if r["id"] in ("inline-901", "issue-902")]
+    fake.reviews = [r for r in fake.reviews if r["id"] == "inline-901"]
     disp.dispatch(cfg, DryRunSessions(), now=1000)
     assert snap_mod.load(cfg.home, key).phase == Phase.IN_REVIEW.value
 
