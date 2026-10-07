@@ -124,11 +124,48 @@ class RepoBinding:
     # the sole reader `ops.pr_size` goes through. 0 disables the check for
     # this key.
     pr_split_threshold: int = 800
+    # T-149: this repo's allowed_paths override, already resolved against the
+    # board-wide [maestro] allowed_paths default -- see resolve(), the sole
+    # reader `dispatcher._route_test_run` goes through. Empty means no
+    # restriction.
+    allowed_paths: list = field(default_factory=list)
     # T-132: "auto" (default -- see resolve_stack_tool, the sole reader) or
     # "git" (forces the legacy git/gh flow, never probes for `gt`). No
     # board-wide [maestro] default to inherit -- unlike base_drift_policy/
     # test_command above, this is per-repo only (see config._STACK_TOOLS).
     stack_tool: str = "auto"
+
+
+def _glob_regex(pattern: str) -> re.Pattern:
+    """T-149: `**/` spans zero or more directories, `**` anything, `*`/`?` stay
+    within one path segment."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def outside_allowed_paths(paths, allowed) -> list[str]:
+    """T-149: the *paths* matching none of the *allowed* globs, in input order.
+    An empty *allowed* means no restriction."""
+    if not allowed:
+        return []
+    regexes = [_glob_regex(g[2:] if g.startswith("./") else g) for g in allowed]
+    return [p for p in paths if not any(r.match(p) for r in regexes)]
 
 
 def _inherited(cfg: Config, table: dict) -> dict:

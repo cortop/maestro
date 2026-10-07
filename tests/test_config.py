@@ -90,6 +90,7 @@ _OVERRIDE_SAMPLES = {
     "ci_failure_excerpt": True, "pr_split_threshold": 0, "test_command": "make check",
     "language": "go", "post_qa_skill": "/polish", "post_qa_skill_runner": "pi",
     "post_qa_skill_runner_model": "m", "file_hints": True, "base_drift_policy": "on_conflict",
+    "allowed_paths": ["src/**"],
 }
 
 

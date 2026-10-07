@@ -2802,6 +2802,34 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
     _route_test_run(cfg, key, payload, actor="dispatcher", cwd=Path(cwd))
 
 
+def _diff_changed_paths(cwd: Path, base: str) -> list[str]:
+    """T-149: every path the tree touches vs *base* (merge-base anchored,
+    workdir-inclusive like `_diff_deleted_test_names`, plus untracked files).
+    Empty on any git failure -- fail open, same posture as that gate."""
+
+    def _git(*args: str):
+        try:
+            return subprocess.run(["git", "-C", str(cwd), *args],
+                                  capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    anchor = base
+    for ref in (f"origin/{base}", base):
+        mb = _git("merge-base", ref, "HEAD")
+        if mb is not None and mb.returncode == 0 and mb.stdout.strip():
+            anchor = mb.stdout.strip()
+            break
+    diff = _git("diff", "--name-only", anchor)
+    if diff is None or diff.returncode != 0:
+        return []
+    paths = set(diff.stdout.splitlines())
+    untracked = _git("ls-files", "--others", "--exclude-standard")
+    if untracked is not None and untracked.returncode == 0:
+        paths.update(untracked.stdout.splitlines())
+    return sorted(p for p in paths if p)
+
+
 def _diff_deleted_test_names(cwd: Path, base: str, profile) -> list[str]:
     """Test names NET-deleted by the tree's diff against *base*, scoped to
     *profile*'s own `test_file_globs` (T-84: generalized from H4's original
@@ -2918,6 +2946,24 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
                         f"test(s): {shown}. A passing suite is a weak oracle for "
                         "removal -- answer to approve the deletion(s) as intended, "
                         "or say what must be restored.",
+                        qid=qid, actor=actor)
+                return
+
+    # T-149: a diff touching files outside the binding's `allowed_paths` needs
+    # a human's approval; the qid encodes the tree state like H4's, so an
+    # answered approval for THIS tree passes and a new commit re-evaluates.
+    if binding.allowed_paths and binding.mode != "local":
+        outside = repos_mod.outside_allowed_paths(
+            _diff_changed_paths(cwd, binding.base_branch or "main"), binding.allowed_paths)
+        if outside:
+            tree_key = ops._tree_state_key(cwd, timeout=binding.worktree_timeout)
+            qid = f"allowed-paths-{key}-{content_hash(tree_key)[:8]}"
+            if not _question_answered(cfg.home, key, qid):
+                ops.ask(cfg, key,
+                        f"{key}: this diff touches {len(outside)} file(s) outside the "
+                        f"repo's allowed_paths ({', '.join(binding.allowed_paths)}): "
+                        f"{', '.join(outside)}. Answer to approve touching them, or "
+                        "say what must be reverted.",
                         qid=qid, actor=actor)
                 return
 

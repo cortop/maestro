@@ -154,6 +154,11 @@ and exit.
 
 Otherwise implement the spec's Acceptance criteria:
 1. Read the spec's Intent + AC and the relevant code.
+   **Scope check (T-149):** `maestro env --key "$KEY"` also reports `allowed_paths` — a glob list
+   (`**` crosses directories) of where this repo's diff may go; empty means no restriction. If it
+   is non-empty and the change needs a file outside it, `maestro ask "$KEY" "<files> are outside
+   allowed_paths (<list>) — approve editing them?" --qid "scope-$KEY-<n>"` and exit **before**
+   editing there. The dispatcher re-checks the final diff and asks itself as a safety net.
    **If `qa` sent you back here** (the context file's phase history shows the most recent
    transition is `qa -> implementing`, citing a failing AC + evidence — cross-check
    `maestro snapshot "$KEY"` -> `qa_verdicts` for the same ac_hash if you want the raw record):
