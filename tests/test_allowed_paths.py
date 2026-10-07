@@ -12,7 +12,7 @@ from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
-from conftest import git, make_origin_and_repo
+from conftest import make_origin_and_repo
 from test_dispatcher_ac_checks import (
     _PASS_CMD, _advance_to_verifying, _commit_test_file, _run_verifying_to_completion,
     _seed_to_worktree,
