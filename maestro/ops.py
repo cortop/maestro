@@ -1553,9 +1553,10 @@ def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
     `implementing` skill used to open by hand. An `inline-<id>` comment_id
     (the shape `providers.cli.GitHubCliVCS._inline_review_comments` mints)
     threads the reply under that inline comment via the `/replies` endpoint
-    (`VCS.reply_to_review_comment`); any other id -- a review body or a plain
-    PR comment -- has no threaded-reply endpoint, so it gets one PR comment
-    quoting the original's first line and linking to it (`VCS.comment_pr`).
+    (`VCS.reply_to_review_comment`). Any other id -- a review body or a plain
+    PR comment -- has no thread to reply in and is refused (T-148): a
+    top-level PR comment is noise, so that feedback is answered by a code
+    change (or a Note), never a post.
 
     Idempotent per (comment_id, tree_sha): checked against `snap.
     review_replies` (folded from prior `ReviewReplyPosted` events) BEFORE the
@@ -1567,6 +1568,11 @@ def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
     _validate_reply_body(body)
     if not comment_id or not comment_id.strip():
         raise store.MaestroError("reply-review: --comment-id must not be empty")
+    if not comment_id.startswith("inline-"):
+        raise store.MaestroError(
+            f"{key}: reply-review: {comment_id!r} is not an inline review comment "
+            f"(expected 'inline-<id>'); only inline comments have a thread to reply in -- "
+            f"address other feedback with a code change or a Note, not a PR comment")
 
     snap = snap_mod.load(cfg.home, key)
     if not snap.pr_number:
@@ -1604,33 +1610,17 @@ def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
             reply_pr = p["pr_number"]
             break
 
-    if comment_id.startswith("inline-"):
-        kind = "inline"
-        raw_id = comment_id[len("inline-"):]
-        result = vcs.reply_to_review_comment(reply_pr, raw_id, body,
-                                             repo=repo_slug, env=cred.env)
-    else:
-        kind = "review"
-        original = next(
-            (r for r in vcs.review_feedback(reply_pr, repo=repo_slug, env=cred.env)
-             if r.get("id") == comment_id), None)
-        first_line = ""
-        if original and (original.get("body") or "").strip():
-            first_line = original["body"].strip().splitlines()[0]
-        link = (f"https://github.com/{repo_slug}/pull/{reply_pr}"
-                f"#pullrequestreview-{comment_id}") if repo_slug else None
-        quote = f"> {first_line}" if first_line else "> (original comment)"
-        parts = [quote] + ([link] if link else []) + [body]
-        result = vcs.comment_pr(reply_pr, "\n\n".join(parts), repo=repo_slug, env=cred.env)
+    result = vcs.reply_to_review_comment(reply_pr, comment_id[len("inline-"):], body,
+                                         repo=repo_slug, env=cred.env)
 
     if not result.get("ok"):
         raise store.MaestroError(
             f"{key}: reply-review: failed to post ({result.get('error', 'unknown')})")
 
     _append(cfg, key, E.REVIEW_REPLY_POSTED,
-            {"comment_id": comment_id, "tree_sha": tree_sha, "kind": kind, "body": body},
+            {"comment_id": comment_id, "tree_sha": tree_sha, "kind": "inline", "body": body},
             actor=actor, sid=f"reply-{key}-{comment_id}-{tree_sha}")
-    return {"posted": True, "kind": kind, "comment_id": comment_id, "tree_sha": tree_sha}
+    return {"posted": True, "kind": "inline", "comment_id": comment_id, "tree_sha": tree_sha}
 
 
 def _diff_added_test_names(cwd: Path, base: str, rel_path: str,

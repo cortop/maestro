@@ -1,7 +1,6 @@
 """T-128: `maestro reply-review` -- reply to a PR review comment IN ITS OWN
 THREAD via the VCS provider (an `inline-<id>` comment threads through the
-`/replies` endpoint; any other id gets one quoting PR comment instead), never
-an improvised new top-level comment. Idempotent per (comment_id, tree_sha);
+`/replies` endpoint; any other id is refused, T-148), never a top-level comment. Idempotent per (comment_id, tree_sha);
 refuses an over-length or jargon-carrying body.
 
 Real-surface QA (CLAUDE.md): the CLI-level test stubs the external `gh`
@@ -174,32 +173,33 @@ def test_reply_review_posts_again_after_a_further_commit(home, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# AC2: a non-inline (review-body) id gets one quoting PR comment with a link
+# T-148: a non-inline id (review body, `issue-` PR comment) is refused -- no
+# post, no ReviewReplyPosted
 # ---------------------------------------------------------------------------
 
-def test_reply_review_non_inline_quotes_original_and_links(home, monkeypatch):
-    cfg = Config(home=home)
-    _seed_with_worktree(home, pr=42)
+@pytest.mark.parametrize("comment_id", ["999", "issue-123"])
+def test_reply_review_cli_refuses_non_inline_id(home, monkeypatch, capsys, comment_id):
+    key = "T-1"
+    _seed_with_worktree(home, key=key, pr=7)
     fake = FakeVCS(reviews=[{"id": "999", "state": "CHANGES_REQUESTED",
-                            "body": "Please rename this variable.\nMore context.",
-                            "author": "octocat"}])
-    _use_fake(cfg, monkeypatch, fake)
+                            "body": "Please rename.", "author": "octocat"}])
+    _use_fake(Config(home=home), monkeypatch, fake)
+    (home / "config.toml").write_text(
+        '[maestro]\n\n[providers]\nvcs = "github_cli"\n', encoding="utf-8")
 
-    result = ops.reply_review(cfg, "T-1", "999", "Renamed it in the latest commit.")
-    assert result["kind"] == "review"
-    assert len(fake.comment_calls) == 1
-    pr_number, posted_body, repo_slug = fake.comment_calls[0]
-    assert pr_number == 42
-    assert repo_slug == "cortop/maestro"
-    assert posted_body.startswith("> Please rename this variable.")
-    assert "pull/42#pullrequestreview-999" in posted_body
-    assert posted_body.endswith("Renamed it in the latest commit.")
+    rc = cli_main(["--home", str(home), "reply-review", key,
+                   "--comment-id", comment_id, "--body", "Renamed it."])
+    assert rc != 0
+    assert "not an inline review comment" in capsys.readouterr().err
+    assert not fake.reply_calls and not fake.comment_calls
+    types = [e["type"] for e in event_log.read(home, key)]
+    assert E.REVIEW_REPLY_POSTED not in types
 
 
 def test_reply_review_targets_the_stack_entry_pr_the_comment_was_left_on(home, monkeypatch):
     cfg = Config(home=home)
     _seed_with_worktree(home, pr=42)
-    for cid in ("inline-555", "999"):
+    for cid in ("inline-555",):
         event_log.append(home, "T-1", E.REVIEW_FEEDBACK_RECEIVED,
                          {"comment_id": cid, "state": "COMMENTED", "body": "Rename this.",
                           "author": "octocat", "pr_number": 43, "stack_index": 1},
@@ -209,10 +209,8 @@ def test_reply_review_targets_the_stack_entry_pr_the_comment_was_left_on(home, m
     _use_fake(cfg, monkeypatch, fake)
 
     ops.reply_review(cfg, "T-1", "inline-555", "Renamed it.")
-    ops.reply_review(cfg, "T-1", "999", "Renamed it.")
     assert [c[0] for c in fake.reply_calls] == [43]
-    assert [c[0] for c in fake.comment_calls] == [43]
-    assert "pull/43#pullrequestreview-999" in fake.comment_calls[0][1]
+    assert not fake.comment_calls
 
 
 # ---------------------------------------------------------------------------
