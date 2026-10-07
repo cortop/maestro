@@ -445,6 +445,12 @@ class Config:
     # [repos.<name>] override wins, same "table wins, unset inherits"
     # precedence as `test_command` -- see `repos.RepoBinding.pr_split_threshold`.
     pr_split_threshold: int = 800
+    # T-149: globs (`**` crosses directories) a branch's diff may touch. A diff
+    # touching anything outside routes to `awaiting-human` for approval
+    # (`dispatcher._route_test_run`, keyed on tree state like the H4 gate).
+    # Empty (default) means no restriction. Per-[repos.<name>] override wins --
+    # see `repos.RepoBinding.allowed_paths`.
+    allowed_paths: list = field(default_factory=list)
     # T-144: exact env var names or fnmatch globs (e.g. "GH_TOKEN_*") to drop
     # from every spawned reconciler's env AND every dispatcher-run subprocess
     # (`ops.capture_tests`/`run_ac_checks`, `_start_test_run`, `_start_restack`)
@@ -859,6 +865,12 @@ def _string_list(raw, where, default):
     return raw
 
 
+def _allowed_paths(raw, where, default):
+    if raw is None:
+        return []
+    return _string_list(raw, where, default)
+
+
 def _runner_enabled(raw, where, default):
     return _normalize_runner_enabled(raw, default)
 
@@ -889,6 +901,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("ci_rerun_grace", _int, per_repo=True),
     Knob("ci_failure_excerpt", _bool, per_repo=True),
     Knob("pr_split_threshold", _nonneg_int, per_repo=True),
+    Knob("allowed_paths", _allowed_paths, per_repo=True),
     Knob("daily_spend_ceiling_usd", _float),
     Knob("runaway_spawns_per_hour", _int),
     Knob("runaway_pause_cooldown", _int),
@@ -1414,6 +1427,11 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # which `implementing` proposes a stack of smaller PRs
                                   # (`maestro ask`) instead of opening/growing one big one. 0
                                   # disables the check. Per-[repos.<name>] override wins.
+# allowed_paths = ["maestro/**", "tests/**"]  # T-149: globs (`**` crosses directories) a branch's
+                                  # diff may touch. A diff touching anything outside routes to
+                                  # awaiting-human with an approval question listing those files
+                                  # (an answered approval for the same tree state passes). Empty
+                                  # (default) means no restriction. Per-[repos.<name>] override wins.
 # scrub_env = ["GH_TOKEN_*"]      # T-144: exact names or fnmatch globs dropped from every
                                   # spawned reconciler's env and every dispatcher-run test/check
                                   # subprocess -- for a human shell's own secrets. Board-wide
@@ -1562,6 +1580,8 @@ implementer = "claude_skill"
 # pr_split_threshold = 1500         # T-126: this repo's override of [maestro]
                                      # pr_split_threshold above -- unset inherits the
                                      # board-wide default.
+# allowed_paths = ["src/**"]         # T-149: this repo's override of [maestro] allowed_paths
+                                     # above -- unset inherits the board-wide default.
 
 # [runner.opencode]                 # OC-4: opencode's own runner-scoped settings; unknown
                                      # keys here fail config.load (fail-closed, see
