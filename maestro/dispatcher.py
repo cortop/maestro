@@ -2073,14 +2073,19 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
     # COMMENTED review with an empty body, stays a no-op exactly like today.
     commented_body: str | None = None
     # T-117: an APPROVED review that carries a body and/or new inline
-    # review-thread comments is the lowest-priority reason. Inline comments
-    # alone (no approval in the same round) never route.
+    # review-thread comments is the lowest-priority reason. T-147: inline and
+    # Conversation-tab comments without an approval in the round route too
+    # (as a "review comment:"), ranking above approved-with-comments only
+    # when no approval accompanies them.
     approved_new = False
     approved_body = ""
     inline_new: list[str] = []
+    own_ids = set(snap.own_comment_ids) if snap is not None else set()
     for r in vcs.review_feedback(pr_number, repo=repo, env=env):
         cid = r.get("id")
         if not cid:
+            continue
+        if cid in own_ids:  # T-147: maestro's own reply -- never route on it
             continue
         # T-130: stamp pr_number/stack_index onto the payload once there's a
         # stack, so `snapshot.fold` can attribute this comment to the right
@@ -2120,7 +2125,7 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
             approved_new = True
             if noise is None:
                 approved_body = body
-        elif state == "INLINE_COMMENT" and body and noise is None:
+        elif state in ("INLINE_COMMENT", "ISSUE_COMMENT") and body and noise is None:
             where = f"{r['path']}:{r['line']}: " if r.get("path") and r.get("line") else (
                 f"{r['path']}: " if r.get("path") else "")
             inline_new.append(f"{where}{body}")
@@ -2131,6 +2136,8 @@ def _observe_reviews(cfg: Config, key: str, pr_number: int, vcs, repo: str | Non
         reason = f"{prefix}changes requested: {changes_requested_body}"
     elif commented_body is not None:
         reason = f"{prefix}review comment: {commented_body}"
+    elif inline_new and not approved_new:
+        reason = f"{prefix}review comment: {' | '.join(inline_new)}"
     elif approved_new and (approved_body or inline_new):
         parts = ([approved_body] if approved_body else []) + inline_new
         reason = f"{prefix}approved with comments: {' | '.join(parts)}"

@@ -951,19 +951,19 @@ def test_approved_with_inline_comments_routes_with_them_in_reason(cfg, monkeypat
     assert kinds == ["ap-1", "inline-7"]
 
 
-def test_bare_approval_and_inline_without_approval_never_route_and_never_reroute(cfg, monkeypatch):
+def test_bare_approval_then_inline_without_approval_routes_once(cfg, monkeypatch):
     fake = _approval_fake([{"id": "ap-1", "state": "APPROVED", "body": "", "author": "r"}])
     _use_fake(cfg, monkeypatch, fake, interval=0)
     _seed(cfg, "T-5", Phase.IN_REVIEW)
     disp.sync_vcs(cfg, now=1000)
     assert snap_mod.load(cfg.home, "T-5").phase == Phase.IN_REVIEW.value
 
-    # inline comments arriving without a new approval are recorded, not routed
+    # T-147: inline comments arriving without a new approval now route, once
     fake.reviews[42].append({"id": "inline-8", "state": "INLINE_COMMENT", "body": "nit",
                              "author": "r", "path": "a.py", "line": 1})
     disp.sync_vcs(cfg, now=2000)
-    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IN_REVIEW.value
-    assert _impl_reasons(cfg) == []
+    assert snap_mod.load(cfg.home, "T-5").phase == Phase.IMPLEMENTING.value
+    assert _impl_reasons(cfg) == ["review comment: a.py:1: nit"]
 
 
 def test_approved_with_comments_does_not_reroute_on_later_sweeps(cfg, monkeypatch):

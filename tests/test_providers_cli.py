@@ -379,6 +379,8 @@ def test_review_feedback_fetches_inline_review_thread_comments(monkeypatch):
     outs = {"pr": reviews, "api": inline}
 
     def fake_run(cmd, timeout=60, env=None):
+        if cmd[1] == "api" and "/issues/" in cmd[-1]:
+            return 0, "[]", ""  # T-147: Conversation-tab comments, none here
         return 0, outs[cmd[1]], ""
 
     monkeypatch.setattr(cli_mod, "_run", fake_run)

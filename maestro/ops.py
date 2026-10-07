@@ -1617,8 +1617,9 @@ def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
         first_line = ""
         if original and (original.get("body") or "").strip():
             first_line = original["body"].strip().splitlines()[0]
-        link = (f"https://github.com/{repo_slug}/pull/{reply_pr}"
-                f"#pullrequestreview-{comment_id}") if repo_slug else None
+        anchor = (f"issuecomment-{comment_id[len('issue-'):]}" if comment_id.startswith("issue-")
+                  else f"pullrequestreview-{comment_id}")
+        link = f"https://github.com/{repo_slug}/pull/{reply_pr}#{anchor}" if repo_slug else None
         quote = f"> {first_line}" if first_line else "> (original comment)"
         parts = [quote] + ([link] if link else []) + [body]
         result = vcs.comment_pr(reply_pr, "\n\n".join(parts), repo=repo_slug, env=cred.env)
@@ -1627,8 +1628,10 @@ def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
         raise store.MaestroError(
             f"{key}: reply-review: failed to post ({result.get('error', 'unknown')})")
 
+    posted_id = result.get("id")
     _append(cfg, key, E.REVIEW_REPLY_POSTED,
-            {"comment_id": comment_id, "tree_sha": tree_sha, "kind": kind, "body": body},
+            {"comment_id": comment_id, "tree_sha": tree_sha, "kind": kind, "body": body,
+             **({"posted_id": posted_id} if posted_id else {})},
             actor=actor, sid=f"reply-{key}-{comment_id}-{tree_sha}")
     return {"posted": True, "kind": kind, "comment_id": comment_id, "tree_sha": tree_sha}
 

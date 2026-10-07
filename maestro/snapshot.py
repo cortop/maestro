@@ -353,6 +353,8 @@ class Snapshot:
     # cwd's HEAD sha unchanged) never posts a duplicate reply. Never reset by a
     # phase change -- a comment's reply history survives a fix-round bounce.
     review_replies: dict[str, list[str]] = field(default_factory=dict)
+    # T-147: ids of comments maestro itself posted (ReviewReplyPosted.posted_id).
+    own_comment_ids: list[str] = field(default_factory=list)
 
     @property
     def question_open(self) -> bool:
@@ -690,6 +692,10 @@ def _fold_review_feedback_received(s: Snapshot, p: dict, seq, t: str) -> None:
 
 
 def _fold_review_reply_posted(s: Snapshot, p: dict, seq, t: str) -> None:
+    # T-147: the reply's own id, so `_observe_reviews` never routes on maestro's
+    # own comment (author filtering can't tell it from the human's login).
+    if p.get("posted_id"):
+        s.own_comment_ids.append(p["posted_id"])
     cid, tree_sha = p.get("comment_id"), p.get("tree_sha")
     if cid and tree_sha:
         seen = s.review_replies.setdefault(cid, [])
