@@ -43,7 +43,7 @@ REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body,
 # review_replies: comment_id -> [tree_sha, ...]) and the commit the reply body
 # itself cites, so a re-run at the SAME tree never posts twice, while a further
 # commit is a fresh reply.
-REVIEW_REPLY_POSTED = "ReviewReplyPosted"  # {comment_id, tree_sha, kind, body}  kind: "inline"|"review"
+REVIEW_REPLY_POSTED = "ReviewReplyPosted"  # {comment_id, tree_sha, kind, body, posted_id?}  kind: "inline"|"review"
 IMPL_TURN = "ImplTurnRecorded"          # {turn, role}  one Implementer/QA hand-off
 IMPL_STEP = "ImplStepRecorded"          # {turn, role, kind, tool, summary}  one notable stream step
 

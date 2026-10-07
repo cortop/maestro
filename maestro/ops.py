@@ -1617,8 +1617,10 @@ def reply_review(cfg: Config, key: str, comment_id: str, body: str, *,
         raise store.MaestroError(
             f"{key}: reply-review: failed to post ({result.get('error', 'unknown')})")
 
+    posted_id = result.get("id")
     _append(cfg, key, E.REVIEW_REPLY_POSTED,
-            {"comment_id": comment_id, "tree_sha": tree_sha, "kind": "inline", "body": body},
+            {"comment_id": comment_id, "tree_sha": tree_sha, "kind": "inline", "body": body,
+             **({"posted_id": posted_id} if posted_id else {})},
             actor=actor, sid=f"reply-{key}-{comment_id}-{tree_sha}")
     return {"posted": True, "kind": "inline", "comment_id": comment_id, "tree_sha": tree_sha}
 

@@ -126,8 +126,9 @@ class VCS(Protocol):
         underneath ``review_feedback``'s own ``inline-<id>``, with the
         ``inline-`` prefix already stripped by the caller) through the
         thread's own ``/replies`` endpoint -- never a new top-level comment.
-        Returns ``{"ok": True}`` on success, or ``{"ok": False, "error": ...}``
-        classified the same way as ``pr_status``'s ``error`` field. ``env``
+        Returns ``{"ok": True, "id": "inline-<id>"}`` on success (``id``, the
+        posted reply's own ``review_feedback`` id, T-147; absent if unknown), or
+        ``{"ok": False, "error": ...}`` classified the same way as ``pr_status``'s ``error`` field. ``env``
         (GA-17): see ``pr_status``.
         """
         ...
@@ -136,7 +137,8 @@ class VCS(Protocol):
                    env: dict | None = None) -> dict:
         """T-128: post one plain, top-level PR comment -- the fallback for a
         review-body (non-inline) comment id, which GitHub has no threaded
-        reply endpoint for. Returns ``{"ok": True}``/``{"ok": False,
+        reply endpoint for. Returns ``{"ok": True, "id": "issue-<id>"}`` (``id``
+        absent if unknown, T-147)/``{"ok": False,
         "error": ...}``, same shape as ``reply_to_review_comment``. ``env``
         (GA-17): see ``pr_status``.
         """

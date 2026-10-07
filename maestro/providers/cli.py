@@ -195,6 +195,36 @@ class GitHubCliVCS:
                 "author": (r.get("author") or {}).get("login"),
             })
         result.extend(self._inline_review_comments(pr_number, repo, env))
+        result.extend(self._issue_comments(pr_number, repo, env))
+        return result
+
+    def _issue_comments(self, pr_number: int, repo: str | None,
+                        env: dict | None) -> list[dict]:
+        """T-147: Conversation-tab PR comments (`gh api .../issues/<n>/comments`),
+        which neither `gh pr view --json reviews` nor `pulls/<n>/comments`
+        returns. Each gets state `ISSUE_COMMENT` and an `issue-<id>` id (own
+        prefix: numeric ids must not collide with `inline-<id>`). Empty-body
+        and failed/garbled fetches yield none."""
+        slug = repo or "{owner}/{repo}"
+        rc, out, _ = _run(["gh", "api", "--paginate", f"repos/{slug}/issues/{pr_number}/comments"],
+                          env=env)
+        if rc != 0 or not out.strip():
+            return []
+        try:
+            comments = json.loads(out)
+        except ValueError:
+            return []
+        result = []
+        for c in comments if isinstance(comments, list) else []:
+            cid = c.get("id")
+            if not cid or not (c.get("body") or "").strip():
+                continue
+            result.append({
+                "id": f"issue-{cid}",
+                "state": "ISSUE_COMMENT",
+                "body": c["body"],
+                "author": (c.get("user") or {}).get("login"),
+            })
         return result
 
     def _inline_review_comments(self, pr_number: int, repo: str | None,
@@ -315,7 +345,11 @@ class GitHubCliVCS:
              "-f", f"body={body}"], env=env)
         if rc != 0:
             return {"ok": False, "error": classify_gh_failure(rc, out, err)}
-        return {"ok": True}
+        try:
+            posted = json.loads(out).get("id")
+        except (ValueError, AttributeError):
+            posted = None
+        return {"ok": True, **({"id": f"inline-{posted}"} if posted else {})}
 
     def comment_pr(self, pr_number: int, body: str, repo: str | None = None,
                    env: dict | None = None) -> dict:
@@ -328,7 +362,9 @@ class GitHubCliVCS:
         rc, out, err = _run(cmd, env=env)
         if rc != 0:
             return {"ok": False, "error": classify_gh_failure(rc, out, err)}
-        return {"ok": True}
+        # `gh pr comment` prints the new comment's URL (`...#issuecomment-<id>`).
+        m = re.search(r"#issuecomment-(\d+)", out)
+        return {"ok": True, **({"id": f"issue-{m.group(1)}"} if m else {})}
 
 
 class CommandFetcher:
