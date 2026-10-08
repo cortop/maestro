@@ -1606,6 +1606,8 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
                 await pilot.pause(0.1)
                 if not isinstance(app.screen_stack[-1], FleetScreen):
                     break
+            assert not isinstance(app.screen_stack[-1], FleetScreen)
+            await pilot.pause(0.1)  # let the confirm modal take focus before answering
             await pilot.press("y")
             for _ in range(50):
                 await pilot.pause(0.1)
