@@ -132,6 +132,7 @@ class MaestroTUI(App):
         self._home = Path(home)
         self._selected_key: str | None = None
         self._filter_idx: int = 0
+        self._release_key: str | None = None
         self._tickets_fr: float = 2.0
         # key -> phase; None = first poll (no notifications)
         self._prev_phases: dict[str, str] | None = None
@@ -240,6 +241,11 @@ class MaestroTUI(App):
                 self.screen_stack[0].query_one("#pulse", Static).update("[red]pulse: error[/red]")
             except NoMatches:
                 pass
+        elif event.worker.name == "release-probe":
+            if event.state == WorkerState.SUCCESS:
+                self._on_release_probed(self._release_key, event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"Claim probe failed: {event.worker.error}", severity="error")
         elif event.worker.name == "compact":
             if event.state == WorkerState.SUCCESS:
                 r = event.worker.result
@@ -320,8 +326,15 @@ class MaestroTUI(App):
                 return
             command, args_text = result
             args = {"text": args_text} if args_text else {}
-            inbox.append_command(self._home, key, command, args)
-            self.notify(f"'{command}' queued for {key}")
+
+            def _queue() -> None:
+                inbox.append_command(self._home, key, command, args)
+                self.notify(f"'{command}' queued for {key}")
+
+            if command == "discard":
+                self._confirm_discard(key, _queue)
+            else:
+                _queue()
 
         self.push_screen(_CmdModal(key, snap.phase), _on_dismiss)
 
@@ -340,8 +353,26 @@ class MaestroTUI(App):
         if snap.phase != Phase.DEGRADED.value:
             self.notify(f"'{command}' only applies to degraded tickets", severity="warning")
             return
-        inbox.append_command(self._home, key, command, {})
-        self.notify(f"'{command}' queued for {key}")
+
+        def _queue() -> None:
+            inbox.append_command(self._home, key, command, {})
+            self.notify(f"'{command}' queued for {key}")
+
+        if command == "discard":
+            self._confirm_discard(key, _queue)
+        else:
+            _queue()
+
+    def _confirm_discard(self, key: str, queue: Callable[[], None]) -> None:
+        """Discard is irreversible: require the ticket key typed out before queuing."""
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                queue()
+
+        self.push_screen(
+            _ConfirmModal(f"Discard [bold]{key}[/bold]? This cannot be undone.", require=key),
+            _on_confirm,
+        )
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
@@ -659,14 +690,32 @@ class MaestroTUI(App):
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
+        cfg = Config(home=self._home)
+        # describe_claims shells out to `ps`, so probe off the UI thread. Never
+        # active_keys/is_claimed: both release stale claims as a side effect.
+        self._release_key = key
+        self.run_worker(
+            lambda: claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age),
+            thread=True, name="release-probe",
+        )
 
-        def _on_confirm(ok: bool) -> None:
+    def _on_release_probed(self, key: str, rows: list[dict]) -> None:
+        row = next((r for r in rows if r["key"] == key), None)
+        if row is None:
+            self.notify(f"{key}: no claim to release")
+            return
+        if row["claimed"]:
+            self.notify(
+                f"{key}: claim is live (pid {row['pid']}, {row['verdict']})", severity="warning")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
             if not ok:
                 return
             claims.release(self._home, key)
             self.notify(f"Claim released for {key}")
 
-        self.app.push_screen(
+        self.push_screen(
             _ConfirmModal(f"Release claim for [bold]{key}[/bold]?"), _on_confirm
         )
 
