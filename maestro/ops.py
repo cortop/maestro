@@ -1105,6 +1105,32 @@ def _qa_brief_ac_entry(index: int, text: str, tree_key: str, snap) -> dict:
     return entry
 
 
+def ac_evidence_rows(snap, spec_text: str, tree_key: str | None) -> list[dict]:
+    """Read-only per-AC evidence matrix for the TUI (T-167): each current AC
+    (spec order) with its self-attestation, spec- and standards-axis QA
+    verdicts and latest captured check. *tree_key* is the current tree state,
+    or ``None`` when the ticket has no worktree (no check is ever "current").
+    Deliberately separate from `qa_brief`, whose packet must not show the
+    independent QA agent prior verdicts or attestations."""
+    rows = []
+    for i, text in enumerate(snap_mod.parse_acs(spec_text), start=1):
+        h = snap_mod.ac_hash(text)
+        row = _qa_brief_ac_entry(i, text, tree_key or "", snap)
+        row.pop("captured_check", None)
+        row["self"] = snap.ac_verified.get(h)
+        row["qa_spec"] = snap.qa_verdicts.get(h)
+        row["qa_std"] = snap.qa_verdicts_standards.get(h)
+        check = None
+        if "annotation" in row:
+            for tk, recs in snap.ac_checks.items():  # fold order: last holder wins
+                if h in recs:
+                    check = {"tree_key": tk, "current": tree_key is not None and tk == tree_key,
+                             **recs[h]}
+        row["check"] = check
+        rows.append(row)
+    return rows
+
+
 def qa_brief(cfg: Config, key: str) -> dict:
     """Build the Implementer->QA hand-off packet for *key*, deterministically.
 
