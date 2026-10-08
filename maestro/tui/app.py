@@ -31,6 +31,7 @@ from .modals import (
 )
 from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
+    DecisionsScreen,
     DetailScreen,
     ActivityScreen,
     DepsScreen,
@@ -199,6 +200,7 @@ class MaestroTUI(App):
         Binding("enter", "focus_detail", "Detail"),
         Binding("i", "inbox_message", "Inbox"),
         Binding("R", "review_panel", "Review"),
+        Binding("W", "decisions", "Decisions"),
         Binding("[", "narrow_detail", "Detail-", show=False),
         Binding("]", "widen_detail", "Detail+", show=False),
         # Less-used actions: keys work but hidden from footer to reduce clutter
@@ -244,7 +246,7 @@ class MaestroTUI(App):
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
-        "jump_running", "filter_query", "clear_query",
+        "jump_running", "decisions", "filter_query", "clear_query",
     })
     _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
@@ -308,6 +310,8 @@ class MaestroTUI(App):
             return self._selected_key
         if isinstance(screen, self._KEYED_SCREENS):
             return screen._key
+        if isinstance(screen, DecisionsScreen):
+            return screen.current_key()
         if isinstance(screen, DepsScreen):
             try:
                 return screen._current_key()
@@ -336,10 +340,6 @@ class MaestroTUI(App):
         if action in ("retry", "discard"):
             cached = self._snap_cache.get(self._target_key() or "")
             if cached is not None and cached[0] != Phase.DEGRADED.value:
-                return None
-        elif action == "answer":
-            cached = self._snap_cache.get(self._target_key() or "")
-            if cached is not None and not cached[1]:
                 return None
         return True
 
@@ -423,6 +423,48 @@ class MaestroTUI(App):
 
         self.run_worker(_sweep, thread=True, group=f"nudge-{key or '_create'}",
                         exclusive=True, name="nudge", exit_on_error=False)
+
+    def _nudge_keys(self, keys: list[str]) -> None:
+        """T-164: ONE sweep restricted to *keys* (the decision queue's touched keys)."""
+        if not self._nudge_enabled or not keys:
+            return
+        try:
+            cfg = config_mod.load(str(self._home))
+        except store.MaestroError as e:
+            self.notify(f"nudge skipped: {e}", severity="warning")
+            return
+        if not cfg.nudge_on_human_input:
+            return
+        factory = self._sessions_factory
+
+        def _sweep() -> tuple[str, str]:
+            try:
+                report = disp.dispatch(cfg, factory(cfg), store.now_epoch(), key_filter=list(keys))
+            except store.MaestroError as e:
+                return f"nudge: {e}", "warning"
+            toasts = [_nudge_toast(k, report) for k in keys]
+            return ("; ".join(m for m, _ in toasts),
+                    "warning" if any(s == "warning" for _, s in toasts) else "information")
+
+        self.run_worker(_sweep, thread=True, group="nudge-keys", exclusive=True,
+                        name="nudge", exit_on_error=False)
+
+    def _decisions_closed(self, answered: int, queued: int, skipped: int, touched: list[str]) -> None:
+        if answered or queued:
+            self.notify(f"{answered} answered, {queued} queued, {skipped} skipped")
+            self._nudge_keys(touched)
+            self._kick_live()
+
+    def _on_decisions(self) -> bool:
+        try:
+            return isinstance(self.screen, DecisionsScreen)
+        except ScreenStackError:  # unmounted app (tests call actions directly)
+            return False
+
+    def action_decisions(self) -> None:
+        if self._on_decisions():
+            return
+        self.push_screen(DecisionsScreen(self._home))
 
     def action_toggle_nudge(self) -> None:
         self._nudge_enabled = not self._nudge_enabled
@@ -1088,12 +1130,12 @@ class MaestroTUI(App):
 
     def action_answer(self) -> None:
         key = self._target_key()
-        if key is None:
-            self.notify("Select a ticket first", severity="warning")
-            return
-        snap = snap_mod.load(self._home, key)
-        if not snap.open_questions:
-            self.notify(f"No open questions for {key}", severity="warning")
+        snap = snap_mod.load(self._home, key) if key is not None else None
+        if snap is None or not snap.open_questions:
+            if self._on_decisions():
+                self.notify("Nothing to answer for this row", severity="warning")
+            else:
+                self.push_screen(DecisionsScreen(self._home))
             return
         # `open_questions` round-trips through a sort_keys=True JSON snapshot, so
         # the dict comes back qid-alphabetical, not round order -- walk it in the

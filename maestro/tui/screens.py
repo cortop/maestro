@@ -14,20 +14,20 @@ from rich.markup import escape as rich_escape
 from rich.text import Text
 from textual.binding import Binding
 from textual.app import ComposeResult, SuspendNotSupported
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Markdown, RichLog, Static, Tree
 from textual.worker import Worker, WorkerState
 
-from .. import burn, claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, repos, snapshot as snap_mod, store
+from .. import burn, claims, projection, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, repos, snapshot as snap_mod, store
 from .. import dispatcher
 from ..config import Config
 from ..dispatcher import list_keys, schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
-from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, phase_dwell,
+from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, fmt_duration, phase_dwell,
                      render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
-from .modals import (_AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _InboxModal, _IntervalModal,
+from .modals import (_ACCEPT_ALL, _AcceptedRecommendation, _AnswerModal, _AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _InboxModal, _IntervalModal,
                      _ScheduleModal, _TextViewModal)
 from .. import repos as repos_mod
 from . import why as why_mod
@@ -1944,3 +1944,299 @@ class WhyScreen(Screen):
                           f"Now: {rich_escape(self._verdict)}"),
             _on_confirm,
         )
+
+
+class DecisionsScreen(Screen):
+    """Board-wide decision queue (T-164): one row per open question on awaiting-human /
+    degraded tickets, plus degraded tickets with none. Every write is an inbox command
+    (`inbox.append_command`); closing the screen toasts one summary and nudges once."""
+
+    HELP = ("Decision queue. y accepts the recommendation, enter answers, space marks, Y accepts the marked "
+            "proceed rows, r / d retry / discard a degraded ticket, x skips, s spec, l logs, escape closes "
+            "(one nudge for everything written).")
+
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("y", "accept", "Accept"),
+        ("Y", "accept_marked", "Accept marked"),
+        ("space", "toggle_mark", "Mark"),
+        ("r", "retry", "Retry"),
+        ("d", "discard", "Discard"),
+        ("x", "skip", "Skip"),
+        ("s", "view_spec", "Spec"),
+        ("l", "view_logs", "Logs"),
+    ]
+
+    CSS = """
+    DecisionsScreen #dq-table { width: 3fr; height: 1fr; }
+    DecisionsScreen #dq-side  { width: 2fr; height: 1fr; padding: 0 1; border-left: solid $primary; }
+    """
+
+    _COLUMNS = ("Key", "Pos", "Kind", "Age", "Question", "Rec")
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+        self._rows: list[dict] = []
+        self._asked: dict[tuple[str, str], float] = {}
+        self._marked: set[tuple[str, str]] = set()
+        self._answered = 0
+        self._queued = 0
+        self._skipped = 0
+        self._touched: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Horizontal():
+            yield DataTable(id="dq-table", cursor_type="row")
+            with VerticalScroll(id="dq-side"):
+                yield Static("", id="dq-side-body", markup=False)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Decisions"
+        self.query_one("#dq-table", DataTable).add_columns(*self._COLUMNS)
+        self._reload()
+        keys = sorted({r["key"] for r in self._rows})
+        home = self._home
+
+        def _ages() -> dict[tuple[str, str], float]:
+            out: dict[tuple[str, str], float] = {}
+            for key in keys:
+                for ev in event_log.read(home, key):
+                    if ev.get("type") == "QuestionAsked":
+                        ts = store.iso_to_epoch(ev.get("ts") or "")
+                        if ts is not None:
+                            out[(key, (ev.get("payload") or {}).get("qid"))] = ts
+            return out
+
+        self.run_worker(_ages, thread=True, name="decisions-ages", exit_on_error=False)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == "decisions-ages" and event.state == WorkerState.SUCCESS:
+            event.stop()
+            self._asked = event.worker.result
+            self._paint()
+
+    # --- rows -----------------------------------------------------------------
+
+    def _reload(self) -> None:
+        self._rows = projection.open_question_queue(self._home)
+        self._paint()
+
+    def _is_queued(self, row: dict) -> bool:
+        cmds = inbox.pending(self._home, row["key"])
+        if row["qid"] is None:
+            return any(c.get("command") in ("retry", "discard") for c in cmds)
+        return any(c.get("command") == "ans" and (c.get("args") or {}).get("qid") == row["qid"]
+                   for c in cmds)
+
+    def _paint(self) -> None:
+        table = self.query_one("#dq-table", DataTable)
+        cur = table.cursor_row
+        table.clear()
+        now = time.time()
+        for row in self._rows:
+            ident = (row["key"], row["qid"] or "")
+            asked = self._asked.get(ident)
+            age = fmt_duration(now - asked) if asked else "…"
+            pos = f"{row['position']}/{row['total']}" if row["position"] else ""
+            rec = "queued" if self._is_queued(row) else (row["recommend"] or "")
+            key_cell = ("✓ " if ident in self._marked else "") + row["key"]
+            table.add_row(key_cell, pos, row["kind"], age, " ".join(row["question"].split())[:80],
+                          " ".join(rec.split())[:40], key=f"{row['key']}|{row['qid'] or ''}")
+        if self._rows:
+            table.move_cursor(row=min(cur, len(self._rows) - 1))
+        self._show_side()
+
+    def _cur(self) -> dict | None:
+        table = self.query_one("#dq-table", DataTable)
+        if not self._rows or not (0 <= table.cursor_row < len(self._rows)):
+            return None
+        return self._rows[table.cursor_row]
+
+    def current_key(self) -> str | None:
+        row = self._cur()
+        return row["key"] if row else None
+
+    def _advance(self) -> None:
+        table = self.query_one("#dq-table", DataTable)
+        if table.cursor_row < len(self._rows) - 1:
+            table.move_cursor(row=table.cursor_row + 1)
+
+    def _show_side(self) -> None:
+        row = self._cur()
+        body = self.query_one("#dq-side-body", Static)
+        if row is None:
+            body.update("Nothing to decide.")
+            return
+        spec = store.spec_path(self._home, row["key"])
+        head = "\n".join(spec.read_text().splitlines()[:25]) if spec.exists() else "(no spec)"
+        body.update(f"{row['key']} · {row['phase']}\n\n{row['question'] or '(no open question)'}\n\n"
+                    f"Recommendation: {row['recommend'] or '(none)'}\n\n── Spec ──\n{head}")
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        event.stop()
+        self._show_side()
+
+    # --- writes ---------------------------------------------------------------
+
+    def _recommendation(self, row: dict) -> str | None:
+        snap = snap_mod.load(self._home, row["key"])
+        if row["qid"] not in snap.open_questions:
+            return None
+        return snap.question_recommends.get(row["qid"]) or row["recommend"]
+
+    def _touch(self, key: str) -> None:
+        if key not in self._touched:
+            self._touched.append(key)
+
+    def _write_ans(self, row: dict, text: str, accepted: bool) -> None:
+        args = {"qid": row["qid"], "text": text}
+        if accepted:
+            args["accepted_recommendation"] = True
+        inbox.append_command(self._home, row["key"], "ans", args)
+        self._answered += 1
+        self._touch(row["key"])
+
+    def action_accept(self) -> None:
+        row = self._cur()
+        if row is None:
+            return
+        if row["qid"] is None:
+            self.notify(f"{row['key']} has no open question (r retry, d discard)", severity="warning")
+            return
+        if self._is_queued(row):
+            self.notify(f"{row['key']}: already queued", severity="warning")
+            return
+        rec = self._recommendation(row)
+        if not rec:
+            self.notify(f"{row['key']}: no recommendation to accept (enter to answer)", severity="warning")
+            return
+        self._write_ans(row, rec, True)
+        self._paint()
+        self._advance()
+
+    def action_toggle_mark(self) -> None:
+        row = self._cur()
+        if row is None or row["qid"] is None:
+            return
+        self._marked ^= {(row["key"], row["qid"])}
+        self._paint()
+
+    def action_skip(self) -> None:
+        if self._cur() is not None:
+            self._skipped += 1
+            self._advance()
+
+    def action_accept_marked(self) -> None:
+        marked = [r for r in self._rows if (r["key"], r["qid"] or "") in self._marked]
+        if not marked:
+            self.notify("No rows marked (space marks a row)", severity="warning")
+            return
+        eligible = [r for r in marked if r["kind"] == "proceed" and not self._is_queued(r)
+                    and self._recommendation(r)]
+        n_skipped = len(marked) - len(eligible)
+        if not eligible:
+            self.notify(f"Nothing to accept: {n_skipped} skipped (only proceed rows with a "
+                        "recommendation are bulk-accepted)", severity="warning")
+            return
+        lines = []
+        for key in dict.fromkeys(r["key"] for r in eligible):
+            accepted = {r["qid"] for r in eligible if r["key"] == key}
+            still_open = [r for r in self._rows if r["key"] == key and r["qid"] not in accepted
+                          and not self._is_queued(r)]
+            lines.append(f"  {key}: {len(accepted)} accepted"
+                         + (" -- partial: will spawn" if still_open else ""))
+        msg = (f"Accept {len(eligible)} recommendation(s)?"
+               + (f" ({n_skipped} skipped: not proceed / no recommendation)" if n_skipped else "")
+               + "\n" + "\n".join(lines))
+
+        def _on_confirm(ok: bool | None) -> None:
+            if not ok:
+                return
+            for r in eligible:
+                rec = self._recommendation(r)
+                if rec:
+                    self._write_ans(r, rec, True)
+                self._marked.discard((r["key"], r["qid"]))
+            self._skipped += n_skipped
+            self._paint()
+
+        self.app.push_screen(_ConfirmModal(msg), _on_confirm)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        row = self._cur()
+        if row is None:
+            return
+        if row["qid"] is None:
+            self.notify(f"{row['key']} has no open question (r retry, d discard)", severity="warning")
+            return
+        if self._is_queued(row):
+            self.notify(f"{row['key']}: already queued", severity="warning")
+            return
+        remaining = sum(1 for r in self._rows if r["key"] == row["key"] and not self._is_queued(r))
+
+        def _on_dismiss(answer: object) -> None:
+            if answer is None:
+                return
+            if answer is _ACCEPT_ALL:
+                for r in [r for r in self._rows if r["key"] == row["key"] and r["qid"]
+                          and not self._is_queued(r)]:
+                    rec = self._recommendation(r)
+                    if rec:
+                        self._write_ans(r, rec, True)
+            else:
+                self._write_ans(row, str(answer), isinstance(answer, _AcceptedRecommendation))
+            self._paint()
+            self._advance()
+
+        self.app.push_screen(
+            _AnswerModal(row["key"], row["qid"], row["position"], row["total"], row["question"],
+                         row["recommend"], remaining, self._home),
+            _on_dismiss)
+
+    def _degraded_row(self, command: str) -> dict | None:
+        row = self._cur()
+        if row is None:
+            return None
+        if row["phase"] != "degraded":
+            self.notify(f"{row['key']}: '{command}' only applies to degraded tickets", severity="warning")
+            return None
+        if any(c.get("command") in ("retry", "discard") for c in inbox.pending(self._home, row["key"])):
+            self.notify(f"{row['key']}: already queued", severity="warning")
+            return None
+        return row
+
+    def _queue_cmd(self, key: str, command: str) -> None:
+        inbox.append_command(self._home, key, command, {})
+        self._queued += 1
+        self._touch(key)
+        self._paint()
+
+    def action_retry(self) -> None:
+        row = self._degraded_row("retry")
+        if row:
+            self._queue_cmd(row["key"], "retry")
+
+    def action_discard(self) -> None:
+        row = self._degraded_row("discard")
+        if row:
+            key = row["key"]
+            self.app._confirm_discard(key, lambda: self._queue_cmd(key, "discard"))
+
+    def action_view_spec(self) -> None:
+        key = self.current_key()
+        if key:
+            self.app.push_screen(SpecScreen(self._home, key))
+
+    def action_view_logs(self) -> None:
+        key = self.current_key()
+        if key:
+            self.app.push_screen(LogsScreen(self._home, key))
+
+    def action_close(self) -> None:
+        app = self.app
+        app.pop_screen()
+        app._decisions_closed(self._answered, self._queued, self._skipped, self._touched)
