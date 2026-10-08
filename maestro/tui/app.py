@@ -6,13 +6,14 @@ from typing import Callable
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from textual.worker import Worker, WorkerState
 
 from rich.text import Text
 
-from .. import claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
+from .. import claims, ratelimit, spend as spend_mod, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from .. import dispatcher as disp
@@ -25,7 +26,7 @@ from .modals import (
     _ACCEPT_ALL, _AcceptedRecommendation, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal,
     _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
 )
-from .render import _dep_color, _render_badge, _styled_row
+from .render import _dep_color, _render_badge, _render_pulse, _styled_row
 from .screens import (
     DetailScreen,
     DepsScreen,
@@ -67,6 +68,9 @@ class MaestroTUI(App):
     #filter-bar {
         height: 1;
         background: $panel;
+    }
+    #pulse {
+        height: 1;
     }
     #fleet-badge {
         layer: topbar;
@@ -136,10 +140,14 @@ class MaestroTUI(App):
         # resolves) so a table reselection while the ~120s claude call is in
         # flight can't attribute its result to the wrong ticket.
         self._suggest_acs_key: str | None = None
+        # T-174: whether the last pulse tick saw "runaway" -- the toast fires
+        # only on the False -> True edge.
+        self._pulse_runaway: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("", id="filter-bar")
+        yield Static("", id="pulse")
         yield Static("", id="fleet-badge")
         with Horizontal():
             yield DataTable(id="tickets")
@@ -162,6 +170,34 @@ class MaestroTUI(App):
         self.set_interval(3.0, self._populate)
         self._refresh_badge()
         self.set_interval(5.0, self._refresh_badge)
+        self._refresh_pulse()
+        self.set_interval(5.0, self._refresh_pulse)
+
+    def _refresh_pulse(self) -> None:
+        # T-174: reads only (no spend/ratelimit probe, no health.report()); the
+        # spawn_budget snapshot scan is why this runs in a thread.
+        def _load() -> dict:
+            try:
+                cfg = config_mod.load(str(self._home))
+            except Exception:
+                return {"error": True}
+            now = store.now_epoch()
+            rate = health.spawn_rate(self._home, now)
+            budget = health.spawn_budget(cfg)
+            hb = store.read_json(store.heartbeat_path(self._home), {})
+            rl = ratelimit.status(self._home, now)
+            return {
+                "buckets": health.pulse_buckets(self._home, now),
+                "spawns": rate["total"],
+                "by_key": rate["by_key"],
+                "budget": budget,
+                "runaway": bool(budget) and rate["total"] > budget,
+                "spend": spend_mod.status(cfg, now),
+                "warn_fractions": list(cfg.alarm_spend_warn_fractions),
+                "heartbeat": hb if isinstance(hb, dict) else {},
+                "paused_until": rl.get("paused_until") if rl.get("paused") else None,
+            }
+        self.run_worker(_load, thread=True, group="pulse", exclusive=True, name="pulse")
 
     def _refresh_badge(self) -> None:
         # T-89 (AC1): the header badge is the one always-visible surface, so
@@ -184,6 +220,26 @@ class MaestroTUI(App):
             result = event.worker.result
             self.query_one("#fleet-badge", Static).update(
                 _render_badge(result["fleet"], result["provider"]))
+        elif event.worker.name == "pulse" and event.state == WorkerState.SUCCESS:
+            p = event.worker.result
+            try:
+                self.screen_stack[0].query_one("#pulse", Static).update(_render_pulse(p))
+            except NoMatches:  # app is tearing down
+                return
+            runaway = bool(p.get("runaway"))
+            if runaway and not self._pulse_runaway:
+                by_key = p.get("by_key") or {}
+                top = max(by_key, key=by_key.get) if by_key else "?"
+                self.notify(
+                    f"Runaway spawn rate: {p['spawns']}/{p['budget']} per hour, "
+                    f"top key {top} -- press F for the fleet panel",
+                    severity="error")
+            self._pulse_runaway = runaway
+        elif event.worker.name == "pulse" and event.state == WorkerState.ERROR:
+            try:
+                self.screen_stack[0].query_one("#pulse", Static).update("[red]pulse: error[/red]")
+            except NoMatches:
+                pass
         elif event.worker.name == "compact":
             if event.state == WorkerState.SUCCESS:
                 r = event.worker.result

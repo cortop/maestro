@@ -65,6 +65,34 @@ def spawn_rate(home: Path, now: float, window: int = WINDOW_SECONDS) -> dict:
     return {"total": sum(by_key.values()), "by_key": by_key}
 
 
+def pulse_buckets(home: Path, now: float, buckets: int = 12, width: int = 300) -> list[int]:
+    """Spawn-ledger weight per *width*-second bucket over the trailing
+    ``buckets * width`` seconds, oldest first (T-174's TUI sparkline).
+
+    Same unit as `spawn_rate` (agent-equivalents; a legacy bare-timestamp entry
+    weighs 1). Entries outside the window are dropped, a future-dated one lands
+    in the newest bucket, and a missing or corrupt ledger reads as all zeros.
+    """
+    out = [0] * buckets
+    ledger = store.read_json(dispatcher._spawn_ledger_path(home), {})
+    if not isinstance(ledger, dict):
+        return out
+    span = buckets * width
+    for entry in ledger.values():
+        recent = entry.get("recent", []) if isinstance(entry, dict) else []
+        if not isinstance(recent, list):
+            continue
+        for e in recent:
+            ts = dispatcher._ledger_entry_ts(e)
+            if ts is None:
+                continue
+            age = now - ts
+            if age >= span:
+                continue
+            out[buckets - 1 - int(max(age, 0) // width)] += dispatcher._ledger_entry_weight(e)
+    return out
+
+
 # GA-14: the unit `spawn_rate`/`spawn_budget` are now denominated in, surfaced
 # by `maestro doctor` (see report()) so a human reading a bare number knows
 # it's no longer a session count.
