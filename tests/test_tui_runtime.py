@@ -3750,7 +3750,7 @@ def test_select_kind_values_survive_null_sentinel_switch(seeded_home):
     asyncio.run(_inner())
     cfg = config_mod.load(str(seeded_home))
     assert cfg.scheduled[0]["kind"] == "research"
-=======
+
 # --- T-174: #pulse strip ---------------------------------------------------
 
 def _pulse_cfg(home, body="", spend_total=None):
@@ -3922,4 +3922,3 @@ def test_pulse_strip_does_not_collapse_filter_bar(seeded_home, no_probe):
             assert app._exception is None
 
     asyncio.run(_inner())
->>>>>>> b00227a (T-174: TUI pulse strip with spawn rate, spend and throttle state)
