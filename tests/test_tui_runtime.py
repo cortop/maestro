@@ -1588,7 +1588,10 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
             assert app._exception is None
 
             await pilot.press("P")  # toggle_pause -> pause (now unpaused)
-            await pilot.pause()
+            for _ in range(50):  # wait for the confirm modal before answering it
+                await pilot.pause(0.1)
+                if not isinstance(app.screen_stack[-1], FleetScreen):
+                    break
             await pilot.press("y")
             for _ in range(50):
                 await pilot.pause(0.1)
