@@ -12,11 +12,13 @@ from maestro import cli, dispatcher as disp, event_log, snapshot as snap_mod, st
 from maestro.statemachine import Phase
 
 
-def _write_config(home, *, capture_session_logs=None):
+def _write_config(home, *, capture_session_logs=None, reconcile_web_tools=None):
     lines = ["[maestro]", 'repo_path = "/repo/default"', 'branch_prefix = "maestro/"',
               "min_spawn_interval = 0"]
     if capture_session_logs is not None:
         lines.append(f"capture_session_logs = {'true' if capture_session_logs else 'false'}")
+    if reconcile_web_tools is not None:
+        lines.append(f"reconcile_web_tools = {'true' if reconcile_web_tools else 'false'}")
     (home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -39,7 +41,7 @@ def test_dispatch_constructs_session_manager_with_capture_session_logs_false(hom
         from maestro.sessions import DryRunSessions
         return DryRunSessions()
 
-    with patch("maestro.cli.ClaudeCliSessions", side_effect=spy):
+    with patch("maestro.sessions.ClaudeCliSessions", side_effect=spy):
         rc = cli.main(["--home", str(home), "dispatch"])
     assert rc == 0
     assert captured["capture_session_logs"] is False
@@ -55,7 +57,7 @@ def test_dispatch_constructs_session_manager_with_capture_session_logs_true_when
         from maestro.sessions import DryRunSessions
         return DryRunSessions()
 
-    with patch("maestro.cli.ClaudeCliSessions", side_effect=spy):
+    with patch("maestro.sessions.ClaudeCliSessions", side_effect=spy):
         rc = cli.main(["--home", str(home), "dispatch"])
     assert rc == 0
     assert captured["capture_session_logs"] is True
@@ -104,7 +106,7 @@ def test_nudge_and_dispatch_construct_session_manager_with_same_kwargs(home, mon
         from maestro.sessions import DryRunSessions
         return DryRunSessions()
 
-    with patch("maestro.cli.ClaudeCliSessions", side_effect=nudge_spy):
+    with patch("maestro.sessions.ClaudeCliSessions", side_effect=nudge_spy):
         rc = cli.main(["--home", str(home), "ans", "T-1", "yes"])
     assert rc == 0
     assert nudge_kwargs  # the nudge really constructed a session manager
@@ -116,10 +118,29 @@ def test_nudge_and_dispatch_construct_session_manager_with_same_kwargs(home, mon
         from maestro.sessions import DryRunSessions
         return DryRunSessions()
 
-    with patch("maestro.cli.ClaudeCliSessions", side_effect=dispatch_spy):
+    with patch("maestro.sessions.ClaudeCliSessions", side_effect=dispatch_spy):
         rc = cli.main(["--home", str(home), "dispatch"])
     assert rc == 0
     assert dispatch_kwargs
 
     assert set(nudge_kwargs.keys()) == set(dispatch_kwargs.keys())
     assert "capture_session_logs" in nudge_kwargs and "capture_session_logs" in dispatch_kwargs
+
+
+# --- T-153: build_routing_sessions is the only RoutingSessions constructor ----
+
+def test_build_routing_sessions_is_the_only_constructor(home):
+    from pathlib import Path
+
+    from maestro import config as config_mod, sessions as sessions_mod
+
+    _write_config(home, reconcile_web_tools=True)
+    cfg = config_mod.load(str(home))
+    routing = sessions_mod.build_routing_sessions(cfg)
+    assert routing.delegates["claude"].base_allowed_tools == ["WebSearch", "WebFetch"]
+    assert set(routing.delegates) == disp._REGISTERED_RUNNERS
+
+    root = Path(cli.__file__).parent
+    sources = [root / "cli.py", *(root / "tui").rglob("*.py")]
+    offenders = [str(p) for p in sources if "RoutingSessions(" in p.read_text(encoding="utf-8")]
+    assert offenders == []

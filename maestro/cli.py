@@ -19,8 +19,7 @@ from . import dispatcher as disp
 from .config import Config, DEFAULT_CONFIG_TOML, config_path, load, runner_path
 from .providers import ollama as ollama_mod
 from .providers import pi as pi_mod
-from .sessions import (ClaudeCliSessions, DryRunSessions, OpencodeCliSessions,
-                       PiCliSessions, RoutingSessions, list_sessions)
+from .sessions import DryRunSessions, build_routing_sessions, list_sessions
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
@@ -37,7 +36,7 @@ def _print(obj) -> None:
 
 
 # Verbs a spawned reconciler may invoke via the maestro CLI, rendered into
-# `Bash(maestro <verb>:*)` rules by `_reconciler_tool_grants` below.
+# `Bash(maestro <verb>:*)` rules by `sessions._reconciler_tool_grants`.
 #
 # MTO-5: sourced from `dispatcher.AGENT_TOOL_VERBS`, not defined locally here
 # -- so `health.check_reconciler_permissions` can read the exact same tuple
@@ -53,29 +52,6 @@ def _print(obj) -> None:
 # which walks build_parser() with that private API and fails if this list and
 # the "[agent]"-tagged verbs there ever drift apart.
 _AGENT_TOOL_VERBS = disp.AGENT_TOOL_VERBS
-
-
-def _reconciler_tool_grants(cfg: Config) -> list[str]:
-    """The process-wide, "always-on" --allowedTools rules for spawned reconcilers:
-    WebSearch/WebFetch when reconcile_web_tools is enabled, nothing else.
-
-    RB-16: the maestro CLI verb grant used to be baked in here too,
-    unconditionally and identically for every phase (_AGENT_TOOL_VERBS in
-    full) -- it no longer is. This function builds the `SessionManager`'s
-    `base_allowed_tools` exactly ONCE per sweep (`_nudge`/`cmd_dispatch`
-    below, before the per-key spawn loop even starts), so it structurally
-    cannot vary by phase; the verb grant needs to, so it moved to
-    `dispatcher.phase_verb_grant`/`phase_verb_denylist`, resolved per key
-    inside `dispatcher.dispatch()`'s own spawn loop instead (the same site
-    `phase_denylist`/`resolved_allowed_tools` already live at) and passed as
-    that call's `allowed_tools`/`disallowed_tools` args. `ClaudeCliSessions.
-    spawn` still merges this base with the per-key list into exactly ONE
-    --allowedTools flag, never two -- unchanged.
-    """
-    rules: list[str] = []
-    if cfg.reconcile_web_tools:
-        rules += ["WebSearch", "WebFetch"]
-    return rules
 
 
 def _nudge(cfg: Config) -> disp.DispatchReport:
@@ -103,33 +79,8 @@ def _nudge(cfg: Config) -> disp.DispatchReport:
     which fails loudly if a future param is added to one site and not the
     other.
     """
-    # RF-2: route through RoutingSessions -- the ClaudeCliSessions construction
-    # is unchanged in every kwarg. OC-4/PI-8: also wires the opencode and pi
-    # delegates (dispatcher._REGISTERED_RUNNERS admits all three names now) --
-    # every RoutingSessions construction site wires every registered
-    # non-claude backend, so adding a FOURTH means touching this dict too (see
-    # dispatcher._REGISTERED_RUNNERS's own docstring).
-    sessions = RoutingSessions({
-        "claude": ClaudeCliSessions(
-            cfg.home, model=cfg.reconcile_model,
-            permission_mode=cfg.permission_mode,
-            base_allowed_tools=_reconciler_tool_grants(cfg),
-            capture_session_logs=cfg.capture_session_logs,
-            session_log_format=cfg.session_log_format,
-            max_session_turns=cfg.max_session_turns,
-            unverified_claim_max_age=cfg.unverified_claim_max_age,
-        ),
-        "opencode": OpencodeCliSessions(
-            cfg.home,
-            capture_session_logs=cfg.capture_session_logs,
-            unverified_claim_max_age=cfg.unverified_claim_max_age,
-        ),
-        "pi": PiCliSessions(
-            cfg.home,
-            capture_session_logs=cfg.capture_session_logs,
-            unverified_claim_max_age=cfg.unverified_claim_max_age,
-        ),
-    }, home=cfg.home)
+    # Every registered backend is wired by the one factory (RF-2/OC-4/PI-8).
+    sessions = build_routing_sessions(cfg)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch())
     if report.repo_blockers:
         if cfg.repos:
@@ -630,27 +581,7 @@ def cmd_trigger_post_qa(args) -> int:
     # RF-2/OC-4/PI-8: same RoutingSessions wiring as _nudge/cmd_dispatch above --
     # every registered non-claude backend, so a manual trigger can route to
     # whatever runner `post_qa_skill_runner` names.
-    sessions = RoutingSessions({
-        "claude": ClaudeCliSessions(
-            cfg.home, model=cfg.reconcile_model,
-            permission_mode=cfg.permission_mode,
-            base_allowed_tools=_reconciler_tool_grants(cfg),
-            capture_session_logs=cfg.capture_session_logs,
-            session_log_format=cfg.session_log_format,
-            max_session_turns=cfg.max_session_turns,
-            unverified_claim_max_age=cfg.unverified_claim_max_age,
-        ),
-        "opencode": OpencodeCliSessions(
-            cfg.home,
-            capture_session_logs=cfg.capture_session_logs,
-            unverified_claim_max_age=cfg.unverified_claim_max_age,
-        ),
-        "pi": PiCliSessions(
-            cfg.home,
-            capture_session_logs=cfg.capture_session_logs,
-            unverified_claim_max_age=cfg.unverified_claim_max_age,
-        ),
-    }, home=cfg.home)
+    sessions = build_routing_sessions(cfg)
     try:
         result = disp.trigger_post_qa_skill(cfg, sessions, args.key, pr_number=args.pr)
     except store.MaestroError as e:
@@ -681,24 +612,7 @@ def cmd_dispatch(args) -> int:
         sessions = DryRunSessions()
     else:
         # RF-2/OC-4/PI-8: same wrap as _nudge above -- every registered backend wired.
-        sessions = RoutingSessions({
-            "claude": ClaudeCliSessions(
-                cfg.home, model=args.model or cfg.reconcile_model,
-                permission_mode=cfg.permission_mode,
-                base_allowed_tools=_reconciler_tool_grants(cfg),
-                capture_session_logs=cfg.capture_session_logs,
-                session_log_format=cfg.session_log_format,
-                max_session_turns=cfg.max_session_turns,
-                unverified_claim_max_age=cfg.unverified_claim_max_age),
-            "opencode": OpencodeCliSessions(
-                cfg.home,
-                capture_session_logs=cfg.capture_session_logs,
-                unverified_claim_max_age=cfg.unverified_claim_max_age),
-            "pi": PiCliSessions(
-                cfg.home,
-                capture_session_logs=cfg.capture_session_logs,
-                unverified_claim_max_age=cfg.unverified_claim_max_age),
-        }, home=cfg.home)
+        sessions = build_routing_sessions(cfg, model=args.model or cfg.reconcile_model)
     report = disp.dispatch(cfg, sessions, now=store.now_epoch(), dry_run=args.dry_run,
                             key_filter=key_filter)
     projection.write(cfg.home)

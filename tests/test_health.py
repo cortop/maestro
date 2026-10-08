@@ -923,7 +923,7 @@ def test_reconciler_permissions_registered_and_never_blocks_a_spawn(home, tmp_pa
 def test_reconciler_permissions_missing_patterns_match_shared_constant(home, tmp_path, monkeypatch):
     """AC3 + AC6: a repo granted only Bash(maestro:*) is reported not-ok with
     git/gh/the test runner named as missing, verbatim against the shared
-    constant both this check and the spawn-time grant (cli._reconciler_tool_grants)
+    constant both this check and the spawn-time grant (sessions._reconciler_tool_grants)
     read."""
     monkeypatch.setenv("MAESTRO_USER_SETTINGS_PATH", str(tmp_path / "no-user-settings.json"))
     repo = tmp_path / "repo"
