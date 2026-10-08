@@ -3649,3 +3649,52 @@ def test_deps_column_counts_and_colors_blocking_deps(home):
             assert app._exception is None
 
     asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# T-152: Spec view Dependencies strip                                         #
+# --------------------------------------------------------------------------- #
+
+def _spec_screen_deps_text(home, key):
+    """Open the real SpecScreen via `s` on the main table; return (strip text, shown, exc)."""
+    from maestro.tui.screens import SpecScreen
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = key
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], SpecScreen)
+            await pilot.press("r")
+            await pilot.pause()
+            w = app.screen_stack[-1].query_one("#spec-deps")
+            return str(w.render()), w.display, app._exception
+
+    return asyncio.run(_inner())
+
+
+def test_spec_screen_dependencies_strip_shows_status_and_phase(home):
+    seed_ticket(home, "D-1", "finished", phase="done")
+    seed_ticket(home, "D-2", "waiting", phase="ready")
+    seed_ticket(home, "D-3", "busy", phase="implementing")
+    seed_ticket(home, "D-0", "child")
+    spec = store.spec_path(home, "D-0")
+    spec.write_text("# D-0\npriority: 2\ndependsOn: [D-1, D-2, D-3, D-9]\n\n"
+                    "## Acceptance criteria\n- [ ] ok\n")
+    before = spec.read_bytes()
+    text, shown, exc = _spec_screen_deps_text(home, "D-0")
+    assert exc is None
+    assert shown
+    positions = [text.index(s) for s in
+                 ("✅ D-1 #done", "💤 D-2 #ready", "⏳ D-3 #implementing", "❓ D-9 #missing")]
+    assert positions == sorted(positions)
+    assert spec.read_bytes() == before
+
+
+def test_spec_screen_dependencies_strip_hidden_without_depends_on(home):
+    seed_ticket(home, "D-5", "loner")
+    _, shown, exc = _spec_screen_deps_text(home, "D-5")
+    assert exc is None
+    assert not shown

@@ -526,6 +526,8 @@ class SpecScreen(Screen):
 
     CSS = """
     SpecScreen #spec-body   { height: 1fr; }
+    SpecScreen #spec-deps   { height: auto; max-height: 4;
+                               border-top: solid $primary; padding: 0 1; }
     SpecScreen #spec-pending { height: auto; max-height: 8;
                                border-top: solid $primary; padding: 0 1; }
     """
@@ -539,6 +541,7 @@ class SpecScreen(Screen):
         yield Header()
         with VerticalScroll(id="spec-body"):
             yield Markdown("", id="spec-md")
+        yield Static("", id="spec-deps", markup=False)
         yield Static("", id="spec-pending", markup=True)
         yield Footer()
 
@@ -551,6 +554,11 @@ class SpecScreen(Screen):
         spec_text = spec_path.read_text() if spec_path.exists() else "(no spec)"
         pending_cmds = inbox.pending(self._home, self._key)
         self.query_one("#spec-md", Markdown).update(spec_text)
+        deps = depgraph.dep_status(self._home, self._key)
+        deps_w = self.query_one("#spec-deps", Static)
+        deps_w.display = bool(deps)
+        deps_w.update("Dependencies  " + " · ".join(
+            f"{emoji} {dep} #{phase}" for dep, emoji, phase in deps))
         pending_markup = _render_pending(pending_cmds)
         self.query_one("#spec-pending", Static).update(
             f"[bold]Pending inbox[/bold]  {pending_markup}"
