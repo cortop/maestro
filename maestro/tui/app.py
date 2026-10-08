@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical
@@ -35,6 +35,7 @@ from .screens import (
     FleetScreen,
     InboxScreen,
     LogsScreen,
+    ProposalScreen,
     ScheduleScreen,
     SpecScreen,
     edit_in_editor,
@@ -130,12 +131,29 @@ class MaestroTUI(App):
         Binding("Q", "trigger_post_qa", "Post-QA", show=False),
         Binding(">", "cycle_sort", "Sort column", show=False),
         Binding("<", "flip_sort", "Sort direction", show=False),
+        Binding("question_mark", "show_help_panel", "Help", show=False),
         Binding("N", "toggle_nudge", "Nudge on/off", show=False),
     ]
+
+    # Actions that act on one ticket: hidden on screens that aren't about a ticket.
+    _TICKET_ACTIONS = frozenset({
+        "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
+        "add_ac", "suggest_acs", "trigger_post_qa", "compact", "release", "focus_detail",
+        "view_events", "inbox_message", "view_logs", "view_inbox",
+    })
+    # Board-only actions: meaningless once any other screen is pushed.
+    _BOARD_ACTIONS = frozenset({
+        "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
+    })
+    _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen)
+    _KEYED_SCREENS = (DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
+                      ProposalScreen)
 
     _selected_key: str | None = None
     _tail_mode: bool = True  # default: show tail in the sidebar panel
     _tickets_fr: float = 2.0  # #tickets fr share vs #right's fixed 1fr
+
+    HELP = "Board: arrows move, enter opens a ticket, f cycles the filter, ? lists every key."
 
     def __init__(self, home: str, sessions_factory: Callable[[Config], object] | None = None) -> None:
         super().__init__()
@@ -163,6 +181,62 @@ class MaestroTUI(App):
         # T-174: whether the last pulse tick saw "runaway" -- the toast fires
         # only on the False -> True edge.
         self._pulse_runaway: bool = False
+        # key -> (phase, open-question count), refreshed by `_populate`; read by
+        # `check_action`, which runs on every footer refresh and must not load snapshots.
+        self._snap_cache: dict[str, tuple[str, int]] = {}
+
+    def _target_key(self) -> str | None:
+        """The ticket the operator is looking at: the pushed screen's own ticket, else the board cursor."""
+        try:
+            screen = self.screen
+        except ScreenStackError:  # unmounted app (tests call actions directly)
+            return self._selected_key
+        if isinstance(screen, self._KEYED_SCREENS):
+            return screen._key
+        if isinstance(screen, DepsScreen):
+            try:
+                return screen._current_key()
+            except NoMatches:
+                return None
+        return self._selected_key
+
+    def _on_board(self) -> bool:
+        return len(self.screen_stack) <= 1
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        try:
+            screen = self.screen
+        except ScreenStackError:
+            return True
+        if action in self._TICKET_ACTIONS and isinstance(screen, self._NON_TICKET_SCREENS):
+            return False
+        if action in self._BOARD_ACTIONS and not self._on_board():
+            return False
+        if action in ("retry", "discard"):
+            cached = self._snap_cache.get(self._target_key() or "")
+            if cached is not None and cached[0] != Phase.DEGRADED.value:
+                return None
+        elif action == "answer":
+            cached = self._snap_cache.get(self._target_key() or "")
+            if cached is not None and not cached[1]:
+                return None
+        return True
+
+    def _refresh_bindings(self) -> None:
+        try:
+            self.screen.refresh_bindings()
+        except ScreenStackError:
+            pass
+
+    def push_screen(self, *args, **kwargs):
+        result = super().push_screen(*args, **kwargs)
+        self.call_after_refresh(self._refresh_bindings)
+        return result
+
+    def pop_screen(self):
+        result = super().pop_screen()
+        self.call_after_refresh(self._refresh_bindings)
+        return result
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -354,6 +428,7 @@ class MaestroTUI(App):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
         self._selected_key = key
+        self._refresh_bindings()
         detail = self.query_one("#detail", Static)
         if key is None:
             detail.update("[dim]Select a ticket[/dim]")
@@ -439,7 +514,7 @@ class MaestroTUI(App):
         return sorted(visible, key=keyfn, reverse=self._sort_desc)
 
     def action_cmd(self) -> None:
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -479,13 +554,13 @@ class MaestroTUI(App):
         self._send_degraded_cmd("discard")
 
     def _send_degraded_cmd(self, command: str) -> None:
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
         snap = snap_mod.load(self._home, key)
         if snap.phase != Phase.DEGRADED.value:
-            self.notify(f"'{command}' only applies to degraded tickets", severity="warning")
+            self.notify(f"{key}: '{command}' only applies to degraded tickets", severity="warning")
             return
 
         def _queue() -> None:
@@ -513,16 +588,17 @@ class MaestroTUI(App):
         self.push_screen(FleetScreen(self._home))
 
     def action_deps_panel(self) -> None:
-        self.push_screen(DepsScreen(self._home, self._selected_key))
+        self.push_screen(DepsScreen(self._home, self._target_key()))
 
     def action_show_spec(self) -> None:
-        if self._selected_key is None:
+        key = self._target_key()
+        if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
-        self.push_screen(SpecScreen(self._home, self._selected_key))
+        self.push_screen(SpecScreen(self._home, key))
 
     def action_edit_spec(self) -> None:
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -530,14 +606,15 @@ class MaestroTUI(App):
         if warning:
             self.notify(warning, severity="warning")
             return
-        self._show_detail(key)
+        if key == self._selected_key and self._on_board():
+            self._show_detail(key)
 
     def action_runner(self) -> None:
         """UX-2: open the runner modal for the selected ticket. All state
         mutation goes through UX-1's `ops.set_runner` in `_on_dismiss` -- the
         TUI never hand-edits the spec file. The `key is None` guard is required
         by the binding sweep, which presses every key with no ticket selected."""
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -565,7 +642,7 @@ class MaestroTUI(App):
         mutation goes through `ops.add_ac` in `_on_dismiss` -- the TUI never
         hand-edits the spec file. The `key is None` guard is required by the
         binding sweep, which presses every key with no ticket selected."""
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -599,7 +676,7 @@ class MaestroTUI(App):
         own exception handler too (AC3 says a failed invocation must not
         crash the app -- this is the actual guard for that, not just the
         `on_worker_state_changed` notify below)."""
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -646,7 +723,7 @@ class MaestroTUI(App):
         selected. Same `sessions.build_routing_sessions` factory as `cli.cmd_dispatch`/
         `cli._nudge` -- every registered non-claude backend wired, so a
         manual fire can route to whatever `post_qa_skill_runner` names."""
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -713,12 +790,13 @@ class MaestroTUI(App):
         self.push_screen(_ImportLinearModal(), _on_dismiss)
 
     def action_answer(self) -> None:
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
+            self.notify("Select a ticket first", severity="warning")
             return
         snap = snap_mod.load(self._home, key)
         if not snap.open_questions:
-            self.notify("No open questions for this ticket", severity="warning")
+            self.notify(f"No open questions for {key}", severity="warning")
             return
         # `open_questions` round-trips through a sort_keys=True JSON snapshot, so
         # the dict comes back qid-alphabetical, not round order -- walk it in the
@@ -738,11 +816,8 @@ class MaestroTUI(App):
         if idx >= len(questions):
             if answered:
                 self.notify(f"{answered} answer(s) queued for {key}")
-                snap = snap_mod.load(self._home, key)
-                runner, runner_model = spec_runner(self._home, key)
-                self.query_one("#detail", Static).update(
-                    _render_detail(snap, snap_mod.display_title(self._home, snap),
-                                   runner, runner_model))
+                if key == self._selected_key and self._on_board():
+                    self._show_detail(key)
                 self._nudge(key)  # once, however the walk ended
             return
         qid, text = questions[idx]
@@ -793,7 +868,7 @@ class MaestroTUI(App):
         )
 
     def action_compact(self) -> None:
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -809,7 +884,7 @@ class MaestroTUI(App):
         )
 
     def action_release(self) -> None:
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -874,15 +949,21 @@ class MaestroTUI(App):
         self.query_one("#tickets", DataTable).styles.width = f"{self._tickets_fr}fr"
 
     def action_focus_detail(self) -> None:
-        if self._selected_key:
-            self.push_screen(DetailScreen(self._home, self._selected_key))
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(DetailScreen(self._home, key))
 
     def action_view_events(self) -> None:
-        if self._selected_key:
-            self.push_screen(EventsScreen(self._home, self._selected_key))
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(EventsScreen(self._home, key))
 
     def action_inbox_message(self) -> None:
-        key = self._selected_key
+        key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
@@ -897,14 +978,18 @@ class MaestroTUI(App):
         self.push_screen(_InboxModal(key), _on_dismiss)
 
     def action_view_logs(self) -> None:
-        if self._selected_key:
-            self.push_screen(LogsScreen(self._home, self._selected_key))
-
-    def action_view_inbox(self) -> None:
-        if self._selected_key is None:
+        key = self._target_key()
+        if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
-        self.push_screen(InboxScreen(self._home, self._selected_key))
+        self.push_screen(LogsScreen(self._home, key))
+
+    def action_view_inbox(self) -> None:
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(InboxScreen(self._home, key))
 
     def _populate(self) -> None:
         _name, predicate = _FILTERS[self._filter_idx]
@@ -924,6 +1009,7 @@ class MaestroTUI(App):
                 if phase in _NEEDS_YOU_PHASE_VALUES and prev_phase != phase:
                     self.notify(f"{key}: {phase}", severity="warning", timeout=6)
         self._prev_phases = new_phases
+        self._snap_cache = {k: (sn.phase, len(sn.open_questions)) for k, sn in snaps_by_key.items()}
 
         # Build filter bar: show counts per filter, bold the active one
         parts = []
@@ -972,6 +1058,10 @@ class MaestroTUI(App):
             table.add_row(*styled, self._deps_cell(graph, row_key, palette), idle, key=row_key)
             row_keys.append(row_key)
         if not row_keys:
+            self._selected_key = None
+            self.query_one("#detail", Static).update("[dim]No tickets match[/dim]")
+            self.query_one("#events", RichLog).clear()
+            self._refresh_bindings()
             return
         if prev_key and prev_key in row_keys:
             table.move_cursor(row=row_keys.index(prev_key))
@@ -979,6 +1069,7 @@ class MaestroTUI(App):
             table.move_cursor(row=min(prev_row, len(row_keys) - 1))
         if self._selected_key:
             self._refresh_events()
+        self._refresh_bindings()
 
     @staticmethod
     def _deps_cell(graph, key: str, palette: dict) -> Text | str:
