@@ -3698,3 +3698,55 @@ def test_spec_screen_dependencies_strip_hidden_without_depends_on(home):
     _, shown, exc = _spec_screen_deps_text(home, "D-5")
     assert exc is None
     assert not shown
+
+
+def test_no_select_blank_sentinel_in_tui():
+    """Textual 8: Select.BLANK is Widget.BLANK (False), not the no-selection sentinel."""
+    from pathlib import Path
+
+    import maestro
+
+    offenders = [str(p) for p in Path(maestro.__file__).parent.rglob("*.py")
+                 if "Select.BLANK" in p.read_text()]
+    assert offenders == []
+
+
+def test_select_kind_values_survive_null_sentinel_switch(seeded_home):
+    async def _inner():
+        import json
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            modal.query_one("#create-title", Input).value = "Default kind"
+            modal.query_one("#create-prefix", Select).value = "T"
+            await pilot.pause()
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert app._exception is None
+            assert len(app.screen_stack) == 1
+
+            await app.run_action("schedule_panel")
+            await pilot.pause()
+            await app.screen_stack[-1].run_action("add_task")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ScheduleModal)
+            modal.query_one("#sched-name", Input).value = "kind-task"
+            modal.query_one("#sched-prompt", TextArea).text = "Do it"
+            modal.query_one("#sched-every", Input).value = "6h"
+            modal.query_one("#sched-kind", Select).value = "research"
+            await modal.run_action("submit")
+            await pilot.pause()
+            assert app._exception is None
+
+        lines = store.new_inbox_path(seeded_home).read_text().splitlines()
+        last = [json.loads(line) for line in lines if line.strip()][-1]
+        assert last["title"] == "Default kind"
+        assert last["args"]["kind"] == "implementation"
+
+    asyncio.run(_inner())
+    cfg = config_mod.load(str(seeded_home))
+    assert cfg.scheduled[0]["kind"] == "research"

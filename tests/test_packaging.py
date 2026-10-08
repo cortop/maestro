@@ -81,3 +81,10 @@ def test_wheel_install_smoke(built_wheel, tmp_path):
         env={"HOME": str(tmp_path)},
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_tui_extra_pins_textual_8():
+    import tomllib
+
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    assert "textual>=8.0" in data["project"]["optional-dependencies"]["tui"]

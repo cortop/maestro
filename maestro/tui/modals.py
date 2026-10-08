@@ -493,7 +493,7 @@ class _CreateModal(ModalScreen):
             return
         select = self.query_one("#create-prefix", Select)
         selected = select.value
-        if selected is Select.BLANK:
+        if selected is Select.NULL:
             self.notify("Select a prefix", severity="warning")
             return
         if selected == self._NEW_PREFIX:
@@ -512,7 +512,7 @@ class _CreateModal(ModalScreen):
             self.notify("Priority must be an integer", severity="warning")
             return
         kind_sel = self.query_one("#create-kind", Select)
-        kind_val = str(kind_sel.value) if kind_sel.value is not Select.BLANK else "implementation"
+        kind_val = str(kind_sel.value) if kind_sel.value is not Select.NULL else "implementation"
         model_val = self.query_one("#create-model", Input).value.strip() or None
         effort_val = self.query_one("#create-effort", Input).value.strip() or None
         self.dismiss({
@@ -689,7 +689,7 @@ class _ScheduleModal(ModalScreen):
             self.notify("Priority must be an integer", severity="warning")
             return
         kind_sel = self.query_one("#sched-kind", Select)
-        kind = str(kind_sel.value) if kind_sel.value is not Select.BLANK else "implementation"
+        kind = str(kind_sel.value) if kind_sel.value is not Select.NULL else "implementation"
         prefix = self.query_one("#sched-prefix", Input).value.strip() or None
         enabled_sel = self.query_one("#sched-enabled", Select)
         enabled = str(enabled_sel.value) == "true"

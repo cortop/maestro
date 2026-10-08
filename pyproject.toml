@@ -13,7 +13,7 @@ dependencies = []  # stdlib-only core (tomllib, fcntl, dataclasses, argparse)
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-xdist>=3", "hypothesis>=6", "ruff>=0.6"]
-tui = ["textual>=0.50"]
+tui = ["textual>=8.0"]
 
 [project.scripts]
 maestro = "maestro.cli:main"
