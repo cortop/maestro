@@ -60,6 +60,10 @@ _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
 ]
 
 
+# ANSWER_COMMANDS minus the ticket-level discard/retry (T-157).
+_PER_QUESTION_COMMANDS = frozenset(ops_mod.ANSWER_COMMANDS) - {"discard", "retry"}
+
+
 class MaestroTUI(App):
     CSS = """
     Screen { layers: base topbar; }
@@ -326,6 +330,15 @@ class MaestroTUI(App):
                 return
             command, args_text = result
             args = {"text": args_text} if args_text else {}
+            # No qid is carried, so fold_inbox would answer EVERY open question.
+            n_open = len(snap_mod.load(self._home, key).open_questions)
+            if command in _PER_QUESTION_COMMANDS and n_open > 1:
+                self.notify(
+                    f"{key} has {n_open} open questions — '{command}' would answer all of "
+                    "them; use `a` to answer one at a time",
+                    severity="warning",
+                )
+                return
 
             def _queue() -> None:
                 inbox.append_command(self._home, key, command, args)
