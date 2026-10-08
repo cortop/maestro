@@ -46,6 +46,20 @@ def _fmt_age(age_s: int | None) -> str:
     return f"{age_s // 3600}h ago"
 
 
+def _fmt_duration(secs: float | None) -> str:
+    """Compact elapsed time (`45s`, `12m`, `3h`, `2d`); `—` when unknown."""
+    if secs is None:
+        return "—"
+    s = int(secs)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
 def _fmt_epoch(ts: float | None) -> str:
     if ts is None:
         return "—"

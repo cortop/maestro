@@ -39,6 +39,7 @@ from .screens import (
     InboxScreen,
     LogsScreen,
     ProposalScreen,
+    ReviewScreen,
     ScheduleScreen,
     SpecScreen,
     AcScreen,
@@ -72,6 +73,7 @@ _NUMERIC_SORT = frozenset({"Fails", "Deps", "PR", "Idle"})
 _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
     ("needs-you", _needs_you_predicate),
     ("active", phase_predicate(ACTIVE_PHASES)),
+    ("review", phase_predicate(frozenset({Phase.AWAITING_CI, Phase.IN_REVIEW}))),
     ("held", lambda home, s: fleet_mod.hold_state(home, s.key, store.now_epoch()) is not None),
     ("running", _running_placeholder),
     ("all", None),
@@ -195,6 +197,7 @@ class MaestroTUI(App):
         Binding("enter", "focus_detail", "Detail"),
         Binding("i", "inbox_message", "Inbox"),
         Binding("W", "decisions", "Decisions"),
+        Binding("R", "review_panel", "Review"),
         Binding("[", "narrow_detail", "Detail-", show=False),
         Binding("]", "widen_detail", "Detail+", show=False),
         # Less-used actions: keys work but hidden from footer to reduce clutter
@@ -240,7 +243,7 @@ class MaestroTUI(App):
     })
     _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
-                      ProposalScreen)
+                      ProposalScreen, ReviewScreen)
 
     _selected_key: str | None = None
     _tail_mode: bool = True  # default: show tail in the sidebar panel
@@ -314,6 +317,8 @@ class MaestroTUI(App):
         if action in self._TICKET_ACTIONS and isinstance(screen, self._NON_TICKET_SCREENS):
             return False
         if action in self._BOARD_ACTIONS and not self._on_board():
+            return False
+        if action == "review_panel" and isinstance(screen, ReviewScreen):
             return False
         if action in ("retry", "discard"):
             cached = self._snap_cache.get(self._target_key() or "")
@@ -814,6 +819,9 @@ class MaestroTUI(App):
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_review_panel(self) -> None:
+        self.push_screen(ReviewScreen(self._home))
 
     def action_activity_panel(self) -> None:
         self.push_screen(ActivityScreen(self._home))

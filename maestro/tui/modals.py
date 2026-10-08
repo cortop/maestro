@@ -527,6 +527,40 @@ class _CreateModal(ModalScreen):
         })
 
 
+class _TextViewModal(ModalScreen):
+    """Read-only scrollable text viewer (review threads, CI timeline, diff); escape closes.
+    Plain text, never markup, so a diff or a log excerpt can't be misparsed."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    DEFAULT_CSS = """
+    _TextViewModal {
+        align: center middle;
+    }
+    #textview-dialog {
+        width: 90%;
+        height: 85%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    """
+
+    def __init__(self, title: str, text: str) -> None:
+        super().__init__()
+        self._title = title
+        self.text = text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="textview-dialog"):
+            yield Label(f"[bold]{self._title}[/bold]  [dim](escape closes)[/dim]")
+            with VerticalScroll():
+                yield Static(self.text, id="textview-body", markup=False)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class _InboxModal(ModalScreen):
     """Free-form inbox message compose modal; dismisses with the message string or None on cancel."""
 
