@@ -22,9 +22,9 @@ from .. import burn, claims, config as config_mod, depgraph, event_log, fleet as
 from ..dispatcher import list_keys, schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
-from .events import (CATEGORY_NAMES, EventTail, category_of, event_summary,
-                     render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line)
-from .modals import (_AcEvidenceModal, _AddAcModal, _ConfirmModal, _InboxModal, _IntervalModal,
+from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, phase_dwell,
+                     render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
+from .modals import (_AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _InboxModal, _IntervalModal,
                      _ScheduleModal, _TextViewModal)
 from .. import repos as repos_mod
 from .render import _fmt_duration, _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
@@ -61,10 +61,51 @@ def edit_in_editor(app, path: Path, line: int | None = None) -> str | None:
     return None
 
 
-class EventsScreen(Screen):
-    """Full-screen scrollable event timeline for one ticket."""
+_EVENT_COLUMNS = ("seq", "ts", "type", "actor", "summary")
 
-    HELP = 'Event timeline for one ticket. t toggles tail/full, escape goes back.'
+
+def _sig(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+def _fill_event_table(table: DataTable, events: list[dict]) -> None:
+    """Rewrite *table* from *events*, keeping the cursor on the same seq and the scroll offset."""
+    prev_seq = None
+    if table.row_count:
+        try:
+            prev_seq = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        except Exception:
+            prev_seq = None
+    scroll_y = table.scroll_y
+    table.clear()
+    for ev in events:
+        table.add_row(*event_row(ev), key=str(ev["seq"]))
+    if prev_seq is not None:
+        try:
+            table.move_cursor(row=table.get_row_index(prev_seq), scroll=False)
+        except Exception:
+            pass
+    table.scroll_to(y=scroll_y, animate=False, immediate=True)
+
+
+def _event_at_cursor(table: DataTable, events: list[dict]) -> dict | None:
+    if not table.row_count:
+        return None
+    try:
+        seq = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+    except Exception:
+        return None
+    return next((e for e in events if str(e["seq"]) == seq), None)
+
+
+class EventsScreen(Screen):
+    """Full-screen event timeline table for one ticket; Enter opens an event's full JSON."""
+
+    HELP = 'Event timeline for one ticket. t toggles tail/full, enter opens the full event, escape goes back.'
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
@@ -76,26 +117,35 @@ class EventsScreen(Screen):
         self._home = home
         self._key = key
         self._tail_mode = False
+        self._shown: list[dict] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield RichLog(id="events-full", highlight=True, markup=True)
+        yield DataTable(id="events-full", cursor_type="row")
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = f"Events: {self._key}"
+        self.query_one("#events-full", DataTable).add_columns(*_EVENT_COLUMNS)
         self._refresh()
 
     def action_toggle_tail(self) -> None:
         self._tail_mode = not self._tail_mode
         self._refresh()
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        ev = _event_at_cursor(self.query_one("#events-full", DataTable), self._shown)
+        if ev is not None:
+            self.app.push_screen(_EventPayloadModal(ev))
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        event.stop()
+
     def _refresh(self) -> None:
-        log = self.query_one("#events-full", RichLog)
         events = event_log.read(self._home, self._key)
-        log.clear()
-        for line in render_log(events, tail=self._tail_mode):
-            log.write(line)
+        self._shown = events[-_TAIL_N:] if self._tail_mode else events
+        _fill_event_table(self.query_one("#events-full", DataTable), self._shown)
 
 
 class InboxScreen(Screen):
@@ -833,18 +883,23 @@ class ProposalScreen(Screen):
 class DetailScreen(Screen):
     """Full-screen right panel: ticket detail summary + event log."""
 
-    HELP = 'Ticket detail and events. t toggles tail/full, p opens the proposal, r refreshes; a, i, c, z act on this ticket.'
+    HELP = ('Ticket detail and events (refreshes itself). t toggles tail/full, enter opens the full event, '
+            'v the full timeline, p opens the proposal, r refreshes; a, i, c, z act on this ticket.')
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("t", "toggle_tail", "Tail/Full"),
         ("r", "refresh", "Refresh"),
         ("p", "view_proposal", "Proposal"),
+        ("v", "view_events", "Timeline"),
     ]
+
+    REFRESH_INTERVAL = 3.0
 
     CSS = """
     DetailScreen #ds-detail { height: auto; max-height: 14; padding: 0 1;
                                border-bottom: solid $primary; }
+    DetailScreen #ds-dwell { height: 1; padding: 0 1; }
     DetailScreen #ds-events { height: 1fr; }
     """
 
@@ -853,16 +908,43 @@ class DetailScreen(Screen):
         self._home = home
         self._key = key
         self._tail_mode = True
+        self._shown: list[dict] = []
+        self._signature: tuple | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("", id="ds-detail", markup=True)
-        yield RichLog(id="ds-events", highlight=True, markup=True)
+        yield Static("", id="ds-dwell", markup=False)
+        yield DataTable(id="ds-events", cursor_type="row")
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = self._key
+        self.query_one("#ds-events", DataTable).add_columns(*_EVENT_COLUMNS)
         self._refresh()
+        self.set_interval(self.REFRESH_INTERVAL, self._tick)
+
+    def _log_signature(self) -> tuple:
+        return (_sig(store.events_path(self._home, self._key)),
+                _sig(store.events_archive_path(self._home, self._key)),
+                _sig(store.snapshot_path(self._home, self._key)))
+
+    def _tick(self) -> None:
+        """Timer callback: re-render only when the log or snapshot files changed."""
+        if self._log_signature() != self._signature:
+            self._refresh()
+
+    def action_view_events(self) -> None:
+        self.app.push_screen(EventsScreen(self._home, self._key))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        ev = _event_at_cursor(self.query_one("#ds-events", DataTable), self._shown)
+        if ev is not None:
+            self.app.push_screen(_EventPayloadModal(ev))
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        event.stop()
 
     def action_toggle_tail(self) -> None:
         self._tail_mode = not self._tail_mode
@@ -879,16 +961,18 @@ class DetailScreen(Screen):
         self.app.push_screen(ProposalScreen(self._home, self._key))
 
     def _refresh(self) -> None:
+        self._signature = self._log_signature()
         snap = snap_mod.load(self._home, self._key)
         runner, runner_model = spec_runner(self._home, self._key)
         self.query_one("#ds-detail", Static).update(
             _render_detail(snap, snap_mod.display_title(self._home, snap),
                            runner, runner_model))
         events = event_log.read(self._home, self._key)
-        log = self.query_one("#ds-events", RichLog)
-        log.clear()
-        for line in render_log(events, tail=self._tail_mode):
-            log.write(line)
+        width = max(20, self.size.width - 2)
+        self.query_one("#ds-dwell", Static).update(
+            render_dwell(phase_dwell(events, time.time()), width))
+        self._shown = events[-_TAIL_N:] if self._tail_mode else events
+        _fill_event_table(self.query_one("#ds-events", DataTable), self._shown)
 
 
 class EnvScreen(Screen):
