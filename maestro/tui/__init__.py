@@ -9,6 +9,9 @@ change without breaking importers.
 from .app import MaestroTUI, main, _FILTERS, _NEEDS_YOU_PHASES
 from .modals import (
     _ACCEPT_ALL,
+    _ActionMenu,
+    MenuRow,
+    menu_actions,
     _AcEvidenceModal,
     _AddAcModal,
     _AnswerModal,
@@ -51,6 +54,9 @@ from .screens import (
 )
 
 __all__ = [
+    "MenuRow",
+    "_ActionMenu",
+    "menu_actions",
     "AcScreen",
     "MaestroTUI",
     "main",

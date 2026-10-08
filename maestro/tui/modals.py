@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, OptionList, Select, Static, TextArea
+from textual.widgets.option_list import Option
 
 from .. import schedule, store
 from ..providers import ollama as ollama_mod
@@ -77,8 +79,10 @@ class _AnswerModal(ModalScreen):
     """
 
     def __init__(self, key: str, qid: str, position: int | None, total: int | None,
-                 question_text: str, recommend: str | None, remaining: int, home: Path) -> None:
+                 question_text: str, recommend: str | None, remaining: int, home: Path,
+                 initial: str = "") -> None:
         super().__init__()
+        self._initial = initial
         self._key = key
         self._qid = qid
         self._position = position
@@ -112,7 +116,7 @@ class _AnswerModal(ModalScreen):
                     "[dim]Ctrl+R accept this recommendation · "
                     "Ctrl+G accept all remaining recommendations[/dim]"
                 )
-            yield TextArea(id="answer-input")
+            yield TextArea(self._initial, id="answer-input")
             with Horizontal(id="answer-buttons"):
                 yield Button("Submit", id="answer-submit-button", variant="primary")
             yield Label("[dim]Enter → newline · Ctrl+S or button → submit · Esc → cancel[/dim]")
@@ -166,6 +170,114 @@ _DEFAULT_COMMANDS: list[tuple[str, str]] = [
 def _commands_for(phase: str) -> list[tuple[str, str]]:
     """The reference list `_CmdModal` shows for *phase*."""
     return _PHASE_COMMANDS.get(phase, _DEFAULT_COMMANDS)
+
+
+class MenuRow(NamedTuple):
+    """One row of the `m` action menu: what to show, which key it mirrors, the App
+    action it runs, and (when not enabled) why it doesn't apply."""
+    label: str
+    hotkey: str
+    action: str
+    enabled: bool
+    reason: str
+
+
+# Pseudo-action for the proposal row: not an App action (DetailScreen's `p` is
+# screen-local), so the app pushes ProposalScreen itself.
+MENU_PROPOSAL = "menu_proposal"
+
+
+def menu_actions(phase: str, *, open_questions: int, has_pr: bool, claim: bool,
+                 has_acs: bool, has_proposal: bool, runner_editable: bool,
+                 extras: tuple[tuple[str, str, str], ...] = ()) -> list[MenuRow]:
+    """The `m` menu for a ticket: every human action, enabled or dimmed with a reason.
+
+    Pure. Rows only name existing App actions (plus `MENU_PROPOSAL`), so the menu adds
+    no write path of its own. *extras* are (label, hotkey, action) rows for actions
+    other tickets add; the caller passes only those present on the App."""
+    degraded = phase == Phase.DEGRADED.value
+    no_q = "" if open_questions else "no open questions"
+    only_degraded = "" if degraded else "only for degraded tickets"
+    rows = [
+        ("Answer", "a", "answer", no_q),
+        ("Approve", "a", "answer_approve", no_q),
+        ("Reject", "a", "answer_reject", no_q),
+        ("Message", "i", "inbox_message", ""),
+        ("Command", "c", "cmd", ""),
+        ("Retry", "ctrl+r", "retry", only_degraded),
+        ("Discard", "ctrl+d", "discard", only_degraded),
+        ("Spec", "s", "show_spec", ""),
+        ("Edit spec", "E", "edit_spec", ""),
+        ("Logs", "l", "view_logs", ""),
+        ("Inbox log", "I", "view_inbox", ""),
+        ("Runner", "o", "runner", "" if runner_editable else "a session is live"),
+        ("Add AC", "A", "add_ac", ""),
+        ("Suggest ACs", "g", "suggest_acs", "spec already has ACs" if has_acs else ""),
+        ("AC matrix", "v", "ac_matrix", ""),
+        ("Post-QA", "Q", "trigger_post_qa", "" if has_pr else "no PR open"),
+        ("Compact", "x", "compact", ""),
+        ("Release claim", "z", "release", "" if claim else "no claim"),
+        ("Detail", "enter", "focus_detail", ""),
+        ("Deps", "D", "deps_panel", ""),
+        ("Proposal", "p", MENU_PROPOSAL, "" if has_proposal else "no proposal.md"),
+    ]
+    out = [MenuRow(label, hk, act, not why, why) for label, hk, act, why in rows]
+    out += [MenuRow(label, hk, act, True, "") for label, hk, act in extras]
+    return out
+
+
+class _ActionMenu(ModalScreen):
+    """The `m` menu (T-178): an OptionList of `MenuRow`s titled `<KEY> · <phase>`.
+    Dismisses with the chosen row (enabled or dimmed -- the app decides what a dimmed
+    one does) or None on Esc. It writes nothing itself."""
+
+    DEFAULT_CSS = """
+    _ActionMenu {
+        align: center middle;
+    }
+    #menu-dialog {
+        width: 60;
+        height: auto;
+        max-height: 90%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    #menu-list { height: auto; max-height: 30; }
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, key: str, phase: str, rows: list[MenuRow]) -> None:
+        super().__init__()
+        self._key = key
+        self._phase = phase
+        self.rows = rows
+        self.title = f"{key} · {phase}"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="menu-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] · {self._phase}", id="menu-title")
+            yield OptionList(*[self._option(r) for r in self.rows], id="menu-list")
+            yield Label("[dim]Enter runs the row · Esc closes[/dim]")
+
+    @staticmethod
+    def _option(row: MenuRow) -> Option:
+        text = Text(f"{row.hotkey:<7} {row.label}")
+        if not row.enabled:
+            text.stylize("dim")
+            text.append(f"  ({row.reason})", style="dim italic")
+        return Option(text)
+
+    def on_mount(self) -> None:
+        self.query_one("#menu-list", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.dismiss(self.rows[event.option_index])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class _CmdModal(ModalScreen):

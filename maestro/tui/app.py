@@ -14,7 +14,7 @@ from textual.worker import Worker, WorkerState
 
 from rich.text import Text
 
-from .. import claims, ratelimit, spend as spend_mod, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
+from .. import claims, gates, ratelimit, spend as spend_mod, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from .. import dispatcher as disp
@@ -24,8 +24,9 @@ from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
 from .modals import (
-    _ACCEPT_ALL, _AcceptedRecommendation, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal,
-    HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
+    _ACCEPT_ALL, MENU_PROPOSAL, MenuRow, _AcceptedRecommendation, _ActionMenu, _AddAcModal, _AnswerModal,
+    _CmdModal, _ConfirmModal, HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal,
+    _SuggestAcsModal, menu_actions,
 )
 from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
@@ -223,13 +224,14 @@ class MaestroTUI(App):
         Binding("N", "toggle_nudge", "Nudge on/off", show=False),
         Binding("h", "hold", "Hold", show=False),
         Binding("j", "jump_running", "Next running", show=False),
+        Binding("m", "action_menu", "Menu", show=False),
     ]
 
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
         "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
-        "view_events", "inbox_message", "view_logs", "view_inbox",
+        "view_events", "inbox_message", "view_logs", "view_inbox", "action_menu",
     })
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
@@ -239,6 +241,12 @@ class MaestroTUI(App):
     _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen)
+
+    # T-178: actions other tickets add; a menu row appears only if the App has the action.
+    _OPTIONAL_MENU_ROWS = (
+        ("Open PR", "O", "open_pr"), ("Hold", "h", "hold"),
+        ("Stop", "K", "stop"), ("Spec fields", "M", "spec_fields"),
+    )
 
     _selected_key: str | None = None
     _tail_mode: bool = True  # default: show tail in the sidebar panel
@@ -978,7 +986,7 @@ class MaestroTUI(App):
 
         self.push_screen(_ImportLinearModal(), _on_dismiss)
 
-    def action_answer(self) -> None:
+    def action_answer(self, initial: str = "") -> None:
         key = self._target_key()
         if key is None:
             self.notify("Select a ticket first", severity="warning")
@@ -997,10 +1005,18 @@ class MaestroTUI(App):
             snap.open_questions.items(),
             key=lambda qt: ops_mod.parse_round_question(qt[1])[0] or float("inf"),
         )
-        self._walk_questions(key, questions, 0, 0)
+        self._walk_questions(key, questions, 0, 0, initial)
+
+    def action_answer_approve(self) -> None:
+        """Menu Approve: the `a` walker pre-filled with "approve" -- always a qid-carrying `ans`."""
+        self.action_answer("approve")
+
+    def action_answer_reject(self) -> None:
+        self.action_answer("reject")
 
     def _walk_questions(
-        self, key: str, questions: list[tuple[str, str]], idx: int, answered: int
+        self, key: str, questions: list[tuple[str, str]], idx: int, answered: int,
+        initial: str = "",
     ) -> None:
         if idx >= len(questions):
             if answered:
@@ -1039,7 +1055,7 @@ class MaestroTUI(App):
                         unanswered.append((q_qid, q_text))
                 if queued:
                     self.notify(f"{queued} recommendation(s) queued for {key}")
-                self._walk_questions(key, unanswered, 0, answered + queued)
+                self._walk_questions(key, unanswered, 0, answered + queued, initial)
                 return
             # T-140: Ctrl+R dismisses with an `_AcceptedRecommendation` (a str
             # subclass equal to the recommendation) -- carry the accept marker
@@ -1049,12 +1065,69 @@ class MaestroTUI(App):
             if isinstance(answer, _AcceptedRecommendation):
                 args["accepted_recommendation"] = True
             inbox.append_command(self._home, key, "ans", args)
-            self._walk_questions(key, questions, idx + 1, answered + 1)
+            self._walk_questions(key, questions, idx + 1, answered + 1, initial)
 
         self.push_screen(
-            _AnswerModal(key, qid, position, total, body, recommend, remaining, self._home),
+            _AnswerModal(key, qid, position, total, body, recommend, remaining, self._home, initial),
             _on_dismiss,
         )
+
+    def action_action_menu(self) -> None:
+        """T-178: the phase-aware action menu for the targeted ticket. Everything the
+        menu offers is an existing action, so it adds no write path. The claim verdict
+        shells out to `ps` (`gates.runner_editable`), so it is resolved once, here, on
+        a thread worker before the menu is pushed -- never `claims.is_claimed`."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        if isinstance(self.screen, _ActionMenu):
+            return
+        home = self._home
+
+        def _probe() -> None:
+            snap = snap_mod.load(home, key)
+            spec = store.spec_path(home, key)
+            try:
+                has_acs = snap_mod.has_acs(spec.read_text(encoding="utf-8"))
+            except OSError:
+                has_acs = False
+            rows = menu_actions(
+                snap.phase,
+                open_questions=len(snap.open_questions),
+                has_pr=snap.pr_number is not None,
+                claim=claims.read_claim(home, key) is not None,
+                has_acs=has_acs,
+                has_proposal=(home / "tickets" / key / "proposal.md").exists(),
+                runner_editable=gates.runner_editable(home, key, snap),
+                extras=tuple(r for r in self._OPTIONAL_MENU_ROWS if hasattr(self, f"action_{r[2]}")),
+            )
+            try:
+                self.call_from_thread(self._push_action_menu, key, snap.phase, rows)
+            except RuntimeError:  # app torn down mid-probe
+                pass
+
+        self.run_worker(_probe, thread=True, group="action-menu", exclusive=True,
+                        name="action-menu", exit_on_error=False)
+
+    def _push_action_menu(self, key: str, phase: str, rows: list[MenuRow]) -> None:
+        if isinstance(self.screen, _ActionMenu) or self._target_key() != key:
+            return
+        self.push_screen(_ActionMenu(key, phase, rows), self._on_menu_chosen)
+
+    def _on_menu_chosen(self, row: MenuRow | None) -> None:
+        if row is None:
+            return
+        key = self._target_key()
+        if key is None:
+            return
+        if not row.enabled:
+            self.notify(f"{key}: {row.label} unavailable -- {row.reason}", severity="warning")
+            return
+        if row.action == MENU_PROPOSAL:
+            self.push_screen(ProposalScreen(self._home, key))
+            return
+        self.call_later(self.run_action, row.action)
 
     def action_compact(self) -> None:
         key = self._target_key()
