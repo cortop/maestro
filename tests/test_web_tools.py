@@ -17,7 +17,7 @@ from maestro.dispatcher import MERGE_DENYLIST
 from maestro.statemachine import Phase
 
 _HUMAN_ONLY_VERBS = ("ans", "answer", "restore", "fleet", "init",
-                     "dispatch", "prune-logs", "cmd", "tui", "compact", "archive-done")
+                     "dispatch", "prune-logs", "cmd", "tui", "compact", "archive-done", "spec-set")
 
 
 def _seed_ready(home, key="T-1"):

@@ -554,6 +554,31 @@ def cmd_runner(args) -> int:
     return 0
 
 
+def cmd_spec_set(args) -> int:
+    """[human] Set a ticket's spec `priority:`/`dependsOn:` front-matter via
+    `ops.set_spec_fields` (validated: no typo'd key, self-dep or cycle). Like
+    `cmd_runner`, never added to `_AGENT_TOOL_VERBS`."""
+    cfg = _cfg(args)
+    depends_on = None
+    if args.depends_on is not None:
+        depends_on = [d.strip() for d in args.depends_on.split(",") if d.strip()]
+    priority = args.priority
+    if priority is not None:
+        try:
+            priority = int(priority)
+        except ValueError:
+            print(f"error: priority must be an integer >= 0, got {priority!r}", file=sys.stderr)
+            return 1
+    try:
+        result = ops.set_spec_fields(cfg, args.key, priority=priority,
+                                     depends_on=depends_on)
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
 def cmd_add_ac(args) -> int:
     """Append a new `- [ ] <text>` line to a ticket's spec `## Acceptance
     criteria` section -- the CLI counterpart to the TUI's add-AC modal
@@ -1532,6 +1557,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--runner", default=None, help="non-default runner for the `implementing` step")
     sp.add_argument("--runner-model", dest="runner_model", default=None,
                     help="model override passed to --runner")
+    sp = add("spec-set", cmd_spec_set,
+             "[human] set a ticket's spec priority/dependsOn (validated: no unknown key, self-dep or cycle)")
+    sp.add_argument("key")
+    sp.add_argument("--priority", default=None, help="integer >= 0")
+    sp.add_argument("--depends-on", dest="depends_on", default=None,
+                    help="comma-separated ticket keys; '' clears the list")
     sp = add("add-ac", cmd_add_ac,
              "append a new '- [ ] <text>' acceptance criterion to a ticket's spec")
     sp.add_argument("key")

@@ -2251,6 +2251,74 @@ def set_runner(cfg: Config, key: str, *, runner: str | None = None,
     return {"runner": runner, "runner_model": runner_model, "warning": warning}
 
 
+def _dep_cycle_through(graph: dict[str, list[str]], key: str) -> list[str] | None:
+    """The shortest-found dependsOn path ``key -> ... -> key`` in *graph*, or
+    ``None``. A plain reachability walk from *key*'s own deps: exact for "does
+    this edit create a cycle through key", unlike filtering
+    `depgraph.find_cycles` (one cycle per DFS back edge)."""
+    seen: set[str] = set()
+
+    def walk(node: str, path: list[str]) -> list[str] | None:
+        for dep in graph.get(node, []):
+            if dep == key:
+                return path + [key]
+            if dep not in seen:
+                seen.add(dep)
+                found = walk(dep, path + [dep])
+                if found:
+                    return found
+        return None
+
+    return walk(key, [key])
+
+
+def set_spec_fields(cfg: Config, key: str, *, priority: int | None = None,
+                    depends_on: list[str] | None = None) -> dict:
+    """[human] Rewrite *key*'s spec `priority:`/`dependsOn:` front-matter lines
+    surgically (`_set_frontmatter_fields`), after validating them -- the
+    write-through behind `maestro spec-set` and the TUI's `M` modal.
+
+    Raises `store.MaestroError` and leaves the file unchanged if there is no
+    spec, neither field is given, *priority* isn't an int >= 0, a dep is
+    *key* itself or never existed (`depgraph.key_exists_anywhere`), or the new
+    edges create a cycle through *key* (reported ``A -> B -> A``). Cycles
+    elsewhere in the graph are ignored. `dependsOn` is always written in the
+    bracket form `dispatcher.parse_depends_on` reads. Appends NO event: the
+    spec hash on disk no longer matching the snapshot wakes the ticket next
+    sweep (`spec-changed`), the same mechanism `set_runner` relies on."""
+    from . import depgraph
+
+    if priority is None and depends_on is None:
+        raise store.MaestroError(
+            f"spec-set {key}: at least one of --priority/--depends-on is required")
+    spec_file = store.spec_path(cfg.home, key)
+    if not spec_file.exists():
+        raise store.MaestroError(f"{key}: no spec.md to edit")
+    updates: dict[str, str] = {}
+    if priority is not None:
+        if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
+            raise store.MaestroError(
+                f"spec-set {key}: priority must be an integer >= 0, got {priority!r}")
+        updates["priority"] = str(priority)
+    if depends_on is not None:
+        deps = list(dict.fromkeys(d.strip() for d in depends_on if d.strip()))
+        for dep in deps:
+            if dep == key:
+                raise store.MaestroError(f"spec-set {key}: {key} cannot depend on itself")
+            if not depgraph.key_exists_anywhere(cfg.home, dep):
+                raise store.MaestroError(f"spec-set {key}: unknown dependency {dep} (no such ticket)")
+        graph = depgraph.load(cfg.home)
+        graph[key] = deps
+        cycle = _dep_cycle_through(graph, key)
+        if cycle:
+            raise store.MaestroError(
+                f"spec-set {key}: dependency cycle {' → '.join(cycle)}")
+        updates["dependsOn"] = "[" + ", ".join(deps) + "]"
+    text = spec_file.read_text(encoding="utf-8")
+    store.atomic_write(spec_file, _set_frontmatter_fields(text, updates))
+    return {"key": key, "priority": priority, "depends_on": depends_on and deps}
+
+
 def _append_ac(spec_text: str, text: str) -> str:
     """Insert ``- [ ] <text>`` as the new last line of *spec_text*'s
     ``## Acceptance criteria`` section, creating the section (appended at
