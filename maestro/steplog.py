@@ -449,6 +449,52 @@ def classify_result(obj: dict) -> dict:
     }
 
 
+def result_summary(records) -> dict:
+    """Fold Claude stream-json *records* into the console header's numbers.
+
+    ``cost`` / ``turns`` / ``duration_ms`` / ``denials`` come from the LAST ``result``
+    (``total_cost_usd`` is a running total -- never summed); each is ``None`` when absent.
+    ``outcome`` is ``running`` until a ``result`` lands, then ``classify_result``'s verdict
+    (an errored result escalates to ``rate_limited`` on a rejected ``rate_limit_event``, as
+    ``session_outcome`` does). ``tokens`` is input+output over the last ``usage`` seen per
+    assistant ``message.id`` (Claude repeats it on every content-block record).
+    """
+    result: dict | None = None
+    rate_limit_info: dict | None = None
+    usage_by_msg: dict = {}
+    anon = 0
+    for obj in records:
+        if not isinstance(obj, dict):
+            continue
+        t = obj.get("type")
+        if t == "result":
+            result = obj
+        elif t == "rate_limit_event":
+            rate_limit_info = obj.get("rate_limit_info")
+        elif t == "assistant":
+            msg = obj.get("message")
+            if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+                continue
+            mid = msg.get("id")
+            if mid is None:
+                anon += 1
+                mid = f"_anon{anon}"
+            usage_by_msg[mid] = msg["usage"]
+    tokens = sum(int(u.get("input_tokens") or 0) + int(u.get("output_tokens") or 0)
+                 for u in usage_by_msg.values())
+    out = {"cost": None, "turns": None, "duration_ms": None, "denials": None,
+           "outcome": "running", "tokens": tokens}
+    if result is not None:
+        outcome = classify_result(result)["outcome"]
+        if outcome == "error" and rate_limit_info and rate_limit_info.get("status") == "rejected":
+            outcome = "rate_limited"
+        denials = result.get("permission_denials")
+        out.update(cost=result.get("total_cost_usd"), turns=result.get("num_turns"),
+                   duration_ms=result.get("duration_ms"), outcome=outcome,
+                   denials=len(denials) if isinstance(denials, list) else None)
+    return out
+
+
 def _opencode_session_outcome(path: Path) -> dict:
     """Tail-scan an opencode ``.opencode.jsonl`` log for its terminal
     ``step_finish`` record (OC-5). ``reason`` other than the clean-stop value

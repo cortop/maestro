@@ -614,3 +614,17 @@ def test_pi_session_outcome_unknown_for_a_grammar_neither_suffix_recognizes(tmp_
     p = tmp_path / "reconcile-T-1-1.weird.jsonl"
     p.write_text(json.dumps({"type": "agent_end", "messages": []}) + "\n", encoding="utf-8")
     assert session_outcome(p)["outcome"] == "unknown"
+
+
+def test_result_summary_takes_last_cost_and_dedups_tokens():
+    from maestro.steplog import result_summary
+    msg = lambda out: {"type": "assistant", "message": {  # noqa: E731
+        "id": "m1", "usage": {"input_tokens": 10, "output_tokens": out}, "content": []}}
+    recs = [msg(1), msg(2), msg(5),
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.40, "num_turns": 22},
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.84, "num_turns": 22,
+             "duration_ms": 1500, "permission_denials": [{"x": 1}]}]
+    s = result_summary(recs)
+    assert s["cost"] == 0.84 and s["turns"] == 22
+    assert s["tokens"] == 15 and s["denials"] == 1 and s["outcome"] == "success"
+    assert result_summary([msg(1)])["outcome"] == "running"
