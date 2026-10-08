@@ -4274,3 +4274,171 @@ def test_release_refuses_live_claim(seeded_home):
             assert app._exception is None
 
     asyncio.run(_stale())
+
+
+# --------------------------------------------------------------------------- #
+# T-155: ticket actions target the visible ticket                              #
+# --------------------------------------------------------------------------- #
+
+def _spy_notify(app) -> list[tuple[str, str]]:
+    seen: list[tuple[str, str]] = []
+    real = app.notify
+
+    def _notify(message, *a, severity="information", **kw):
+        seen.append((str(message), severity))
+        return real(message, *a, severity=severity, **kw)
+
+    app.notify = _notify
+    return seen
+
+
+def test_actions_target_visible_ticket(seeded_home):
+    from textual.widgets import Input as _Input
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            app._selected_key = "T-3"
+            seen = _spy_notify(app)
+            app.push_screen(DetailScreen(seeded_home, "T-1"))
+            await pilot.pause()
+            await pilot.press("i")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _InboxModal)
+            modal.query_one("#inbox-input", _Input).value = "for T-1"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert [c["args"]["text"] for c in inbox.pending(seeded_home, "T-1")] == ["for T-1"]
+            assert inbox.pending(seeded_home, "T-3") == []
+            assert any("T-1" in m for m, _ in seen)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_deps_detail_discard_targets_screen_key(seeded_home):
+    from textual.widgets import Tree
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            app._selected_key = "T-3"
+            await pilot.press("D")
+            for _ in range(50):
+                await pilot.pause(0.1)
+                if isinstance(app.screen, DepsScreen) and app.screen._graph is not None:
+                    break
+            await pilot.pause()
+            tree = app.screen.query_one("#deps-tree", Tree)
+            node = next(n for n in tree.root.children if n.data == "T-2")
+            tree.move_cursor(node)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, DetailScreen)
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ConfirmModal)
+            assert modal._require == "T-2"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_empty_filter_clears_selection(home):
+    seed_ticket(home, "T-3", "implementing", phase="implementing", pr=15)
+    seed_ticket(home, "T-5", "ready", phase="ready")
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            app._selected_key = "T-3"
+            seen = _spy_notify(app)
+            await pilot.press("f")
+            await pilot.pause()
+            assert _FILTERS[app._filter_idx][0] == "needs-you"
+            assert app._selected_key is None
+            assert "No tickets match" in app.query_one("#detail", Static).render().plain
+            for key in ("c", "a"):
+                before = len(seen)
+                await pilot.press(key)
+                await pilot.pause()
+                assert any(sev == "warning" for _, sev in seen[before:]), key
+            assert inbox.pending(home, "T-3") == [] and inbox.pending(home, "T-5") == []
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_ticket_actions_hidden_off_ticket_screens(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("F")
+            await pilot.pause()
+            assert isinstance(app.screen, FleetScreen)
+            actions = {b.binding.action for b in app.screen.active_bindings.values()}
+            assert not actions & {"answer", "discard"}
+            await pilot.press("escape")
+            await pilot.pause()
+            app.push_screen(DetailScreen(seeded_home, "T-3"))
+            await pilot.pause()
+            actions = {b.binding.action for b in app.screen.active_bindings.values()}
+            assert "cycle_filter" not in actions
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_retry_dimmed_unless_degraded(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            assert app.check_action("retry", ()) is None
+            assert app.check_action("discard", ()) is None
+            app._selected_key = "T-2"
+            assert app.check_action("retry", ()) is True
+            app._selected_key = "T-1"
+            assert app.check_action("answer", ()) is True
+            app._selected_key = "T-3"
+            assert app.check_action("answer", ()) is None
+
+    asyncio.run(_inner())
+
+
+def test_question_mark_opens_help(seeded_home):
+    from textual.widgets import HelpPanel
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert app.screen.query(HelpPanel)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            app.push_screen(DetailScreen(seeded_home, "T-3"))
+            await pilot.pause()
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert app.screen.query(HelpPanel)
+            assert app._exception is None
+
+    asyncio.run(_inner())

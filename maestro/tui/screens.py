@@ -57,6 +57,8 @@ def edit_in_editor(app, path: Path) -> str | None:
 class EventsScreen(Screen):
     """Full-screen scrollable event timeline for one ticket."""
 
+    HELP = 'Event timeline for one ticket. t toggles tail/full, escape goes back.'
+
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("t", "toggle_tail", "Tail/Full"),
@@ -94,6 +96,8 @@ class InboxScreen(Screen):
     including already-processed ones, with pending/processed visibly distinct.
     Read-only: derives the split from the machine-owned cursor, never writes."""
 
+    HELP = 'Pending and past inbox lines for one ticket. escape goes back.'
+
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
     def __init__(self, home: Path, key: str) -> None:
@@ -130,6 +134,8 @@ def _is_error_line(text: str) -> bool:
 class LogsScreen(Screen):
     """Live session console for one ticket: sticky summary header, follow toggle, session
     picker, auto-advance across claim hand-offs, and a jump to the next error."""
+
+    HELP = 'Live agent-session console for one ticket. escape goes back.'
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
@@ -450,6 +456,8 @@ def _session_header(sess: dict, outcome: str, info: dict) -> str:
 class FleetScreen(Screen):
     """Full-screen fleet & health panel."""
 
+    HELP = 'Dispatcher fleet and claims. escape goes back.'
+
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("u", "fleet_up", "Up"),
@@ -620,6 +628,8 @@ class FleetScreen(Screen):
 class DepsScreen(Screen):
     """Full-screen dependency tree of every open ticket, colored by blocking depth."""
 
+    HELP = "Dependency tree. enter opens the ticket's detail, s its spec, r refreshes, escape goes back."
+
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("r", "refresh_deps", "Refresh"),
@@ -718,6 +728,8 @@ class DepsScreen(Screen):
 class SpecScreen(Screen):
     """Full-screen spec viewer + pending inbox for one ticket."""
 
+    HELP = 'Spec viewer for one ticket. escape goes back.'
+
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("e", "edit_spec", "Edit"),
@@ -778,6 +790,8 @@ class SpecScreen(Screen):
 class ProposalScreen(Screen):
     """Read-only viewer for a ticket's proposal.md."""
 
+    HELP = 'Proposal document for one ticket. escape goes back.'
+
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("r", "refresh_proposal", "Refresh"),
@@ -811,6 +825,8 @@ class ProposalScreen(Screen):
 
 class DetailScreen(Screen):
     """Full-screen right panel: ticket detail summary + event log."""
+
+    HELP = 'Ticket detail and events. t toggles tail/full, p opens the proposal, r refreshes; a, i, c, z act on this ticket.'
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
@@ -871,6 +887,8 @@ class DetailScreen(Screen):
 class EnvScreen(Screen):
     """Read-only panel showing resolved config — same values as `maestro env`."""
 
+    HELP = 'Resolved config, same as `maestro env`. escape goes back.'
+
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
     CSS = "EnvScreen #env-panel { padding: 1 2; height: 1fr; }"
@@ -892,6 +910,8 @@ class EnvScreen(Screen):
 
 class ScheduleScreen(Screen):
     """View/add/edit/enable-disable config-declared `[[scheduled]]` tasks."""
+
+    HELP = 'Scheduled tasks. escape goes back.'
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
