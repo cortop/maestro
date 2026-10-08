@@ -2064,6 +2064,41 @@ def test_action_view_logs_no_selection_does_nothing(home):
     assert not push_calls
 
 
+# --------------------------------------------------------------------------- #
+# T-172: phase_dwell                                                          #
+# --------------------------------------------------------------------------- #
+
+def test_phase_dwell_segments_and_forced():
+    from maestro.tui.events import phase_dwell, render_dwell
+
+    def ev(t, ts, **payload):
+        return {"type": t, "ts": f"2026-01-01T{ts}+00:00", "payload": payload}
+
+    events = [
+        ev("TicketCreated", "00:00:00"),
+        ev("PhaseChanged", "00:10:00", phase="implementing"),
+        ev("PhaseChanged", "00:20:00", phase="qa", forced_by="human"),
+        ev("Stalled", "00:30:00", reason="x"),
+        ev("PhaseChanged", "00:40:00", phase="bogus"),
+        ev("Finalized", "01:00:00"),
+        ev("PhaseChanged", "01:10:00", phase="implementing"),
+    ]
+    now = store.iso_to_epoch("2026-01-01T02:00:00+00:00")
+    segs = phase_dwell(events, now)
+    assert [(s.phase, s.seconds, s.forced, s.current) for s in segs] == [
+        ("triaging", 600, False, False),
+        ("implementing", 600, False, False),
+        ("qa", 600, True, False),
+        ("degraded", 1800, False, False),
+        ("done", 3600, False, True),
+    ]
+    line = render_dwell(segs, 200)
+    assert "implementing 10m ▸ qa 10m" in line.plain and line.plain.endswith("done 1h00m (now)")
+    assert any(sp.style == "red" for sp in line.spans)
+    short = render_dwell(segs, 40).plain
+    assert "…" in short and short.startswith("triaging") and short.endswith("(now)")
+
+
 # --- T-173: activity ticker ----------------------------------------------------
 
 def test_activity_categories_cover_event_vocabulary():

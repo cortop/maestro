@@ -350,7 +350,7 @@ class MaestroTUI(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one(DataTable)
+        table = self.query_one("#tickets", DataTable)
         table.cursor_type = "row"
         table.add_column("Key")
         table.add_column("Phase")
@@ -1264,7 +1264,7 @@ class MaestroTUI(App):
         graph = self._graph  # worker-cached; no I/O on the UI thread
         visible = self._sort_visible(visible, snaps_by_key, graph)
 
-        table = self.query_one(DataTable)
+        table = self.query_one("#tickets", DataTable)
         # Preserve cursor across clear/repopulate.
         prev_key: str | None = None
         try:
