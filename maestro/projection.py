@@ -228,7 +228,8 @@ def render(home: Path) -> dict[str, str]:
     hook_errors = hb.get("hook_errors") or {}
     has_blockers = bool(blocked or runner_blockers or repo_blockers or hook_errors)
 
-    if not awaiting and not degraded and not burning and not has_blockers:
+    held = fleet.list_holds(home, store.now_epoch())
+    if not awaiting and not degraded and not burning and not has_blockers and not held:
         nlines.append("\nNothing is waiting on you. 🎉\n")
     if has_blockers:
         age = ""
@@ -251,6 +252,19 @@ def render(home: Path) -> dict[str, str]:
         for hook, err in sorted(hook_errors.items()):
             nlines.append(f"- **hook `{hook}`** — {err}")
         nlines.append("")
+    if held:
+        nlines.append("\n## Held (the dispatcher will not spawn these)\n")
+        for key in sorted(held, key=split_key):
+            h = held[key]
+            until = h.get("until")
+            expiry = "until released"
+            if until is not None:
+                try:
+                    expiry = f"until {store.epoch_to_iso(float(until))}"
+                except (TypeError, ValueError):
+                    expiry = f"until {until}"
+            nlines.append(f"- **{key}** — {h.get('reason') or 'no reason given'} ({expiry})")
+            nlines.append(f"  - release: `maestro unhold {key}`")
     if awaiting:
         nlines.append("\n## Questions\n")
         for s in sorted(awaiting, key=lambda x: split_key(x.key)):

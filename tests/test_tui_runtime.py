@@ -69,6 +69,7 @@ from maestro.tui import (  # noqa: E402
     _CreateModal,
     _EventPayloadModal,
     _FILTERS,
+    HoldModal,
     _ImportLinearModal,
     _InboxModal,
     _IntervalModal,
@@ -352,7 +353,7 @@ _BINDING_CLASSES = [
     MaestroTUI, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
     ScheduleScreen, ActivityScreen, AcScreen, _AcEvidenceModal, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
     _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal,
-    _ConfirmModal, SpecScreen, EnvScreen, _EventPayloadModal,
+    _ConfirmModal, HoldModal, SpecScreen, EnvScreen, _EventPayloadModal,
 ]
 
 
@@ -4868,6 +4869,46 @@ def test_question_mark_opens_help(seeded_home):
 
 
 # --------------------------------------------------------------------------- #
+# T-175: per-ticket hold via `h`                                              #
+# --------------------------------------------------------------------------- #
+
+def test_hold_key_roundtrip(seeded_home):
+    from maestro import fleet
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await pilot.press("h")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], HoldModal)
+            await pilot.press("3", "0", "m", "enter")
+            await pilot.pause()
+            await pilot.press(*"pairing", "enter")
+            await pilot.pause()
+            st = fleet.hold_state(seeded_home, "T-3", store.now_epoch())
+            assert st is not None and st["reason"] == "pairing" and st["until"]
+            app._filter_idx = _filter_idx("held")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one(DataTable)
+            assert [str(rk.value) for rk in table.rows] == ["T-3"]
+            assert "⏸" in str(table.get_row("T-3")[0])
+            app._selected_key = "T-3"
+            await pilot.press("h")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _ConfirmModal)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert fleet.hold_state(seeded_home, "T-3", store.now_epoch()) is not None
+            await pilot.press("h")
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+            assert fleet.hold_state(seeded_home, "T-3", store.now_epoch()) is None
+            assert app._exception is None
+
 # T-163: live Now column, running filter, j jumps to running tickets          #
 # --------------------------------------------------------------------------- #
 
