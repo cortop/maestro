@@ -122,52 +122,196 @@ class InboxScreen(Screen):
             log.write(line)
 
 
-class LogsScreen(Screen):
-    """Screen that tails the live session log for one ticket."""
+def _is_error_line(text: str) -> bool:
+    """Rendered log lines that mark an error / rate-limit (see ``render_*_log_line``)."""
+    return text.startswith("[red]") or text.startswith("[yellow]── rate_limit")
 
-    BINDINGS = [("escape", "app.pop_screen", "Back")]
+
+class LogsScreen(Screen):
+    """Live session console for one ticket: sticky summary header, follow toggle, session
+    picker, auto-advance across claim hand-offs, and a jump to the next error."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("f", "toggle_follow", "Follow"),
+        ("s", "pick_session", "Session"),
+        ("e", "next_error", "Next error"),
+    ]
+
+    DEFAULT_CSS = """
+    LogsScreen #logs-summary { dock: top; height: 1; padding: 0 1; background: $boost; }
+    """
 
     def __init__(self, home: Path, key: str) -> None:
         super().__init__()
         self._home = home
         self._key = key
         self._stop = False
+        self._gen = 0
+        self._cur_path: Path | None = None
+        self._err_lines: list[int] = []
+        self._last_jump = -1
+        self._summary_cache: tuple | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static("", id="logs-summary")
         yield RichLog(id="logs-view", highlight=False, markup=True)
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = f"Logs: {self._key}"
-        self.run_worker(self._tail, thread=True, name="tail-logs")
+        self._update_header()
+        self.set_interval(1.0, self._update_header)
+        self._start_tail()
 
     def on_unmount(self) -> None:
         self._stop = True
 
-    def _write(self, log_widget: RichLog, text: str) -> None:
-        self.app.call_from_thread(log_widget.write, text)
+    def _start_tail(self, pick: dict | None = None) -> None:
+        self._gen += 1
+        gen = self._gen
+        self.run_worker(lambda: self._tail(gen, pick), thread=True, name="tail-logs", exclusive=True)
 
-    def _render_history(self, log_widget: RichLog, sessions_list: list[dict],
+    # ---- main-thread helpers -------------------------------------------------
+
+    def _append(self, gen: int, text: str) -> None:
+        if gen != self._gen:
+            return
+        log = self.query_one("#logs-view", RichLog)
+        if _is_error_line(text):
+            self._err_lines.append(len(log.lines))
+        log.write(text)
+
+    def _set_current(self, gen: int, path: Path) -> None:
+        if gen != self._gen:
+            return
+        self._cur_path = path
+        self._summary_cache = None
+        self._update_header()
+
+    def _summary_text(self) -> Text:
+        from .. import steplog
+        path = self._cur_path
+        if path is None:
+            return Text("(no session)", style="dim")
+        try:
+            st = path.stat()
+        except OSError:
+            return Text(f"(log not found: {path.name})", style="dim")
+        stamp = (path, st.st_mtime_ns, st.st_size)
+        if self._summary_cache is None or self._summary_cache[0] != stamp:
+            cost = turns = dur = denials = None
+            tokens = None
+            try:
+                if path.name.endswith(".stream.jsonl"):
+                    s = steplog.result_summary(o for _, o in steplog.iter_records(path))
+                    cost, turns, dur, denials, tokens = (
+                        s["cost"], s["turns"], s["duration_ms"], s["denials"], s["tokens"])
+                    outcome = s["outcome"]
+                else:
+                    info = steplog.session_outcome(path)
+                    outcome = info["outcome"]
+                    res = info.get("result")
+                    if isinstance(res, dict):
+                        turns = res.get("num_turns")
+            except OSError:
+                outcome = "unknown"
+            self._summary_cache = (stamp, outcome, cost, turns, dur, denials, tokens)
+        _, outcome, cost, turns, dur, denials, tokens = self._summary_cache
+        parts = [
+            outcome,
+            f"${cost:.2f}" if isinstance(cost, (int, float)) else "$—",
+            f"{turns if turns is not None else '—'} turns",
+            f"{denials if denials is not None else '—'} denied",
+            f"{dur / 1000:.1f}s" if isinstance(dur, (int, float)) else "—",
+        ]
+        if outcome == "running":
+            if tokens:
+                parts.append(f"{tokens} tok")
+            parts.append(f"last write {max(0, int(time.time() - st.st_mtime))}s ago")
+        text = " · ".join(parts)
+        if not self.query_one("#logs-view", RichLog).auto_scroll:
+            text += " · paused"
+        bad = outcome in ("error", "rate_limited", "crashed")
+        return Text(text, style="bold red" if bad else "")
+
+    def _update_header(self) -> None:
+        try:
+            self.query_one("#logs-summary", Static).update(self._summary_text())
+        except Exception:  # not mounted yet / already gone
+            pass
+
+    # ---- actions -------------------------------------------------------------
+
+    def action_toggle_follow(self) -> None:
+        log = self.query_one("#logs-view", RichLog)
+        log.auto_scroll = not log.auto_scroll
+        if log.auto_scroll:
+            log.scroll_end(animate=False)
+        self._update_header()
+
+    def action_next_error(self) -> None:
+        log = self.query_one("#logs-view", RichLog)
+        floor = max(int(log.scroll_y), self._last_jump)
+        nxt = next((o for o in self._err_lines if o > floor), None)
+        if nxt is None:
+            self.notify("No further errors", severity="information")
+            return
+        self._last_jump = nxt
+        log.auto_scroll = False  # else the next write snaps back to the bottom
+        log.scroll_to(y=nxt, animate=False)
+        self._update_header()
+
+    def action_pick_session(self) -> None:
+        from .modals import _SessionPickModal
+        sessions = list_sessions(self._home, self._key, with_outcome=True)
+        if not sessions:
+            self.notify("No sessions", severity="warning")
+            return
+        labels = [f"{s['ts']} {s['format']} {s.get('outcome', '?')} {s.get('model', '?')}"
+                  for s in sessions]
+
+        def _picked(idx) -> None:
+            if idx is None:
+                return
+            log = self.query_one("#logs-view", RichLog)
+            log.clear()
+            self._err_lines = []
+            self._last_jump = -1
+            self._start_tail(pick=sessions[idx])
+
+        self.app.push_screen(_SessionPickModal(labels), _picked)
+
+    # ---- tail worker (thread) ------------------------------------------------
+
+    def _live(self, gen: int) -> bool:
+        return not self._stop and gen == self._gen
+
+    def _emit(self, gen: int, text: str) -> None:
+        if self._live(gen):
+            self.app.call_from_thread(self._append, gen, text)
+
+    def _render_history(self, gen: int, sessions_list: list[dict],
                         skip_path: Path | None) -> None:
         """T-119: render every captured session oldest-first under a header, one file at a
         time. *skip_path* (the live session) is left for the tail loop to render."""
         from .. import steplog
         for sess in reversed(sessions_list):
             path = Path(sess["path"])
-            if self._stop or (skip_path is not None and path == skip_path):
+            if not self._live(gen) or (skip_path is not None and path == skip_path):
                 continue
             if not path.exists():
-                self._write(log_widget, f"(session {sess['session_id']}: log file missing, skipped)")
+                self._emit(gen, f"(session {sess['session_id']}: log file missing, skipped)")
                 continue
             try:
                 outcome = steplog.session_outcome(path)["outcome"]
-                self._write(log_widget, _session_header(sess, outcome, steplog.session_model(path)))
-                self._render_file(log_widget, path)
+                self._emit(gen, _session_header(sess, outcome, steplog.session_model(path)))
+                self._render_file(gen, path)
             except OSError:
-                self._write(log_widget, f"(session {sess['session_id']}: log file missing, skipped)")
+                self._emit(gen, f"(session {sess['session_id']}: log file missing, skipped)")
 
-    def _render_file(self, log_widget: RichLog, path: Path) -> None:
+    def _render_file(self, gen: int, path: Path) -> None:
         is_pi = path.name.endswith(".pi.jsonl")
         is_opencode = path.name.endswith(".opencode.jsonl")
         structured = is_pi or is_opencode or path.name.endswith(".stream.jsonl")
@@ -176,10 +320,10 @@ class LogsScreen(Screen):
                        else render_log_line)
         with path.open(encoding="utf-8", errors="replace") as f:
             for raw in f:
-                if self._stop:
+                if not self._live(gen):
                     return
                 if not structured:
-                    self._write(log_widget, raw)
+                    self._emit(gen, raw)
                     continue
                 raw = raw.strip()
                 if not raw:
@@ -189,10 +333,21 @@ class LogsScreen(Screen):
                 except json.JSONDecodeError:
                     continue
                 for rendered in render_line(obj):
-                    self._write(log_widget, rendered)
+                    self._emit(gen, rendered)
 
-    def _tail(self) -> None:
-        log_widget = self.query_one("#logs-view", RichLog)
+    def _tail(self, gen: int, pick: dict | None = None) -> None:
+        from .. import steplog
+        if pick is not None:
+            path = Path(pick["path"])
+            self.app.call_from_thread(self._set_current, gen, path)
+            if not path.exists():
+                self._emit(gen, f"(log not found: {path.name})")
+                return
+            self._emit(gen, _session_header(pick, pick.get("outcome") or steplog.session_outcome(path)["outcome"],
+                                            steplog.session_model(path)))
+            self._render_file(gen, path)
+            self.app.call_from_thread(self._set_current, gen, path)
+            return
 
         claim = claims.read_claim(self._home, self._key)
         live_pid = claim.get("pid") if claim else None
@@ -204,23 +359,48 @@ class LogsScreen(Screen):
             log_path = Path(log_path_str)
         else:
             if not sessions_list:
-                self.app.call_from_thread(log_widget.write, "(no session logs found)")
+                self._emit(gen, "(no session logs found)")
                 return
             log_path = Path(sessions_list[0]["path"])
 
         # Every earlier session first (oldest-first), then the live one is tailed below.
-        self._render_history(log_widget, sessions_list, skip_path=log_path)
+        self._render_history(gen, sessions_list, skip_path=log_path)
 
         if not log_path.exists():
-            self.app.call_from_thread(log_widget.write, f"(log not found: {log_path.name})")
+            self._emit(gen, f"(log not found: {log_path.name})")
             return
 
         live = next((x for x in sessions_list if Path(x["path"]) == log_path), None)
         if live is not None:
-            from .. import steplog
-            self._write(log_widget, _session_header(live, steplog.session_outcome(log_path)["outcome"],
-                                                      steplog.session_model(log_path)))
+            self._emit(gen, _session_header(live, steplog.session_outcome(log_path)["outcome"],
+                                            steplog.session_model(log_path)))
+        self.app.call_from_thread(self._set_current, gen, log_path)
 
+        self._follow(gen, log_path, live_pid, verdict)
+        # Auto-advance (read-only: read_claim/verify_claim never release a claim): keep
+        # polling for a hand-off once a live session we were tailing ends.
+        if verdict == "denied" or not live_pid:
+            return
+        cur = log_path
+        while self._live(gen):
+            time.sleep(0.5)
+            claim = claims.read_claim(self._home, self._key)
+            new = claim.get("log_path") if claim else None
+            if not new or Path(new) == cur or not Path(new).exists():
+                continue
+            if claims.verify_claim(self._home, self._key) == "denied":
+                continue
+            cur = Path(new)
+            phase = snap_mod.load(self._home, self._key).phase
+            phase = getattr(phase, "value", phase)
+            from rich.markup import escape
+            model = steplog.session_model(cur)["model"]
+            self._emit(gen, f"[dim]── next session ({escape(str(phase))}, {escape(model)}) ──[/dim]")
+            self.app.call_from_thread(self._set_current, gen, cur)
+            self._follow(gen, cur, claim.get("pid"), "confirmed")
+
+    def _follow(self, gen: int, log_path: Path, live_pid, verdict: str) -> None:
+        """Stream *log_path* until its writer is gone (dead pid / denied claim / no pid)."""
         is_stream = log_path.name.endswith(".stream.jsonl")
         is_opencode = log_path.name.endswith(".opencode.jsonl")
         is_pi = log_path.name.endswith(".pi.jsonl")
@@ -230,7 +410,7 @@ class LogsScreen(Screen):
 
         with log_path.open(encoding="utf-8", errors="replace") as f:
             buf = ""
-            while not self._stop:
+            while self._live(gen):
                 chunk = f.read(4096)
                 if chunk:
                     buf += chunk
@@ -245,9 +425,9 @@ class LogsScreen(Screen):
                             except json.JSONDecodeError:
                                 continue
                             for rendered in render_line(obj):
-                                self.app.call_from_thread(log_widget.write, rendered)
+                                self._emit(gen, rendered)
                     else:
-                        self.app.call_from_thread(log_widget.write, chunk)
+                        self._emit(gen, chunk)
                 else:
                     if verdict == "denied":
                         break
@@ -256,6 +436,8 @@ class LogsScreen(Screen):
                     if not live_pid:
                         break
                     time.sleep(0.25)
+        if self._live(gen):
+            self.app.call_from_thread(self._update_header)
 
 
 def _session_header(sess: dict, outcome: str, info: dict) -> str:

@@ -6,7 +6,7 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Label, OptionList, Select, Static, TextArea
 
 from .. import schedule, store
 from ..providers import ollama as ollama_mod
@@ -595,6 +595,30 @@ class _ConfirmModal(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class _SessionPickModal(ModalScreen):
+    """Pick one captured session (newest first); dismisses with its index in *labels*, None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, labels: list[str]) -> None:
+        super().__init__()
+        self._labels = labels
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label("Pick a session")
+            yield OptionList(*self._labels, id="session-pick")
+
+    def on_mount(self) -> None:
+        self.query_one("#session-pick", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option_index)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class _ScheduleModal(ModalScreen):
