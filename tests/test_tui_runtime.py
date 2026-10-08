@@ -26,6 +26,8 @@ import asyncio
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -40,10 +42,13 @@ from rich.text import Text  # noqa: E402
 from conftest import add_worktree, git, make_origin_and_repo, seed_phase, seed_ticket  # noqa: E402
 from maestro.tui.modals import _TextViewModal  # noqa: E402
 from maestro import claims, config as config_mod, event_log, fleet as fleet_mod, inbox  # noqa: E402
+from maestro.projection import ticket_rows  # noqa: E402
 from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
 from maestro.cli import main as cli_main  # noqa: E402
 from maestro.sessions import ClaudeCliSessions, DryRunSessions, OpencodeCliSessions, PiCliSessions  # noqa: E402
 from maestro.tui import (  # noqa: E402
+    ReviewScreen,
+    ActivityScreen,
     DepsScreen,
     DetailScreen,
     EventsScreen,
@@ -52,7 +57,6 @@ from maestro.tui import (  # noqa: E402
     LogsScreen,
     MaestroTUI,
     ProposalScreen,
-    ReviewScreen,
     ScheduleScreen,
     SpecScreen,
     EnvScreen,
@@ -343,7 +347,7 @@ def test_quit_binding_exits_clean(seeded_home):
 
 _BINDING_CLASSES = [
     MaestroTUI, ReviewScreen, _TextViewModal, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
-    ScheduleScreen, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
+    ScheduleScreen, ActivityScreen, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
     _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal,
     _ConfirmModal, SpecScreen, EnvScreen,
 ]
@@ -1589,7 +1593,10 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
             assert app._exception is None
 
             await pilot.press("P")  # toggle_pause -> pause (now unpaused)
-            await pilot.pause()
+            for _ in range(50):  # wait for the confirm modal before answering it
+                await pilot.pause(0.1)
+                if not isinstance(app.screen_stack[-1], FleetScreen):
+                    break
             await pilot.press("y")
             for _ in range(50):
                 await pilot.pause(0.1)
@@ -4528,6 +4535,54 @@ def test_cmd_discard_not_refused_with_multiple_open_questions(home):
 
 
 # --------------------------------------------------------------------------- #
+# T-161: sortable board columns + Idle column                                 #
+# --------------------------------------------------------------------------- #
+
+def _seed_sort_board(home):
+    for i in (1, 2, 3, 4, 5):
+        seed_phase(home, f"T-{i}", disp_mod.Phase.READY)
+    for n in range(3):
+        event_log.append(home, "T-3", "Failed", {"error": f"boom {n}"}, actor="r")
+    snap_mod.rebuild(home, "T-3")
+
+
+def _cursor_key(app):
+    table = app.query_one("#tickets", DataTable)
+    return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+
+
+def _row_values(app):
+    table = app.query_one("#tickets", DataTable)
+    return [table.coordinate_to_cell_key((i, 0)).row_key.value for i in range(table.row_count)]
+
+
+def _bar(app):
+    return str(app.query_one("#filter-bar").render())
+
+
+def test_idle_column_shows_time_since_last_event(home, monkeypatch):
+    real = store.iso_now
+    old = time.time() - 2 * 3600 - 30
+    monkeypatch.setattr(store, "iso_now",
+                        lambda: datetime.fromtimestamp(old, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"))
+    seed_phase(home, "T-1", disp_mod.Phase.READY)
+    monkeypatch.setattr(store, "iso_now", real)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            labels = [c.label.plain for c in table.columns.values()]
+            assert labels[labels.index("Deps") + 1] == "Idle"
+            assert table.get_row("T-1")[labels.index("Idle")] == "2h"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # T-155: ticket actions target the visible ticket                              #
 # --------------------------------------------------------------------------- #
 
@@ -4572,6 +4627,31 @@ def test_actions_target_visible_ticket(seeded_home):
     asyncio.run(_inner())
 
 
+def test_sort_by_fails_survives_refresh(home):
+    _seed_sort_board(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            for _ in range(6):  # Key, Phase, Title, PR, CI, Fails
+                await pilot.press(">")
+            await pilot.pause()
+            assert _row_values(app)[0] == "T-3"
+            assert "↓ Fails" in _bar(app)
+            order = _row_values(app)
+            key = _cursor_key(app)
+            app._populate()
+            await pilot.pause()
+            assert _row_values(app) == order
+            assert _cursor_key(app) == key
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_deps_detail_discard_targets_screen_key(seeded_home):
     from textual.widgets import Tree
 
@@ -4605,6 +4685,49 @@ def test_deps_detail_discard_targets_screen_key(seeded_home):
     asyncio.run(_inner())
 
 
+def test_sort_direction_flip(home):
+    _seed_sort_board(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            for _ in range(6):
+                await pilot.press(">")
+            await pilot.press("<")
+            await pilot.pause()
+            assert _row_values(app)[-1] == "T-3"
+            assert "↑ Fails" in _bar(app)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_header_click_sorts_and_reverses(home):
+    _seed_sort_board(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            cols = list(table.columns.values())
+            x = sum(c.get_render_width(table) for c in cols[:5]) + 2
+            await pilot.click("#tickets", offset=(x, 0))
+            await pilot.pause()
+            assert _row_values(app)[0] == "T-3"
+            assert "↓ Fails" in _bar(app)
+            await pilot.click("#tickets", offset=(x, 0))
+            await pilot.pause()
+            assert _row_values(app)[-1] == "T-3"
+            assert "↑ Fails" in _bar(app)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_empty_filter_clears_selection(home):
     seed_ticket(home, "T-3", "implementing", phase="implementing", pr=15)
     seed_ticket(home, "T-5", "ready", phase="ready")
@@ -4629,6 +4752,52 @@ def test_empty_filter_clears_selection(home):
                 await pilot.pause()
                 assert any(sev == "warning" for _, sev in seen[before:]), key
             assert inbox.pending(home, "T-3") == [] and inbox.pending(home, "T-5") == []
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_sort_cycle_returns_to_default_order(home):
+    _seed_sort_board(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            for _ in range(8):  # through Idle
+                await pilot.press(">")
+            await pilot.pause()
+            assert "Idle" in _bar(app)
+            await pilot.press(">")
+            await pilot.pause()
+            assert _row_values(app) == [r[-1] for r in ticket_rows(home)]
+            assert "↓" not in _bar(app) and "↑" not in _bar(app)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_sort_keeps_cursor_on_selected_key(home):
+    _seed_sort_board(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            table.move_cursor(row=table.get_row_index("T-5"))
+            await pilot.pause()
+            assert app._selected_key == "T-5"
+            for _ in range(6):
+                await pilot.press(">")
+            await pilot.pause()
+            assert app._selected_key == "T-5"
+            assert _cursor_key(app) == "T-5"
+            assert table.cursor_row == table.get_row_index("T-5")
             assert app._exception is None
 
     asyncio.run(_inner())
@@ -4693,6 +4862,114 @@ def test_question_mark_opens_help(seeded_home):
             assert app._exception is None
 
     asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# T-173: ActivityScreen (board-wide ticker)                                   #
+# --------------------------------------------------------------------------- #
+
+async def _open_activity(app, pilot):
+    ActivityScreen.POLL_INTERVAL = 0.2
+    await pilot.press("T")
+    for _ in range(40):
+        await pilot.pause(0.05)
+        if isinstance(app.screen, ActivityScreen) and app.screen._ready:
+            break
+    await pilot.pause(0.2)
+    assert isinstance(app.screen, ActivityScreen)
+    return app.screen
+
+
+async def _wait_for(pilot, cond, tries=60):
+    for _ in range(tries):
+        await pilot.pause(0.1)
+        if cond():
+            return True
+    return False
+
+
+@pytest.fixture(autouse=False)
+def _fast_activity(monkeypatch):
+    monkeypatch.setattr(ActivityScreen, "POLL_INTERVAL", 0.2)
+
+
+def _row_keys(screen):
+    return [k.value for k in screen.query_one("#act-table", DataTable).rows]
+
+
+def test_activity_screen_tails_new_event_to_top(seeded_home, _fast_activity):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            screen = await _open_activity(app, pilot)
+            assert _row_keys(screen)
+            ev = event_log.append(seeded_home, "T-3", "Note", {"text": "hello [x]"}, actor="t")
+            top = f"T-3:{ev['seq']}"
+            assert await _wait_for(pilot, lambda: _row_keys(screen)[:1] == [top])
+            assert _row_keys(screen).count(top) == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_activity_hot_keys_pause_and_categories(seeded_home, _fast_activity):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            screen = await _open_activity(app, pilot)
+            for i in range(40):
+                event_log.append(seeded_home, "T-3", "RequeueScheduled", {"at": i}, actor="t")
+            assert await _wait_for(pilot, lambda: screen.hot_keys[:1] and screen.hot_keys[0][0] == "T-3"
+                                   and screen.hot_keys[0][1] >= 40)
+            await pilot.press("space")
+            before = len(_row_keys(screen))
+            ev = event_log.append(seeded_home, "T-4", "Note", {"text": "held"}, actor="t")
+            held = f"T-4:{ev['seq']}"
+            assert await _wait_for(pilot, lambda: screen._held)
+            assert len(_row_keys(screen)) == before and held not in _row_keys(screen)
+            await pilot.press("space")
+            await pilot.pause()
+            assert _row_keys(screen)[0] == held
+            await pilot.press("6")  # RequeueScheduled lives in group 6
+            await pilot.pause()
+            assert not any(k for k in _row_keys(screen)
+                           if screen.query_one("#act-table", DataTable).get_row(k)[2].plain == "RequeueScheduled")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def _tree_sizes(home):
+    return {str(p): p.stat().st_size for d in ("events", "derived/claims")
+            if (home / d).is_dir() for p in (home / d).rglob("*") if p.is_file()}
+
+
+def test_activity_enter_opens_detail_read_only(seeded_home, _fast_activity):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-1"
+            screen = await _open_activity(app, pilot)
+            table = screen.query_one("#act-table", DataTable)
+            idx = next(i for i, k in enumerate(_row_keys(screen)) if k.startswith("T-3:"))
+            table.move_cursor(row=idx)
+            await pilot.pause()
+            before = _tree_sizes(seeded_home)
+            depth = len(app.screen_stack)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(app.screen_stack) == depth + 1
+            assert isinstance(app.screen, DetailScreen) and app.screen._key == "T-3"
+            assert app._selected_key == "T-1"
+            await pilot.pause(0.5)
+            assert _tree_sizes(seeded_home) == before
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
 
 
 # --------------------------------------------------------------------------- #
