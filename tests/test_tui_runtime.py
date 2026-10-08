@@ -3607,6 +3607,50 @@ def test_deps_screen_tree_colors_and_navigation(home):
     asyncio.run(_inner())
 
 
+def test_deps_column_counts_and_colors_blocking_deps(home):
+    """Deps column: blank when unblocked, open-dep count colored by depth, missing dep blocks."""
+    seed_phase(home, "D-0", disp_mod.Phase.DONE)
+    for key, deps in (("A-1", []), ("B-1", ["A-1"]), ("C-1", ["B-1"]),
+                      ("E-1", ["D-0"]), ("F-1", ["NOPE-9"])):
+        seed_phase(home, key, disp_mod.Phase.READY)
+        if deps:
+            store.spec_path(home, key).write_text(
+                f"# {key}\n\ndependsOn: [{', '.join(deps)}]\n\n## Acceptance criteria\n- [ ] ok\n",
+                encoding="utf-8")
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            app._populate()
+            await pilot.pause()
+            table = app.query_one("#tickets", DataTable)
+            col = [c.label.plain for c in table.columns.values()].index("Deps")
+            assert [c.label.plain for c in table.columns.values()][col - 1] == "Fails"
+            palette = app.get_css_variables()
+
+            def cell(key):
+                return table.get_row(key)[col]
+
+            for key in ("A-1", "E-1"):
+                assert str(cell(key)) == ""
+            for key, color in (("B-1", palette["warning"]), ("C-1", palette["error"]),
+                               ("F-1", palette["warning"])):
+                c = cell(key)
+                assert str(c) == "1" and isinstance(c, Text), key
+                assert color in str(c.style), (key, c.style)
+
+            # refresh keeps cursor/selection with the new column
+            table.move_cursor(row=table.get_row_index("C-1"))
+            await pilot.pause()
+            app._populate()
+            await pilot.pause()
+            assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value == "C-1"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # --------------------------------------------------------------------------- #
 # T-152: Spec view Dependencies strip                                         #
 # --------------------------------------------------------------------------- #

@@ -10,7 +10,9 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from textual.worker import Worker, WorkerState
 
-from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
+from rich.text import Text
+
+from .. import claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from .. import dispatcher as disp
@@ -23,7 +25,7 @@ from .modals import (
     _ACCEPT_ALL, _AcceptedRecommendation, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal,
     _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
 )
-from .render import _render_badge, _styled_row
+from .render import _dep_color, _render_badge, _styled_row
 from .screens import (
     DetailScreen,
     DepsScreen,
@@ -155,6 +157,7 @@ class MaestroTUI(App):
         table.add_column("PR")
         table.add_column("CI")
         table.add_column("Fails")
+        table.add_column("Deps")
         self._populate()
         self.set_interval(3.0, self._populate)
         self._refresh_badge()
@@ -726,8 +729,11 @@ class MaestroTUI(App):
         prev_row = table.cursor_row
         table.clear()
         row_keys: list[str] = []
+        graph = depgraph.build(home)  # once per refresh, not per row
+        palette = self.get_css_variables()
         for *cells, row_key in visible:
-            table.add_row(*_styled_row(*cells), key=row_key)
+            styled = _styled_row(*cells)
+            table.add_row(*styled, self._deps_cell(graph, row_key, palette), key=row_key)
             row_keys.append(row_key)
         if not row_keys:
             return
@@ -737,6 +743,15 @@ class MaestroTUI(App):
             table.move_cursor(row=min(prev_row, len(row_keys) - 1))
         if self._selected_key:
             self._refresh_events()
+
+    @staticmethod
+    def _deps_cell(graph, key: str, palette: dict) -> Text | str:
+        """Open-dependency count colored by blocking depth; blank when unblocked."""
+        node = graph.nodes.get(key)
+        if node is None or not node.blocked:
+            return ""
+        count = len(node.open_deps) + len(node.missing)
+        return Text(str(count), style=_dep_color(graph.depth[key], palette))
 
     def _refresh_events(self) -> None:
         if not self._selected_key:
