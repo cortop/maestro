@@ -469,15 +469,25 @@ class Config:
 # key set (`_REPO_TABLE_KEYS`, below the knob table) adds every board-wide knob
 # declared `per_repo=True`; config.load raises on anything outside it, so a
 # typo'd credential field (or any other field) never gets silently ignored.
+# sorted-registry
 _REPO_ONLY_KEYS = frozenset({
-    "path", "slug", "base_branch", "branch_prefix", "default",
-    "max_spawns_per_sweep", "mode", "reconcile_allowed_tools",
-    "gh_account", "token_env", "prime", "test_selector",
+    "base_branch",
+    "branch_prefix",
+    "default",
+    "gh_account",
+    "max_spawns_per_sweep",
+    "mode",
+    "path",
+    "prime",
+    "reconcile_allowed_tools",
+    "slug",
     # T-132: this repo's PR-stack tool override -- see _STACK_TOOLS. No
     # board-wide [maestro] default exists, so this stays repo-only rather
     # than a per_repo=True Knob (unlike test_command/base_drift_policy/etc,
     # which override a board-wide default and so live in REPO_OVERRIDE_KEYS).
     "stack_tool",
+    "test_selector",
+    "token_env",
 })
 
 # MTO-2: the whole recognized base_drift_policy value set -- both [maestro] and
@@ -523,7 +533,14 @@ _READY_FAST_PATH_MODES = frozenset({"off", "on"})
 # code scraping ticket specs for whatever model tag happens to be in use.
 # `models` unset falls back to the board-wide `runner_model` default (see that
 # function's own docstring).
-_RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host", "bin"})
+# sorted-registry
+_RUNNER_OPENCODE_KEYS = frozenset({
+    "bin",
+    "concurrency",
+    "host",
+    "models",
+    "phases",
+})
 
 
 # T-56/T-60: [runner.pi]'s whole recognized key set. Same validation posture as
@@ -547,9 +564,19 @@ _RUNNER_OPENCODE_KEYS = frozenset({"concurrency", "phases", "models", "host", "b
 # Record<string,string>`) that `headers` is the exact key name pi's model
 # registry expects at the provider level, the same posture as `api_key`
 # (verbatim, never resolved -- see that function's own docstring).
+# sorted-registry
 _RUNNER_PI_KEYS = frozenset({
-    "provider", "base_url", "api", "compat", "models", "api_key", "version",
-    "concurrency", "phases", "headers", "bin",
+    "api",
+    "api_key",
+    "base_url",
+    "bin",
+    "compat",
+    "concurrency",
+    "headers",
+    "models",
+    "phases",
+    "provider",
+    "version",
 })
 
 
