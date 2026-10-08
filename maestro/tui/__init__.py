@@ -46,6 +46,7 @@ from .screens import (
     InboxScreen,
     LogsScreen,
     ProposalScreen,
+    ReviewScreen,
     ScheduleScreen,
     SpecScreen,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "InboxScreen",
     "LogsScreen",
     "ProposalScreen",
+    "ReviewScreen",
     "ScheduleScreen",
     "SpecScreen",
     "_ACCEPT_ALL",

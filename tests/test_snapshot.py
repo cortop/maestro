@@ -381,3 +381,22 @@ def test_done_drops_phase_changed_entirely():
     ])
     assert snap.phase == Phase.DONE.value
     assert snap.failure_count == 1
+
+
+def test_review_ready(home):
+    """T-177: ready == CI passing AND no unresolved reviews AND every AC spec-axis QA-passed."""
+    from maestro.snapshot import Snapshot, ac_hash
+    spec = "## Acceptance criteria\n- [ ] one\n- [ ] two\n"
+    verdicts = {ac_hash(t): {"verdict": "pass"} for t in ("one", "two")}
+
+    def snap(**kw):
+        base = dict(key="T-1", ci_state="passing", unresolved_reviews=0, qa_verdicts=dict(verdicts))
+        base.update(kw)
+        return Snapshot(**base)
+
+    assert snap().review_ready(spec)
+    assert not snap(ci_state="failing").review_ready(spec)
+    assert not snap(ci_state=None).review_ready(spec)
+    assert not snap(unresolved_reviews=1).review_ready(spec)
+    assert not snap(qa_verdicts={ac_hash("one"): {"verdict": "pass"}}).review_ready(spec)
+    assert not snap(qa_verdicts={**verdicts, ac_hash("two"): {"verdict": "fail"}}).review_ready(spec)
