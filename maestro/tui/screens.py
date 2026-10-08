@@ -10,15 +10,18 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from rich.markup import escape as rich_escape
 from rich.text import Text
 from textual.binding import Binding
 from textual.app import ComposeResult, SuspendNotSupported
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Markdown, RichLog, Static, Tree
 from textual.worker import Worker, WorkerState
 
 from .. import burn, claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, repos, snapshot as snap_mod, store
+from .. import dispatcher
+from ..config import Config
 from ..dispatcher import list_keys, schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
@@ -27,7 +30,8 @@ from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row,
 from .modals import (_AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _InboxModal, _IntervalModal,
                      _ScheduleModal, _TextViewModal)
 from .. import repos as repos_mod
-from .render import _fmt_duration, _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
+from . import why as why_mod
+from .render import _fmt_duration, _dep_label, _fmt_epoch, _nudge_toast, _render_dep_header, _render_env, _render_fleet
 
 
 def editor_argv(path: Path, line: int | None = None) -> list[str]:
@@ -1779,3 +1783,164 @@ class AcScreen(Screen):
             self.app._nudge(self._key)
 
         self.app.push_screen(_InboxModal(self._key, f"re AC{row['index']}: "), _on_dismiss)
+
+
+class WhyScreen(Screen):
+    """Read-only "why isn't it dispatched" view for one ticket (T-165): the live
+    due verdict, throttles, claim, spawn attempts and recent sweep decisions.
+    Reads only (`snap_mod.load`, `dispatcher.due_check`, `describe_claims`); the one
+    write is `k`, an explicit, confirmed, key-scoped dispatch sweep."""
+
+    HELP = ("Why/Next. enter on a dependency row opens its Why view or on a decision shows it in full, "
+            "l opens the logs, r refreshes, k kicks a sweep scoped to this ticket, escape goes back.")
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("r", "refresh_why", "Refresh"),
+        ("l", "open_logs", "Logs"),
+        ("k", "kick", "Kick sweep"),
+    ]
+
+    CSS = """
+    WhyScreen #why-lines { height: auto; padding: 0 1; }
+    WhyScreen #why-deps { height: auto; max-height: 8; }
+    WhyScreen #why-decisions { height: 1fr; }
+    """
+
+    def __init__(self, home: Path, key: str, clock=store.now_epoch) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+        self._clock = clock
+        self._cfg = Config(home=home)
+        self._ctx: dict = {}
+        self._decisions: list[dict] = []
+        self._deps: list[tuple[str, str]] = []
+        self._verdict: str = ""
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Vertical(id="why-lines"):
+            yield Static("", id="why-now", markup=False)
+            yield Static("", id="why-throttle", markup=False)
+            yield Static("", id="why-claim", markup=False)
+            yield Static("", id="why-attempts", markup=False)
+        yield DataTable(id="why-deps", cursor_type="row")
+        yield DataTable(id="why-decisions", cursor_type="row")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Why: {self._key}"
+        self.query_one("#why-deps", DataTable).add_columns("Blocking dep", "Phase")
+        self.query_one("#why-decisions", DataTable).add_columns("Time", "Outcome", "Reason")
+        self.query_one("#why-decisions", DataTable).focus()
+        self._tick()
+        self._load()
+        self.set_interval(1.0, self._tick)
+        self.set_interval(10.0, self._load)
+
+    def _load(self) -> None:
+        home, key, clock = self._home, self._key, self._clock
+
+        def _work() -> tuple[Config, dict]:
+            cfg = why_mod.load_cfg(home)
+            return cfg, why_mod.gather_context(home, key, cfg, clock())
+
+        self.run_worker(_work, thread=True, group="why-load", exclusive=True,
+                        name="why-load", exit_on_error=False)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "why-load":
+            return
+        if event.state == WorkerState.SUCCESS:
+            self._cfg, self._ctx = event.worker.result
+            self._fill_decisions(self._ctx["decisions"])
+            self._tick()
+        elif event.state == WorkerState.ERROR:
+            self.query_one("#why-claim", Static).update(f"load failed: {event.worker.error}")
+
+    def _tick(self) -> None:
+        """Recompute the clock-dependent lines from already-cached context (cheap reads only)."""
+        now = self._clock()
+        try:
+            snap = snap_mod.load(self._home, self._key)
+            res, text = why_mod.now_verdict(self._home, self._key, snap, now)
+        except Exception as exc:  # noqa: BLE001 -- a corrupt ticket must not crash the screen
+            self.query_one("#why-now", Static).update(f"Now: unavailable ({exc})")
+            return
+        self._verdict = text
+        self.query_one("#why-now", Static).update(f"Now: {text}")
+        self.query_one("#why-throttle", Static).update(
+            "Throttle: " + why_mod.throttle_text(self._home, self._key, snap, res, self._cfg, self._ctx, now))
+        self.query_one("#why-claim", Static).update(
+            "Claim: " + (why_mod.claim_text(self._ctx) if self._ctx else "loading…"))
+        self.query_one("#why-attempts", Static).update(why_mod.attempts_text(snap, self._cfg, self._ctx))
+        deps = why_mod.open_deps(self._home, self._key) if res.reason == "blocked-dep" else []
+        if deps != self._deps:
+            self._deps = deps
+            table = self.query_one("#why-deps", DataTable)
+            table.clear()
+            for dep, phase in deps:
+                table.add_row(dep, phase)
+            table.display = bool(deps)
+            if deps:
+                table.focus()
+
+    def _fill_decisions(self, decisions: list[dict]) -> None:
+        self._decisions = list(reversed(decisions))  # newest first
+        table = self.query_one("#why-decisions", DataTable)
+        table.clear()
+        for d in self._decisions:
+            style = why_mod.outcome_style(d.get("outcome"))
+            table.add_row(Text(str(d.get("ts") or "")), Text(str(d.get("outcome") or ""), style=style),
+                          Text(str(d.get("reason") or "")))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        if event.data_table.id == "why-deps":
+            if 0 <= event.cursor_row < len(self._deps):
+                self.app.push_screen(WhyScreen(self._home, self._deps[event.cursor_row][0], self._clock))
+            return
+        if 0 <= event.cursor_row < len(self._decisions):
+            d = self._decisions[event.cursor_row]
+            body = "\n".join([f"ts: {d.get('ts')}", f"outcome: {d.get('outcome')}",
+                              f"reason: {d.get('reason')}",
+                              f"hook_errors: {d.get('hook_errors') or 'none'}"])
+            self.app.push_screen(_AcEvidenceModal(f"{self._key} · sweep decision", body))
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        event.stop()
+
+    def action_refresh_why(self) -> None:
+        self._load()
+        self._tick()
+
+    def action_open_logs(self) -> None:
+        self.app.push_screen(LogsScreen(self._home, self._key))
+
+    def action_kick(self) -> None:
+        home, key = self._home, self._key
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            app = self.app
+
+            def _sweep() -> None:
+                cfg = why_mod.load_cfg(home)
+                try:
+                    report = dispatcher.dispatch(cfg, app._sessions_factory(cfg), store.now_epoch(),
+                                                 key_filter=[key])
+                    msg, sev = _nudge_toast(key, report)
+                except store.MaestroError as e:
+                    msg, sev = f"kick: {e}", "warning"
+                app.call_from_thread(app.notify, msg, severity=sev)
+
+            self.run_worker(_sweep, thread=True, group=f"kick-{key}", exclusive=True,
+                            name="why-kick", exit_on_error=False)
+
+        self.app.push_screen(
+            _ConfirmModal(f"Run a real dispatch sweep for [bold]{key}[/bold] only? "
+                          f"Now: {rich_escape(self._verdict)}"),
+            _on_confirm,
+        )
