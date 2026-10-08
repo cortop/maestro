@@ -566,32 +566,70 @@ class _InboxModal(ModalScreen):
 
 
 class _ConfirmModal(ModalScreen):
-    """Simple yes/no confirmation modal; dismisses with True on confirm, False on cancel."""
+    """Confirmation modal that defaults to No; dismisses True on confirm, False on cancel.
+
+    Default mode shows [Cancel] [Confirm] buttons with Cancel focused (``default=True``
+    focuses Confirm instead) and no Input, so a bare ``y`` / ``n`` reaches ``on_key``.
+    ``require=<text>`` adds an Input and keeps Confirm disabled until the stripped text
+    equals ``require`` exactly -- for irreversible actions.
+    """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, message: str) -> None:
+    DEFAULT_CSS = """
+    _ConfirmModal #confirm-input.mismatch { border: tall red; }
+    _ConfirmModal #confirm-buttons { height: auto; margin-top: 1; }
+    """
+
+    def __init__(self, message: str, *, default: bool = False, require: str | None = None) -> None:
         super().__init__()
         self._message = message
+        self._default = default
+        self._require = require
 
     def compose(self) -> ComposeResult:
         with Vertical(id="answer-dialog"):
             yield Label(self._message)
-            yield Label("[dim]y / Enter → confirm · n / Esc → cancel[/dim]")
-            yield Input(placeholder="y to confirm", id="confirm-input")
+            if self._require is not None:
+                yield Label(f"[dim]Type [bold]{self._require}[/bold] to enable Confirm · Esc → cancel[/dim]")
+                yield Input(placeholder=self._require, id="confirm-input", classes="mismatch")
+            else:
+                yield Label("[dim]y → confirm · n / Esc → cancel · Tab + Enter picks a button[/dim]")
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Cancel", id="confirm-cancel")
+                yield Button("Confirm", id="confirm-ok", variant="error",
+                             disabled=self._require is not None)
 
     def on_mount(self) -> None:
-        self.query_one("#confirm-input", Input).focus()
+        if self._require is not None:
+            self.query_one("#confirm-input", Input).focus()
+        else:
+            self.query_one("#confirm-ok" if self._default else "#confirm-cancel", Button).focus()
+
+    def _matches(self, value: str) -> bool:
+        return self._require is not None and value.strip() == self._require
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        ok = self._matches(event.value)
+        self.query_one("#confirm-ok", Button).disabled = not ok
+        event.input.set_class(not ok, "mismatch")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        val = event.value.strip().lower()
-        self.dismiss(val in ("y", "yes", ""))
+        if self._matches(event.value):
+            self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-ok")
 
     def on_key(self, event) -> None:
-        if event.key == "y":
-            self.dismiss(True)
-        elif event.key == "n":
-            self.dismiss(False)
+        if self._require is not None:
+            return
+        if event.key in ("y", "n"):
+            # Stop the key here: an unstopped `n` would fall through to the app's
+            # own `n` (new-ticket) binding once the modal is dismissed.
+            event.stop()
+            event.prevent_default()
+            self.dismiss(event.key == "y")
 
     def action_cancel(self) -> None:
         self.dismiss(False)
