@@ -1561,12 +1561,18 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
             assert "Paused" in str(status_widget.content)
 
             await pilot.press("P")  # toggle_pause -> resume (was paused)
-            await pilot.pause(0.1)
+            for _ in range(50):  # threaded worker: poll, don't race a fixed pause
+                await pilot.pause(0.1)
+                if fleet.pause_state(seeded_home, store.now_epoch()) is None:
+                    break
             assert fleet.pause_state(seeded_home, store.now_epoch()) is None
             assert app._exception is None
 
             await pilot.press("P")  # toggle_pause -> pause (now unpaused)
-            await pilot.pause(0.1)
+            for _ in range(50):
+                await pilot.pause(0.1)
+                if fleet.pause_state(seeded_home, store.now_epoch()) is not None:
+                    break
             assert fleet.pause_state(seeded_home, store.now_epoch()) is not None
             assert app._exception is None
 
