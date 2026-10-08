@@ -1,6 +1,7 @@
 """The MaestroTUI app: main board table, key actions, and the `maestro tui` entrypoint."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -39,6 +40,7 @@ from .screens import (
     ProposalScreen,
     ScheduleScreen,
     SpecScreen,
+    AcScreen,
     edit_in_editor,
 )
 
@@ -52,6 +54,14 @@ def _needs_you_predicate(home: Path, s: snap_mod.Snapshot) -> bool:
     return s.phase in _NEEDS_YOU_PHASE_VALUES
 
 
+def _running_placeholder(home: Path, s: snap_mod.Snapshot) -> bool:
+    """Stand-in for the `running` filter: the app resolves it per instance
+    (`MaestroTUI._predicate`) against its live-claim cache, which a module-level
+    `(home, Snapshot)` predicate can't see."""
+    del home, s
+    return False
+
+
 # Named filters: (display_name, row_predicate) — None predicate means no
 # filtering (show all). A predicate takes (home, Snapshot) -> bool; wider than
 # a bare phase set for callers that need one.
@@ -62,12 +72,86 @@ _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
     ("needs-you", _needs_you_predicate),
     ("active", phase_predicate(ACTIVE_PHASES)),
     ("held", lambda home, s: fleet_mod.hold_state(home, s.key, store.now_epoch()) is not None),
+    ("running", _running_placeholder),
     ("all", None),
 ]
 
 
+# T-163: Now-cell thresholds, mirroring the watchdog's no-output rule
+# (`dispatcher.run_watchdog`, `health.check_claim_no_output`).
+_SILENT_WARN_S = 120
+_SILENT_RED_FRACTION = 0.5
+_DISPATCHER_OWNED = {"testrun": "tests", "restack": "restack"}
+
+
+def _fmt_span(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s" if s < 600 else f"{s // 60}m"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def _now_state(live: dict | None, now: float, no_output_timeout: int) -> tuple[str, str] | None:
+    """(severity, text) for a key's Now cell, or None when blank. Severity is one of
+    ok / warn / red / owned. Read-only: only displays what the watchdog would judge."""
+    if not live or not live.get("claimed"):
+        return None
+    owned = _DISPATCHER_OWNED.get(live.get("kind") or "")
+    if owned:
+        return "owned", f"◌ {owned}"
+    run = _fmt_span(now - live["epoch"]) if live.get("epoch") is not None else "?"
+    mtime = live.get("mtime")
+    if mtime is None:
+        return "ok", f"● {run}"
+    silent = now - mtime
+    if no_output_timeout and silent > no_output_timeout * _SILENT_RED_FRACTION:
+        return "red", f"silent {_fmt_span(silent)}/{_fmt_span(no_output_timeout)}"
+    if silent > _SILENT_WARN_S:
+        return "warn", f"● {run} silent {_fmt_span(silent)}"
+    return "ok", f"● {run}"
+
+
+def _load_live(home: Path, cfg: Config) -> dict[str, dict]:
+    """Blocking (`ps` + stat): worker thread only. Never releases a claim."""
+    raw = claims.all_claims(home)
+    out: dict[str, dict] = {}
+    for row in claims.describe_claims(home, max_age=cfg.unverified_claim_max_age):
+        c = raw.get(row["key"], {})
+        mtime = None
+        if c.get("log_path"):
+            try:
+                mtime = os.stat(c["log_path"]).st_mtime
+            except OSError:
+                pass
+        out[row["key"]] = {"claimed": row["claimed"], "kind": c.get("kind"),
+                           "epoch": c.get("epoch"), "pid": c.get("pid"), "mtime": mtime}
+    return out
+
+
+def _load_board(home: Path) -> dict:
+    """Everything `_populate` renders, read off the UI thread (T-163 enabler 4)."""
+    try:
+        cfg = config_mod.load(str(home))
+    except store.MaestroError:
+        cfg = Config(home=home)
+    rows = ticket_rows(home)
+    return {
+        "rows": rows,
+        "snaps": {r[-1]: snap_mod.load(home, r[-1]) for r in rows},
+        "graph": depgraph.build(home),
+        "live": _load_live(home, cfg),
+        "no_output_timeout": cfg.no_output_timeout,
+    }
+
+
 # ANSWER_COMMANDS minus the ticket-level discard/retry (T-157).
 _PER_QUESTION_COMMANDS = frozenset(ops_mod.ANSWER_COMMANDS) - {"discard", "retry"}
+
+
+def _filter_idx_by_name(name: str) -> int:
+    return next(i for i, (n, _) in enumerate(_FILTERS) if n == name)
 
 
 class MaestroTUI(App):
@@ -130,6 +214,7 @@ class MaestroTUI(App):
         Binding("o", "runner", "Runner", show=False),
         Binding("L", "import_linear", "Linear", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
+        Binding("v", "ac_matrix", "ACs", show=False),
         Binding("g", "suggest_acs", "Suggest ACs", show=False),
         Binding("Q", "trigger_post_qa", "Post-QA", show=False),
         Binding(">", "cycle_sort", "Sort column", show=False),
@@ -137,20 +222,22 @@ class MaestroTUI(App):
         Binding("question_mark", "show_help_panel", "Help", show=False),
         Binding("N", "toggle_nudge", "Nudge on/off", show=False),
         Binding("h", "hold", "Hold", show=False),
+        Binding("j", "jump_running", "Next running", show=False),
     ]
 
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
-        "add_ac", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
+        "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
         "view_events", "inbox_message", "view_logs", "view_inbox",
     })
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
+        "jump_running",
     })
     _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
-    _KEYED_SCREENS = (DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
+    _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen)
 
     _selected_key: str | None = None
@@ -188,6 +275,14 @@ class MaestroTUI(App):
         # key -> (phase, open-question count), refreshed by `_populate`; read by
         # `check_action`, which runs on every footer refresh and must not load snapshots.
         self._snap_cache: dict[str, tuple[str, int]] = {}
+        # T-163: the worker-filled board cache `_populate` renders from.
+        self._rows: list[tuple[str, ...]] = []
+        self._snaps: dict[str, snap_mod.Snapshot] = {}
+        self._graph = None
+        self._live: dict[str, dict] = {}
+        self._no_output_timeout: int = Config.no_output_timeout
+        # key -> claim identity that already toasted red.
+        self._red_toasted: dict[str, tuple] = {}
 
     def _target_key(self) -> str | None:
         """The ticket the operator is looking at: the pushed screen's own ticket, else the board cursor."""
@@ -265,8 +360,9 @@ class MaestroTUI(App):
         table.add_column("Fails")
         table.add_column("Deps")
         table.add_column("Idle")
-        self._populate()
-        self.set_interval(3.0, self._populate)
+        table.add_column("Now")
+        self._refresh_now()
+        self.set_interval(3.0, self._kick_live)
         self._refresh_badge()
         self.set_interval(5.0, self._refresh_badge)
         self._refresh_pulse()
@@ -438,11 +534,13 @@ class MaestroTUI(App):
             detail.update("[dim]Select a ticket[/dim]")
             self.query_one("#events", RichLog).clear()
             return
-        self._show_detail(key)
+        # cursor moves (incl. the one a refresh makes) render from the worker's cache
+        self._show_detail(key, self._snaps.get(key))
 
-    def _show_detail(self, key: str) -> None:
+    def _show_detail(self, key: str, snap: snap_mod.Snapshot | None = None) -> None:
         detail = self.query_one("#detail", Static)
-        snap = snap_mod.load(self._home, key)
+        if snap is None:
+            snap = snap_mod.load(self._home, key)
         runner, runner_model = spec_runner(self._home, key)
         detail.update(_render_detail(snap, snap_mod.display_title(self._home, snap),
                                      runner, runner_model,
@@ -458,7 +556,90 @@ class MaestroTUI(App):
             self.push_screen(DetailScreen(self._home, key))
 
     def action_refresh(self) -> None:
+        self._kick_live()
+
+    # --- T-163: live board cache -------------------------------------------
+
+    def _kick_live(self) -> None:
+        """Reload the board cache on an exclusive thread worker, then re-render once."""
+        home = self._home
+
+        def _work() -> None:
+            data = _load_board(home)
+            try:
+                self.call_from_thread(self._apply_board, data)
+            except RuntimeError:  # app torn down mid-load
+                pass
+
+        self.run_worker(_work, thread=True, group="live", exclusive=True,
+                        name="live", exit_on_error=False)
+
+    def _refresh_now(self) -> None:
+        """Synchronous reload + render (mount and tests; never the periodic path)."""
+        self._apply_board(_load_board(self._home))
+
+    def _apply_board(self, data: dict) -> None:
+        self._rows = data["rows"]
+        self._snaps = data["snaps"]
+        self._graph = data["graph"]
+        self._live = data["live"]
+        self._no_output_timeout = data["no_output_timeout"]
+        self._toast_new_red(store.now_epoch())
         self._populate()
+
+    def _toast_new_red(self, now: float) -> None:
+        red: dict[str, tuple] = {}
+        for key, live in self._live.items():
+            st = _now_state(live, now, self._no_output_timeout)
+            if st and st[0] == "red":
+                red[key] = (live.get("pid"), live.get("epoch"))
+        for key, ident in red.items():
+            if self._red_toasted.get(key) != ident:
+                self.notify(f"{key}: session silent past 50% of no_output_timeout",
+                            severity="warning", timeout=8)
+        self._red_toasted = red
+
+    def _running_keys(self) -> set[str]:
+        return {k for k, v in self._live.items() if v.get("claimed")}
+
+    def _predicate(self, pred):
+        if pred is _running_placeholder:
+            running = self._running_keys()
+            return lambda home, s: s.key in running
+        return pred
+
+    def _now_cell(self, key: str, now: float) -> Text | str:
+        st = _now_state(self._live.get(key), now, self._no_output_timeout)
+        if st is None:
+            return ""
+        sev, text = st
+        style = {"ok": "green", "warn": "yellow", "red": "bold red", "owned": "dim"}[sev]
+        return Text(text, style=style)
+
+    def action_jump_running(self) -> None:
+        """Select the next running row after the cursor, wrapping; widens the filter
+        to `all` only when the target isn't visible."""
+        running = self._running_keys()
+        order = [r[-1] for r in self._rows if r[-1] in running]
+        if not order:
+            self.notify("No running tickets")
+            return
+        table = self.query_one(DataTable)
+        visible = [str(k.value) for k in table.rows]
+        cur = self._selected_key
+        pos = visible.index(cur) if cur in visible else -1
+        after = [k for k in visible[pos + 1:] if k in running]
+        target = after[0] if after else next((k for k in visible if k in running), None)
+        if target is None:
+            target = order[0]
+        if target not in visible:
+            self._filter_idx = _filter_idx_by_name("all")
+            self._populate()
+            visible = [str(k.value) for k in table.rows]
+        if target in visible:
+            table.move_cursor(row=visible.index(target))
+            self._selected_key = target
+            self._show_detail(target)
 
     def action_cycle_filter(self) -> None:
         self._filter_idx = (self._filter_idx + 1) % len(_FILTERS)
@@ -791,7 +972,7 @@ class MaestroTUI(App):
                 return
             if result["minted"]:
                 self.notify(f"imported {result['key']}")
-                self._populate()
+                self._kick_live()
             else:
                 self.notify(f"{result['key']} already imported", severity="warning")
 
@@ -991,6 +1172,16 @@ class MaestroTUI(App):
             return
         self.push_screen(DetailScreen(self._home, key))
 
+    def action_ac_matrix(self) -> None:
+        """T-167: the AC evidence matrix for the ticket being looked at."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        if isinstance(self.screen, AcScreen):
+            return
+        self.push_screen(AcScreen(self._home, key))
+
     def action_view_events(self) -> None:
         key = self._target_key()
         if key is None:
@@ -1028,14 +1219,12 @@ class MaestroTUI(App):
         self.push_screen(InboxScreen(self._home, key))
 
     def _populate(self) -> None:
+        """Render the filter bar, rows and Now cells from the cached board (no I/O)."""
         _name, predicate = _FILTERS[self._filter_idx]
+        predicate = self._predicate(predicate)
         home = self._home
-
-        # Load all rows once for counting and filtering
-        all_rows = ticket_rows(home)
-
-        # Snapshot-level state for filtering/toasting.
-        snaps_by_key = {row[-1]: snap_mod.load(home, row[-1]) for row in all_rows}
+        all_rows = self._rows
+        snaps_by_key = self._snaps
 
         # Detect tickets newly entering awaiting-human/degraded.
         new_phases = {key: s.phase for key, s in snaps_by_key.items()}
@@ -1053,6 +1242,7 @@ class MaestroTUI(App):
             if fpred is None:
                 count = len(all_rows)
             else:
+                fpred = self._predicate(fpred)
                 count = sum(1 for s in snaps_by_key.values() if fpred(home, s))
             label = f"{fname}({count})"
             if i == self._filter_idx:
@@ -1071,7 +1261,7 @@ class MaestroTUI(App):
         else:
             visible = all_rows
 
-        graph = depgraph.build(home)  # once per refresh, not per row
+        graph = self._graph  # worker-cached; no I/O on the UI thread
         visible = self._sort_visible(visible, snaps_by_key, graph)
 
         table = self.query_one(DataTable)
@@ -1087,13 +1277,14 @@ class MaestroTUI(App):
         table.clear()
         row_keys: list[str] = []
         palette = self.get_css_variables()
-        now = store.iso_to_epoch(store.iso_now()) or 0.0
+        now = store.now_epoch()
         for *cells, row_key in visible:
             if fleet_mod.hold_state(home, row_key, store.now_epoch()) is not None:
                 cells[0] = f"⏸ {cells[0]}"
             styled = _styled_row(*cells)
             idle = _format_age(_idle_seconds(snaps_by_key[row_key], now))
-            table.add_row(*styled, self._deps_cell(graph, row_key, palette), idle, key=row_key)
+            table.add_row(*styled, self._deps_cell(graph, row_key, palette), idle,
+                          self._now_cell(row_key, now), key=row_key)
             row_keys.append(row_key)
         if not row_keys:
             self._selected_key = None
@@ -1112,7 +1303,7 @@ class MaestroTUI(App):
     @staticmethod
     def _deps_cell(graph, key: str, palette: dict) -> Text | str:
         """Open-dependency count colored by blocking depth; blank when unblocked."""
-        node = graph.nodes.get(key)
+        node = graph.nodes.get(key) if graph is not None else None
         if node is None or not node.blocked:
             return ""
         count = len(node.open_deps) + len(node.missing)

@@ -71,7 +71,7 @@ def test_dispatch_sweep_then_tui_reflects_board(home, cfg):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             # T-1, T-2, T-3 seeded + T-9 minted by the sweep = 4 rows.
@@ -80,7 +80,7 @@ def test_dispatch_sweep_then_tui_reflects_board(home, cfg):
 
             # The needs-you filter narrows to the awaiting-human ticket.
             app._filter_idx = _filter_idx("needs-you")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert app.query_one("#tickets", DataTable).row_count == 1
             assert app._exception is None

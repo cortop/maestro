@@ -696,8 +696,10 @@ def test_tui_cycle_filter_advances_and_wraps():
     assert app._filter_idx == 1
     app.action_cycle_filter()
     assert app._filter_idx == 2
-    for _ in range(len(_FILTERS) - 2):
+    for _ in range(len(_FILTERS) - 3):
         app.action_cycle_filter()
+    assert app._filter_idx == len(_FILTERS) - 1
+    app.action_cycle_filter()
     assert app._filter_idx == 0  # wraps around
 
 
@@ -1297,7 +1299,7 @@ def test_populate_preserves_cursor_on_refresh(home):
     app = _make_app_with_fake_table(home, table)
 
     # First populate — cursor lands on row 0
-    app._populate()
+    app._refresh_now()
     assert table.row_count == 3
 
     # Simulate user moving cursor to the second row
@@ -1305,7 +1307,7 @@ def test_populate_preserves_cursor_on_refresh(home):
     key_before = table.cursor_row_key.value
 
     # Refresh (same tickets) — cursor should stay on the same key
-    app._populate()
+    app._refresh_now()
     assert table.cursor_row_key.value == key_before
 
 
@@ -1315,7 +1317,7 @@ def test_populate_clamps_cursor_when_ticket_removed(home):
     table = _FakeDataTable()
     app = _make_app_with_fake_table(home, table)
 
-    app._populate()
+    app._refresh_now()
     # Move to last row
     table.move_cursor(row=2)
     assert table.cursor_row_key.value == "B-3"
@@ -1327,7 +1329,7 @@ def test_populate_clamps_cursor_when_ticket_removed(home):
         mock_rows.return_value = [
             (k, "triaging", k, "—", "—", 0, k) for k in remaining
         ]
-        app._populate()
+        app._refresh_now()
 
     # Cursor should be on a valid row, not crashed
     assert table.cursor_row < table.row_count
@@ -1339,7 +1341,7 @@ def test_populate_empty_table_no_crash(home):
     table = _FakeDataTable()
     app = _make_app_with_fake_table(home, table)
 
-    app._populate()  # no tickets exist
+    app._refresh_now()  # no tickets exist
     assert table.row_count == 0
 
 
