@@ -357,7 +357,8 @@ def test_quit_binding_exits_clean(seeded_home):
 
 _BINDING_CLASSES = [
     MaestroTUI, ReviewScreen, _TextViewModal, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
->>>>>>> origin/main
+    ScheduleScreen, ActivityScreen, AcScreen, DecisionsScreen, WhyScreen, _AcEvidenceModal, _ActionMenu, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
+    _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal, _SpecFieldsModal,
     _ConfirmModal, HoldModal, SpecScreen, EnvScreen, _EventPayloadModal,
 ]
 
