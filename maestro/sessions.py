@@ -202,6 +202,22 @@ class SessionManager(Protocol):
         """
 
 
+# Popen handles of reconcilers this process spawned and has not yet seen exit.
+# A short-lived CLI never notices, but a long-lived parent (the TUI) must reap
+# them: an exited child stays a zombie until waited on, and `claims.probe_processes`
+# (`ps -p`) still lists a zombie, so its claim would read `confirmed` and block
+# that key's next spawn. `reap_children` polls (= waits on) the finished ones.
+_CHILDREN: list[subprocess.Popen] = []
+
+
+def reap_children() -> int:
+    """Reap spawned reconcilers that have exited; returns how many were reaped."""
+    alive = [p for p in _CHILDREN if p.poll() is None]
+    reaped = len(_CHILDREN) - len(alive)
+    _CHILDREN[:] = alive
+    return reaped
+
+
 def _launch_detached(home: Path, key: str, cmd: list[str], cwd: Path, env: dict,
                      log_file: Path | None, *, prompt: str, runner: str) -> int:
     """Launch *cmd* as a fully detached reconciler session for *key* and
@@ -240,6 +256,7 @@ def _launch_detached(home: Path, key: str, cmd: list[str], cwd: Path, env: dict,
     except Exception:
         claims.release(home, key)
         raise
+    _CHILDREN.append(proc)
     claims.write_claim(home, key, proc.pid, session_name(key),
                        log_path=log_path, cwd=str(cwd), prompt=prompt, runner=runner)
     return proc.pid
@@ -260,6 +277,7 @@ class _ClaimBackedSessions:
         self._claims_run = claims_run
 
     def list_active(self) -> set[str]:
+        reap_children()  # a zombie child would still read as a live claim
         return claims.active_keys(self.home, run=self._claims_run,
                                   max_age=self._unverified_claim_max_age)
 
@@ -290,7 +308,7 @@ class ClaudeCliSessions(_ClaimBackedSessions):
         # before this ticket for every existing home (see config.Config.max_session_turns).
         self.max_session_turns = max_session_turns
         # GA-10: the process-wide "always-on" --allowedTools rules (RB-16:
-        # reconcile_web_tools only now -- see cli._reconciler_tool_grants; the
+        # reconcile_web_tools only now -- see sessions._reconciler_tool_grants; the
         # maestro CLI verb grant moved to the per-key allowed_tools argument
         # below, phase-scoped via dispatcher.phase_verb_grant) -- bare rules,
         # not a pre-built "--allowedTools" pair, so spawn() can merge in the
@@ -805,3 +823,50 @@ class RoutingSessions:
         merged = dict(env_overlay) if env_overlay else {}
         merged.setdefault("PI_CODING_AGENT_DIR", str(store.pi_agent_dir(self.home)))
         return merged
+
+
+def _reconciler_tool_grants(cfg: config.Config) -> list[str]:
+    """The process-wide, "always-on" --allowedTools rules for spawned reconcilers:
+    WebSearch/WebFetch when reconcile_web_tools is enabled, nothing else.
+
+    RB-16: the maestro CLI verb grant is NOT baked in here -- it varies by phase,
+    so it is resolved per key inside ``dispatcher.dispatch()``'s spawn loop
+    (``dispatcher.phase_verb_grant``/``phase_verb_denylist``). This list is the
+    ``base_allowed_tools`` built once per sweep; ``ClaudeCliSessions.spawn`` merges
+    it with the per-key list into exactly ONE --allowedTools flag.
+    """
+    rules: list[str] = []
+    if cfg.reconcile_web_tools:
+        rules += ["WebSearch", "WebFetch"]
+    return rules
+
+
+def build_routing_sessions(cfg: config.Config, *, model: str | None = None) -> RoutingSessions:
+    """The ONE construction site for the production ``RoutingSessions``: every
+    registered runner backend (claude/opencode/pi) wired from *cfg*.
+
+    ``model`` overrides ``cfg.reconcile_model`` for the claude delegate
+    (``maestro dispatch --model``). Adding a FOURTH backend means adding it here
+    (see ``dispatcher._REGISTERED_RUNNERS``).
+    """
+    return RoutingSessions({
+        "claude": ClaudeCliSessions(
+            cfg.home, model=model or cfg.reconcile_model,
+            permission_mode=cfg.permission_mode,
+            base_allowed_tools=_reconciler_tool_grants(cfg),
+            capture_session_logs=cfg.capture_session_logs,
+            session_log_format=cfg.session_log_format,
+            max_session_turns=cfg.max_session_turns,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+        "opencode": OpencodeCliSessions(
+            cfg.home,
+            capture_session_logs=cfg.capture_session_logs,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+        "pi": PiCliSessions(
+            cfg.home,
+            capture_session_logs=cfg.capture_session_logs,
+            unverified_claim_max_age=cfg.unverified_claim_max_age,
+        ),
+    }, home=cfg.home)

@@ -143,11 +143,11 @@ class _AnswerModal(ModalScreen):
 # Phase-aware command reference shown in _CmdModal.
 _PHASE_COMMANDS: dict[str, list[tuple[str, str]]] = {
     Phase.DEGRADED.value: [
-        ("retry", "re-enter implementing"),
+        ("retry", "re-enter ready"),
         ("discard", "drop this ticket permanently"),
     ],
     Phase.AWAITING_HUMAN.value: [
-        ("ans <qid> <text>", "answer the open question"),
+        ("ans <text>", "answer the only open question; several open → use `a`"),
         ("approve", "approve and advance"),
         ("yes", "shorthand approve"),
         ("no", "reject the plan"),
@@ -156,9 +156,8 @@ _PHASE_COMMANDS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 _DEFAULT_COMMANDS: list[tuple[str, str]] = [
-    ("retry", "re-enter implementing"),
+    ("retry", "re-enter ready"),
     ("discard", "drop this ticket permanently"),
-    ("requeue <secs>", "delay next reconcile by N seconds"),
 ]
 
 
