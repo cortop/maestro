@@ -23,7 +23,7 @@ from ..dispatcher import schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, phase_dwell,
-                     render_dwell, render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line)
+                     render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
 from .modals import _ConfirmModal, _EventPayloadModal, _IntervalModal, _ScheduleModal
 from .render import _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
 

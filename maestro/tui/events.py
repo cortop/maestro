@@ -74,14 +74,6 @@ def render_event(ev: dict) -> str:
     )
 
 
-def event_summary(ev: dict) -> str:
-    """Plain-text one-line summary of an event's payload (no markup, for table cells)."""
-    payload = ev.get("payload") or {}
-    if ev.get("type") == _IMPL_STEP:
-        return str(payload.get("summary", ""))[:80]
-    return ", ".join(f"{k}={v}" for k, v in list(payload.items())[:3])
-
-
 def event_row(ev: dict) -> tuple[Text, Text, Text, Text, Text]:
     """One event as ``(seq, ts, type, actor, summary)`` Text cells -- built from plain
     text so a ``[`` in a payload is never parsed as markup by the DataTable."""
