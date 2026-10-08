@@ -38,6 +38,7 @@ from .screens import (
     ProposalScreen,
     ScheduleScreen,
     SpecScreen,
+    AcScreen,
     edit_in_editor,
 )
 
@@ -124,6 +125,7 @@ class MaestroTUI(App):
         Binding("o", "runner", "Runner", show=False),
         Binding("L", "import_linear", "Linear", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
+        Binding("v", "ac_matrix", "ACs", show=False),
         Binding("g", "suggest_acs", "Suggest ACs", show=False),
         Binding("Q", "trigger_post_qa", "Post-QA", show=False),
         Binding("question_mark", "show_help_panel", "Help", show=False),
@@ -133,7 +135,7 @@ class MaestroTUI(App):
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
-        "add_ac", "suggest_acs", "trigger_post_qa", "compact", "release", "focus_detail",
+        "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "focus_detail",
         "view_events", "inbox_message", "view_logs", "view_inbox",
     })
     # Board-only actions: meaningless once any other screen is pushed.
@@ -141,7 +143,7 @@ class MaestroTUI(App):
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
     })
     _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen)
-    _KEYED_SCREENS = (DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
+    _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen)
 
     _selected_key: str | None = None
@@ -891,6 +893,16 @@ class MaestroTUI(App):
             self.notify("Select a ticket first", severity="warning")
             return
         self.push_screen(DetailScreen(self._home, key))
+
+    def action_ac_matrix(self) -> None:
+        """T-167: the AC evidence matrix for the ticket being looked at."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        if isinstance(self.screen, AcScreen):
+            return
+        self.push_screen(AcScreen(self._home, key))
 
     def action_view_events(self) -> None:
         key = self._target_key()

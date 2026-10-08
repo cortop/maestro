@@ -15,22 +15,24 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static, Tree
 from textual.worker import Worker, WorkerState
 
+from .. import repos as repos_mod
 from .. import claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
 from ..dispatcher import schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line
-from .modals import _ConfirmModal, _IntervalModal, _ScheduleModal
+from .modals import _AcEvidenceModal, _AddAcModal, _ConfirmModal, _InboxModal, _IntervalModal, _ScheduleModal
 from .render import _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
 
 
-def editor_argv(path: Path) -> list[str]:
-    """`$VISUAL`, then `$EDITOR`, then `vi`, shlex-split, with `path` appended."""
+def editor_argv(path: Path, line: int | None = None) -> list[str]:
+    """`$VISUAL`, then `$EDITOR`, then `vi`, shlex-split, with `path` appended
+    (preceded by `+N` when *line* is given)."""
     cmd = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    return [*shlex.split(cmd), str(path)]
+    return [*shlex.split(cmd), *([f"+{line}"] if line else []), str(path)]
 
 
-def edit_in_editor(app, path: Path) -> str | None:
+def edit_in_editor(app, path: Path, line: int | None = None) -> str | None:
     """Open `path` in the user's editor, suspending the TUI while it runs.
 
     Returns None on success, else a human-readable warning (never raises for a
@@ -39,7 +41,7 @@ def edit_in_editor(app, path: Path) -> str | None:
     if not path.is_file():
         return f"Spec not found: {path}"
     try:
-        argv = editor_argv(path)
+        argv = editor_argv(path, line)
     except ValueError as exc:
         return f"Bad editor command: {exc}"
     if not argv[:-1]:
@@ -1031,3 +1033,209 @@ class ScheduleScreen(Screen):
             return
         self.notify(f"Toggled {self._selected_name}")
         self._refresh()
+
+
+class AcScreen(Screen):
+    """AC evidence matrix for one ticket (T-167): one row per spec AC with its
+    self-attestation, spec/standards QA verdicts and latest captured check.
+    Read-only over the evidence -- it never calls verify_ac / record_qa_verdict /
+    run_ac_checks and appends no event; the only writes are the human's own
+    (`ops.add_ac`, the editor on the spec, one inbox `msg`)."""
+
+    HELP = ("AC evidence matrix. enter shows full evidence, E edits the spec at the AC, "
+            "A adds an AC, m messages the reconciler about the AC, r refreshes, escape goes back.")
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("enter", "show_evidence", "Evidence"),
+        ("E", "edit_ac", "Edit AC"),
+        ("A", "add_ac", "Add AC"),
+        ("m", "message_ac", "Message"),
+        ("r", "refresh_matrix", "Refresh"),
+    ]
+
+    CSS = """
+    AcScreen #ac-summary { height: auto; padding: 0 1; }
+    AcScreen #ac-table   { height: 1fr; }
+    """
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+        self._rows: list[dict] = []
+        self._tree_key: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("", id="ac-summary", markup=False)
+        yield DataTable(id="ac-table")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"ACs: {self._key}"
+        table = self.query_one("#ac-table", DataTable)
+        table.cursor_type = "row"
+        for col in ("#", "AC", "Self", "QA-spec", "QA-std", "Check"):
+            table.add_column(col)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._render_rows()
+        wt = store.worktree_path(self._home, self._key)
+        if not wt.is_dir():
+            return
+        home, key = self._home, self._key
+
+        def _tree() -> None:
+            try:
+                cfg = config_mod.load(str(home))
+                timeout = repos_mod.resolve(cfg, home, key).worktree_timeout
+                tk = ops._tree_state_key(wt, timeout=timeout)
+            except Exception:  # noqa: BLE001 -- a slow/broken git leaves checks "no worktree"
+                return
+            try:
+                self.app.call_from_thread(self._apply_tree_key, tk)
+            except Exception:  # noqa: BLE001 -- screen closed while git ran
+                pass
+
+        self.run_worker(_tree, thread=True, group=f"ac-tree-{key}", exclusive=True,
+                        name="ac-tree", exit_on_error=False)
+
+    def _apply_tree_key(self, tk: str) -> None:
+        self._tree_key = tk
+        self._render_rows()
+
+    def _spec_text(self) -> str:
+        path = store.spec_path(self._home, self._key)
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    @staticmethod
+    def _verdict_cell(v: dict | None) -> Text:
+        if not v:
+            return Text("—", style="dim")
+        verdict = v.get("verdict")
+        return Text(str(verdict), style="green" if verdict == "pass" else "red bold")
+
+    @staticmethod
+    def _check_cell(row: dict, have_tree: bool) -> Text:
+        ann = row.get("annotation")
+        if ann is None:
+            return Text("")
+        kind = ann["kind"]
+        if not have_tree:
+            return Text(f"{kind} · no worktree", style="dim")
+        chk = row["check"]
+        if chk is None:
+            return Text(f"{kind} · not run", style="dim")
+        sha = str(chk["tree_key"]).split(":", 1)[0][:7]
+        ok = chk.get("passed")
+        return Text(" · ".join((kind, "passed" if ok else "failed", sha,
+                                "current" if chk["current"] else "stale tree")),
+                    style="green" if ok else "red")
+
+    def _render_rows(self) -> None:
+        spec = self._spec_text()
+        try:
+            snap = snap_mod.load(self._home, self._key)
+        except Exception as exc:  # noqa: BLE001
+            self.query_one("#ac-summary", Static).update(f"snapshot unavailable: {exc}")
+            return
+        self._rows = ops.ac_evidence_rows(snap, spec, self._tree_key)
+        npass = sum(1 for r in self._rows if (r["qa_spec"] or {}).get("verdict") == "pass")
+        nfail = sum(1 for r in self._rows if (r["qa_spec"] or {}).get("verdict") == "fail")
+        total = len(self._rows)
+        self.query_one("#ac-summary", Static).update(
+            f"QA spec {npass}/{total} pass · {nfail} fail · {total - npass - nfail} pending")
+        table = self.query_one("#ac-table", DataTable)
+        cursor = table.cursor_row
+        table.clear()
+        have_tree = self._tree_key is not None
+        for r in self._rows:
+            table.add_row(
+                Text(str(r["index"])), Text(r["text"]),
+                Text("✓ attested", style="green") if r["self"] else Text("—", style="dim"),
+                self._verdict_cell(r["qa_spec"]), self._verdict_cell(r["qa_std"]),
+                self._check_cell(r, have_tree))
+        if self._rows:
+            table.move_cursor(row=min(cursor, len(self._rows) - 1))
+
+    def _current(self) -> dict | None:
+        if not self._rows:
+            return None
+        idx = self.query_one("#ac-table", DataTable).cursor_row
+        return self._rows[idx] if 0 <= idx < len(self._rows) else None
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # the focused table consumes `enter` (select_cursor) before the screen binding
+        self.action_show_evidence()
+
+    def action_refresh_matrix(self) -> None:
+        self._refresh()
+
+    def action_show_evidence(self) -> None:
+        row = self._current()
+        if row is None:
+            self.notify("No AC selected", severity="warning")
+            return
+        lines = [row["text"], ""]
+        s = row["self"]
+        lines.append("Self-attestation: " + ("none" if not s else
+                     f"\n  what: {s.get('what')}\n  where: {s.get('where')}\n  result: {s.get('result')}"))
+        for label, v in (("QA spec", row["qa_spec"]), ("QA standards", row["qa_std"])):
+            lines.append(f"{label}: " + ("none" if not v else f"{v.get('verdict')}\n  {v.get('evidence', '')}"))
+        c = row["check"]
+        if row.get("annotation") is None:
+            lines.append("Check: (AC is not annotated)")
+        elif c is None:
+            lines.append("Check: no captured check")
+        else:
+            lines.append(f"Check: {c.get('kind')} {'passed' if c.get('passed') else 'failed'} "
+                         f"({'current' if c['current'] else 'stale tree'}, tree {c['tree_key']})\n"
+                         f"  command: {c.get('command')}\n  exit code: {c.get('exit_code')}")
+            if c.get("failure_excerpt"):
+                lines.append("  failure excerpt:\n" + c["failure_excerpt"])
+        self.app.push_screen(_AcEvidenceModal(f"{self._key} · AC{row['index']}", "\n".join(lines)))
+
+    def action_edit_ac(self) -> None:
+        row = self._current()
+        spec_path = store.spec_path(self._home, self._key)
+        line = None
+        if row is not None:
+            spec = self._spec_text()
+            matches = list(snap_mod._AC_RE.finditer(spec))
+            if row["index"] <= len(matches):
+                line = spec.count("\n", 0, matches[row["index"] - 1].start()) + 1
+        warning = edit_in_editor(self.app, spec_path, line)
+        if warning:
+            self.notify(warning, severity="warning")
+        self._refresh()
+
+    def action_add_ac(self) -> None:
+        def _on_dismiss(text: str | None) -> None:
+            if text is None:
+                return
+            try:
+                ops.add_ac(config_mod.load(str(self._home)), self._key, text)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
+            self.notify(f"AC added to {self._key}")
+            self._refresh()
+
+        self.app.push_screen(_AddAcModal(self._key), _on_dismiss)
+
+    def action_message_ac(self) -> None:
+        row = self._current()
+        if row is None:
+            self.notify("No AC selected", severity="warning")
+            return
+
+        def _on_dismiss(text: str | None) -> None:
+            if text is None:
+                return
+            inbox.append_command(self._home, self._key, "msg", {"text": text})
+            self.notify(f"Message queued for {self._key}")
+            self.app._nudge(self._key)
+
+        self.app.push_screen(_InboxModal(self._key, f"re AC{row['index']}: "), _on_dismiss)
