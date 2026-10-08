@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 from rich.text import Text
 
@@ -243,3 +244,47 @@ def _dep_label(graph, key: str, palette: dict, in_cycle: bool = False) -> Text:
     if node.missing:
         out.append(f" missing: {', '.join(node.missing)}", style="red")
     return out
+
+
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: list[int]) -> str:
+    top = max(values, default=0)
+    if top <= 0:
+        return _SPARK[0] * len(values)
+    return "".join(_SPARK[min(len(_SPARK) - 1, round(v / top * (len(_SPARK) - 1)))]
+                   for v in values)
+
+
+def _render_pulse(p: dict) -> str:
+    """T-174: the one-line `#pulse` strip from the worker's read-only `p` dict."""
+    if p.get("error"):
+        return "[red]pulse: config error[/red]"
+    total, budget = p["spawns"], p["budget"]
+    spawns = f"spawns {total}/{budget} /hr"
+    if p["runaway"]:
+        spawns = f"[red bold]{spawns}[/red bold]"
+    spend = p["spend"]
+    if spend["unavailable"]:
+        spend_str = "[yellow]unavailable[/yellow]"
+    else:
+        today, ceiling = spend["today_usd"], spend["ceiling_usd"]
+        today_str = f"${today:.2f}" if today is not None else "—"
+        if ceiling is None:
+            spend_str = f"{today_str} / [yellow]no cap[/yellow]"
+        else:
+            ceiling = float(ceiling)
+            fracs = [float(f) for f in p["warn_fractions"]]
+            if today is not None and today >= ceiling:
+                today_str = f"[red bold]{today_str}[/red bold]"
+            elif today is not None and fracs and today >= min(fracs) * ceiling:
+                today_str = f"[yellow]{today_str}[/yellow]"
+            spend_str = f"{today_str} / ${ceiling:.2f}"
+    hb = p["heartbeat"]
+    counts = "·".join(str(hb.get(k, "—")) for k in ("active", "due", "throttled"))
+    parts = [_sparkline(p["buckets"]), spawns, spend_str, f"{counts} (active·due·throttled)"]
+    if p.get("paused_until") is not None:
+        until = datetime.fromtimestamp(p["paused_until"], tz=timezone.utc).strftime("%H:%M")
+        parts.append(f"[yellow bold]rate-limited → {until}[/yellow bold]")
+    return "  ".join(parts)

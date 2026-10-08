@@ -2120,3 +2120,22 @@ def test_worktree_branch_does_not_change_the_ensure_verdict(tmp_path, cfg):
     wt = _real_worktree(cfg.home, "T-1", detach=True)
     assert ops.worktree_health(wt, timeout=cfg.worktree_timeout)["healthy"] is True
     assert ops.worktree_branch(wt, timeout=cfg.worktree_timeout) is None
+
+
+def test_pulse_buckets_from_spawn_ledger(home):
+    now = 1_000_000.0
+    path = disp._spawn_ledger_path(home)
+    assert health.pulse_buckets(home, now) == [0] * 12  # missing ledger
+    path.write_text("not json", encoding="utf-8")
+    assert health.pulse_buckets(home, now) == [0] * 12  # corrupt ledger
+    store.write_json(path, {
+        "T-1": {"recent": [now - 10, [now - 20, 2], now - 3601, [now - 4000, 5]]},
+        "T-2": {"recent": [now - 3599, [now - 301, 3], [now - 299, 4], "junk"]},
+    })
+    got = health.pulse_buckets(home, now)
+    assert len(got) == 12
+    assert got[-1] == 1 + 2 + 4   # newest bucket: two entries of T-1 + the 299s-old one
+    assert got[-2] == 3           # 301s old
+    assert got[0] == 1            # 3599s old, bare timestamp counts 1
+    assert sum(got) == 11         # nothing older than an hour
+    assert sum(got) == health.spawn_rate(home, now)["total"]
