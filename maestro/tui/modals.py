@@ -8,9 +8,12 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, OptionList, Select, Static, TextArea
+from textual.widgets import (
+    Button, Checkbox, Input, Label, OptionList, Select, SelectionList, Static, TextArea,
+)
+from textual.widgets.selection_list import Selection
 
-from .. import schedule, store
+from .. import depgraph, dispatcher, gates, ops, schedule, store
 from ..providers import ollama as ollama_mod
 from ..providers import pi as pi_mod
 from ..statemachine import Phase
@@ -1069,3 +1072,121 @@ class _EventPayloadModal(ModalScreen):
     def action_copy(self) -> None:
         self.app.copy_to_clipboard(self._text)
         self.notify("Event JSON copied")
+
+
+class _SpecFieldsModal(ModalScreen):
+    """Edit one ticket's spec `priority:`/`dependsOn:` (T-179). Dismisses with
+    ``{"priority": int | None, "depends_on": list[str]}`` or ``None`` on
+    cancel; the caller saves through `ops.set_spec_fields`. The picker lists
+    open tickets (`depgraph.build`); current deps that are done/archived are
+    shown read-only as "kept" and always carried into ``depends_on`` so a
+    priority-only save never drops them silently."""
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+s", "submit", "Save"),
+    ]
+
+    def __init__(self, key: str, home: Path) -> None:
+        super().__init__()
+        self._key = key
+        self._home = home
+        spec_file = store.spec_path(home, key)
+        text = spec_file.read_text(encoding="utf-8") if spec_file.exists() else ""
+        current = dispatcher.parse_depends_on(text)
+        self._dep_graph = depgraph.load(home)
+        nodes = depgraph.build(home).nodes
+        self._dep_choices = [(k, f"{k} ({n.phase}) {n.title}") for k, n in
+                         sorted(nodes.items(), key=lambda kv: dispatcher.split_key(kv[0]))
+                         if k != key]
+        open_keys = {k for k, _ in self._dep_choices}
+        self._kept = [d for d in current if d not in open_keys]
+        self._dep_nodes = nodes
+        self._selected: set[str] = {d for d in current if d in open_keys}
+        self._priority = gates.parse_spec_overrides(text).get("priority")
+        self._cycle: list[str] | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="spec-fields-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] — priority / dependsOn")
+            yield Input(value="" if self._priority is None else str(self._priority),
+                        placeholder="Priority (integer >= 0)", id="spec-priority")
+            yield Label("", id="spec-priority-error")
+            yield Input(placeholder="Filter tickets", id="spec-filter")
+            yield SelectionList[str](*self._selections(""), id="spec-deps")
+            yield Label("", id="spec-kept")
+            yield Label("", id="spec-preview")
+            yield Label("[dim]Ctrl+S → save · Esc → cancel[/dim]")
+
+    def _selections(self, needle: str) -> list[Selection]:
+        needle = needle.lower()
+        return [Selection(label, k, k in self._selected)
+                for k, label in self._dep_choices if needle in label.lower()]
+
+    def on_mount(self) -> None:
+        self.query_one("#spec-priority", Input).focus()
+        if self._kept:
+            done = ", ".join(f"{d} ({self._dep_nodes[d].phase if d in self._dep_nodes else 'done'})"
+                             for d in self._kept)
+            self.query_one("#spec-kept", Label).update(f"kept: {done}")
+        self._refresh_preview()
+
+    def _deps(self) -> list[str]:
+        return self._kept + sorted(self._selected, key=dispatcher.split_key)
+
+    def _refresh_preview(self) -> None:
+        graph = dict(self._dep_graph)
+        graph[self._key] = self._deps()
+        self._cycle = ops._dep_cycle_through(graph, self._key)
+        blockers = [f"{d} ({self._dep_nodes[d].phase})" for d in self._deps() if d in self._dep_nodes]
+        lines = []
+        if blockers:
+            lines.append("blockers: " + ", ".join(blockers))
+        if self._cycle:
+            lines.append("[red]CYCLE: " + " → ".join(self._cycle) + "[/red]")
+        lines.append(f"saving wakes {self._key} (spec-changed, bypasses floor)")
+        self.query_one("#spec-preview", Label).update("\n".join(lines))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "spec-filter":
+            sel = self.query_one("#spec-deps", SelectionList)
+            sel.clear_options()
+            sel.add_options(self._selections(event.value.strip()))
+            self._refresh_preview()
+        elif event.input.id == "spec-priority":
+            self._priority_value()
+
+    def on_selection_list_selected_changed(self, event) -> None:
+        visible = {o.value for o in self._visible_options()}
+        self._selected = (self._selected - visible) | set(event.selection_list.selected)
+        self._refresh_preview()
+
+    def _visible_options(self):
+        sel = self.query_one("#spec-deps", SelectionList)
+        return [sel.get_option_at_index(i) for i in range(sel.option_count)]
+
+    def _priority_value(self) -> tuple[bool, int | None]:
+        """``(ok, value)``; blank means "leave priority alone"."""
+        raw = self.query_one("#spec-priority", Input).value.strip()
+        err = self.query_one("#spec-priority-error", Label)
+        if not raw:
+            err.update("")
+            return True, None
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if value < 0:
+            err.update("[red]priority must be an integer >= 0[/red]")
+            return False, None
+        err.update("")
+        return True, value
+
+    def action_submit(self) -> None:
+        ok, priority = self._priority_value()
+        if not ok or self._cycle:
+            return
+        self.dismiss({"priority": priority, "depends_on": self._deps()})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
