@@ -52,7 +52,7 @@ def _fmt_epoch(ts: float | None) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
 
-def _render_badge(status: dict, provider: dict | None = None) -> str:
+def _render_badge(status: dict, provider: dict | None = None, nudge: bool = True) -> str:
     """Compact fleet state for the header: on/off, interval, heartbeat age.
 
     T-89 (AC1): *provider* -- ``health.check_provider_availability``'s own
@@ -74,7 +74,44 @@ def _render_badge(status: dict, provider: dict | None = None) -> str:
         badge = f"[red bold]NO NETWORK[/red bold]  {badge}"
     elif state == "erroring":
         badge = f"[yellow bold]ERRORING[/yellow bold]  {badge}"
+    if not nudge:
+        badge = f"[dim]nudge:off[/dim]  {badge}"
     return badge
+
+
+def _nudge_toast(key: str | None, report) -> tuple[str, str]:
+    """T-153: decode a nudge sweep's ``DispatchReport`` into one (message,
+    severity) toast. *key* is ``None`` for the unfiltered create sweep, which
+    reports what it minted instead."""
+    spawned = key in report.spawned if key else bool(report.spawned)
+    if key is None:
+        head = (f"minted {', '.join(report.minted)}" if report.minted
+                else "nothing minted")
+        if report.paused:
+            return "fleet paused -- queued, will run on resume", "warning"
+        return (head + (f"; spawned {', '.join(report.spawned)}" if report.spawned else ""),
+                "information")
+    if spawned:
+        return f"{key}: spawned", "information"
+    if report.paused:
+        return f"{key}: fleet paused -- queued, will run on resume", "warning"
+    if report.paused_until:
+        until = datetime.fromtimestamp(report.paused_until).strftime("%H:%M")
+        return f"{key}: rate-limited until {until}", "warning"
+    if report.spend_ceiling_reason:
+        return f"{key}: spend ceiling -- {report.spend_ceiling_reason}", "warning"
+    if report.repo_blockers:
+        return f"{key}: repo blocked ({'; '.join(report.repo_blockers)})", "warning"
+    if report.runner_blockers:
+        why = "; ".join(f"{r}: {m}" for r, m in report.runner_blockers.items())
+        return f"{key}: runner blocked ({why})", "warning"
+    if key in report.claimed:
+        return f"{key}: already running", "information"
+    if key in report.throttled:
+        return f"{key}: throttled (spawn floor)", "warning"
+    if key in report.capacity_skipped:
+        return f"{key}: at capacity", "warning"
+    return f"{key}: not due", "information"
 
 
 def _find_check(doctor: dict, name: str) -> dict:

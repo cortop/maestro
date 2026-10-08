@@ -71,9 +71,9 @@ def _build_delegates_at_both_sites(home, monkeypatch):
 
     monkeypatch.setattr(RoutingSessions, "__init__", spy_init)
 
-    with patch("maestro.cli.ClaudeCliSessions", side_effect=_FakeDelegate), \
-         patch("maestro.cli.OpencodeCliSessions", side_effect=_FakeDelegate), \
-         patch("maestro.cli.PiCliSessions", side_effect=_FakeDelegate):
+    with patch("maestro.sessions.ClaudeCliSessions", side_effect=_FakeDelegate), \
+         patch("maestro.sessions.OpencodeCliSessions", side_effect=_FakeDelegate), \
+         patch("maestro.sessions.PiCliSessions", side_effect=_FakeDelegate):
         rc = cli.main(["--home", str(home), "ans", "T-1", "yes"])
         assert rc == 0
         rc = cli.main(["--home", str(home), "dispatch"])

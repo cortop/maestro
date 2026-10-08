@@ -199,7 +199,7 @@ AGENT_TOOL_VERBS = (
 # spawner emitting it itself (AD-1's concern is specifically the spawner
 # self-widening), so it stays an accepted -- but no longer the *only*
 # accepted -- form of the 'maestro' requirement below. MUST equal
-# ``AGENT_TOOL_VERBS``'s render prefix; ``cli._reconciler_tool_grants``
+# ``AGENT_TOOL_VERBS``'s render prefix; ``sessions._reconciler_tool_grants``
 # asserts this constant is ``RECONCILER_REQUIRED_TOOLS[0]`` so the two can
 # never silently drift apart.
 MAESTRO_COARSE_GRANT = "Bash(maestro:*)"
@@ -320,7 +320,7 @@ def skill_grant(command: str) -> list[str]:
     caches or implement tickets -- the same self-widening AD-1 forbids for
     ``Bash(maestro:*)``.
 
-    Not in ``cli._reconciler_tool_grants``: that is built once per sweep before
+    Not in ``sessions._reconciler_tool_grants``: that is built once per sweep before
     the per-key loop, so it structurally cannot vary by phase (RB-16 moved the
     verb grant out for the same reason). Not in ``.claude/settings.json``
     either: 57 of the 249 ran with a cwd under ``derived``-adjacent scratch,
@@ -424,7 +424,7 @@ RECONCILER_REQUIRED_TOOLS = (
     "Bash(python3:*)",
 )
 
-# Module-load-time guard: was `cli._reconciler_tool_grants`'s own assert
+# Module-load-time guard: was `sessions._reconciler_tool_grants`'s own assert
 # before RB-16 moved the maestro-verb grant out of that (process-wide, phase-
 # blind) function into `phase_verb_grant`/`phase_verb_denylist` above (per-key,
 # phase-scoped). Lives here now instead -- both sides of the equality are

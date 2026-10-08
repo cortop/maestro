@@ -1,6 +1,6 @@
 """Tests for the event-driven nudge: ans/cmd/create trigger an in-process dispatch."""
 
-from maestro import cli, dispatcher as disp, event_log, inbox, snapshot as snap_mod, store
+from maestro import cli, dispatcher as disp, event_log, inbox, sessions as sessions_mod, snapshot as snap_mod, store
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
@@ -74,7 +74,7 @@ def test_nudge_does_not_double_spawn_live_claim(home, monkeypatch):
     inbox.append_command(home, "T-1", "ans", {"text": "yes", "qid": "q1"})
 
     sessions = DryRunSessions(active={"T-1"})
-    monkeypatch.setattr(cli, "ClaudeCliSessions", lambda *a, **kw: sessions)
+    monkeypatch.setattr(sessions_mod, "ClaudeCliSessions", lambda *a, **kw: sessions)
 
     rc = cli.main(["--home", str(home), "ans", "T-1", "yes"])
     assert rc == 0
@@ -130,7 +130,7 @@ def test_ans_on_paused_fleet_queues_and_prints_notice(home, monkeypatch, capsys)
 
     _seed_awaiting_human(home, "T-1")
     sessions = DryRunSessions()
-    monkeypatch.setattr(cli, "ClaudeCliSessions", lambda *a, **kw: sessions)
+    monkeypatch.setattr(sessions_mod, "ClaudeCliSessions", lambda *a, **kw: sessions)
     fleet.pause(home, reason="mid-flight")
 
     rc = cli.main(["--home", str(home), "ans", "T-1", "yes"])

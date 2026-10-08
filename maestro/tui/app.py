@@ -18,7 +18,7 @@ from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from .. import dispatcher as disp
 from ..projection import phase_predicate, ticket_rows
-from ..sessions import ClaudeCliSessions, OpencodeCliSessions, PiCliSessions, RoutingSessions
+from ..sessions import build_routing_sessions, reap_children
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
 from .events import render_log
@@ -26,7 +26,7 @@ from .modals import (
     _ACCEPT_ALL, _AcceptedRecommendation, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal,
     _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
 )
-from .render import _dep_color, _render_badge, _render_pulse, _styled_row
+from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
     DetailScreen,
     DepsScreen,
@@ -59,6 +59,10 @@ _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
     ("active", phase_predicate(ACTIVE_PHASES)),
     ("all", None),
 ]
+
+
+# ANSWER_COMMANDS minus the ticket-level discard/retry (T-157).
+_PER_QUESTION_COMMANDS = frozenset(ops_mod.ANSWER_COMMANDS) - {"discard", "retry"}
 
 
 class MaestroTUI(App):
@@ -123,6 +127,7 @@ class MaestroTUI(App):
         Binding("g", "suggest_acs", "Suggest ACs", show=False),
         Binding("Q", "trigger_post_qa", "Post-QA", show=False),
         Binding("question_mark", "show_help_panel", "Help", show=False),
+        Binding("N", "toggle_nudge", "Nudge on/off", show=False),
     ]
 
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
@@ -145,9 +150,15 @@ class MaestroTUI(App):
 
     HELP = "Board: arrows move, enter opens a ticket, f cycles the filter, ? lists every key."
 
-    def __init__(self, home: str) -> None:
+    def __init__(self, home: str, sessions_factory: Callable[[Config], object] | None = None) -> None:
         super().__init__()
         self._home = Path(home)
+        # T-153: builds the SessionManager a post-input nudge sweep spawns through
+        # (tests inject a DryRunSessions factory -- the only external boundary).
+        self._sessions_factory = sessions_factory or build_routing_sessions
+        # T-153: `N` toggles nudging for THIS session only (no config write).
+        self._nudge_enabled: bool = True
+        self._badge_result: dict | None = None
         self._selected_key: str | None = None
         self._filter_idx: int = 0
         self._release_key: str | None = None
@@ -247,6 +258,51 @@ class MaestroTUI(App):
         self.set_interval(5.0, self._refresh_badge)
         self._refresh_pulse()
         self.set_interval(5.0, self._refresh_pulse)
+        # T-153: reap exited reconcilers this long-lived process spawned, so a
+        # zombie never keeps its claim `confirmed` and blocks the key's respawn.
+        self.set_interval(3.0, reap_children)
+
+    def _nudge(self, key: str | None) -> None:
+        """T-153: right after a human inbox write, run a sweep on a thread worker
+        -- key-scoped for *key*, UNFILTERED for ``None`` (create: ``key_filter``
+        skips minting) -- and toast what it did. Never raises into the UI."""
+        if not self._nudge_enabled:
+            return
+        try:
+            cfg = config_mod.load(str(self._home))
+        except store.MaestroError as e:
+            self.notify(f"nudge skipped: {e}", severity="warning")
+            return
+        if not cfg.nudge_on_human_input:
+            return
+        factory = self._sessions_factory
+
+        def _sweep() -> tuple[str, str]:
+            try:
+                report = disp.dispatch(cfg, factory(cfg), store.now_epoch(),
+                                       key_filter=[key] if key else None)
+            except store.MaestroError as e:
+                return f"nudge: {e}", "warning"
+            return _nudge_toast(key, report)
+
+        self.run_worker(_sweep, thread=True, group=f"nudge-{key or '_create'}",
+                        exclusive=True, name="nudge", exit_on_error=False)
+
+    def action_toggle_nudge(self) -> None:
+        self._nudge_enabled = not self._nudge_enabled
+        self.notify(f"nudge {'on' if self._nudge_enabled else 'off'} for this session")
+        if self._badge_result is not None:
+            self._paint_badge()
+        else:
+            self._refresh_badge()
+
+    def _paint_badge(self) -> None:
+        r = self._badge_result
+        try:  # the base screen, not whatever modal is on top right now
+            self.screen_stack[0].query_one("#fleet-badge", Static).update(
+                _render_badge(r["fleet"], r["provider"], self._nudge_enabled))
+        except (NoMatches, IndexError):  # app is tearing down
+            pass
 
     def _refresh_pulse(self) -> None:
         # T-174: reads only (no spend/ratelimit probe, no health.report()); the
@@ -292,9 +348,14 @@ class MaestroTUI(App):
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
-            result = event.worker.result
-            self.query_one("#fleet-badge", Static).update(
-                _render_badge(result["fleet"], result["provider"]))
+            self._badge_result = event.worker.result
+            self._paint_badge()
+        elif event.worker.name == "nudge":
+            if event.state == WorkerState.SUCCESS:
+                msg, severity = event.worker.result
+                self.notify(msg, severity=severity)
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"nudge failed: {event.worker.error}", severity="error")
         elif event.worker.name == "pulse" and event.state == WorkerState.SUCCESS:
             p = event.worker.result
             try:
@@ -401,10 +462,20 @@ class MaestroTUI(App):
                 return
             command, args_text = result
             args = {"text": args_text} if args_text else {}
+            # No qid is carried, so fold_inbox would answer EVERY open question.
+            n_open = len(snap_mod.load(self._home, key).open_questions)
+            if command in _PER_QUESTION_COMMANDS and n_open > 1:
+                self.notify(
+                    f"{key} has {n_open} open questions — '{command}' would answer all of "
+                    "them; use `a` to answer one at a time",
+                    severity="warning",
+                )
+                return
 
             def _queue() -> None:
                 inbox.append_command(self._home, key, command, args)
                 self.notify(f"'{command}' queued for {key}")
+                self._nudge(key)
 
             if command == "discard":
                 self._confirm_discard(key, _queue)
@@ -432,6 +503,7 @@ class MaestroTUI(App):
         def _queue() -> None:
             inbox.append_command(self._home, key, command, {})
             self.notify(f"'{command}' queued for {key}")
+            self._nudge(key)
 
         if command == "discard":
             self._confirm_discard(key, _queue)
@@ -585,7 +657,7 @@ class MaestroTUI(App):
         preflight) must surface via `on_worker_state_changed`'s notify, not
         the App's own exception handler. The `key is None` guard is required
         by the binding sweep, which presses every key with no ticket
-        selected. Same `RoutingSessions` construction as `cli.cmd_dispatch`/
+        selected. Same `sessions.build_routing_sessions` factory as `cli.cmd_dispatch`/
         `cli._nudge` -- every registered non-claude backend wired, so a
         manual fire can route to whatever `post_qa_skill_runner` names."""
         key = self._target_key()
@@ -593,23 +665,7 @@ class MaestroTUI(App):
             self.notify("Select a ticket first", severity="warning")
             return
         cfg = config_mod.load(str(self._home))
-        sessions = RoutingSessions({
-            "claude": ClaudeCliSessions(
-                cfg.home, model=cfg.reconcile_model, permission_mode=cfg.permission_mode,
-                capture_session_logs=cfg.capture_session_logs,
-                session_log_format=cfg.session_log_format,
-                max_session_turns=cfg.max_session_turns,
-                unverified_claim_max_age=cfg.unverified_claim_max_age,
-            ),
-            "opencode": OpencodeCliSessions(
-                cfg.home, capture_session_logs=cfg.capture_session_logs,
-                unverified_claim_max_age=cfg.unverified_claim_max_age,
-            ),
-            "pi": PiCliSessions(
-                cfg.home, capture_session_logs=cfg.capture_session_logs,
-                unverified_claim_max_age=cfg.unverified_claim_max_age,
-            ),
-        }, home=cfg.home)
+        sessions = self._sessions_factory(cfg)
         self.run_worker(lambda: disp.trigger_post_qa_skill(cfg, sessions, key),
                         thread=True, name="trigger-post-qa", exit_on_error=False)
 
@@ -644,6 +700,7 @@ class MaestroTUI(App):
                 prefix=result.get("prefix"),
             )
             self.notify("queued; dispatcher will mint the key")
+            self._nudge(None)
 
         self.push_screen(_CreateModal(prefixes), _on_dismiss)
 
@@ -698,6 +755,7 @@ class MaestroTUI(App):
                 self.notify(f"{answered} answer(s) queued for {key}")
                 if key == self._selected_key and self._on_board():
                     self._show_detail(key)
+                self._nudge(key)  # once, however the walk ended
             return
         qid, text = questions[idx]
         remaining = len(questions) - idx
@@ -705,6 +763,8 @@ class MaestroTUI(App):
 
         def _on_dismiss(answer: object) -> None:
             if answer is None:
+                # Esc partway: nudge for whatever was already queued.
+                self._walk_questions(key, [], 0, answered)
                 return
             if answer is _ACCEPT_ALL:
                 # Queue the recommendation for every remaining question that has
@@ -850,6 +910,7 @@ class MaestroTUI(App):
                 return
             inbox.append_command(self._home, key, "msg", {"text": text})
             self.notify(f"Message queued for {key}")
+            self._nudge(key)
 
         self.push_screen(_InboxModal(key), _on_dismiss)
 

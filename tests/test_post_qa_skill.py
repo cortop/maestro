@@ -664,7 +664,7 @@ def test_cli_trigger_post_qa_happy_path(home, monkeypatch):
         encoding="utf-8")
     _seed_ticket(home, "T-1")
     sessions = DryRunSessions()
-    monkeypatch.setattr("maestro.cli.ClaudeCliSessions", lambda *a, **kw: sessions)
+    monkeypatch.setattr("maestro.sessions.ClaudeCliSessions", lambda *a, **kw: sessions)
 
     code, out = _run_cli_trigger_post_qa(home, "T-1")
 
@@ -703,7 +703,7 @@ def test_cli_trigger_post_qa_pr_flag_targets_stack_entry(home, monkeypatch):
         encoding="utf-8")
     _seed_stack_ticket(home, "T-1", n=3)
     sessions = DryRunSessions()
-    monkeypatch.setattr("maestro.cli.ClaudeCliSessions", lambda *a, **kw: sessions)
+    monkeypatch.setattr("maestro.sessions.ClaudeCliSessions", lambda *a, **kw: sessions)
 
     code, out = _run_cli_trigger_post_qa_with_pr(home, "T-1", 101)
 

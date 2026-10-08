@@ -41,6 +41,7 @@ from conftest import seed_phase, seed_ticket  # noqa: E402
 from maestro import claims, config as config_mod, event_log, fleet as fleet_mod, inbox  # noqa: E402
 from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
 from maestro.cli import main as cli_main  # noqa: E402
+from maestro.sessions import ClaudeCliSessions, DryRunSessions, OpencodeCliSessions, PiCliSessions  # noqa: E402
 from maestro.tui import (  # noqa: E402
     DepsScreen,
     DetailScreen,
@@ -69,8 +70,21 @@ from maestro.tui import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_spawns(monkeypatch):
+    """T-153: a human-input modal submit nudges a sweep; no test in this module
+    may reach a real `claude`/`opencode`/`pi` Popen."""
+    def _boom(*a, **kw):
+        raise AssertionError("a real CLI backend spawn was attempted in a TUI test")
+    for cls in (ClaudeCliSessions, OpencodeCliSessions, PiCliSessions):
+        monkeypatch.setattr(cls, "spawn", _boom)
+
+
 def _make_app(home):
-    return MaestroTUI(home=str(home))
+    dry = DryRunSessions()
+    app = MaestroTUI(home=str(home), sessions_factory=lambda cfg: dry)
+    app.dry = dry
+    return app
 
 
 def _filter_idx(name: str) -> int:
@@ -3933,6 +3947,134 @@ def test_pulse_strip_does_not_collapse_filter_bar(seeded_home, no_probe):
 
 
 # --------------------------------------------------------------------------- #
+# T-153: human input nudges a key-scoped sweep and toasts the outcome          #
+# --------------------------------------------------------------------------- #
+
+def _capture_toasts(app):
+    toasts: list[str] = []
+    real = app.notify
+
+    def _notify(message, *a, **kw):
+        toasts.append(str(message))
+        return real(message, *a, **kw)
+
+    app.notify = _notify
+    return toasts
+
+
+async def _settle(app, pilot):
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def test_tui_answer_nudges_key_scoped_sweep(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            toasts = _capture_toasts(app)
+            app._selected_key = "T-1"
+            await app.run_action("answer")
+            await pilot.pause()
+            for _ in range(2):  # two open questions
+                await pilot.press("a", "n", "s")
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+            await _settle(app, pilot)
+            assert [s[0] for s in app.dry.spawned] == ["T-1"]
+            assert any("T-1: spawned" in t for t in toasts), toasts
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_tui_nudge_respects_config_off(seeded_home):
+    (seeded_home / "config.toml").write_text(
+        "[maestro]\nnudge_on_human_input = false\n", encoding="utf-8")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-1"
+            await app.run_action("answer")
+            await pilot.pause()
+            for _ in range(2):
+                await pilot.press("a", "n", "s")
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+            await _settle(app, pilot)
+            assert app.dry.spawned == []
+            assert len(inbox.pending(seeded_home, "T-1")) == 2
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_tui_nudge_reports_fleet_paused(seeded_home):
+    fleet_mod.pause(seeded_home, reason="test")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            toasts = _capture_toasts(app)
+            app._selected_key = "T-2"
+            await pilot.press("ctrl+r")
+            await _settle(app, pilot)
+            assert app.dry.spawned == []
+            assert any("T-2" in t and "paused" in t for t in toasts), toasts
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_tui_create_nudge_mints_key(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            toasts = _capture_toasts(app)
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _CreateModal)
+            modal.query_one("#create-title", Input).value = "Brand new thing"
+            modal.query_one("#create-prefix", Select).value = "T"
+            await pilot.pause()
+            await pilot.press("ctrl+enter")
+            await _settle(app, pilot)
+            assert app._exception is None
+        minted = [t for t in toasts if t.startswith("minted ")]
+        assert minted and "T-6" in minted[0], toasts
+        assert store.spec_path(seeded_home, "T-6").exists()
+
+    asyncio.run(_inner())
+
+
+def test_tui_nudge_toggle_off(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _settle(app, pilot)
+            await pilot.press("N")
+            await pilot.pause()
+            assert "nudge:off" in str(app.query_one("#fleet-badge", Static).render())
+            app._selected_key = "T-3"
+            await app.run_action("inbox_message")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _InboxModal)
+            await pilot.press("h", "i", "enter")
+            await _settle(app, pilot)
+            assert app.dry.spawned == []
+            assert len(inbox.pending(seeded_home, "T-3")) == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # T-171: LogsScreen live console                                              #
 # --------------------------------------------------------------------------- #
 
@@ -4274,6 +4416,113 @@ def test_release_refuses_live_claim(seeded_home):
             assert app._exception is None
 
     asyncio.run(_stale())
+
+
+def _cmd_notifs(app):
+    return [n.message for n in app._notifications]
+
+
+def _submit_cmd(app, key, command):
+    app._selected_key = key
+    return app.run_action("cmd")
+
+
+def test_cmd_refuses_qidless_answer_with_multiple_open_questions(home):
+    seed_ticket(home, "T-1", "two questions", phase="awaiting-human",
+                questions={"q1": "a?", "q2": "b?"})
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _submit_cmd(app, "T-1", "approve")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _CmdModal)
+            modal.query_one("#cmd-input", Input).value = "approve"
+            modal._submit()
+            await pilot.pause()
+            msgs = [m for m in _cmd_notifs(app) if "T-1" in m and "2" in m]
+            assert msgs
+            assert not store.inbox_path(home, "T-1").exists() or not store.inbox_path(home, "T-1").read_text().strip()
+            assert inbox.pending(home, "T-1") == []
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_cmd_answer_single_open_question_still_queues(home):
+    seed_ticket(home, "T-1", "one question", phase="awaiting-human",
+                questions={"q1": "a?"})
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _submit_cmd(app, "T-1", "approve")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            modal.query_one("#cmd-input", Input).value = "approve"
+            modal._submit()
+            await pilot.pause()
+            pending = inbox.pending(home, "T-1")
+            assert [c.get("command", c.get("cmd")) for c in pending] == ["approve"]
+            assert not [m for m in _cmd_notifs(app) if "open questions" in m]
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_cmd_modal_has_no_requeue_row(home):
+    from maestro.tui import _PHASE_COMMANDS, _DEFAULT_COMMANDS
+    seed_ticket(home, "T-4", "ready ticket", phase="ready")
+    for cmd, desc in _DEFAULT_COMMANDS + [r for rows in _PHASE_COMMANDS.values() for r in rows]:
+        assert "requeue" not in cmd and "requeue" not in desc
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(_CmdModal("T-4", "ready"), lambda _: None)
+            await pilot.pause()
+            rows = [str(lbl.content) for lbl in app.screen.query("Label.cmd-row")]
+            assert rows and not any("requeue" in r for r in rows)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_cmd_modal_rows_match_real_routing():
+    from maestro.tui import _PHASE_COMMANDS, _DEFAULT_COMMANDS
+    all_rows = _DEFAULT_COMMANDS + [r for rows in _PHASE_COMMANDS.values() for r in rows]
+    retries = [r for r in all_rows if r[0] == "retry"]
+    assert retries and all(desc == "re-enter ready" for _c, desc in retries)
+    assert not any("<qid>" in c or "<qid>" in d for c, d in all_rows)
+
+
+def test_cmd_discard_not_refused_with_multiple_open_questions(home):
+    seed_ticket(home, "T-1", "two questions", phase="awaiting-human",
+                questions={"q1": "a?", "q2": "b?"})
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _submit_cmd(app, "T-1", "discard")
+            await pilot.pause()
+            app.screen_stack[-1].dismiss(("discard", ""))
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _ConfirmModal)
+            modal.query_one("#confirm-input", Input).value = "T-1"
+            await pilot.pause()
+            modal.query_one("#confirm-ok").press()
+            await pilot.pause()
+            pending = inbox.pending(home, "T-1")
+            assert [c.get("command", c.get("cmd")) for c in pending] == ["discard"]
+            assert app._exception is None
+
+    asyncio.run(_inner())
 
 
 # --------------------------------------------------------------------------- #

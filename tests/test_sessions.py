@@ -301,3 +301,26 @@ def test_spawn_env_bash_max_timeout_zero_leaves_runner_default(home, monkeypatch
     env = _capture_env(home)
     assert "BASH_MAX_TIMEOUT_MS" not in env
     assert "BASH_DEFAULT_TIMEOUT_MS" not in env
+
+
+def test_reap_children_reaps_exited_spawn(home):
+    """T-153: a long-lived parent (the TUI) must wait() on exited reconcilers,
+    or the zombie keeps its claim `confirmed` and blocks the key's respawn."""
+    import subprocess
+    import sys
+    import time
+
+    from maestro import sessions as sessions_mod
+
+    pid = sessions_mod._launch_detached(
+        home, "T-1", [sys.executable, "-c", "pass"], home, dict(__import__("os").environ),
+        None, prompt="p", runner="claude")
+    proc = sessions_mod._CHILDREN[-1]
+    assert proc.pid == pid
+    deadline = time.time() + 10
+    while time.time() < deadline and proc in sessions_mod._CHILDREN:
+        sessions_mod.reap_children()
+        time.sleep(0.05)
+    assert proc not in sessions_mod._CHILDREN
+    assert proc.returncode is not None
+    assert isinstance(proc, subprocess.Popen)
