@@ -94,7 +94,8 @@ def test_dispatch_gates_row_count_matches_source_today():
     can never drift from the source it's proving the doc matches."""
     rows = diagram._outcome_assignments(diagram.DISPATCHER_SOURCE_PATH.read_text())
     text = diagram.DISPATCH_GATES_PATH.read_text()
-    assert f"{len(rows)} gates today." in text
+    row_re = re.compile(r"^\| `[a-z_]+` \| `dispatcher\.", re.M)
+    assert len(row_re.findall(text.split("## Sweep-level brakes")[0])) == len(rows)
     for _, outcome in rows:
         assert f"`{outcome}`" in text
 
@@ -139,6 +140,32 @@ def test_outcome_assignments_ast_walk_matches_real_dispatcher_source():
     src_lines = source.splitlines()
     for lineno, outcome in rows:
         assert f'"{outcome}"' in src_lines[lineno - 1]
+
+
+def test_dispatch_gates_stable_under_line_shifts(monkeypatch, tmp_path):
+    """T-180: rows are labelled by function, so prepending lines to
+    dispatcher.py must not change the rendered doc."""
+    original = diagram.render_dispatch_gates()
+    shifted = tmp_path / "dispatcher.py"
+    shifted.write_text("\n" * 50 + diagram.DISPATCHER_SOURCE_PATH.read_text())
+    monkeypatch.setattr(diagram, "DISPATCHER_SOURCE_PATH", shifted)
+    assert diagram.render_dispatch_gates() == original
+
+
+def test_enclosing_def_is_outermost_top_level():
+    import ast
+    import pytest
+    src = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        x = 1\n"
+        "    return inner\n"
+        "y = 2\n"
+    )
+    tree = ast.parse(src)
+    assert diagram._enclosing_def(tree, 3) == "outer"
+    with pytest.raises(ValueError):
+        diagram._enclosing_def(tree, 5)
 
 
 # ---------------------------------------------------------------------------
