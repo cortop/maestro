@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import json as _json
+from dataclasses import dataclass
 
+from rich.text import Text
+
+from .. import store
+from ..statemachine import Phase
 from ..steplog import (OC_STEP_FINISH_TYPES, OC_STEP_START_TYPES,
                         OC_TEXT_TYPES, OC_TOOL_USE_TYPES, PI_AGENT_END_TYPE,
                         PI_MESSAGE_END_TYPE, PI_TOOL_START_TYPE,
@@ -65,6 +70,130 @@ def render_event(ev: dict) -> str:
         f"[dim]{seq:>4}[/dim] [cyan]{ts}[/cyan] "
         f"{type_markup} [dim]{actor}[/dim] {summary}"
     )
+
+
+def event_summary(ev: dict) -> str:
+    """Plain-text one-line summary of an event's payload (no markup, for table cells)."""
+    payload = ev.get("payload") or {}
+    if ev.get("type") == _IMPL_STEP:
+        return str(payload.get("summary", ""))[:80]
+    return ", ".join(f"{k}={v}" for k, v in list(payload.items())[:3])
+
+
+def event_row(ev: dict) -> tuple[Text, Text, Text, Text, Text]:
+    """One event as ``(seq, ts, type, actor, summary)`` Text cells -- built from plain
+    text so a ``[`` in a payload is never parsed as markup by the DataTable."""
+    type_ = ev.get("type", _EM)
+    color = _MILESTONE_COLOR.get(type_, "bold yellow")
+    return (
+        Text(str(ev.get("seq", "?")), style="dim", justify="right"),
+        Text((ev.get("ts") or "")[:19], style="cyan"),
+        Text(str(type_), style=color),
+        Text(str(ev.get("actor", _EM)), style="dim"),
+        Text(event_summary(ev).replace("\n", " ")),
+    )
+
+
+@dataclass(frozen=True)
+class DwellSegment:
+    phase: str
+    seconds: float
+    forced: bool = False
+    current: bool = False
+
+
+def phase_dwell(events: list[dict], now: float) -> list[DwellSegment]:
+    """Fold the phase-moving events into per-phase dwell segments (oldest first).
+
+    Mirrors the fold arms in ``snapshot``: TicketCreated -> triaging, PhaseChanged
+    (valid ``phase``) -> that phase, Stalled -> degraded, Finalized -> done. An unknown
+    phase and a move to the phase already current are no-ops, and ``done`` absorbs.
+    The last segment is ``current`` and runs up to *now*.
+    """
+    moves: list[tuple[str, float, bool]] = []
+    for ev in events:
+        t = ev.get("type")
+        payload = ev.get("payload") or {}
+        forced = False
+        if t == "TicketCreated":
+            phase = Phase.TRIAGING.value
+        elif t == "PhaseChanged":
+            try:
+                phase = Phase(payload.get("phase")).value
+            except ValueError:
+                continue
+            forced = bool(payload.get("forced_by"))
+        elif t == "Stalled":
+            phase = Phase.DEGRADED.value
+        elif t == "Finalized":
+            phase = Phase.DONE.value
+        else:
+            continue
+        ts = store.iso_to_epoch(ev.get("ts"))
+        if ts is None:
+            continue
+        if moves:
+            if moves[-1][0] == Phase.DONE.value or moves[-1][0] == phase:
+                continue
+        moves.append((phase, ts, forced))
+    segs: list[DwellSegment] = []
+    for i, (phase, ts, forced) in enumerate(moves):
+        last = i == len(moves) - 1
+        end = now if last else moves[i + 1][1]
+        segs.append(DwellSegment(phase, max(0.0, end - ts), forced, last))
+    return segs
+
+
+def fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m = s // 60
+    if m < 60:
+        return f"{m}m"
+    h, m = divmod(m, 60)
+    if h < 24:
+        return f"{h}h{m:02d}m"
+    d, h = divmod(h, 24)
+    return f"{d}d{h:02d}h"
+
+
+def render_dwell(segs: list[DwellSegment], width: int = 100) -> Text:
+    """One-line ``implementing 38m ▸ qa 12m ▸ in-review 2h14m (now)`` strip; forced hops
+    red. Middle segments are elided (``…``) until the line fits *width*."""
+    def seg_text(seg: DwellSegment) -> Text:
+        label = f"{seg.phase} {fmt_duration(seg.seconds)}" + (" (now)" if seg.current else "")
+        return Text(label, style="red" if seg.forced else "")
+
+    sep = " ▸ "
+    parts = [seg_text(s) for s in segs]
+    n = len(parts)
+
+    def build(head: int, tail: int) -> Text:
+        items: list[Text | None] = [*parts[:head]]
+        if head + tail < n:
+            items.append(None)
+        items += parts[n - tail:] if tail else []
+        out = Text()
+        for i, item in enumerate(items):
+            if i:
+                out.append(sep)
+            if item is None:
+                out.append("…", style="dim")
+            else:
+                out.append_text(item)
+        return out
+
+    line = build(n, 0)
+    if n <= 2 or line.cell_len <= width:
+        return line
+    # Elide the middle, keeping the oldest and newest, as little as fits.
+    for kept in range(n - 1, 1, -1):
+        for tail in range(kept - 1, 0, -1):
+            line = build(kept - tail, tail)
+            if line.cell_len <= width:
+                return line
+    return build(1, 1)
 
 
 def render_log(events: list[dict], *, tail: bool = False) -> list[str]:

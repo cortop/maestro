@@ -1,6 +1,7 @@
 """Modal input dialogs (answer, command palette, create, inbox, confirm, schedule)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -926,3 +927,39 @@ class _RunnerModal(ModalScreen):
         else:
             runner_model = model_widget.value.strip() or None
         self.dismiss({"runner": runner, "runner_model": runner_model})
+
+
+class _EventPayloadModal(ModalScreen):
+    """Read-only view of one event's full JSON (markup off: payloads contain ``[``);
+    ``c`` copies it to the clipboard, Esc closes."""
+
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("c", "copy", "Copy JSON"),
+    ]
+
+    DEFAULT_CSS = """
+    _EventPayloadModal { align: center middle; }
+    _EventPayloadModal #payload-dialog { width: 90%; height: 85%; border: solid $accent;
+                                         padding: 1 2; background: $surface; }
+    _EventPayloadModal #payload-scroll { height: 1fr; }
+    """
+
+    def __init__(self, event: dict) -> None:
+        super().__init__()
+        self._event = event
+        self._text = json.dumps(event, indent=2, default=str)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="payload-dialog"):
+            yield Label(f"Event #{self._event.get('seq', '?')} {self._event.get('type', '')}"
+                        "  [c] copy · [Esc] close", markup=False)
+            with VerticalScroll(id="payload-scroll"):
+                yield Static(self._text, id="payload-json", markup=False)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def action_copy(self) -> None:
+        self.app.copy_to_clipboard(self._text)
+        self.notify("Event JSON copied")
