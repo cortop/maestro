@@ -2495,6 +2495,8 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
         snap = snap_mod.load(home, key)
         if Phase(snap.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
             continue
+        if fleet.hold_state(home, key, now) is not None:
+            continue  # held keys are never spawned, post-QA skill included
         binding = repos_mod.resolve(cfg, home, key)
         skill = binding.post_qa_skill
         if not skill:
@@ -3800,6 +3802,11 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
         return None
     sweep.observed_seq[key] = snap.observed_seq
     sweep.phase[key] = snap.phase
+    held = fleet.hold_state(home, key, now)
+    if held is not None:
+        decisions[key] = {"outcome": "held",
+                          "reason": "held by a human" + (f": {held['reason']}" if held.get("reason") else "")}
+        return None
     res = due_check(home, key, snap, now)
     if not res.due:
         decisions[key] = {"outcome": "not_due", "reason": res.reason}

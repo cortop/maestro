@@ -25,7 +25,7 @@ from .detail import render as _render_detail
 from .events import render_log
 from .modals import (
     _ACCEPT_ALL, _AcceptedRecommendation, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal,
-    _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
+    HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SuggestAcsModal,
 )
 from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
@@ -72,6 +72,7 @@ _NUMERIC_SORT = frozenset({"Fails", "Deps", "PR", "Idle"})
 _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
     ("needs-you", _needs_you_predicate),
     ("active", phase_predicate(ACTIVE_PHASES)),
+    ("held", lambda home, s: fleet_mod.hold_state(home, s.key, store.now_epoch()) is not None),
     ("running", _running_placeholder),
     ("all", None),
 ]
@@ -221,6 +222,7 @@ class MaestroTUI(App):
         Binding("<", "flip_sort", "Sort direction", show=False),
         Binding("question_mark", "show_help_panel", "Help", show=False),
         Binding("N", "toggle_nudge", "Nudge on/off", show=False),
+        Binding("h", "hold", "Hold", show=False),
         Binding("j", "jump_running", "Next running", show=False),
         Binding("w", "why_panel", "Why", show=False),
     ]
@@ -228,7 +230,7 @@ class MaestroTUI(App):
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
-        "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "focus_detail",
+        "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
         "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel",
     })
     # Board-only actions: meaningless once any other screen is pushed.
@@ -543,7 +545,8 @@ class MaestroTUI(App):
             snap = snap_mod.load(self._home, key)
         runner, runner_model = spec_runner(self._home, key)
         detail.update(_render_detail(snap, snap_mod.display_title(self._home, snap),
-                                     runner, runner_model))
+                                     runner, runner_model,
+                                     hold=fleet_mod.hold_state(self._home, key, store.now_epoch())))
         self._refresh_events()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -1071,6 +1074,34 @@ class MaestroTUI(App):
             _ConfirmModal(f"Compact log for [bold]{key}[/bold]?"), _on_confirm
         )
 
+    def action_hold(self) -> None:
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        if fleet_mod.hold_state(self._home, key, store.now_epoch()) is not None:
+            def _on_confirm(ok: bool | None) -> None:
+                if not ok:
+                    return
+                fleet_mod.unhold(self._home, key)
+                self.notify(f"Released hold on {key}")
+                self._populate()
+
+            self.push_screen(
+                _ConfirmModal(f"{key} is held. Release the hold?"), _on_confirm)
+            return
+
+        def _on_dismiss(result: tuple[int | None, str | None] | None) -> None:
+            if result is None:
+                return
+            seconds, reason = result
+            until = store.now_epoch() + seconds if seconds is not None else None
+            fleet_mod.hold(self._home, key, until=until, reason=reason)
+            self.notify(f"Held {key}")
+            self._populate()
+
+        self.push_screen(HoldModal(key), _on_dismiss)
+
     def action_release(self) -> None:
         key = self._target_key()
         if key is None:
@@ -1258,6 +1289,8 @@ class MaestroTUI(App):
         palette = self.get_css_variables()
         now = store.now_epoch()
         for *cells, row_key in visible:
+            if fleet_mod.hold_state(home, row_key, store.now_epoch()) is not None:
+                cells[0] = f"⏸ {cells[0]}"
             styled = _styled_row(*cells)
             idle = _format_age(_idle_seconds(snaps_by_key[row_key], now))
             table.add_row(*styled, self._deps_cell(graph, row_key, palette), idle,

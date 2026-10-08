@@ -722,7 +722,7 @@ def test_doctor_cli_includes_check_registry(home, cfg):
                       "missing_reconcile_skill",
                       "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
                       "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
-                      "pi_version", "worktree_health", "worktree_branch", "worktree_witness",
+                      "pi_version", "worktree_health", "worktree_branch", "worktree_witness", "holds",
                       "provider_availability",
                       "missing_acs", "ac_annotation_parse", "unresolvable_spec_hints"}
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
@@ -794,7 +794,7 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
         "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
         "language_binding", "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
         "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
-        "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_branch", "worktree_witness",
+        "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_branch", "worktree_witness", "holds",
         "provider_availability", "burn", "missing_acs", "ac_annotation_parse", "unresolvable_spec_hints",
     }
     code, out = run_doctor(home)
