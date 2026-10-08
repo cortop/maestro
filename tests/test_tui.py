@@ -870,6 +870,13 @@ def test_discard_degraded_appends_discard_command(home):
 
     app.action_discard()
 
+    assert inbox.pending(home, "T-1") == []  # nothing queued until the typed confirm
+    assert len(push_calls) == 1
+    screen, callback = push_calls[0]
+    assert screen._require == "T-1"
+    callback(False)
+    assert inbox.pending(home, "T-1") == []
+    callback(True)
     pending = inbox.pending(home, "T-1")
     assert len(pending) == 1
     assert pending[0]["command"] == "discard"
@@ -1497,17 +1504,42 @@ def _write_claim(home, key):
     (claim_dir / f"{key}.json").write_text(json.dumps({"pid": 99999, "key": key}))
 
 
-def test_release_action_pushes_confirm_modal(home):
-    """action_release for a selected ticket pushes a _ConfirmModal."""
+def _stale_row(key="T-1"):
+    return {"key": key, "pid": 99999, "age_s": 9999, "verdict": "denied", "claimed": False}
+
+
+def test_release_probe_stale_claim_pushes_confirm_modal(home):
+    """A stale claim row leads to a (default-No) _ConfirmModal."""
     from maestro.tui import _ConfirmModal
     app, push_calls = _make_app_with_mocked_screen(home)
-    app._selected_key = "T-1"
 
-    app.action_release()
+    app._on_release_probed("T-1", [_stale_row()])
 
     assert len(push_calls) == 1
     screen, _ = push_calls[0]
     assert isinstance(screen, _ConfirmModal)
+
+
+def test_release_probe_without_claim_notifies_only(home):
+    """No claim row for the key: info toast, no modal."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+
+    app._on_release_probed("T-1", [])
+
+    assert push_calls == []
+    app.notify.assert_called_once()
+
+
+def test_release_probe_live_claim_refuses(home):
+    """A live claim row is refused with a toast naming key, pid and verdict."""
+    app, push_calls = _make_app_with_mocked_screen(home)
+    row = {"key": "T-1", "pid": 4242, "age_s": 3, "verdict": "confirmed", "claimed": True}
+
+    app._on_release_probed("T-1", [row])
+
+    assert push_calls == []
+    msg = app.notify.call_args[0][0]
+    assert "T-1" in msg and "live" in msg and "4242" in msg and "confirmed" in msg
 
 
 def test_release_action_no_ticket_notifies(home):
@@ -1528,7 +1560,7 @@ def test_release_action_cancel_leaves_claim(home):
     app, push_calls = _make_app_with_mocked_screen(home)
     app._selected_key = "T-1"
 
-    app.action_release()
+    app._on_release_probed("T-1", [_stale_row()])
     _, callback = push_calls[0]
     callback(False)  # cancel
 
@@ -1541,7 +1573,7 @@ def test_release_action_confirm_clears_claim(home):
     app, push_calls = _make_app_with_mocked_screen(home)
     app._selected_key = "T-1"
 
-    app.action_release()
+    app._on_release_probed("T-1", [_stale_row()])
     _, callback = push_calls[0]
     callback(True)  # confirm
 

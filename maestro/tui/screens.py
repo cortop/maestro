@@ -531,19 +531,37 @@ class FleetScreen(Screen):
         self.app.push_screen(_IntervalModal(), _on_interval)
 
     def action_fleet_down(self) -> None:
-        self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down")
-        self._log("fleet down … ")
-        self._refresh_worker()
+        def _on_confirm(ok: bool | None) -> None:
+            if not ok:
+                return
+            self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down")
+            self._log("fleet down … ")
+            self._refresh_worker()
+
+        self.app.push_screen(
+            _ConfirmModal("Take the [bold]fleet down[/bold]? Dispatch stops until you bring it up."),
+            _on_confirm,
+        )
 
     def action_toggle_pause(self) -> None:
         paused = self._status.get("paused", False)
         if paused:
             self.run_worker(lambda: fleet_mod.resume(self._home), thread=True, name="fleet-resume")
             self._log("fleet resume … ")
-        else:
+            self._refresh_worker()
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if not ok:
+                return
             self.run_worker(lambda: fleet_mod.pause(self._home), thread=True, name="fleet-pause")
             self._log("fleet pause … ")
-        self._refresh_worker()
+            self._refresh_worker()
+
+        self.app.push_screen(
+            _ConfirmModal("[bold]Pause[/bold] the fleet? No new sessions spawn until resumed."),
+            _on_confirm,
+        )
 
     def action_dispatch_sweep(self) -> None:
         self._log("dispatching (dry-run) … ")
