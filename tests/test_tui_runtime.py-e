@@ -3700,6 +3700,7 @@ def test_spec_screen_dependencies_strip_hidden_without_depends_on(home):
     assert not shown
 
 
+<<<<<<< HEAD
 def test_no_select_blank_sentinel_in_tui():
     """Textual 8: Select.BLANK is Widget.BLANK (False), not the no-selection sentinel."""
     from pathlib import Path
