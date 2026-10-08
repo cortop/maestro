@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 from . import backup as backup_mod
-from . import claims, credentials, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, spend as spend_mod, store
+from . import claims, credentials, depgraph, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, spend as spend_mod, store
 from . import config as config_mod
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
@@ -447,52 +447,6 @@ def check_watchdog_loops(cfg: Config, now: float) -> dict:
     detail = (f"{len(counts)} ticket(s) repeatedly tripping the no-progress watchdog"
               if counts else "none")
     return {"name": "watchdog_loops", "status": status, "detail": detail, "counts": counts}
-
-
-def _key_exists_anywhere(home: Path, key: str) -> bool:
-    """A dependency is only genuinely *missing* if it never existed -- a
-    finished, archived ticket (``ops.archive_done``) is a legitimate satisfied
-    dependency, not a typo."""
-    if store.ticket_dir(home, key).exists():
-        return True
-    return (home / "tickets" / "_archive" / key).exists()
-
-
-def _depends_on_graph(home: Path) -> dict[str, list[str]]:
-    graph: dict[str, list[str]] = {}
-    for key in dispatcher.list_keys(home):
-        spec_file = store.spec_path(home, key)
-        graph[key] = (dispatcher.parse_depends_on(spec_file.read_text(encoding="utf-8"))
-                      if spec_file.exists() else [])
-    return graph
-
-
-def _find_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
-    """DFS cycle detection over the dependsOn graph; each cycle is reported as
-    the key path from its first repeated node back to itself."""
-    WHITE, GRAY, BLACK = 0, 1, 2
-    color = {k: WHITE for k in graph}
-    path: list[str] = []
-    cycles: list[list[str]] = []
-
-    def visit(node: str) -> None:
-        color[node] = GRAY
-        path.append(node)
-        for dep in graph.get(node, []):
-            if dep not in graph:
-                continue
-            if color.get(dep) == GRAY:
-                i = path.index(dep)
-                cycles.append(path[i:] + [dep])
-            elif color.get(dep) == WHITE:
-                visit(dep)
-        path.pop()
-        color[node] = BLACK
-
-    for node in list(graph):
-        if color[node] == WHITE:
-            visit(node)
-    return cycles
 
 
 def check_repo_preflight(cfg: Config, now: float) -> dict:
@@ -1610,11 +1564,11 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
 
 def check_depends_on(cfg: Config, now: float) -> dict:
     home = cfg.home
-    graph = _depends_on_graph(home)
+    graph = depgraph.load(home)
     missing = [{"key": key, "dep": dep}
                for key, deps in graph.items() for dep in deps
-               if dep and dep not in graph and not _key_exists_anywhere(home, dep)]
-    cycles = _find_cycles(graph)
+               if dep and dep not in graph and not depgraph.key_exists_anywhere(home, dep)]
+    cycles = depgraph.find_cycles(graph)
     status = "fail" if cycles else ("warn" if missing else "ok")
     return {
         "name": "depends_on", "status": status,

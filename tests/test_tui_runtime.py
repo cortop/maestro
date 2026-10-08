@@ -42,6 +42,7 @@ from maestro import claims, config as config_mod, event_log, fleet as fleet_mod,
 from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
 from maestro.cli import main as cli_main  # noqa: E402
 from maestro.tui import (  # noqa: E402
+    DepsScreen,
     DetailScreen,
     EventsScreen,
     FleetScreen,
@@ -322,7 +323,7 @@ def test_quit_binding_exits_clean(seeded_home):
 # False, no exception) — the press-sweep above cannot see that, so guard it here.
 
 _BINDING_CLASSES = [
-    MaestroTUI, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
+    MaestroTUI, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
     ScheduleScreen, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
     _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal,
 ]
@@ -3558,3 +3559,49 @@ def test_fleet_up_worker_loads_config_and_passes_it_through(seeded_home, monkeyp
     # The whole point: the runner dirs it needs come off this Config.
     from maestro import fleet as _f
     assert isinstance(_f.config_runner_dirs(cfg), list)
+
+
+def test_deps_screen_tree_colors_and_navigation(home):
+    """D opens DepsScreen: tree of open tickets, done absent, keys colored by depth."""
+    seed_phase(home, "A-1", disp_mod.Phase.DONE)
+    for key, deps in (("B-1", []), ("B-2", ["B-1"]), ("B-3", ["B-2", "A-1"])):
+        seed_phase(home, key, disp_mod.Phase.READY)
+        if deps:
+            store.spec_path(home, key).write_text(
+                f"# {key}\n\ndependsOn: [{', '.join(deps)}]\n\n## Acceptance criteria\n- [ ] ok\n",
+                encoding="utf-8")
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "B-2"
+            await pilot.press("D")
+            await pilot.pause()
+            await pilot.pause()
+            screen = app.screen_stack[-1]
+            assert isinstance(screen, DepsScreen)
+            tree = screen.query_one("#deps-tree")
+            top = tree.root.children
+            assert [n.data for n in top] == ["B-1"]
+            assert [n.data for n in top[0].children] == ["B-2"]
+            assert [n.data for n in top[0].children[0].children] == ["B-3"]
+            palette = app.get_css_variables()
+            for node, var in ((top[0], "success"), (top[0].children[0], "warning"),
+                              (top[0].children[0].children[0], "error")):
+                spans = [s for s in node.label.spans if node.data in node.label.plain[s.start:s.end]]
+                assert any(palette[var] in str(s.style) for s in spans), (node.data, var)
+            assert "A-1" not in "".join(str(n.label) for n in [*top, *top[0].children, *top[0].children[0].children])
+            assert screen._current_key() == "B-2"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DepsScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen_stack[-1], DepsScreen)
+            assert app._exception is None
+
+    asyncio.run(_inner())

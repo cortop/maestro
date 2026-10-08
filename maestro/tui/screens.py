@@ -8,19 +8,20 @@ import subprocess
 import time
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import ComposeResult, SuspendNotSupported
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static, Tree
 from textual.worker import Worker, WorkerState
 
-from .. import claims, config as config_mod, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
+from .. import claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
 from ..dispatcher import schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line
 from .modals import _ConfirmModal, _IntervalModal, _ScheduleModal
-from .render import _fmt_epoch, _render_env, _render_fleet
+from .render import _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
 
 
 def editor_argv(path: Path) -> list[str]:
@@ -414,6 +415,104 @@ class FleetScreen(Screen):
         self._log_lines.append(msg)
         del self._log_lines[:-6]
         self.query_one("#fleet-log", Static).update("\n".join(self._log_lines))
+
+
+class DepsScreen(Screen):
+    """Full-screen dependency tree of every open ticket, colored by blocking depth."""
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("r", "refresh_deps", "Refresh"),
+        ("enter", "open_detail", "Detail"),
+        ("s", "open_spec", "Spec"),
+    ]
+
+    CSS = """
+    DepsScreen #deps-header { padding: 0 2; height: auto; }
+    DepsScreen #deps-tree   { height: 1fr; }
+    """
+
+    def __init__(self, home: Path, focus_key: str | None = None) -> None:
+        super().__init__()
+        self._home = home
+        self._focus_key = focus_key
+        self._graph: depgraph.DepGraph | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("[dim]Loading…[/dim]", id="deps-header")
+        yield Tree("dependencies", id="deps-tree")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Dependencies"
+        self.query_one("#deps-tree", Tree).show_root = False
+        self._refresh_worker()
+        self.set_interval(10.0, self._refresh_worker)
+
+    def _refresh_worker(self) -> None:
+        self.run_worker(lambda: depgraph.build(self._home), thread=True, group="refresh",
+                        exclusive=True, name="deps-refresh")
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "deps-refresh":
+            return
+        if event.state == WorkerState.SUCCESS:
+            self._graph = event.worker.result
+            self._populate()
+        elif event.state == WorkerState.ERROR:
+            self.query_one("#deps-header", Static).update(
+                f"[red]deps refresh failed: {event.worker.error}[/red]")
+
+    def _populate(self) -> None:
+        g = self._graph
+        tree = self.query_one("#deps-tree", Tree)
+        want = self._focus_key or self._current_key()
+        tree.clear()
+        palette = self.app.get_css_variables()
+        self.query_one("#deps-header", Static).update(_render_dep_header(g, palette))
+        shown: dict[str, object] = {}
+        in_cycle = {k for c in g.cycles for k in c}
+
+        def add(parent, key: str) -> None:
+            if key in shown:
+                parent.add_leaf(Text.from_markup(
+                    f"[dim]{key} ↑ shown above[/dim]"), data=key)
+                return
+            node = parent.add(_dep_label(g, key, palette, key in in_cycle),
+                              data=key, expand=True)
+            shown[key] = node
+            for child in g.dependents[key]:
+                add(node, child)
+
+        for root in g.roots:
+            add(tree.root, root)
+        target = shown.get(want) if want else None
+        if target is not None:
+            tree.call_after_refresh(tree.move_cursor, target)
+            self._focus_key = None
+
+    def _current_key(self) -> str | None:
+        node = self.query_one("#deps-tree", Tree).cursor_node
+        return node.data if node is not None else None
+
+    def action_refresh_deps(self) -> None:
+        self._refresh_worker()
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        # Enter on a focused Tree emits NodeSelected and consumes the key, so the
+        # screen-level `enter` binding never fires -- open the detail view here.
+        self.action_open_detail()
+
+    def action_open_detail(self) -> None:
+        key = self._current_key()
+        if key is not None:
+            self.app.push_screen(DetailScreen(self._home, key))
+
+    def action_open_spec(self) -> None:
+        key = self._current_key()
+        if key is not None:
+            self.app.push_screen(SpecScreen(self._home, key))
 
 
 class SpecScreen(Screen):
