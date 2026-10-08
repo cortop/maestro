@@ -174,7 +174,7 @@ def test_row_highlight_renders_every_seeded_phase(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             assert table.row_count == 5
@@ -202,7 +202,7 @@ def test_all_view_orders_rows_by_phase_attention_priority(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             assert table.row_count == 5
@@ -247,7 +247,7 @@ def test_detail_panel_resize_bindings_grow_shrink_and_clamp(seeded_home):
             assert app._exception is None
 
             # The ratio survives a periodic refresh within the session.
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert app._tickets_fr == app._TICKETS_FR_MAX
             assert app.query_one("#tickets", DataTable).styles.width.value == \
@@ -866,7 +866,7 @@ def test_detail_screen_shows_stacked_pr_entries(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             table.focus()
@@ -899,7 +899,7 @@ def test_detail_pane_and_screen_render_title_from_spec_at_row_zero(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
 
             table = app.query_one("#tickets", DataTable)
@@ -939,7 +939,7 @@ def test_detail_pane_surfaces_provider_marker_for_a_provider_caused_degrade(home
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             table.focus()
@@ -1650,7 +1650,7 @@ def test_phase_styled_rows_render_without_crash(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one(DataTable)
             assert table.row_count >= 1
@@ -1746,7 +1746,7 @@ def test_notification_fires_on_phase_transition(seeded_home):
             snap_mod.rebuild(seeded_home, "T-5")
 
             notifications_before = len(app._notifications)
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert len(app._notifications) > notifications_before, (
                 "Expected a warning notification after T-5 entered awaiting-human"
@@ -1800,7 +1800,7 @@ def test_inbox_action_works_for_any_phase(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             for r in range(table.row_count):
@@ -1841,7 +1841,7 @@ def test_researching_rows_render_without_crash(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert app._exception is None
 
@@ -1867,7 +1867,7 @@ def test_verifying_rows_render_without_crash(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert app._exception is None
 
@@ -2732,7 +2732,7 @@ def test_detail_pane_and_screen_render_title_from_spec(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
 
             table = app.query_one("#tickets", DataTable)
@@ -3644,7 +3644,7 @@ def test_deps_column_counts_and_colors_blocking_deps(home):
         app = _make_app(home)
         async with app.run_test(size=(140, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             col = [c.label.plain for c in table.columns.values()].index("Deps")
@@ -3665,7 +3665,7 @@ def test_deps_column_counts_and_colors_blocking_deps(home):
             # refresh keeps cursor/selection with the new column
             table.move_cursor(row=table.get_row_index("C-1"))
             await pilot.pause()
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value == "C-1"
             assert app._exception is None
@@ -4549,7 +4549,7 @@ def test_actions_target_visible_ticket(seeded_home):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             app._selected_key = "T-3"
             seen = _spy_notify(app)
@@ -4578,7 +4578,7 @@ def test_deps_detail_discard_targets_screen_key(seeded_home):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             app._selected_key = "T-3"
             await pilot.press("D")
             for _ in range(50):
@@ -4612,7 +4612,7 @@ def test_empty_filter_clears_selection(home):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             app._selected_key = "T-3"
             seen = _spy_notify(app)
@@ -4688,6 +4688,175 @@ def test_question_mark_opens_help(seeded_home):
             await pilot.press("question_mark")
             await pilot.pause()
             assert app.screen.query(HelpPanel)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# T-163: live Now column, running filter, j jumps to running tickets          #
+# --------------------------------------------------------------------------- #
+
+import os as _os  # noqa: E402
+import threading as _threading  # noqa: E402
+import time as _time  # noqa: E402
+
+
+async def _live_tick(app, pilot):
+    """Run one real worker refresh to completion and let its re-render land."""
+    app._kick_live()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def _now_cell(app, key):
+    table = app.query_one("#tickets", DataTable)
+    return str(table.get_row(key)[-1])
+
+
+def _claim(home, key, tmp_path, *, pid=None, kind=None, with_log=True):
+    log = tmp_path / f"{key}.log"
+    log.write_text("x")
+    claims.write_claim(home, key, pid if pid is not None else _os.getpid(), "t",
+                       log_path=str(log) if with_log else None, kind=kind)
+    return log
+
+
+def test_now_column_shows_live_claim(seeded_home, tmp_path):
+    _claim(seeded_home, "T-3", tmp_path)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            await _live_tick(app, pilot)
+            assert _now_cell(app, "T-3").startswith("●")
+            assert "running(1)" in str(app.query_one("#filter-bar", Static).content)
+            assert claims.read_claim(seeded_home, "T-3")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_j_jumps_to_running_ticket(seeded_home, tmp_path):
+    _claim(seeded_home, "T-3", tmp_path)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await _live_tick(app, pilot)
+            assert app._filter_idx == _filter_idx("needs-you")
+            await pilot.press("j")
+            await pilot.pause()
+            assert app._selected_key == "T-3"
+            assert app._filter_idx == _filter_idx("all")
+            table = app.query_one("#tickets", DataTable)
+            assert str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value) == "T-3"
+            idx = app._filter_idx
+            await pilot.press("j")
+            await pilot.pause()
+            assert app._filter_idx == idx and app._selected_key == "T-3"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_now_column_silence_thresholds_and_one_toast(seeded_home, tmp_path):
+    log = _claim(seeded_home, "T-3", tmp_path)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            now = _time.time()
+            _os.utime(log, (now - 150, now - 150))
+            await _live_tick(app, pilot)
+            cell = app.query_one("#tickets", DataTable).get_row("T-3")[-1]
+            assert "silent" in str(cell) and "yellow" in str(cell.style)
+            timeout = config_mod.load(str(seeded_home)).no_output_timeout
+            _os.utime(log, (now - timeout * 0.6, now - timeout * 0.6))
+            before = len(app._notifications)
+            await _live_tick(app, pilot)
+            await _live_tick(app, pilot)
+            cell = app.query_one("#tickets", DataTable).get_row("T-3")[-1]
+            assert "silent" in str(cell) and "red" in str(cell.style)
+            toasts = [n for n in list(app._notifications)[before:] if "T-3" in n.message]
+            assert len(toasts) == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_now_column_dispatcher_owned_claims(seeded_home, tmp_path):
+    _claim(seeded_home, "T-3", tmp_path, kind="testrun", with_log=False)
+    _claim(seeded_home, "T-4", tmp_path, kind="restack", with_log=False)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            await _live_tick(app, pilot)
+            assert _now_cell(app, "T-3") == "◌ tests"
+            assert _now_cell(app, "T-4") == "◌ restack"
+            assert "running(2)" in str(app.query_one("#filter-bar", Static).content)
+
+    asyncio.run(_inner())
+
+
+def test_live_worker_never_releases_claims(seeded_home, tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    _claim(seeded_home, "T-3", tmp_path, pid=proc.pid)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            for _ in range(3):
+                await _live_tick(app, pilot)
+            assert "running(0)" in str(app.query_one("#filter-bar", Static).content)
+            assert _now_cell(app, "T-3") == ""
+            assert claims.read_claim(seeded_home, "T-3")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_live_probe_runs_in_worker(seeded_home, tmp_path, monkeypatch):
+    _claim(seeded_home, "T-3", tmp_path)
+    main = _threading.get_ident()
+    calls: list[tuple[str, int, bool]] = []
+    in_populate = {"on": False}
+
+    def _wrap(mod, name):
+        real = getattr(mod, name)
+
+        def _w(*a, **kw):
+            calls.append((name, _threading.get_ident(), in_populate["on"]))
+            return real(*a, **kw)
+        monkeypatch.setattr(mod, name, _w)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            _wrap(claims, "probe_processes")
+            _wrap(snap_mod, "load")
+            real_populate = app._populate
+
+            def _populate():
+                in_populate["on"] = True
+                try:
+                    real_populate()
+                finally:
+                    in_populate["on"] = False
+            app._populate = _populate
+            for _ in range(3):
+                await _live_tick(app, pilot)
+            names = {c[0] for c in calls}
+            assert names == {"probe_processes", "load"}
+            assert not any(c[2] for c in calls), "disk/ps read while _populate ran"
+            assert all(c[1] != main for c in calls), "refresh-driven read on the UI thread"
             assert app._exception is None
 
     asyncio.run(_inner())
