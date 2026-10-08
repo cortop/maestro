@@ -52,6 +52,7 @@ from .screens import (
     ReviewScreen,
     ScheduleScreen,
     SpecScreen,
+    WhyScreen,
 )
 
 __all__ = [
@@ -59,6 +60,7 @@ __all__ = [
     "_ActionMenu",
     "menu_actions",
     "AcScreen",
+    "WhyScreen",
     "MaestroTUI",
     "main",
     "ActivityScreen",
