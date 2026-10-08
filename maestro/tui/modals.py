@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
@@ -542,15 +543,17 @@ class _InboxModal(ModalScreen):
     }
     """
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, initial: str = "") -> None:
         super().__init__()
         self._key = key
+        self._initial = initial
 
     def compose(self) -> ComposeResult:
         with Vertical(id="inbox-dialog"):
             yield Label(f"[bold]{self._key}[/bold] — send to inbox")
             yield Label("[dim]Message will be queued for the next reconciler sweep.[/dim]")
-            yield Input(placeholder="Message (Enter to send, Esc to cancel)", id="inbox-input")
+            yield Input(value=self._initial,
+                        placeholder="Message (Enter to send, Esc to cancel)", id="inbox-input")
 
     def on_mount(self) -> None:
         self.query_one("#inbox-input", Input).focus()
@@ -561,6 +564,33 @@ class _InboxModal(ModalScreen):
             self.dismiss(text)
 
     def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _AcEvidenceModal(ModalScreen):
+    """Read-only full evidence for one AC row (T-167): self-attestation, both
+    QA evidence strings and the captured check. Escape closes it."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    DEFAULT_CSS = """
+    _AcEvidenceModal { align: center middle; }
+    #ac-evidence-dialog {
+        width: 80%; height: 80%; border: solid $accent; padding: 1 2; background: $surface;
+    }
+    """
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self._title = title
+        self._body = body
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="ac-evidence-dialog"):
+            yield Static(Text(self._title, style="bold"))
+            yield Static(Text(self._body))
+
+    def action_close(self) -> None:
         self.dismiss(None)
 
 

@@ -9,6 +9,7 @@ change without breaking importers.
 from .app import MaestroTUI, main, _FILTERS, _NEEDS_YOU_PHASES
 from .modals import (
     _ACCEPT_ALL,
+    _AcEvidenceModal,
     _AddAcModal,
     _AnswerModal,
     _CmdModal,
@@ -34,6 +35,7 @@ from .render import (
 )
 from .screens import (
     ActivityScreen,
+    AcScreen,
     DetailScreen,
     EnvScreen,
     EventsScreen,
@@ -47,6 +49,7 @@ from .screens import (
 )
 
 __all__ = [
+    "AcScreen",
     "MaestroTUI",
     "main",
     "ActivityScreen",
@@ -61,6 +64,7 @@ __all__ = [
     "ScheduleScreen",
     "SpecScreen",
     "_ACCEPT_ALL",
+    "_AcEvidenceModal",
     "_AddAcModal",
     "_AnswerModal",
     "_CmdModal",
