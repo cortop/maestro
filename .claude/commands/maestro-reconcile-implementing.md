@@ -106,29 +106,58 @@ continue with `gt -C <WT> continue` (its own, single invocation; never `gt -C <W
 fall back to `git rebase`/`git merge` on a gt-managed branch (`<PREFIX>$KEY-*`/`<PREFIX>$KEY`) --
 gt's own parent-tracking would then disagree with the tree.
 
-**If `STACK_TOOL == git` (default):** If a PR is already open (snapshot `pr_number` is set),
-first fetch and incorporate `origin/<PREFIX>$KEY` — the PR branch as it actually stands on
-GitHub — **before** rebasing onto base. Rebasing from only the local worktree tip would silently
-drop any commit pushed to the PR branch by someone else since your last sync (a CI bot's
-auto-fix, a human's own push, a co-author) the moment you force-push the rebased result:
+**If `STACK_TOOL == git` (default):** first fetch and incorporate `origin/<PREFIX>$KEY` — the PR
+branch as it actually stands on GitHub — **before** syncing with base. Syncing from only the local
+worktree tip would silently drop any commit pushed to the PR branch by someone else since your last
+sync (a CI bot's auto-fix, a human's own push, a co-author). Force-push is denied, so a pushed
+branch can only advance by merge:
 ```bash
 git -C <WT> fetch -q origin "<PREFIX>$KEY"
 git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"   # no-op if nothing new is there
 ```
+Whether `origin/<PREFIX>$KEY` exists (that fetch succeeds) decides how you sync with base — not
+whether `pr_number` is set, since a branch can be pushed before its PR opens. If the fetch fails
+because the branch was never pushed, skip the `--ff-only` merge too.
+
 If that `merge --ff-only` fails (your local tip and `origin/<PREFIX>$KEY` have diverged — someone
 else pushed while you were working), reconcile properly instead of discarding either side:
 `git -C <WT> merge -q "origin/<PREFIX>$KEY"` and resolve any conflict the same way step 0's own
-rebase conflicts are resolved below, before continuing.
+base-sync conflicts are resolved below, before continuing.
 
-Then always rebase onto the latest base, and resolve any conflicts — always resolve, never
-`git rebase --abort`:
+Then sync with the latest base, and resolve any conflicts — always resolve, never
+`git merge --abort` and never `git rebase --abort`.
+
+Fetch the latest base first:
 ```bash
 git -C <REPO> fetch -q origin "<BASE>"
+```
+
+**Pushed branch (`origin/<PREFIX>$KEY` exists)** — merge base in; never rebase, since the rebased
+branch could not be published:
+```bash
+git -C <WT> merge -q "origin/<BASE>"
+```
+A conflicting merge exits non-zero and leaves conflict markers in the tree — resolve them, then
+finish with `git -C <WT> commit --no-edit` (its own, single invocation; never
+`git merge --abort`).
+
+**Never-pushed branch** — rebase onto base:
+```bash
 git -C <WT> rebase "origin/<BASE>"
 ```
 A conflicting rebase exits non-zero and leaves conflict markers in the tree — resolve them, then
 continue with `git -C <WT> rebase --continue` (its own, single invocation; never
 `git rebase --abort`).
+
+**Conflicted generated file:** take either side of it, resolve every other conflicted file first,
+then run the repo's generator and `git add` its output — never hand-merge generated text. In this
+repo, `docs/dispatch-gates.md` and `docs/state-machine.md` are generated:
+```bash
+.venv/bin/python -m maestro.diagram
+git -C <WT> add docs/dispatch-gates.md docs/state-machine.md
+```
+Do not run the generator through `make`: `make` is not granted to reconcilers, and a denied call
+leaves the worktree mid-merge, which trips the dispatcher's repo_preflight merge-in-progress check.
 
 Before resolving a conflicting hunk, recover the intent on **both** sides — read the commit(s)
 (and, if the subject references one, the PR/ticket) that introduced the conflicting lines on
@@ -138,7 +167,7 @@ trying to do, not just a textual splice.
 
 If a PR is already open (snapshot `pr_number` is set) and its Acceptance criteria are already
 implemented, you are here **only to resolve the conflict** — resolve, run tests, then skip to
-step 5 (push the rebased branch + `set-phase awaiting-ci`); the `pr-size` check does not apply
+step 5 (push the synced branch + `set-phase awaiting-ci`); the `pr-size` check does not apply
 here (T-129) — it only ever runs before the first PR exists, never on a conflict-only pass against
 one already open. Keep the prior attestations and QA
 verdicts as-is (the spec, and so their content hashes, didn't change) — do not re-implement the
@@ -398,7 +427,7 @@ AC has a `verify-ac` attestation, a PR is open with `PrOpened` recorded, and `se
 appended, handing review off to the independent `qa` phase; (b) a fix round — the fix is made per
 `qa`'s evidence, tests are green, `impl-turn` recorded the round (and did not park the ticket), the
 fix is pushed, and `set-phase qa` has appended again to re-request review; (c) a conflict-only
-pass — the rebase is clean (or escalated via `maestro ask` with a `conflict-$KEY-<n>` qid), tests
+pass — the sync is clean (or escalated via `maestro ask` with a `conflict-$KEY-<n>` qid), tests
 are green, and the branch is pushed with `set-phase awaiting-ci` appended; (d) a review-feedback
 round — every inline comment you addressed or declined got a `maestro reply-review` reply in its
 own thread (approvals and acknowledgements got none), each one either addressed with a pushed code
