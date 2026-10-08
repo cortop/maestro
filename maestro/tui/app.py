@@ -17,7 +17,7 @@ from .. import claims, ratelimit, spend as spend_mod, config as config_mod, depg
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from .. import dispatcher as disp
-from ..projection import phase_predicate, ticket_rows
+from ..projection import _PHASE_RANK, phase_predicate, ticket_rows
 from ..sessions import build_routing_sessions, reap_children
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
@@ -29,6 +29,7 @@ from .modals import (
 from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
     DetailScreen,
+    ActivityScreen,
     DepsScreen,
     EnvScreen,
     EventsScreen,
@@ -54,6 +55,9 @@ def _needs_you_predicate(home: Path, s: snap_mod.Snapshot) -> bool:
 # Named filters: (display_name, row_predicate) — None predicate means no
 # filtering (show all). A predicate takes (home, Snapshot) -> bool; wider than
 # a bare phase set for callers that need one.
+# T-161: sortable board columns, in table order; numeric ones first-sort descending.
+_SORT_COLUMNS = ("Key", "Phase", "Title", "PR", "CI", "Fails", "Deps", "Idle")
+_NUMERIC_SORT = frozenset({"Fails", "Deps", "PR", "Idle"})
 _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
     ("needs-you", _needs_you_predicate),
     ("active", phase_predicate(ACTIVE_PHASES)),
@@ -110,6 +114,7 @@ class MaestroTUI(App):
         Binding("ctrl+r", "retry", "Retry", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("T", "activity_panel", "Activity", show=False),
         Binding("D", "deps_panel", "Deps", show=False),
         Binding("e", "env_panel", "Env", show=False),
         Binding("S", "schedule_panel", "Schedule", show=False),
@@ -126,6 +131,8 @@ class MaestroTUI(App):
         Binding("A", "add_ac", "Add AC", show=False),
         Binding("g", "suggest_acs", "Suggest ACs", show=False),
         Binding("Q", "trigger_post_qa", "Post-QA", show=False),
+        Binding(">", "cycle_sort", "Sort column", show=False),
+        Binding("<", "flip_sort", "Sort direction", show=False),
         Binding("question_mark", "show_help_panel", "Help", show=False),
         Binding("N", "toggle_nudge", "Nudge on/off", show=False),
     ]
@@ -140,7 +147,7 @@ class MaestroTUI(App):
     _BOARD_ACTIONS = frozenset({
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
     })
-    _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen)
+    _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen)
 
@@ -161,6 +168,9 @@ class MaestroTUI(App):
         self._badge_result: dict | None = None
         self._selected_key: str | None = None
         self._filter_idx: int = 0
+        # T-161: board sort -- index into _SORT_COLUMNS, None = default order.
+        self._sort_col: int | None = None
+        self._sort_desc: bool = False
         self._release_key: str | None = None
         self._tickets_fr: float = 2.0
         # key -> phase; None = first poll (no notifications)
@@ -252,6 +262,7 @@ class MaestroTUI(App):
         table.add_column("CI")
         table.add_column("Fails")
         table.add_column("Deps")
+        table.add_column("Idle")
         self._populate()
         self.set_interval(3.0, self._populate)
         self._refresh_badge()
@@ -450,6 +461,60 @@ class MaestroTUI(App):
         self._filter_idx = (self._filter_idx + 1) % len(_FILTERS)
         self._populate()
 
+    def _set_sort(self, col: int | None) -> None:
+        self._sort_col = col
+        if col is not None:
+            self._sort_desc = _SORT_COLUMNS[col] in _NUMERIC_SORT
+        self._populate()
+
+    def action_cycle_sort(self) -> None:
+        nxt = 0 if self._sort_col is None else self._sort_col + 1
+        self._set_sort(nxt if nxt < len(_SORT_COLUMNS) else None)
+
+    def action_flip_sort(self) -> None:
+        if self._sort_col is None:
+            return
+        self._sort_desc = not self._sort_desc
+        self._populate()
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        col = event.column_index
+        if col >= len(_SORT_COLUMNS):
+            return
+        if col == self._sort_col:
+            self.action_flip_sort()
+        else:
+            self._set_sort(col)
+
+    def _sort_visible(self, visible: list, snaps_by_key: dict, graph) -> list:
+        """Stable sort of *visible* rows by the active column, on typed values."""
+        if self._sort_col is None:
+            return visible
+        name = _SORT_COLUMNS[self._sort_col]
+        now = store.iso_to_epoch(store.iso_now()) or 0.0
+
+        def keyfn(row):
+            key = row[-1]
+            snap = snaps_by_key[key]
+            if name == "Key":
+                return disp.split_key(key)
+            if name == "Phase":
+                return _PHASE_RANK.get(snap.phase, 99)
+            if name == "Title":
+                return row[2].lower()
+            if name == "PR":
+                return snap.pr_number or 0
+            if name == "CI":
+                return row[4].lower()
+            if name == "Fails":
+                return snap.failure_count
+            if name == "Deps":
+                node = graph.nodes.get(key)
+                return len(node.open_deps) + len(node.missing) if node and node.blocked else 0
+            return _idle_seconds(snap, now) or 0.0  # Idle
+
+        return sorted(visible, key=keyfn, reverse=self._sort_desc)
+
     def action_cmd(self) -> None:
         key = self._target_key()
         if key is None:
@@ -523,6 +588,9 @@ class MaestroTUI(App):
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_activity_panel(self) -> None:
+        self.push_screen(ActivityScreen(self._home))
 
     def action_deps_panel(self) -> None:
         self.push_screen(DepsScreen(self._home, self._target_key()))
@@ -961,7 +1029,10 @@ class MaestroTUI(App):
             else:
                 label = f"[dim]{label}[/dim]"
             parts.append(label)
-        self.query_one("#filter-bar", Static).update("  " + "  |  ".join(parts))
+        bar = "  " + "  |  ".join(parts)
+        if self._sort_col is not None:
+            bar += f"  {'↓' if self._sort_desc else '↑'} {_SORT_COLUMNS[self._sort_col]}"
+        self.query_one("#filter-bar", Static).update(bar)
 
         # Apply current filter
         if predicate is not None:
@@ -969,11 +1040,14 @@ class MaestroTUI(App):
         else:
             visible = all_rows
 
+        graph = depgraph.build(home)  # once per refresh, not per row
+        visible = self._sort_visible(visible, snaps_by_key, graph)
+
         table = self.query_one("#tickets", DataTable)
         # Preserve cursor across clear/repopulate.
         prev_key: str | None = None
         try:
-            rk = table.cursor_row_key
+            rk = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             if rk is not None and rk.value is not None:
                 prev_key = str(rk.value)
         except Exception:
@@ -981,11 +1055,12 @@ class MaestroTUI(App):
         prev_row = table.cursor_row
         table.clear()
         row_keys: list[str] = []
-        graph = depgraph.build(home)  # once per refresh, not per row
         palette = self.get_css_variables()
+        now = store.iso_to_epoch(store.iso_now()) or 0.0
         for *cells, row_key in visible:
             styled = _styled_row(*cells)
-            table.add_row(*styled, self._deps_cell(graph, row_key, palette), key=row_key)
+            idle = _format_age(_idle_seconds(snaps_by_key[row_key], now))
+            table.add_row(*styled, self._deps_cell(graph, row_key, palette), idle, key=row_key)
             row_keys.append(row_key)
         if not row_keys:
             self._selected_key = None
@@ -1018,6 +1093,23 @@ class MaestroTUI(App):
         log.clear()
         for line in render_log(events, tail=self._tail_mode):
             log.write(line)
+
+
+def _idle_seconds(snap, now: float) -> float | None:
+    """Seconds since the ticket's last event (`updated_ts`); None when unknown."""
+    ts = store.iso_to_epoch(snap.updated_ts) if snap.updated_ts else None
+    return None if ts is None else max(0.0, now - ts)
+
+
+def _format_age(seconds: float | None) -> str:
+    """Compact age: 42s, 7m, 3h, 2d; blank when unknown."""
+    if seconds is None:
+        return ""
+    s = int(seconds)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if s >= size:
+            return f"{s // size}{unit}"
+    return f"{s}s"
 
 
 def main(args) -> int:

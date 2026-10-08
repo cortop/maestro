@@ -6,20 +6,24 @@ import os
 import shlex
 import subprocess
 import time
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 from rich.text import Text
+from textual.binding import Binding
 from textual.app import ComposeResult, SuspendNotSupported
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Markdown, RichLog, Static, Tree
+from textual.widgets import DataTable, Footer, Header, Input, Markdown, RichLog, Static, Tree
 from textual.worker import Worker, WorkerState
 
-from .. import claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
+from .. import burn, claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
 from ..dispatcher import schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
-from .events import (_TAIL_N, event_row, phase_dwell, render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
+from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, phase_dwell,
+                     render_dwell, render_inbox, render_log, render_log_line, render_opencode_log_line, render_pi_log_line)
 from .modals import _ConfirmModal, _EventPayloadModal, _IntervalModal, _ScheduleModal
 from .render import _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
 
@@ -1115,3 +1119,210 @@ class ScheduleScreen(Screen):
             return
         self.notify(f"Toggled {self._selected_name}")
         self._refresh()
+
+
+class ActivityScreen(Screen):
+    """Board-wide activity ticker (T-173): newest-first events from every ticket,
+    tail-followed live, with a hot-keys panel. Strictly read-only."""
+
+    HELP = ('Board-wide events, newest first. space pauses, 1-6 toggle categories, '
+            '/ filters by key or type, enter opens the ticket, escape goes back.')
+
+    BINDINGS = [
+        ("escape", "back", "Back"),
+        ("space", "toggle_pause", "Pause"),
+        *[Binding(str(n), f"toggle_cat({n})", f"{n}:{name}") for n, name in CATEGORY_NAMES.items()],
+        ("slash", "filter_text", "Filter"),
+    ]
+
+    CSS = """
+    ActivityScreen #act-hot    { height: auto; max-height: 6; padding: 0 1;
+                                 border-bottom: solid $primary; }
+    ActivityScreen #act-filter { display: none; }
+    ActivityScreen #act-table  { height: 1fr; }
+    """
+
+    POLL_INTERVAL = 2.0
+    BURN_INTERVAL = 30.0
+    HOT_WINDOW_S = 600
+    HOT_TOP_N = 5
+    BACKFILL_N = 200
+    MAX_ROWS = 1000
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+        self._tail = EventTail(home)
+        self._ready = False  # polling waits for the backfill to seed the tail
+        self._rows: deque[dict] = deque(maxlen=self.MAX_ROWS)  # newest first
+        self._recent: deque[dict] = deque(maxlen=5000)  # newest first; feeds hot keys
+        self._held: list[dict] = []  # events buffered while paused (oldest first)
+        self._paused = False
+        self._cats: set[int] = set(CATEGORY_NAMES)
+        self._text = ""
+        self._flagged: list[str] = []
+        self.hot_keys: list[tuple[str, int]] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("", id="act-hot")
+        yield Input(placeholder="filter by key or type", id="act-filter")
+        yield DataTable(id="act-table", cursor_type="row")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Activity"
+        table = self.query_one("#act-table", DataTable)
+        for label in ("Time", "Key", "Type", "Actor", "Summary"):
+            table.add_column(label)
+        table.focus()
+        self.run_worker(self._tail.backfill, thread=True, group="activity-backfill",
+                        name="activity-backfill")
+        self.set_interval(self.POLL_INTERVAL, self._poll_worker)
+        self._burn_worker()
+        self.set_interval(self.BURN_INTERVAL, self._burn_worker)
+
+    # --- workers -------------------------------------------------------------
+
+    def _poll_worker(self) -> None:
+        if self._ready:
+            self.run_worker(self._tail.poll, thread=True, group="activity-poll",
+                            exclusive=True, name="activity-poll")
+
+    def _burn_worker(self) -> None:
+        self.run_worker(self._load_burn, thread=True, group="activity-burn",
+                        exclusive=True, name="activity-burn")
+
+    def _load_burn(self) -> list[str]:
+        try:
+            return list(burn.report(config_mod.load(str(self._home)), store.now_epoch())["flagged"])
+        except Exception:
+            return []
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.state != WorkerState.SUCCESS:
+            return
+        name = event.worker.name
+        if name == "activity-backfill":
+            self._ready = True
+            self._ingest(event.worker.result)
+        elif name == "activity-poll":
+            self._ingest(event.worker.result)
+        elif name == "activity-burn":
+            self._flagged = event.worker.result
+            self._render_hot()
+
+    # --- model ---------------------------------------------------------------
+
+    def _ingest(self, events: list[dict]) -> None:
+        """``events`` is oldest-first; every one lands in the hot-keys cache at once,
+        and in the visible rows now or (paused) at resume."""
+        for ev in events:
+            self._recent.appendleft(ev)
+        if self._paused:
+            self._held += events
+        else:
+            for ev in events:
+                self._rows.appendleft(ev)
+        self._render_table()
+        self._render_hot()
+
+    def _visible(self, ev: dict) -> bool:
+        if category_of(ev.get("type", "")) not in self._cats:
+            return False
+        text = self._text.lower()
+        return not text or text in ev["key"].lower() or text in str(ev.get("type", "")).lower()
+
+    @staticmethod
+    def _row_id(ev: dict) -> str:
+        return f"{ev['key']}:{ev['seq']}"
+
+    def _render_table(self) -> None:
+        table = self.query_one("#act-table", DataTable)
+        keep = None
+        if table.row_count:
+            try:
+                keep = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            except Exception:
+                keep = None
+        table.clear()
+        for ev in self._rows:
+            if not self._visible(ev):
+                continue
+            table.add_row(
+                Text((ev.get("ts") or "")[11:19]), Text(ev["key"]),
+                Text(str(ev.get("type", ""))), Text(str(ev.get("actor", ""))),
+                Text(event_summary(ev)[:120]), key=self._row_id(ev))
+        if keep is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(keep))
+            except Exception:
+                pass
+
+    def _render_hot(self) -> None:
+        cutoff = time.time() - self.HOT_WINDOW_S
+        counts: dict[str, int] = {}
+        for ev in self._recent:
+            try:
+                ts = datetime.fromisoformat(ev["ts"]).timestamp()
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ts < cutoff:
+                break  # newest first: everything after is older
+            counts[ev["key"]] = counts.get(ev["key"], 0) + 1
+        self.hot_keys = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:self.HOT_TOP_N]
+        flagged = set(self._flagged)
+        parts = [f"{k} {n}" + (" 🔥" if k in flagged else "") for k, n in self.hot_keys]
+        extra = sorted(flagged - {k for k, _ in self.hot_keys})
+        state = " [yellow]PAUSED[/yellow]" if self._paused else ""
+        line = "  ".join(Text(p).markup for p in parts) or "[dim]no events in the last 10 min[/dim]"
+        burning = f"\nburning: {' '.join(extra)}" if extra else ""
+        self.query_one("#act-hot", Static).update(f"hot (10m): {line}{state}{burning}")
+
+    # --- actions -------------------------------------------------------------
+
+    def action_back(self) -> None:
+        inp = self.query_one("#act-filter", Input)
+        if inp.display:
+            inp.display = False
+            self.query_one("#act-table", DataTable).focus()
+        else:
+            self.app.pop_screen()
+
+    def action_toggle_pause(self) -> None:
+        self._paused = not self._paused
+        if not self._paused:
+            for ev in self._held:
+                self._rows.appendleft(ev)
+            self._held = []
+            self._render_table()
+        self._render_hot()
+
+    def action_toggle_cat(self, n: int) -> None:
+        self._cats ^= {n}
+        self._render_table()
+
+    def action_filter_text(self) -> None:
+        inp = self.query_one("#act-filter", Input)
+        inp.display = True
+        inp.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        self._text = event.value.strip()
+        self._render_table()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        event.input.display = False
+        self.query_one("#act-table", DataTable).focus()
+
+    # The table's messages would bubble to MaestroTUI's board handlers (push
+    # DetailScreen / reset _selected_key); handle them here instead.
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        event.stop()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        if event.row_key.value:
+            self.app.push_screen(DetailScreen(self._home, event.row_key.value.rsplit(":", 1)[0]))
