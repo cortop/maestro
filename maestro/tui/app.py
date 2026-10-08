@@ -503,7 +503,7 @@ class MaestroTUI(App):
             p = event.worker.result
             try:
                 self.screen_stack[0].query_one("#pulse", Static).update(_render_pulse(p))
-            except NoMatches:  # app is tearing down
+            except (NoMatches, IndexError):  # app is tearing down
                 return
             runaway = bool(p.get("runaway"))
             if runaway and not self._pulse_runaway:
@@ -563,7 +563,10 @@ class MaestroTUI(App):
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
         self._selected_key = key
         self._refresh_bindings()
-        detail = self.query_one("#detail", Static)
+        try:
+            detail = self.query_one("#detail", Static)
+        except NoMatches:  # a modal/screen is on top (or teardown): nothing to paint
+            return
         if key is None:
             detail.update("[dim]Select a ticket[/dim]")
             self.query_one("#events", RichLog).clear()
