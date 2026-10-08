@@ -132,3 +132,27 @@ def build(home: Path) -> DepGraph:
     roots = [k for k in sorted(nodes, key=_natural) if not nodes[k].open_deps or k in in_cycle]
     roots.sort(key=lambda k: not dependents[k])  # stable: dependents first, key order within
     return DepGraph(nodes, dependents, roots, cycles, depth)
+
+
+def dep_status(home: Path, key: str) -> list[tuple[str, str, str]]:
+    """Each of *key*'s spec dependsOn entries as ``(dep, emoji, phase)``, spec order.
+
+    ✅ terminal · 💤 triaging/ready · ⏳ any other open phase · ❓ never existed
+    (phase ``missing``). Read-only; an archived dep counts as its archived phase."""
+    spec_file = store.spec_path(home, key)
+    deps = (dispatcher.parse_depends_on(spec_file.read_text(encoding="utf-8"))
+            if spec_file.exists() else [])
+    out: list[tuple[str, str, str]] = []
+    for dep in deps:
+        if not key_exists_anywhere(home, dep):
+            out.append((dep, "❓", "missing"))
+            continue
+        phase = Phase(snap_mod.load(home, dep).phase)
+        if phase in TERMINAL_PHASES:
+            emoji = "✅"
+        elif phase in (Phase.TRIAGING, Phase.READY):
+            emoji = "💤"
+        else:
+            emoji = "⏳"
+        out.append((dep, emoji, phase.value))
+    return out
