@@ -61,3 +61,44 @@ def test_brief_still_requires_at_least_one_ac_and_appends_no_event(tmp_path, hom
     before = len(event_log.read(home, "T-1"))
     ops.qa_brief(cfg, "T-1")
     assert len(event_log.read(home, "T-1")) == before
+
+
+def test_ac_evidence_rows_axes_and_stale_check(tmp_path, home):
+    """T-167: the TUI matrix builder reports self / QA-spec / QA-std / latest check
+    per AC, flags a check from another tree as stale, and leaves `qa_brief` alone."""
+    key = "T-1"
+    cfg, _repo, _wt = _bind(tmp_path, home, key)
+    spec = store.spec_path(home, key)
+    spec.write_text(spec.read_text().replace(
+        "- [ ] widget works (test: tests/test_widget.py::test_widget)\n"
+        "- [ ] plain prose AC\n",
+        "- [ ] attested AC\n- [ ] qa-failed AC\n"
+        "- [ ] widget works (test: tests/test_widget.py::test_widget)\n"))
+    acs = snap_mod.parse_acs(spec.read_text())
+    ops.verify_ac(cfg, key, 1, {"what": "ran it", "where": "t.py", "result": "ok"})
+    event_log.append(home, key, "PhaseChanged", {"phase": "qa", "reason": ""}, actor="r")
+    snap_mod.rebuild(home, key)
+    ops.record_qa_verdict(cfg, key, 2, "fail", "does not work")
+    ops.record_qa_verdict(cfg, key, 1, "pass", "std fine", axis="standards")
+    h3 = snap_mod.ac_hash(acs[2])
+    event_log.append(home, key, "AcCheckCaptured", {
+        "tree_key": "abc1234def:old", "ac_hash": h3, "ac_index": 3, "ac_text": acs[2],
+        "kind": "test", "command": "pytest x", "exit_code": 1, "passed": False,
+        "failure_excerpt": "boom"}, actor="d")
+    snap = snap_mod.rebuild(home, key)
+    before = ops.qa_brief(cfg, key)["acs"]
+
+    rows = ops.ac_evidence_rows(snap, spec.read_text(), "abc1234def:new")
+    assert [r["index"] for r in rows] == [1, 2, 3]
+    assert rows[0]["self"]["what"] == "ran it" and rows[0]["qa_std"]["verdict"] == "pass"
+    assert rows[1]["qa_spec"]["verdict"] == "fail" and rows[1]["check"] is None
+    chk = rows[2]["check"]
+    assert chk["passed"] is False and chk["current"] is False
+    assert chk["failure_excerpt"] == "boom" and chk["tree_key"] == "abc1234def:old"
+    assert "check" not in rows[0]["annotation"] if rows[0].get("annotation") else True
+    assert ops.ac_evidence_rows(snap, spec.read_text(), "abc1234def:old")[2]["check"]["current"]
+    assert ops.ac_evidence_rows(snap, spec.read_text(), None)[2]["check"]["current"] is False
+
+    after = ops.qa_brief(cfg, key)["acs"]
+    assert after == before
+    assert all(set(e) <= {"index", "text", "ac_hash", "annotation", "captured_check"} for e in after)

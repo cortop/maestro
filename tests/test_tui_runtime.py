@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -47,7 +48,9 @@ from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod
 from maestro.cli import main as cli_main  # noqa: E402
 from maestro.sessions import ClaudeCliSessions, DryRunSessions, OpencodeCliSessions, PiCliSessions  # noqa: E402
 from maestro.tui import (  # noqa: E402
+    AcScreen,
     ActivityScreen,
+    _AcEvidenceModal,
     DepsScreen,
     DetailScreen,
     EventsScreen,
@@ -180,7 +183,7 @@ def test_row_highlight_renders_every_seeded_phase(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             assert table.row_count == 5
@@ -208,7 +211,7 @@ def test_all_view_orders_rows_by_phase_attention_priority(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             assert table.row_count == 5
@@ -253,7 +256,7 @@ def test_detail_panel_resize_bindings_grow_shrink_and_clamp(seeded_home):
             assert app._exception is None
 
             # The ratio survives a periodic refresh within the session.
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert app._tickets_fr == app._TICKETS_FR_MAX
             assert app.query_one("#tickets", DataTable).styles.width.value == \
@@ -347,7 +350,7 @@ def test_quit_binding_exits_clean(seeded_home):
 
 _BINDING_CLASSES = [
     MaestroTUI, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
-    ScheduleScreen, ActivityScreen, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
+    ScheduleScreen, ActivityScreen, AcScreen, _AcEvidenceModal, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
     _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal,
     _ConfirmModal, SpecScreen, EnvScreen, _EventPayloadModal,
 ]
@@ -872,7 +875,7 @@ def test_detail_screen_shows_stacked_pr_entries(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             table.focus()
@@ -905,7 +908,7 @@ def test_detail_pane_and_screen_render_title_from_spec_at_row_zero(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
 
             table = app.query_one("#tickets", DataTable)
@@ -945,7 +948,7 @@ def test_detail_pane_surfaces_provider_marker_for_a_provider_caused_degrade(home
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             table.focus()
@@ -1659,7 +1662,7 @@ def test_phase_styled_rows_render_without_crash(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one(DataTable)
             assert table.row_count >= 1
@@ -1755,7 +1758,7 @@ def test_notification_fires_on_phase_transition(seeded_home):
             snap_mod.rebuild(seeded_home, "T-5")
 
             notifications_before = len(app._notifications)
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert len(app._notifications) > notifications_before, (
                 "Expected a warning notification after T-5 entered awaiting-human"
@@ -1809,7 +1812,7 @@ def test_inbox_action_works_for_any_phase(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             for r in range(table.row_count):
@@ -1850,7 +1853,7 @@ def test_researching_rows_render_without_crash(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert app._exception is None
 
@@ -1876,7 +1879,7 @@ def test_verifying_rows_render_without_crash(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert app._exception is None
 
@@ -2741,7 +2744,7 @@ def test_detail_pane_and_screen_render_title_from_spec(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
 
             table = app.query_one("#tickets", DataTable)
@@ -3653,7 +3656,7 @@ def test_deps_column_counts_and_colors_blocking_deps(home):
         app = _make_app(home)
         async with app.run_test(size=(140, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             col = [c.label.plain for c in table.columns.values()].index("Deps")
@@ -3674,7 +3677,7 @@ def test_deps_column_counts_and_colors_blocking_deps(home):
             # refresh keeps cursor/selection with the new column
             table.move_cursor(row=table.get_row_index("C-1"))
             await pilot.pause()
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value == "C-1"
             assert app._exception is None
@@ -4606,7 +4609,7 @@ def test_actions_target_visible_ticket(seeded_home):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             app._selected_key = "T-3"
             seen = _spy_notify(app)
@@ -4660,7 +4663,7 @@ def test_deps_detail_discard_targets_screen_key(seeded_home):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             app._selected_key = "T-3"
             await pilot.press("D")
             for _ in range(50):
@@ -4737,7 +4740,7 @@ def test_empty_filter_clears_selection(home):
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
-            app._populate()
+            app._refresh_now()
             await pilot.pause()
             app._selected_key = "T-3"
             seen = _spy_notify(app)
@@ -4859,6 +4862,175 @@ def test_question_mark_opens_help(seeded_home):
             await pilot.press("question_mark")
             await pilot.pause()
             assert app.screen.query(HelpPanel)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# T-163: live Now column, running filter, j jumps to running tickets          #
+# --------------------------------------------------------------------------- #
+
+import os as _os  # noqa: E402
+import threading as _threading  # noqa: E402
+import time as _time  # noqa: E402
+
+
+async def _live_tick(app, pilot):
+    """Run one real worker refresh to completion and let its re-render land."""
+    app._kick_live()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def _now_cell(app, key):
+    table = app.query_one("#tickets", DataTable)
+    return str(table.get_row(key)[-1])
+
+
+def _claim(home, key, tmp_path, *, pid=None, kind=None, with_log=True):
+    log = tmp_path / f"{key}.log"
+    log.write_text("x")
+    claims.write_claim(home, key, pid if pid is not None else _os.getpid(), "t",
+                       log_path=str(log) if with_log else None, kind=kind)
+    return log
+
+
+def test_now_column_shows_live_claim(seeded_home, tmp_path):
+    _claim(seeded_home, "T-3", tmp_path)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            await _live_tick(app, pilot)
+            assert _now_cell(app, "T-3").startswith("●")
+            assert "running(1)" in str(app.query_one("#filter-bar", Static).content)
+            assert claims.read_claim(seeded_home, "T-3")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_j_jumps_to_running_ticket(seeded_home, tmp_path):
+    _claim(seeded_home, "T-3", tmp_path)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await _live_tick(app, pilot)
+            assert app._filter_idx == _filter_idx("needs-you")
+            await pilot.press("j")
+            await pilot.pause()
+            assert app._selected_key == "T-3"
+            assert app._filter_idx == _filter_idx("all")
+            table = app.query_one("#tickets", DataTable)
+            assert str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value) == "T-3"
+            idx = app._filter_idx
+            await pilot.press("j")
+            await pilot.pause()
+            assert app._filter_idx == idx and app._selected_key == "T-3"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_now_column_silence_thresholds_and_one_toast(seeded_home, tmp_path):
+    log = _claim(seeded_home, "T-3", tmp_path)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            now = _time.time()
+            _os.utime(log, (now - 150, now - 150))
+            await _live_tick(app, pilot)
+            cell = app.query_one("#tickets", DataTable).get_row("T-3")[-1]
+            assert "silent" in str(cell) and "yellow" in str(cell.style)
+            timeout = config_mod.load(str(seeded_home)).no_output_timeout
+            _os.utime(log, (now - timeout * 0.6, now - timeout * 0.6))
+            before = len(app._notifications)
+            await _live_tick(app, pilot)
+            await _live_tick(app, pilot)
+            cell = app.query_one("#tickets", DataTable).get_row("T-3")[-1]
+            assert "silent" in str(cell) and "red" in str(cell.style)
+            toasts = [n for n in list(app._notifications)[before:] if "T-3" in n.message]
+            assert len(toasts) == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_now_column_dispatcher_owned_claims(seeded_home, tmp_path):
+    _claim(seeded_home, "T-3", tmp_path, kind="testrun", with_log=False)
+    _claim(seeded_home, "T-4", tmp_path, kind="restack", with_log=False)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            await _live_tick(app, pilot)
+            assert _now_cell(app, "T-3") == "◌ tests"
+            assert _now_cell(app, "T-4") == "◌ restack"
+            assert "running(2)" in str(app.query_one("#filter-bar", Static).content)
+
+    asyncio.run(_inner())
+
+
+def test_live_worker_never_releases_claims(seeded_home, tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    _claim(seeded_home, "T-3", tmp_path, pid=proc.pid)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._filter_idx = _filter_idx("all")
+            for _ in range(3):
+                await _live_tick(app, pilot)
+            assert "running(0)" in str(app.query_one("#filter-bar", Static).content)
+            assert _now_cell(app, "T-3") == ""
+            assert claims.read_claim(seeded_home, "T-3")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_live_probe_runs_in_worker(seeded_home, tmp_path, monkeypatch):
+    _claim(seeded_home, "T-3", tmp_path)
+    main = _threading.get_ident()
+    calls: list[tuple[str, int, bool]] = []
+    in_populate = {"on": False}
+
+    def _wrap(mod, name):
+        real = getattr(mod, name)
+
+        def _w(*a, **kw):
+            calls.append((name, _threading.get_ident(), in_populate["on"]))
+            return real(*a, **kw)
+        monkeypatch.setattr(mod, name, _w)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            _wrap(claims, "probe_processes")
+            _wrap(snap_mod, "load")
+            real_populate = app._populate
+
+            def _populate():
+                in_populate["on"] = True
+                try:
+                    real_populate()
+                finally:
+                    in_populate["on"] = False
+            app._populate = _populate
+            for _ in range(3):
+                await _live_tick(app, pilot)
+            names = {c[0] for c in calls}
+            assert names == {"probe_processes", "load"}
+            assert not any(c[2] for c in calls), "disk/ps read while _populate ran"
+            assert all(c[1] != main for c in calls), "refresh-driven read on the UI thread"
             assert app._exception is None
 
     asyncio.run(_inner())
@@ -5090,3 +5262,198 @@ def test_events_screen_table_and_payload_modal(seeded_home):
             assert isinstance(app.screen, EventsScreen)
             assert app._exception is None
     asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# T-167: AC evidence matrix (AcScreen, `v`)                                    #
+# --------------------------------------------------------------------------- #
+
+def _seed_ac_ticket(home, key="T-9", *, worktree=False):
+    from maestro.config import Config
+    store.atomic_write(
+        store.spec_path(home, key),
+        f"# {key}: ac matrix\npriority: 2\n\n## Intent\nx\n\n## Acceptance criteria\n"
+        "- [ ] first shows [bold] literally\n- [ ] second fails qa\n"
+        "- [ ] third (test: tests/test_x.py::test_x)\n")
+    event_log.append(home, key, "TicketCreated", {"title": "ac matrix", "source": "test"}, actor="d")
+    event_log.append(home, key, "PhaseChanged", {"phase": "qa", "reason": ""}, actor="r")
+    snap_mod.rebuild(home, key)
+    cfg = Config(home=home)
+    acs = snap_mod.parse_acs(store.spec_path(home, key).read_text())
+    ops_mod.verify_ac(cfg, key, 1, {"what": "ran", "where": "t.py", "result": "ok"})
+    ops_mod.record_qa_verdict(cfg, key, 2, "fail", "second is broken")
+    event_log.append(home, key, "AcCheckCaptured", {
+        "tree_key": "1234567abc:dead", "ac_hash": snap_mod.ac_hash(acs[2]), "ac_index": 3,
+        "ac_text": acs[2], "kind": "test", "command": "pytest tests/test_x.py", "exit_code": 1,
+        "passed": False, "failure_excerpt": "AssertionError: kaboom"}, actor="d")
+    snap_mod.rebuild(home, key)
+    if worktree:
+        store.worktree_path(home, key).mkdir(parents=True)
+
+
+def _table_text(app):
+    t = app.screen.query_one("#ac-table", DataTable)
+    return [[str(c) for c in t.get_row_at(i)] for i in range(t.row_count)]
+
+
+def test_ac_matrix_rows_and_header(home):
+    _seed_ac_ticket(home)
+    seed_ticket(home, "T-1", "other")
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-9"
+            await pilot.press("v")
+            await pilot.pause()
+            assert isinstance(app.screen, AcScreen)
+            assert str(app.screen.query_one("#ac-summary", Static).render()) == \
+                "QA spec 0/3 pass · 1 fail · 2 pending"
+            rows = _table_text(app)
+            assert [r[0] for r in rows] == ["1", "2", "3"]
+            assert rows[0][1] == "first shows [bold] literally"
+            assert "fail" in rows[1][3]
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_ac_matrix_targets_visible_ticket(home):
+    _seed_ac_ticket(home)
+    seed_ticket(home, "T-1", "other")
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-1"
+            app.push_screen(SpecScreen(home, "T-9"))
+            await pilot.pause()
+            await pilot.press("v")
+            await pilot.pause()
+            assert isinstance(app.screen, AcScreen)
+            assert app.screen._key == "T-9"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_ac_matrix_evidence_modal(home):
+    _seed_ac_ticket(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-9"
+            await pilot.press("v")
+            await pilot.pause()
+            await pilot.press("down", "down", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, _AcEvidenceModal)
+            body = " ".join(str(w.render()) for w in app.screen.query(Static))
+            assert "AssertionError: kaboom" in body
+            assert "pytest tests/test_x.py" in body
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_ac_matrix_message_writes_no_evidence(home):
+    _seed_ac_ticket(home)
+    before = len(event_log.read(home, "T-9"))
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-9"
+            await pilot.press("v")
+            await pilot.pause()
+            await pilot.press("down", "m")
+            await pilot.pause()
+            assert isinstance(app.screen, _InboxModal)
+            inp = app.screen.query_one("#inbox-input", Input)
+            assert inp.value == "re AC2: "
+            inp.value = "re AC2: please look"
+            await pilot.press("enter")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    msgs = [e for e in inbox.pending(home, "T-9") if e["command"] == "msg"]
+    assert len(msgs) == 1 and msgs[0]["args"]["text"] == "re AC2: please look"
+    assert len(event_log.read(home, "T-9")) == before
+
+
+def test_ac_matrix_add_ac_and_editor_line(home, monkeypatch):
+    from maestro.tui.screens import editor_argv
+    monkeypatch.setenv("VISUAL", "vim")
+    assert editor_argv(Path("/p/spec.md"), line=7) == ["vim", "+7", "/p/spec.md"]
+    assert editor_argv(Path("/p/spec.md")) == ["vim", "/p/spec.md"]
+    _seed_ac_ticket(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-9"
+            await pilot.press("v")
+            await pilot.pause()
+            assert len(_table_text(app)) == 3
+            await pilot.press("A")
+            await pilot.pause()
+            assert isinstance(app.screen, _AddAcModal)
+            app.screen.query_one("#add-ac-input", Input).value = "fourth one"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, AcScreen)
+            assert len(_table_text(app)) == 4
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_ac_matrix_edit_passes_ac_line_to_editor(home, monkeypatch):
+    import maestro.tui.screens as screens_mod
+    _seed_ac_ticket(home)
+    seen = {}
+    monkeypatch.setattr(screens_mod, "edit_in_editor",
+                        lambda app, path, line=None: seen.update(line=line))
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-9"
+            await pilot.press("v")
+            await pilot.pause()
+            await pilot.press("down", "E")
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    lines = store.spec_path(home, "T-9").read_text().splitlines()
+    assert lines[seen["line"] - 1].startswith("- [ ] second")
+
+
+def test_ac_matrix_no_worktree_is_read_only(home):
+    _seed_ac_ticket(home)
+    before = len(event_log.read(home, "T-9"))
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-9"
+            await pilot.press("v")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            assert "no worktree" in _table_text(app)[2][5]
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    assert not (home / "scratch").exists()
+    assert len(event_log.read(home, "T-9")) == before
