@@ -23,6 +23,7 @@ The whole module is skipped when the optional ``tui`` extra (textual) is absent.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import subprocess
 import sys
@@ -66,6 +67,7 @@ from maestro.tui import (  # noqa: E402
     _CmdModal,
     _ConfirmModal,
     _CreateModal,
+    _EventPayloadModal,
     _FILTERS,
     _ImportLinearModal,
     _InboxModal,
@@ -350,7 +352,7 @@ _BINDING_CLASSES = [
     MaestroTUI, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
     ScheduleScreen, ActivityScreen, AcScreen, _AcEvidenceModal, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
     _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal,
-    _ConfirmModal, SpecScreen, EnvScreen,
+    _ConfirmModal, SpecScreen, EnvScreen, _EventPayloadModal,
 ]
 
 
@@ -5138,6 +5140,127 @@ def test_activity_enter_opens_detail_read_only(seeded_home, _fast_activity):
             assert _tree_sizes(seeded_home) == before
             assert app._exception is None
 
+    asyncio.run(_inner())
+
+
+
+
+# --------------------------------------------------------------------------- #
+# T-172: live DetailScreen, event table, payload modal                        #
+# --------------------------------------------------------------------------- #
+
+def _ds_cursor_seq(table):
+    return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+
+
+def test_detail_screen_live_refresh_keeps_cursor(seeded_home, monkeypatch):
+    monkeypatch.setattr(DetailScreen, "REFRESH_INTERVAL", 0.2)
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(DetailScreen(seeded_home, "T-3"))
+            await pilot.pause()
+            screen = app.screen
+            table = screen.query_one("#ds-events", DataTable)
+            before_rows = table.row_count
+            table.move_cursor(row=1)
+            await pilot.pause()
+            seq = _ds_cursor_seq(table)
+            event_log.append(seeded_home, "T-3", "PhaseChanged",
+                             {"phase": "qa", "reason": "x"}, actor="r")
+            await pilot.pause(0.8)
+            assert table.row_count == before_rows + 1
+            assert _ds_cursor_seq(table) == seq
+            assert "qa" in str(screen.query_one("#ds-dwell", Static).render())
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_detail_screen_refresh_gated_on_log_signature(seeded_home, monkeypatch):
+    monkeypatch.setattr(DetailScreen, "REFRESH_INTERVAL", 0.2)
+    async def _inner():
+        for _ in range(30):
+            event_log.append(seeded_home, "T-3", "Checked", {"n": 1}, actor="r")
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 20)) as pilot:
+            await pilot.pause()
+            app.push_screen(DetailScreen(seeded_home, "T-3"))
+            await pilot.pause()
+            screen = app.screen
+            screen._tail_mode = False
+            screen.action_refresh()
+            table = screen.query_one("#ds-events", DataTable)
+            await pilot.pause()
+            table.move_cursor(row=table.row_count - 1)
+            await pilot.pause()
+            table.move_cursor(row=3)
+            await pilot.pause()
+            calls = []
+            orig = screen._refresh
+            screen._refresh = lambda: (calls.append(1), orig())
+            state = (table.cursor_row, table.scroll_y)
+            await pilot.pause(0.7)
+            assert not calls, "refresh must not re-render without a log change"
+            assert (table.cursor_row, table.scroll_y) == state
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_detail_event_row_opens_payload_modal(seeded_home):
+    async def _inner():
+        excerpt = "boom [red]x[/red] " + "y" * 600
+        event_log.append(seeded_home, "T-3", "CiObserved",
+                         {"state": "failure", "failure_excerpt": excerpt}, actor="d")
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            app.push_screen(DetailScreen(seeded_home, "T-3"))
+            await pilot.pause()
+            table = app.screen.query_one("#ds-events", DataTable)
+            table.focus()
+            table.move_cursor(row=table.row_count - 1)
+            await pilot.pause()
+            depth = len(app.screen_stack)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, _EventPayloadModal)
+            assert len(app.screen_stack) == depth + 1
+            assert excerpt in str(app.screen.query_one("#payload-json", Static).render())
+            await pilot.press("c")
+            await pilot.pause()
+            assert json.loads(app.clipboard)["payload"]["failure_excerpt"] == excerpt
+            assert app._selected_key == "T-3"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, DetailScreen)
+            assert sum(isinstance(sc, DetailScreen) for sc in app.screen_stack) == 1
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_events_screen_table_and_payload_modal(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(DetailScreen(seeded_home, "T-3"))
+            await pilot.pause()
+            await pilot.press("v")
+            await pilot.pause()
+            assert isinstance(app.screen, EventsScreen)
+            assert app.screen._key == "T-3"
+            table = app.screen.query_one("#events-full", DataTable)
+            assert table.row_count == len(event_log.read(seeded_home, "T-3"))
+            table.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, _EventPayloadModal)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, EventsScreen)
+            assert app._exception is None
     asyncio.run(_inner())
 
 
