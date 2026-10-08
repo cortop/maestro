@@ -152,8 +152,8 @@ def test_no_bare_origin_main():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         assert '$BASE' not in text, f'{path} should hold BASE as the literal <BASE>, not $BASE'
-        assert text.count('"origin/<BASE>"') == 1, \
-            f'{path} should target "origin/<BASE>" exactly 1 time(s) (step 0\'s rebase only)'
+        assert text.count('"origin/<BASE>"') == 2, \
+            f'{path} should target "origin/<BASE>" exactly 2 time(s) (step 0\'s merge + rebase)'
         assert text.count('fetch -q origin "<BASE>"') == 1, \
             f'{path} should fetch "<BASE>" exactly 1 time(s)'
 
@@ -1227,3 +1227,42 @@ def test_implementing_qa_handoffs_carry_no_leftover_requeue():
             f'{path}: a set-phase ... qa hand-off still carries a leftover --requeue'
         assert text.count("awaiting-ci --requeue 300") == 2, \
             f'{path}: expected the two real CI-poll awaiting-ci --requeue 300 lines to remain'
+
+
+# ---------------------------------------------------------------------------
+# T-181: a pushed branch cannot be force-pushed after a rebase, so step 0 merges base into
+# any branch that exists on origin and rebases only a never-pushed one.
+# ---------------------------------------------------------------------------
+
+def test_base_sync_merges_pushed_branch():
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        fetch_line = 'git -C <WT> fetch -q origin "<PREFIX>$KEY"'
+        ff_line = 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"'
+        merge_line = 'git -C <WT> merge -q "origin/<BASE>"'
+        rebase_line = 'git -C <WT> rebase "origin/<BASE>"'
+        for line in (fetch_line, ff_line, merge_line, rebase_line):
+            assert line in text, f"{path}: missing {line!r}"
+        assert text.index(fetch_line) < text.index(ff_line) < text.index(merge_line), path
+        assert text.index(fetch_line) < text.index(ff_line) < text.index(rebase_line), path
+        assert "git -C <WT> commit --no-edit" in text, path
+        assert "never-pushed" in text.lower(), path
+
+
+def test_base_sync_never_aborts_and_never_calls_make():
+    import re
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "git merge --abort" in text, f"{path}: must forbid git merge --abort"
+        assert "git rebase --abort" in text, f"{path}: must forbid git rebase --abort"
+        assert not re.search(r"(`|^\s*|\$ )make\s", text, re.M), \
+            f"{path}: make is not granted to reconcilers; no make invocation allowed"
+
+
+def test_generated_doc_conflict_rule():
+    for path in (_commands_path("implementing"), _skills_path("implementing")):
+        text = path.read_text()
+        assert "Conflicted generated file" in text, path
+        assert "resolve every other conflicted file first" in text, path
+        assert ".venv/bin/python -m maestro.diagram" in text, path
+        assert "docs/dispatch-gates.md" in text and "docs/state-machine.md" in text, path
