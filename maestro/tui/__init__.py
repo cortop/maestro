@@ -50,10 +50,12 @@ from .screens import (
     ReviewScreen,
     ScheduleScreen,
     SpecScreen,
+    WhyScreen,
 )
 
 __all__ = [
     "AcScreen",
+    "WhyScreen",
     "MaestroTUI",
     "main",
     "ActivityScreen",

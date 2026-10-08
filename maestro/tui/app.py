@@ -43,6 +43,7 @@ from .screens import (
     ScheduleScreen,
     SpecScreen,
     AcScreen,
+    WhyScreen,
     edit_in_editor,
 )
 
@@ -196,8 +197,8 @@ class MaestroTUI(App):
         Binding("n", "create", "New"),
         Binding("enter", "focus_detail", "Detail"),
         Binding("i", "inbox_message", "Inbox"),
-        Binding("W", "decisions", "Decisions"),
         Binding("R", "review_panel", "Review"),
+        Binding("W", "decisions", "Decisions"),
         Binding("[", "narrow_detail", "Detail-", show=False),
         Binding("]", "widen_detail", "Detail+", show=False),
         # Less-used actions: keys work but hidden from footer to reduce clutter
@@ -228,13 +229,14 @@ class MaestroTUI(App):
         Binding("N", "toggle_nudge", "Nudge on/off", show=False),
         Binding("h", "hold", "Hold", show=False),
         Binding("j", "jump_running", "Next running", show=False),
+        Binding("w", "why_panel", "Why", show=False),
     ]
 
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
         "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
-        "view_events", "inbox_message", "view_logs", "view_inbox",
+        "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel",
     })
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
@@ -243,7 +245,7 @@ class MaestroTUI(App):
     })
     _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
-                      ProposalScreen, ReviewScreen)
+                      ProposalScreen, ReviewScreen, WhyScreen)
 
     _selected_key: str | None = None
     _tail_mode: bool = True  # default: show tail in the sidebar panel
@@ -1231,6 +1233,14 @@ class MaestroTUI(App):
         if isinstance(self.screen, AcScreen):
             return
         self.push_screen(AcScreen(self._home, key))
+
+    def action_why_panel(self) -> None:
+        """T-165: why the ticket being looked at is (not) dispatched."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(WhyScreen(self._home, key))
 
     def action_view_events(self) -> None:
         key = self._target_key()
