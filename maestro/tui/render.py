@@ -203,3 +203,43 @@ def _render_env(cfg: config_mod.Config) -> str:
     for k, v in providers.items():
         lines.append(f"  {k + ':':20} {v}")
     return "\n".join(lines)
+
+
+_DEP_COLORS = ("success", "warning", "error")  # blocking depth 0 / 1 / >=2
+
+
+def _dep_color(depth: int, palette: dict) -> str:
+    return palette.get(_DEP_COLORS[min(depth, 2)], ("green", "orange1", "red")[min(depth, 2)])
+
+
+def _render_dep_header(graph, palette: dict) -> Text:
+    """Per-color ticket counts (+ a red banner for cycles) for the deps screen."""
+    counts = [0, 0, 0]
+    for d in graph.depth.values():
+        counts[min(d, 2)] += 1
+    out = Text()
+    for i, label in enumerate(("can start", "one step away", "stuck behind a chain")):
+        out.append("● ", style=_dep_color(i, palette))
+        out.append(f"{counts[i]} {label}   ")
+    if graph.cycles:
+        out.append("\n")
+        out.append("cycles: " + "; ".join(" → ".join(c) for c in graph.cycles), style=_dep_color(2, palette))
+    return out
+
+
+def _dep_label(graph, key: str, palette: dict, in_cycle: bool = False) -> Text:
+    """One tree row: colored key, title, phase, ⧗ when blocked, done-dep count, missing deps."""
+    node = graph.nodes[key]
+    color = _dep_color(graph.depth[key], palette)
+    out = Text()
+    out.append("⟳ " if in_cycle else "● ", style=color)
+    out.append(key, style=f"bold {color}")
+    out.append(f"  {node.title}  ")
+    out.append(f"[{node.phase}]", style=_PHASE_STYLE.get(node.phase, ""))
+    if node.blocked:
+        out.append(" ⧗")
+    if node.done_deps:
+        out.append(f" ({node.done_deps} deps done)", style="dim")
+    if node.missing:
+        out.append(f" missing: {', '.join(node.missing)}", style="red")
+    return out

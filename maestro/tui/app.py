@@ -26,6 +26,7 @@ from .modals import (
 from .render import _render_badge, _styled_row
 from .screens import (
     DetailScreen,
+    DepsScreen,
     EnvScreen,
     EventsScreen,
     FleetScreen,
@@ -98,6 +99,7 @@ class MaestroTUI(App):
         Binding("ctrl+r", "retry", "Retry", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("D", "deps_panel", "Deps", show=False),
         Binding("e", "env_panel", "Env", show=False),
         Binding("S", "schedule_panel", "Schedule", show=False),
         Binding("s", "show_spec", "Spec", show=False),
@@ -284,6 +286,9 @@ class MaestroTUI(App):
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_deps_panel(self) -> None:
+        self.push_screen(DepsScreen(self._home, self._selected_key))
 
     def action_show_spec(self) -> None:
         if self._selected_key is None:

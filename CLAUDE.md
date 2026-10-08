@@ -91,6 +91,7 @@ Guards and budgets:
 
 Supporting:
 - `context.py` — fold of a ticket's log into a context dossier. `locate.py` — file/symbol hints.
+- `depgraph.py` — dependsOn graph: open-ticket tree + blocking depth (`depgraph.build`).
 - `steplog.py` — reads session logs (Claude/opencode/pi) into steps.
 - `projection.py` — snapshots → `derived/*.md` dashboards. `notify.py` — push notifications.
 - `schedule.py` — interval/cron scheduled tasks. `decision_labels.py` — answer → route fold.
