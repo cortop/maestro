@@ -432,6 +432,13 @@ class Snapshot:
         predicate since T-86 only ever needs the yes/no answer."""
         return not self.qa_unpassed_acs(spec_text)
 
+    def review_ready(self, spec_text: str) -> bool:
+        """True iff CI is passing, no CHANGES_REQUESTED is unresolved and every current
+        AC has a spec-axis QA pass -- the same three conjuncts `dispatcher._maybe_undraft`
+        checks before undrafting. Backs the TUI review cockpit's "ready" badge."""
+        return (self.ci_state == "passing" and self.unresolved_reviews == 0
+                and self.qa_all_passing(spec_text))
+
     def qa_unpassed_acs(self, spec_text: str) -> list[str]:
         """AC texts (in spec order) that do NOT carry a latest spec-axis QA verdict of
         "pass" -- i.e. no verdict recorded at all, or the latest one is "fail" (T-85).

@@ -18,16 +18,16 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Markdown, RichLog, Static, Tree
 from textual.worker import Worker, WorkerState
 
-from .. import burn, claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, snapshot as snap_mod, store
-from ..dispatcher import schedule_status, spec_runner
+from .. import burn, claims, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, repos, snapshot as snap_mod, store
+from ..dispatcher import list_keys, schedule_status, spec_runner
 from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, phase_dwell,
                      render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
 from .modals import (_AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _InboxModal, _IntervalModal,
-                     _ScheduleModal)
+                     _ScheduleModal, _TextViewModal)
 from .. import repos as repos_mod
-from .render import _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
+from .render import _fmt_duration, _dep_label, _fmt_epoch, _render_dep_header, _render_env, _render_fleet
 
 
 def editor_argv(path: Path, line: int | None = None) -> list[str]:
@@ -1122,6 +1122,252 @@ class ScheduleScreen(Screen):
             return
         self.notify(f"Toggled {self._selected_name}")
         self._refresh()
+
+
+REVIEW_PHASES = frozenset({"awaiting-ci", "in-review"})
+
+
+def _unreplied_reviews(events: list[dict], pr_number: int | None) -> int:
+    """T-177: ReviewFeedbackReceived on the tracked PR that is not an approval and has no
+    ReviewReplyPosted for its comment_id. `Snapshot.unresolved_reviews` can't serve: every
+    PhaseChanged zeroes it and CHANGES_REQUESTED routes to implementing before these phases."""
+    replied = {e["payload"].get("comment_id") for e in events if e["type"] == "ReviewReplyPosted"}
+    n = 0
+    for e in events:
+        if e["type"] != "ReviewFeedbackReceived":
+            continue
+        p = e["payload"]
+        if p.get("state") == "APPROVED" or p.get("comment_id") in replied:
+            continue
+        if p.get("pr_number") is None or p.get("pr_number") == pr_number:
+            n += 1
+    return n
+
+
+def _phase_age_s(events: list[dict]) -> float | None:
+    """Seconds since the last PhaseChanged in *events* (None if there is none)."""
+    for e in reversed(events):
+        if e["type"] == "PhaseChanged":
+            try:
+                return max(0.0, store.now_epoch() - datetime.fromisoformat(e["ts"]).timestamp())
+            except (KeyError, ValueError):
+                return None
+    return None
+
+
+def review_row(home: Path, snap: snap_mod.Snapshot) -> tuple:
+    """One ReviewScreen row's cells: key, PR, CI, reviews, QA, time in phase, ready."""
+    try:
+        spec_text = store.spec_path(home, snap.key).read_text(encoding="utf-8")
+    except OSError:
+        spec_text = ""
+    events = event_log.read(home, snap.key)
+    pr = f"{snap.pr_number}" if snap.pr_number else "—"
+    if snap.pr_stack:
+        total = snap.pr_stack[0].get("total") or len(snap.pr_stack)
+        cur = next((e for e in snap.pr_stack if e.get("number") == snap.pr_number), None)
+        pr += f" {(cur['index'] + 1) if cur else len(snap.pr_stack)}/{total}"
+    pr_cell = Text(pr, style="dim") if snap.pr_draft else Text(pr)
+    ci = snap.ci_state or "—"
+    if snap.failing_checks:
+        ci += f" ({len(snap.failing_checks)})"
+    acs = snap_mod.parse_acs(spec_text)
+    qa = f"{len(acs) - len(snap.qa_unpassed_acs(spec_text))}/{len(acs)}"
+    age = _phase_age_s(events)
+    return (snap.key, pr_cell, ci, str(_unreplied_reviews(events, snap.pr_number)), qa,
+            _fmt_duration(age), "ready" if snap.review_ready(spec_text) else "")
+
+
+class ReviewScreen(Screen):
+    """T-177: the review cockpit -- every awaiting-ci / in-review ticket with what a human
+    needs to decide on a merge. Read-only apart from `i`; `y` only copies the merge command."""
+
+    HELP = ("Review queue. o opens the PR, t review threads, f CI timeline, d diff, "
+            "i messages the implementer, y copies the merge command, enter opens detail, "
+            "r refreshes, escape goes back.")
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("o", "open_pr", "PR"),
+        ("t", "threads", "Threads"),
+        ("f", "ci_timeline", "CI"),
+        ("d", "diff", "Diff"),
+        ("i", "message", "Message"),
+        ("y", "copy_merge", "Copy merge"),
+        ("enter", "open_detail", "Detail"),
+        ("r", "refresh", "Refresh"),
+    ]
+
+    CSS = "ReviewScreen #review-table { height: 1fr; }"
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield DataTable(id="review-table")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Review"
+        table = self.query_one("#review-table", DataTable)
+        table.cursor_type = "row"
+        for col in ("Key", "PR", "CI", "Reviews", "QA", "In phase", "Ready"):
+            table.add_column(col)
+        self._populate()
+        self.set_interval(3.0, self._populate)
+
+    @property
+    def _key(self) -> str | None:
+        """The highlighted row's ticket (read by `MaestroTUI._target_key`)."""
+        table = self.query_one("#review-table", DataTable)
+        if not table.row_count:
+            return None
+        try:
+            return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        except Exception:
+            return None
+
+    def _populate(self) -> None:
+        table = self.query_one("#review-table", DataTable)
+        keep = self._key
+        snaps = [s for s in (snap_mod.load(self._home, k) for k in list_keys(self._home))
+                 if s.phase in REVIEW_PHASES]
+        snaps.sort(key=lambda s: s.key)
+        table.clear()
+        for s in snaps:
+            table.add_row(*review_row(self._home, s), key=s.key)
+        if keep is not None:
+            for i, s in enumerate(snaps):
+                if s.key == keep:
+                    table.move_cursor(row=i)
+                    break
+
+    def _snap(self) -> snap_mod.Snapshot | None:
+        key = self._key
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return None
+        return snap_mod.load(self._home, key)
+
+    def action_refresh(self) -> None:
+        self._populate()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # Enter on a focused DataTable emits RowSelected and consumes the key.
+        self.action_open_detail()
+
+    def action_open_detail(self) -> None:
+        key = self._key
+        if key is not None:
+            self.app.push_screen(DetailScreen(self._home, key))
+
+    def action_message(self) -> None:
+        # The app's inbox-message action targets this screen's cursor row via `_target_key`.
+        self.app.action_inbox_message()
+
+    def action_open_pr(self) -> None:
+        snap = self._snap()
+        if snap is None:
+            return
+        if not snap.pr_url:
+            self.notify("No PR", severity="warning")
+            return
+        self.app.open_url(snap.pr_url)
+
+    def action_copy_merge(self) -> None:
+        snap = self._snap()
+        if snap is None:
+            return
+        if not snap.pr_number:
+            self.notify("No PR", severity="warning")
+            return
+        try:
+            slug = repos.resolve_vcs_slug(config_mod.load(str(self._home)), snap)
+        except store.MaestroError:
+            slug = repos.slug_from_pr_url(snap.pr_url)
+        cmd = f"gh pr merge {snap.pr_number}" + (f" --repo {slug}" if slug else "")
+        self.app.copy_to_clipboard(cmd)
+        self.notify(f"Copied (not run): {cmd}")
+
+    def action_threads(self) -> None:
+        snap = self._snap()
+        if snap is None:
+            return
+        events = event_log.read(self._home, snap.key)
+        replies: dict[str, list[dict]] = {}
+        for e in events:
+            if e["type"] == "ReviewReplyPosted":
+                replies.setdefault(e["payload"].get("comment_id"), []).append(e["payload"])
+        blocks = []
+        for e in events:
+            if e["type"] != "ReviewFeedbackReceived":
+                continue
+            p = e["payload"]
+            where = f" {p['path']}:{p['line']}" if p.get("path") and p.get("line") else \
+                (f" {p['path']}" if p.get("path") else "")
+            lines = [f"{p.get('author', '?')} [{p.get('state', '?')}]{where}", (p.get("body") or "").strip()]
+            for r in replies.get(p.get("comment_id"), []):
+                lines.append("  ↳ reply: " + (r.get("body") or "").strip())
+            blocks.append("\n".join(lines))
+        self.app.push_screen(_TextViewModal(f"{snap.key}: review threads",
+                                            "\n\n".join(blocks) or "(no review feedback)"))
+
+    def action_ci_timeline(self) -> None:
+        snap = self._snap()
+        if snap is None:
+            return
+        blocks = []
+        for e in event_log.read(self._home, snap.key):
+            if e["type"] != "CiObserved":
+                continue
+            p = e["payload"]
+            line = f"{e.get('ts', '?')}  {p.get('state', '?')}"
+            if p.get("failing_checks"):
+                line += "  failing: " + ", ".join(p["failing_checks"])
+            if p.get("failure_excerpt"):
+                line += "\n" + p["failure_excerpt"].rstrip()
+            blocks.append(line)
+        self.app.push_screen(_TextViewModal(f"{snap.key}: CI timeline",
+                                            "\n\n".join(blocks) or "(no CI observations)"))
+
+    def action_diff(self) -> None:
+        snap = self._snap()
+        if snap is None:
+            return
+        wt = store.worktree_path(self._home, snap.key)
+        if not wt.is_dir():
+            self.notify(f"No worktree for {snap.key}", severity="warning")
+            return
+        try:
+            base = repos.resolve(config_mod.load(str(self._home)), self._home, snap.key).base_branch
+        except store.MaestroError as e:
+            self.notify(str(e), severity="warning")
+            return
+        key = snap.key
+
+        def _diff() -> tuple[str, str, bool]:
+            r = subprocess.run(["git", "-C", str(wt), "diff", f"origin/{base}...HEAD"],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                return key, r.stderr.strip() or "git diff failed", False
+            return key, r.stdout or "(no changes)", True
+
+        self.run_worker(_diff, thread=True, group="review-diff", exclusive=True,
+                        name="review-diff", exit_on_error=False)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "review-diff":
+            return
+        if event.state == WorkerState.SUCCESS:
+            key, text, ok = event.worker.result
+            if ok:
+                self.app.push_screen(_TextViewModal(f"{key}: diff", text))
+            else:
+                self.notify(f"diff failed: {text}", severity="warning")
+        elif event.state == WorkerState.ERROR:
+            self.notify(f"diff failed: {event.worker.error}", severity="warning")
 
 
 class ActivityScreen(Screen):
