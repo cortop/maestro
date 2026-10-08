@@ -3759,11 +3759,17 @@ def _active_agent_keys(sessions: SessionManager, home: Path) -> set[str]:
                       if c.get("kind") in ("testrun", "restack")}
 
 
-def _due_check(home: Path, key: str, snap, now: float) -> DueResult:
+def due_check(home: Path, key: str, snap, now: float) -> DueResult:
+    """Read-only due verdict for *key* -- the one place the sweep and the TUI's
+    Why screen both compute it, so they cannot drift."""
     return is_due(home, key, snap,
                   inbox_pending=inbox.has_pending(home, key),
                   current_spec_hash=spec_hash_on_disk(home, key),
                   now=now, blocked_dep=_has_unmet_deps(home, key))
+
+
+def _due_check(home: Path, key: str, snap, now: float) -> DueResult:
+    return due_check(home, key, snap, now)
 
 
 def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
@@ -3794,7 +3800,7 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
         return None
     sweep.observed_seq[key] = snap.observed_seq
     sweep.phase[key] = snap.phase
-    res = _due_check(home, key, snap, now)
+    res = due_check(home, key, snap, now)
     if not res.due:
         decisions[key] = {"outcome": "not_due", "reason": res.reason}
         return None

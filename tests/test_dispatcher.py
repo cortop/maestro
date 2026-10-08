@@ -2714,3 +2714,24 @@ def test_reconciler_literal_coverage_matches_skills():
                   for t in disp.RECONCILER_LITERAL_COVERAGE["Bash(gh:*)"]}
     assert git_covered == git_subcommands
     assert gh_covered == gh_subcommands
+
+
+def test_due_check_matches_sweep_not_due_reason(home, cfg):
+    """The public due_check (what the TUI Why screen renders) names the same
+    reason a real sweep records as `not_due` for backoff/sleeping/blocked-dep/terminal."""
+    seed_phase(home, "T-back", Phase.AWAITING_CI)
+    ops.requeue(cfg, "T-back", 10_000)
+    seed_phase(home, "T-sleep", Phase.AWAITING_HUMAN)
+    _ask(home, "T-sleep")
+    _seed_with_deps(home, "T-dep", Phase.IMPLEMENTING)
+    _seed_with_deps(home, "T-blocked", Phase.READY, depends_on=["T-dep"])
+    seed_phase(home, "T-done", Phase.DONE)
+    now = 1000.0
+    disp.dispatch(cfg, DryRunSessions(), now=now)
+    ledger = json.loads(disp.dispatch_ledger_path(home).read_text().splitlines()[-1])
+    expected = {"T-back": "backoff", "T-sleep": "sleeping",
+                "T-blocked": "blocked-dep", "T-done": "terminal"}
+    for key, reason in expected.items():
+        res = disp.due_check(home, key, snap_mod.load(home, key), now)
+        assert not res.due and res.reason == reason
+        assert ledger["decisions"][key] == {"outcome": "not_due", "reason": res.reason}

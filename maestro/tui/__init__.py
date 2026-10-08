@@ -47,10 +47,12 @@ from .screens import (
     ProposalScreen,
     ScheduleScreen,
     SpecScreen,
+    WhyScreen,
 )
 
 __all__ = [
     "AcScreen",
+    "WhyScreen",
     "MaestroTUI",
     "main",
     "ActivityScreen",
