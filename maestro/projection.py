@@ -103,6 +103,77 @@ def phase_predicate(phases: frozenset) -> RowPredicate:
     return lambda home, s: s.phase in values
 
 
+QueryPredicate = Callable[[snap_mod.Snapshot, str, int], bool]
+
+_REVIEW_PHASES = (Phase.AWAITING_CI.value, Phase.IN_REVIEW.value)
+
+
+def _query_term(field: str, val: str) -> QueryPredicate:
+    """One `field:value` term; raises ValueError for an unknown field or bad value."""
+    if field == "phase":
+        return lambda s, t, d: s.phase.lower().startswith(val)
+    if field == "ci":
+        return lambda s, t, d: (s.ci_state or "").lower().startswith(val)
+    if field == "pr":
+        if val == "any":
+            return lambda s, t, d: s.pr_number is not None
+        if val == "none":
+            return lambda s, t, d: s.pr_number is None
+        if not val.isdigit():
+            raise ValueError(f"pr: expects a number, 'any' or 'none', got {val!r}")
+        n = int(val)
+        return lambda s, t, d: s.pr_number == n
+    if field == "repo":
+        if val == "none":
+            return lambda s, t, d: not s.repo
+        return lambda s, t, d: (s.repo or "").lower() == val
+    if field == "deps":
+        op = ">" if val.startswith(">") else "="
+        num = val.lstrip(">")
+        if not num.isdigit():
+            raise ValueError(f"deps: expects N or >N, got {val!r}")
+        n = int(num)
+        if op == ">":
+            return lambda s, t, d: d > n
+        return lambda s, t, d: d == n
+    if field == "q":
+        if val != "open":
+            raise ValueError(f"q: only supports 'open', got {val!r}")
+        return lambda s, t, d: bool(s.open_questions)
+    if field == "is":
+        if val == "burning":
+            return lambda s, t, d: bool(s.burning)
+        if val == "review":
+            return lambda s, t, d: s.phase in _REVIEW_PHASES
+        raise ValueError(f"is: expects 'burning' or 'review', got {val!r}")
+    raise ValueError(f"unknown filter field {field!r}")
+
+
+def parse_query(text: str) -> QueryPredicate:
+    """Compile a board filter query to a predicate over (snapshot, rendered title,
+    open-dep count). Terms are whitespace-separated and ANDed; a leading `!`
+    negates; matching is case-insensitive. Bare words match key or title,
+    `field:value` terms match snapshot state. Raises ValueError on an unknown
+    field or malformed value -- never silently matches everything. Pure and
+    stdlib-only: no I/O per row."""
+    terms: list[QueryPredicate] = []
+    for raw in text.split():
+        neg = raw.startswith("!")
+        word = raw[1:] if neg else raw
+        if not word:
+            raise ValueError("empty term after '!'")
+        word = word.lower()
+        if ":" in word:
+            field, _, val = word.partition(":")
+            if not val:
+                raise ValueError(f"{field}: needs a value")
+            term = _query_term(field, val)
+        else:
+            term = (lambda w: lambda s, t, d: w in s.key.lower() or w in t.lower())(word)
+        terms.append((lambda p: lambda s, t, d: not p(s, t, d))(term) if neg else term)
+    return lambda s, t, d: all(p(s, t, d) for p in terms)
+
+
 def load_snapshots(home: Path) -> list[snap_mod.Snapshot]:
     """Every ticket's snapshot, freshly loaded. The shared read behind
     `ticket_rows` and any caller needing a snapshot-level predicate rather
