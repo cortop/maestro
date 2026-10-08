@@ -33,6 +33,7 @@ from .render import (
     _styled_row,
 )
 from .screens import (
+    ActivityScreen,
     DetailScreen,
     EnvScreen,
     EventsScreen,
@@ -48,6 +49,7 @@ from .screens import (
 __all__ = [
     "MaestroTUI",
     "main",
+    "ActivityScreen",
     "DetailScreen",
     "EnvScreen",
     "EventsScreen",
