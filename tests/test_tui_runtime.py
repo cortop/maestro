@@ -41,6 +41,7 @@ from conftest import seed_phase, seed_ticket  # noqa: E402
 from maestro import claims, config as config_mod, event_log, fleet as fleet_mod, inbox  # noqa: E402
 from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
 from maestro.cli import main as cli_main  # noqa: E402
+from maestro.sessions import ClaudeCliSessions, DryRunSessions, OpencodeCliSessions, PiCliSessions  # noqa: E402
 from maestro.tui import (  # noqa: E402
     DepsScreen,
     DetailScreen,
@@ -69,8 +70,21 @@ from maestro.tui import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_spawns(monkeypatch):
+    """T-153: a human-input modal submit nudges a sweep; no test in this module
+    may reach a real `claude`/`opencode`/`pi` Popen."""
+    def _boom(*a, **kw):
+        raise AssertionError("a real CLI backend spawn was attempted in a TUI test")
+    for cls in (ClaudeCliSessions, OpencodeCliSessions, PiCliSessions):
+        monkeypatch.setattr(cls, "spawn", _boom)
+
+
 def _make_app(home):
-    return MaestroTUI(home=str(home))
+    dry = DryRunSessions()
+    app = MaestroTUI(home=str(home), sessions_factory=lambda cfg: dry)
+    app.dry = dry
+    return app
 
 
 def _filter_idx(name: str) -> int:
@@ -3933,6 +3947,134 @@ def test_pulse_strip_does_not_collapse_filter_bar(seeded_home, no_probe):
 
 
 # --------------------------------------------------------------------------- #
+# T-153: human input nudges a key-scoped sweep and toasts the outcome          #
+# --------------------------------------------------------------------------- #
+
+def _capture_toasts(app):
+    toasts: list[str] = []
+    real = app.notify
+
+    def _notify(message, *a, **kw):
+        toasts.append(str(message))
+        return real(message, *a, **kw)
+
+    app.notify = _notify
+    return toasts
+
+
+async def _settle(app, pilot):
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def test_tui_answer_nudges_key_scoped_sweep(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            toasts = _capture_toasts(app)
+            app._selected_key = "T-1"
+            await app.run_action("answer")
+            await pilot.pause()
+            for _ in range(2):  # two open questions
+                await pilot.press("a", "n", "s")
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+            await _settle(app, pilot)
+            assert [s[0] for s in app.dry.spawned] == ["T-1"]
+            assert any("T-1: spawned" in t for t in toasts), toasts
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_tui_nudge_respects_config_off(seeded_home):
+    (seeded_home / "config.toml").write_text(
+        "[maestro]\nnudge_on_human_input = false\n", encoding="utf-8")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-1"
+            await app.run_action("answer")
+            await pilot.pause()
+            for _ in range(2):
+                await pilot.press("a", "n", "s")
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+            await _settle(app, pilot)
+            assert app.dry.spawned == []
+            assert len(inbox.pending(seeded_home, "T-1")) == 2
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_tui_nudge_reports_fleet_paused(seeded_home):
+    fleet_mod.pause(seeded_home, reason="test")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            toasts = _capture_toasts(app)
+            app._selected_key = "T-2"
+            await pilot.press("ctrl+r")
+            await _settle(app, pilot)
+            assert app.dry.spawned == []
+            assert any("T-2" in t and "paused" in t for t in toasts), toasts
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_tui_create_nudge_mints_key(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            toasts = _capture_toasts(app)
+            await app.run_action("create")
+            await pilot.pause()
+            modal = app.screen_stack[-1]
+            assert isinstance(modal, _CreateModal)
+            modal.query_one("#create-title", Input).value = "Brand new thing"
+            modal.query_one("#create-prefix", Select).value = "T"
+            await pilot.pause()
+            await pilot.press("ctrl+enter")
+            await _settle(app, pilot)
+            assert app._exception is None
+        minted = [t for t in toasts if t.startswith("minted ")]
+        assert minted and "T-6" in minted[0], toasts
+        assert store.spec_path(seeded_home, "T-6").exists()
+
+    asyncio.run(_inner())
+
+
+def test_tui_nudge_toggle_off(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _settle(app, pilot)
+            await pilot.press("N")
+            await pilot.pause()
+            assert "nudge:off" in str(app.query_one("#fleet-badge", Static).render())
+            app._selected_key = "T-3"
+            await app.run_action("inbox_message")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _InboxModal)
+            await pilot.press("h", "i", "enter")
+            await _settle(app, pilot)
+            assert app.dry.spawned == []
+            assert len(inbox.pending(seeded_home, "T-3")) == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # T-171: LogsScreen live console                                              #
 # --------------------------------------------------------------------------- #
 

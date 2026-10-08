@@ -9,6 +9,7 @@ from maestro import claims, event_log, inbox, snapshot as snap_mod, store
 from maestro.cli import main
 from maestro.config import Config
 from maestro.projection import ticket_rows
+from maestro.sessions import ClaudeCliSessions, DryRunSessions, OpencodeCliSessions, PiCliSessions
 from maestro.statemachine import Phase, ACTIVE_PHASES
 
 
@@ -570,9 +571,20 @@ def _make_ticket_with_questions(home, key, questions: dict):
     snap_mod.rebuild(home, key)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_spawns(monkeypatch):
+    """T-153: a human-input modal submit nudges a sweep; no test in this module
+    may reach a real `claude`/`opencode`/`pi` Popen."""
+    def _boom(*a, **kw):
+        raise AssertionError("a real CLI backend spawn was attempted in a TUI test")
+    for cls in (ClaudeCliSessions, OpencodeCliSessions, PiCliSessions):
+        monkeypatch.setattr(cls, "spawn", _boom)
+
+
 def _make_app_with_mocked_screen(home):
     """Return (app, push_calls) where push_calls captures (screen, callback) tuples."""
-    app = MaestroTUI(home=str(home))
+    app = MaestroTUI(home=str(home), sessions_factory=lambda cfg: DryRunSessions())
+    app.run_worker = mock.Mock()  # never mounted: no worker loop to run a nudge on
     push_calls = []
 
     def fake_push_screen(screen, callback=None):
