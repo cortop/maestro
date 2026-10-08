@@ -2059,3 +2059,58 @@ def test_action_view_logs_no_selection_does_nothing(home):
     app.action_view_logs()
 
     assert not push_calls
+
+
+# --- T-173: activity ticker ----------------------------------------------------
+
+def test_activity_categories_cover_event_vocabulary():
+    from maestro import events as ev_mod
+    from maestro.tui.events import CATEGORY_OF, category_of
+    names = {v for k, v in vars(ev_mod).items() if k.isupper() and isinstance(v, str)}
+    assert names
+    for t in names:
+        assert CATEGORY_OF[t] in range(1, 7), t
+    assert category_of("NoSuchEvent") == 6
+
+
+def test_activity_tail_survives_compaction(home, cfg):
+    from conftest import seed_ticket
+    from maestro import ops
+    from maestro.tui.events import EventTail
+    seed_ticket(home, "T-3", "x", phase="implementing")
+    tail = EventTail(home)
+    seen = [e["seq"] for e in tail.poll()]
+    assert seen and tail.poll() == []
+    for i in range(3):
+        event_log.append(home, "T-3", "Note", {"text": str(i)}, actor="t")
+    snap_mod.rebuild(home, "T-3")
+    ops.compact(cfg, "T-3")
+    assert [e["seq"] for e in event_log.read(home, "T-3")] and \
+        store.events_path(home, "T-3").stat().st_size < 10_000
+    event_log.append(home, "T-3", "Note", {"text": "after"}, actor="t")
+    seen += [e["seq"] for e in tail.poll()]
+    seen += [e["seq"] for e in tail.poll()]
+    assert sorted(seen) == seen and seen == list(range(1, max(seen) + 1))
+    assert len(set(seen)) == len(seen)
+
+
+def test_activity_tail_skips_torn_line(home):
+    from maestro.tui.events import EventTail
+    event_log.append(home, "T-3", "Note", {"text": "a"}, actor="t")
+    tail = EventTail(home)
+    assert [e["seq"] for e in tail.poll()] == [1]
+    path = store.events_path(home, "T-3")
+    line = '{"seq":2,"ts":"2026-01-01T00:00:00+00:00","key":"T-3","actor":"t","type":"Note","payload":{}}'
+    with open(path, "ab") as fh:
+        fh.write(line[:40].encode())
+    assert tail.poll() == []
+    with open(path, "ab") as fh:
+        fh.write((line[40:] + "\n").encode())
+    assert [e["seq"] for e in tail.poll()] == [2]
+    assert tail.poll() == []
+    with open(path, "ab") as fh:
+        fh.write(b'{"seq":3,"ty')  # abandoned fragment
+    assert tail.poll() == []
+    event_log.append(home, "T-3", "Note", {"text": "real"}, actor="t")
+    got = tail.poll()
+    assert [e["type"] for e in got] == ["Note"] and got[0]["payload"] == {"text": "real"}

@@ -29,6 +29,7 @@ from .modals import (
 from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
     DetailScreen,
+    ActivityScreen,
     DepsScreen,
     EnvScreen,
     EventsScreen,
@@ -110,6 +111,7 @@ class MaestroTUI(App):
         Binding("ctrl+r", "retry", "Retry", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("T", "activity_panel", "Activity", show=False),
         Binding("D", "deps_panel", "Deps", show=False),
         Binding("e", "env_panel", "Env", show=False),
         Binding("S", "schedule_panel", "Schedule", show=False),
@@ -140,7 +142,7 @@ class MaestroTUI(App):
     _BOARD_ACTIONS = frozenset({
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
     })
-    _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen)
+    _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen)
 
@@ -523,6 +525,9 @@ class MaestroTUI(App):
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_activity_panel(self) -> None:
+        self.push_screen(ActivityScreen(self._home))
 
     def action_deps_panel(self) -> None:
         self.push_screen(DepsScreen(self._home, self._target_key()))
