@@ -696,7 +696,8 @@ def test_tui_cycle_filter_advances_and_wraps():
     assert app._filter_idx == 1
     app.action_cycle_filter()
     assert app._filter_idx == 2
-    app.action_cycle_filter()
+    for _ in range(len(_FILTERS) - 2):
+        app.action_cycle_filter()
     assert app._filter_idx == 0  # wraps around
 
 

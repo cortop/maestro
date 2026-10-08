@@ -737,6 +737,42 @@ def cmd_fleet(args) -> int:
 
 
 # --- agent state verbs (used inside a reconcile session) --------------------
+def cmd_hold(args) -> int:
+    """[human] hold one ticket: the dispatcher never spawns it until released or
+    expired. Never added to `_AGENT_TOOL_VERBS` -- a reconciler must not hold keys."""
+    home = _cfg(args).home
+    if args.list:
+        _print(fleet.list_holds(home, store.now_epoch()))
+        return 0
+    if not args.key:
+        print("error: hold: KEY required (or --list)", file=sys.stderr)
+        return 2
+    if disp._never_minted(home, args.key):
+        print(f"error: unknown ticket {args.key!r}", file=sys.stderr)
+        return 1
+    until = None
+    try:
+        if args.until:
+            until = _parse_until(args.until)
+        elif args.for_:
+            until = store.now_epoch() + schedule.parse_every(args.for_)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    _print(fleet.hold(home, args.key, until=until, reason=args.reason))
+    return 0
+
+
+def cmd_unhold(args) -> int:
+    """[human] release a ticket's hold (never an agent verb)."""
+    home = _cfg(args).home
+    if fleet.hold_path(home, args.key).exists() or not disp._never_minted(home, args.key):
+        _print(fleet.unhold(home, args.key))
+        return 0
+    print(f"error: unknown ticket {args.key!r}", file=sys.stderr)
+    return 1
+
+
 def cmd_snapshot(args) -> int:
     home = _cfg(args).home
     out = snap_mod.rebuild(home, args.key).to_dict()
@@ -1627,6 +1663,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--until", default=None,
                     help="pause [action=pause] until a bare epoch or ISO-8601 timestamp")
     sp.add_argument("--reason", default=None, help="pause [action=pause] reason")
+
+    sp = add("hold", cmd_hold, "[human] hold a ticket: never spawn it until unheld/expired")
+    sp.add_argument("key", nargs="?", default=None)
+    sp.add_argument("--list", action="store_true", help="list held keys")
+    sp.add_argument("--for", dest="for_", default=None, help="duration (30m/2h/7d/seconds)")
+    sp.add_argument("--until", default=None, help="bare epoch or ISO-8601 timestamp")
+    sp.add_argument("--reason", default=None)
+    sp = add("unhold", cmd_unhold, "[human] release a ticket's hold"); sp.add_argument("key")
 
     sp = add("snapshot", cmd_snapshot, "[agent] folded snapshot"); sp.add_argument("key")
     sp = add("events", cmd_events, "[agent] event log"); sp.add_argument("key"); sp.add_argument("--since", type=int, default=0)

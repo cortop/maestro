@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .. import ops as ops_mod
 from .. import snapshot as snap_mod
+from .. import store
 
 _EM = "—"  # em-dash for missing values
 
@@ -14,7 +15,8 @@ def _esc(s: str) -> str:
 
 
 def render(snap: snap_mod.Snapshot, title: str | None = None,
-           runner: str | None = None, runner_model: str | None = None) -> str:
+           runner: str | None = None, runner_model: str | None = None,
+           hold: dict | None = None) -> str:
     """Build Rich markup string for the snapshot detail pane.
 
     `title` arrives from the caller (`projection.display_title`) for the same
@@ -29,6 +31,17 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
     the board default (`"claude"`), not an em-dash -- an absent override is a
     normal, common state, not a missing value.
     """
+    hold_line = ""
+    if hold is not None:
+        until = hold.get("until")
+        try:
+            expiry = f"until {store.epoch_to_iso(float(until))}" if until is not None else "until released"
+        except (TypeError, ValueError):
+            expiry = f"until {_esc(str(until))}"
+        reason = hold.get("reason")
+        hold_line = (f"[dim]Held[/dim]          [yellow bold]HELD[/yellow bold] "
+                     f"{_esc(str(reason)) if reason else _EM} ({expiry})\n")
+
     def v(val: object) -> str:
         return _esc(str(val)) if val is not None and val != "" else _EM
 
@@ -102,6 +115,7 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
         f"[bold]{v(title if title is not None else snap.title)}[/bold]\n\n"
         f"[dim]Key[/dim]           {v(snap.key)}\n"
         f"[dim]Phase[/dim]         {v(snap.phase)}\n"
+        f"{hold_line}"
         f"[dim]Runner[/dim]        {runner_info}\n"
         f"[dim]Source[/dim]        {v(snap.source)}\n"
         f"[dim]External[/dim]      {external_info}\n"

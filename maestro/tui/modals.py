@@ -564,6 +564,48 @@ class _InboxModal(ModalScreen):
         self.dismiss(None)
 
 
+class HoldModal(ModalScreen):
+    """Hold one ticket: a duration (blank = until released, parsed by
+    `schedule.parse_every`) and an optional reason. Dismisses with
+    ``(until_seconds_or_None, reason_or_None)``, or None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label(f"[bold]Hold {self._key}[/bold] — the dispatcher will not spawn it")
+            yield Input(placeholder="Duration (30m / 2h / 7d; blank = until released)",
+                        id="hold-duration")
+            yield Label("", id="hold-error")
+            yield Input(placeholder="Reason (optional)", id="hold-reason")
+
+    def on_mount(self) -> None:
+        self.query_one("#hold-duration", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "hold-duration":
+            self.query_one("#hold-reason", Input).focus()
+            return
+        raw = self.query_one("#hold-duration", Input).value.strip()
+        seconds = None
+        if raw:
+            try:
+                seconds = schedule.parse_every(raw)
+            except ValueError as e:
+                self.query_one("#hold-error", Label).update(f"[red]{e}[/red]")
+                self.query_one("#hold-duration", Input).focus()
+                return
+        reason = self.query_one("#hold-reason", Input).value.strip()
+        self.dismiss((seconds, reason or None))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _ConfirmModal(ModalScreen):
     """Confirmation modal that defaults to No; dismisses True on confirm, False on cancel.
 
