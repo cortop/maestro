@@ -9,16 +9,17 @@ from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 from textual.worker import Worker, WorkerState
 
+from rich.markup import escape
 from rich.text import Text
 
 from .. import claims, ratelimit, spend as spend_mod, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
 from ..config import Config
 from ..dispatcher import existing_prefixes, spec_runner
 from .. import dispatcher as disp
-from ..projection import _PHASE_RANK, phase_predicate, ticket_rows
+from ..projection import _PHASE_RANK, parse_query, phase_predicate, ticket_rows
 from ..sessions import build_routing_sessions, reap_children
 from ..statemachine import Phase, ACTIVE_PHASES
 from .detail import render as _render_detail
@@ -230,6 +231,8 @@ class MaestroTUI(App):
         Binding("h", "hold", "Hold", show=False),
         Binding("j", "jump_running", "Next running", show=False),
         Binding("w", "why_panel", "Why", show=False),
+        Binding("slash", "filter_query", "Search", show=False, priority=True),
+        Binding("escape", "clear_query", "Clear search", show=False),
     ]
 
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
@@ -241,7 +244,7 @@ class MaestroTUI(App):
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
-        "jump_running", "decisions",
+        "jump_running", "decisions", "filter_query", "clear_query",
     })
     _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
@@ -264,6 +267,12 @@ class MaestroTUI(App):
         self._badge_result: dict | None = None
         self._selected_key: str | None = None
         self._filter_idx: int = 0
+        # T-166: the `/` live filter -- the applied text, its compiled predicate
+        # (last GOOD query), and the parse error for what's currently typed.
+        self._query: str = ""
+        self._query_pred = None
+        self._query_error: str | None = None
+        self._query_timer = None
         # T-161: board sort -- index into _SORT_COLUMNS, None = default order.
         self._sort_col: int | None = None
         self._sort_desc: bool = False
@@ -322,6 +331,10 @@ class MaestroTUI(App):
             return False
         if action == "review_panel" and isinstance(screen, ReviewScreen):
             return False
+        if action == "filter_query" and self._query_input_shown():
+            return False  # let a typed "/" reach the already-open Input
+        if action == "clear_query" and not (self._query or self._query_input_shown()):
+            return False
         if action in ("retry", "discard"):
             cached = self._snap_cache.get(self._target_key() or "")
             if cached is not None and cached[0] != Phase.DEGRADED.value:
@@ -347,6 +360,11 @@ class MaestroTUI(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("", id="filter-bar")
+        qi = Input(placeholder="filter: words, phase: ci: pr: repo: deps: q: is: (! negates)",
+                   id="query-bar")
+        qi.display = False
+        qi.can_focus = False  # hidden: must not steal the initial focus from the table
+        yield qi
         yield Static("", id="pulse")
         yield Static("", id="fleet-badge")
         with Horizontal():
@@ -689,6 +707,60 @@ class MaestroTUI(App):
             table.move_cursor(row=visible.index(target))
             self._selected_key = target
             self._show_detail(target)
+
+    def _query_input_shown(self) -> bool:
+        try:
+            return bool(self.query_one("#query-bar", Input).display)
+        except NoMatches:
+            return False
+
+    def action_filter_query(self) -> None:
+        """T-166: dock the query Input under the filter bar and focus it."""
+        qi = self.query_one("#query-bar", Input)
+        qi.display = True
+        qi.can_focus = True
+        qi.focus()
+        self._refresh_bindings()
+
+    def action_clear_query(self) -> None:
+        qi = self.query_one("#query-bar", Input)
+        if self._query_timer is not None:
+            self._query_timer.stop()
+            self._query_timer = None
+        qi.value = ""
+        qi.display = False
+        qi.can_focus = False
+        self._query, self._query_pred, self._query_error = "", None, None
+        self.query_one("#tickets", DataTable).focus()
+        self._populate()
+
+    def _apply_query(self) -> None:
+        self._query_timer = None
+        text = self.query_one("#query-bar", Input).value.strip()
+        try:
+            pred = parse_query(text) if text else None
+        except ValueError as exc:
+            self._query_error = str(exc)
+        else:
+            self._query, self._query_pred, self._query_error = text, pred, None
+        self._populate()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "query-bar":
+            return
+        if self._query_timer is not None:
+            self._query_timer.stop()
+        self._query_timer = self.set_timer(0.15, self._apply_query)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "query-bar":
+            return
+        event.stop()
+        if self._query_timer is not None:
+            self._query_timer.stop()
+        self._apply_query()
+        self.query_one("#tickets", DataTable).focus()
+        self._refresh_bindings()
 
     def action_cycle_filter(self) -> None:
         self._filter_idx = (self._filter_idx + 1) % len(_FILTERS)
@@ -1313,7 +1385,6 @@ class MaestroTUI(App):
         bar = "  " + "  |  ".join(parts)
         if self._sort_col is not None:
             bar += f"  {'↓' if self._sort_desc else '↑'} {_SORT_COLUMNS[self._sort_col]}"
-        self.query_one("#filter-bar", Static).update(bar)
 
         # Apply current filter
         if predicate is not None:
@@ -1322,6 +1393,15 @@ class MaestroTUI(App):
             visible = all_rows
 
         graph = self._graph  # worker-cached; no I/O on the UI thread
+        if self._query_pred is not None:
+            qpred = self._query_pred
+            visible = [r for r in visible
+                       if qpred(snaps_by_key[r[-1]], r[2], self._open_dep_count(graph, r[-1]))]
+        if self._query:
+            bar += f"  {escape(f'[/ {self._query}]')} ({len(visible)})"
+        if self._query_error:
+            bar += f"  [red]{escape(self._query_error)}[/red]"
+        self.query_one("#filter-bar", Static).update(bar)
         visible = self._sort_visible(visible, snaps_by_key, graph)
 
         table = self.query_one("#tickets", DataTable)
@@ -1359,6 +1439,13 @@ class MaestroTUI(App):
         if self._selected_key:
             self._refresh_events()
         self._refresh_bindings()
+
+    @staticmethod
+    def _open_dep_count(graph, key: str) -> int:
+        node = graph.nodes.get(key) if graph is not None else None
+        if node is None or not node.blocked:
+            return 0
+        return len(node.open_deps) + len(node.missing)
 
     @staticmethod
     def _deps_cell(graph, key: str, palette: dict) -> Text | str:
