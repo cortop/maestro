@@ -696,8 +696,10 @@ def test_tui_cycle_filter_advances_and_wraps():
     assert app._filter_idx == 1
     app.action_cycle_filter()
     assert app._filter_idx == 2
-    for _ in range(len(_FILTERS) - 2):
+    for _ in range(len(_FILTERS) - 3):
         app.action_cycle_filter()
+    assert app._filter_idx == len(_FILTERS) - 1
+    app.action_cycle_filter()
     assert app._filter_idx == 0  # wraps around
 
 

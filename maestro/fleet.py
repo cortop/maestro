@@ -6,7 +6,8 @@ Thin, testable wrapper over the packaged ``install.sh`` plus a status probe. Eac
 ``subprocess.run``) so the behaviour can be tested against a fake ``launchctl`` /
 install script without touching the real system. ``pause``/``resume``/``pause_state``
 need no such seam — they are pure ``derived/.paused`` JSON reads/writes via
-``store.write_json``/``read_json``.
+``store.write_json``/``read_json``. ``hold``/``unhold``/``hold_state`` are the
+per-ticket analogue (``derived/holds/<KEY>.json``): one key is never spawned.
 """
 from __future__ import annotations
 
@@ -364,3 +365,79 @@ def pause_state(home: Path, now: float) -> dict | None:
             path.unlink(missing_ok=True)
             return None
     return {"since": raw.get("since"), "until": until, "reason": raw.get("reason")}
+
+
+# --- per-ticket hold: derived/holds/<KEY>.json ------------------------------
+#
+# Like the pause switch but scoped to one key: the dispatcher never SPAWNS a
+# held key (every other key and all VCS/CI sync keep running; a running session
+# is not killed). Disposable derived state, so ``maestro backup`` skips it.
+# ``derived/holds/`` is not scanned by ``dispatcher.list_keys``, so a hold file
+# can never be mistaken for a ticket. Existence arms the hold (fail closed).
+
+def holds_dir(home: Path) -> Path:
+    return home / "derived" / "holds"
+
+
+def hold_path(home: Path, key: str) -> Path:
+    return holds_dir(home) / f"{store.validate_key(key)}.json"
+
+
+def hold(home: Path, key: str, *, until: float | None = None,
+         reason: str | None = None) -> dict:
+    """Hold *key*. Idempotent: re-holding replaces the prior state."""
+    path = hold_path(home, key)
+    previous = store.read_json(path, None) if path.exists() else None
+    state = {"key": key, "since": store.now_epoch(), "until": until, "reason": reason}
+    store.write_json(path, state)
+    out = dict(state)
+    if previous is not None:
+        out["previous"] = previous
+    return out
+
+
+def unhold(home: Path, key: str) -> dict:
+    """Release *key*'s hold. Idempotent: clean when it was not held."""
+    path = hold_path(home, key)
+    was_held = path.exists()
+    path.unlink(missing_ok=True)
+    return {"key": key, "unheld": True, "was_held": was_held}
+
+
+def hold_state(home: Path, key: str, now: float) -> dict | None:
+    """``None`` when *key* is not held. A past ``until`` auto-releases (unlinks
+    the file); corrupt JSON or an unparseable ``until`` still counts as held."""
+    path = hold_path(home, key)
+    if not path.exists():
+        return None
+    raw = store.read_json(path, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    until = raw.get("until")
+    if until is not None:
+        try:
+            until_epoch = float(until)
+        except (TypeError, ValueError):
+            until_epoch = None
+        if until_epoch is not None and until_epoch <= now:
+            path.unlink(missing_ok=True)
+            return None
+    return {"key": key, "since": raw.get("since"), "until": until,
+            "reason": raw.get("reason")}
+
+
+def list_holds(home: Path, now: float) -> dict[str, dict]:
+    """Every currently-held key -> its state (expired holds are released)."""
+    out: dict[str, dict] = {}
+    d = holds_dir(home)
+    if not d.is_dir():
+        return out
+    for p in sorted(d.glob("*.json")):
+        try:
+            key = store.validate_key(p.stem)
+        except Exception:
+            continue
+        st = hold_state(home, key, now)
+        if st is not None:
+            out[key] = st
+    return out

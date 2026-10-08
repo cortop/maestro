@@ -1768,6 +1768,24 @@ def check_worktree_witness(cfg: Config, now: float) -> dict:
             "witness_less": witness_less}
 
 
+def check_holds(cfg: Config, now: float) -> dict:
+    """Warn while any ticket is held (the dispatcher will not spawn it)."""
+    held = fleet.list_holds(cfg.home, now)
+    if not held:
+        return {"name": "holds", "status": "ok", "detail": "no ticket is held", "held": {}}
+    parts = []
+    for key in sorted(held):
+        until = held[key].get("until")
+        try:
+            exp = f"until {store.epoch_to_iso(float(until))}" if until is not None else "until released"
+        except (TypeError, ValueError):
+            exp = f"until {until}"
+        parts.append(f"{key} ({exp})")
+    return {"name": "holds", "status": "warn",
+            "detail": "held: " + ", ".join(parts) + " -- `maestro unhold <KEY>` to release",
+            "held": held}
+
+
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
@@ -1785,7 +1803,7 @@ CHECKS = (check_home_structure, check_heartbeat, check_backup_age, check_claim_a
           check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
           check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
           check_runner_binary, check_pi_version, check_worktree_health, check_worktree_branch,
-          check_worktree_witness,
+          check_worktree_witness, check_holds,
           check_provider_availability)
 
 
