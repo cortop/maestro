@@ -38,6 +38,7 @@ from .render import (
 from .screens import (
     ActivityScreen,
     AcScreen,
+    DecisionsScreen,
     DetailScreen,
     EnvScreen,
     EventsScreen,
@@ -55,6 +56,7 @@ __all__ = [
     "MaestroTUI",
     "main",
     "ActivityScreen",
+    "DecisionsScreen",
     "DetailScreen",
     "EnvScreen",
     "EventsScreen",

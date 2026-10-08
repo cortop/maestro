@@ -744,8 +744,8 @@ def test_answer_modal_spec_loaded_from_disk(home):
     assert screen._question_text == "OK?"
 
 
-def test_answer_no_questions_notifies_warning(home):
-    """action_answer on a ticket with no open questions shows a warning toast."""
+def test_answer_no_questions_opens_decision_queue(home):
+    """T-164: action_answer on a ticket with no open questions opens the decision queue."""
     store.atomic_write(store.spec_path(home, "T-1"), "# T-1\napproval_tier: 0\n")
     event_log.append(home, "T-1", "TicketCreated", {"title": "T-1"}, actor="d")
     snap_mod.rebuild(home, "T-1")
@@ -755,10 +755,9 @@ def test_answer_no_questions_notifies_warning(home):
 
     app.action_answer()
 
-    assert not push_calls
-    app.notify.assert_called_once()
-    _, kwargs = app.notify.call_args
-    assert kwargs.get("severity") == "warning"
+    assert [type(s).__name__ for s, _ in push_calls] == ["DecisionsScreen"]
+    app.notify.assert_not_called()
+    assert inbox.pending(home, "T-1") == []
 
 
 # --- 'c' / cmd modal (action_cmd, action_retry, action_discard) ---------------
