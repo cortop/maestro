@@ -133,6 +133,18 @@ def _ask_park_outcomes(tree: ast.Module) -> list[tuple[int, str]]:
     return found
 
 
+def _enclosing_def(tree: ast.Module, lineno: int) -> str:
+    """Name of the OUTERMOST module-level def containing `lineno` (not the
+    smallest enclosing one, so a gate in a nested closure is still labelled
+    with a name `hasattr(maestro.dispatcher, ...)` resolves). Raises
+    ``ValueError`` when the line is not inside any top-level def."""
+    for node in tree.body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.lineno <= lineno <= (node.end_lineno or node.lineno)):
+            return node.name
+    raise ValueError(f"line {lineno} is not inside any top-level def")
+
+
 def _outcome_assignments(source: str) -> list[tuple[int, str]]:
     """(lineno, literal) for every ``decisions[<key>]`` outcome assignment in
     `source` -- the subscript form (``decisions[<key>]["outcome"] =
@@ -224,29 +236,31 @@ _HOOKS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _hook_source_lines(source: str) -> list[tuple[str, int, str]]:
+def _hook_source_lines(source: str) -> list[tuple[str, str, str]]:
+    tree = ast.parse(source)
     lines = source.splitlines()
     found = []
     for name, marker, desc in _HOOKS:
         lineno = next((i for i, line in enumerate(lines, start=1) if marker in line), None)
         if lineno is None:
             raise ValueError(f"dispatch hook marker not found in dispatcher.py: {marker!r}")
-        found.append((name, lineno, desc))
+        found.append((name, _enclosing_def(tree, lineno), desc))
     return found
 
 
-def _brake_source_lines(source: str) -> list[tuple[str, int, str]]:
-    """(name, lineno, description) for each of `_BRAKES`, located by finding
+def _brake_source_lines(source: str) -> list[tuple[str, str, str]]:
+    """(name, enclosing def, description) for each of `_BRAKES`, located by finding
     its marker as a plain substring of a source line -- raises if a marker
     has drifted out of `dispatcher.py` entirely, so a rename there fails
     `make diagram`/`make test` loudly instead of silently going stale."""
+    tree = ast.parse(source)
     lines = source.splitlines()
     found = []
     for name, marker, desc in _BRAKES:
         lineno = next((i for i, line in enumerate(lines, start=1) if marker in line), None)
         if lineno is None:
             raise ValueError(f"dispatch gate brake marker not found in dispatcher.py: {marker!r}")
-        found.append((name, lineno, desc))
+        found.append((name, _enclosing_def(tree, lineno), desc))
     return found
 
 
@@ -261,6 +275,7 @@ def render_dispatch_gates() -> str:
     the resource layer (throttle, repo caps, credentials, runner preflight,
     spend ceiling, ...) statically."""
     source = DISPATCHER_SOURCE_PATH.read_text()
+    tree = ast.parse(source)
     rows = _outcome_assignments(source)
     brakes = _brake_source_lines(source)
     lines = [_HEADER, "", "# dispatch gate table", "",
@@ -268,21 +283,22 @@ def render_dispatch_gates() -> str:
               "`decisions[key][\"outcome\"] = \"<literal>\"` or a "
               "`decisions[key] = {\"outcome\": \"<literal>\", ...}` dict literal (a "
               "conditional-expression value counted as both arms) -- in the source "
-              "order `maestro/dispatcher.py`'s `dispatch()` sets them. Regenerate with "
-              "`make diagram` after touching `dispatch()`; `tests/test_diagram.py` fails "
+              "order they appear in `maestro/dispatcher.py`, labelled by the enclosing "
+              "top-level function (no line numbers, so unrelated edits to the file never "
+              "touch this doc). Regenerate with `make diagram` after touching a gate; `tests/test_diagram.py` fails "
               "`make test` otherwise.",
-              "", f"{len(rows)} gates today.", "",
-              "| # | outcome | source |", "|---|---------|--------|"]
-    for i, (lineno, outcome) in enumerate(rows, start=1):
-        lines.append(f"| {i} | `{outcome}` | `maestro/dispatcher.py:{lineno}` |")
+              "",
+              "| outcome | source |", "|---------|--------|"]
+    for lineno, outcome in rows:
+        lines.append(f"| `{outcome}` | `dispatcher.{_enclosing_def(tree, lineno)}` |")
     lines += ["", "## Sweep-level brakes", "",
               "These four short-circuit the entire spawn phase before any per-key "
               "outcome above reaches `spawned`/`would_spawn` -- a due key keeps "
               "whatever outcome the loop above already gave it, but nothing actually "
               "spawns this sweep.",
               "", "| brake | source | what it guards |", "|---|---|---|"]
-    for name, lineno, desc in brakes:
-        lines.append(f"| {name} | `maestro/dispatcher.py:{lineno}` | {desc} |")
+    for name, fn, desc in brakes:
+        lines.append(f"| {name} | `dispatcher.{fn}` | {desc} |")
     hooks = _hook_source_lines(source)
     lines += ["", "## Dispatcher hooks", "",
               "Dispatcher-owned, one-shot hooks that act on a ticket's CURRENT "
@@ -290,8 +306,8 @@ def render_dispatch_gates() -> str:
               "the per-key due/spawn walk above, since the ticket isn't `due` by "
               "that loop's own definition.",
               "", "| hook | source | what it does |", "|---|---|---|"]
-    for name, lineno, desc in hooks:
-        lines.append(f"| {name} | `maestro/dispatcher.py:{lineno}` | {desc} |")
+    for name, fn, desc in hooks:
+        lines.append(f"| {name} | `dispatcher.{fn}` | {desc} |")
     lines.append("")
     return "\n".join(lines)
 

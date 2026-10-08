@@ -99,7 +99,8 @@ Supporting:
 - `skills_install.py` — `maestro install-commands` (payload in `maestro/_skill_commands/`).
 - `fleet.py` — launchd LaunchAgent management + pause switch.
 - `diagram.py` — generates the two derived docs from `statemachine.TRANSITIONS` and an AST
-  walk of `dispatcher.py`; `tests/test_diagram.py` fails on drift. It pins literal
+  walk of `dispatcher.py` (gate rows are labelled by enclosing function, no line
+  numbers); `tests/test_diagram.py` fails on drift. It pins literal
   `decisions[...]["outcome"] = "..."` assignments and a few exact source lines in
   `dispatcher.py` — keep them literal when refactoring.
 - `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).

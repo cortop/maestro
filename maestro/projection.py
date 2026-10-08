@@ -210,6 +210,30 @@ def ticket_rows(home: Path, phases: frozenset | None = None, *,
     return rows_from_snapshots(home, snaps)
 
 
+def open_question_queue(home: Path) -> list[dict]:
+    """The board-wide decision queue: one row per open question on awaiting-human /
+    degraded tickets (round order), plus one `qid=None` row per degraded ticket with
+    none. Pure read of snapshots; `age`/`queued` are the caller's to add."""
+    from .ops import parse_round_question
+    rows: list[dict] = []
+    for key in sorted(list_keys(home), key=split_key):
+        s = snap_mod.load(home, key)
+        if s.phase not in (Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value):
+            continue
+        parsed = [(qid, text, *parse_round_question(text)) for qid, text in s.open_questions.items()]
+        parsed.sort(key=lambda p: p[2] or float("inf"))
+        for qid, text, position, total, body, recommend in parsed:
+            rows.append({"key": key, "qid": qid, "phase": s.phase, "position": position,
+                         "total": total, "kind": s.question_kinds.get(qid, ""),
+                         "question": body, "recommend": recommend, "text": text,
+                         "n_open": len(parsed)})
+        if not parsed and s.phase == Phase.DEGRADED.value:
+            rows.append({"key": key, "qid": None, "phase": s.phase, "position": None,
+                         "total": None, "kind": "degraded", "question": s.last_error or "",
+                         "recommend": None, "text": s.last_error or "", "n_open": 0})
+    return rows
+
+
 def _recent_fast_path_routes(home: Path, now_epoch: float) -> list[tuple[str, str]]:
     """``(key, verbatim answer)`` for every ticket whose MOST RECENT
     ``PhaseChanged`` was a T-122 answer_fast_path route (``actor ==

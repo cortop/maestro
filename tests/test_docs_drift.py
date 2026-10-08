@@ -162,7 +162,7 @@ def test_linked_docs_actually_carry_at_least_one_relative_link():
 # ---------------------------------------------------------------------------
 
 _PACKAGE = REPO_ROOT / "maestro"
-_AGENT_DOCS = ["CLAUDE.md", "DESIGN.md"]
+_AGENT_DOCS = ["CLAUDE.md", "DESIGN.md", "docs/dispatch-gates.md"]
 _DOTTED_REF_RE = re.compile(r"`([a-z_]+)\.([A-Za-z_][A-Za-z0-9_]*)(?:\(\))?`")
 _FILE_EXTENSIONS = {"py", "md", "toml", "json", "jsonl", "sh", "txt"}
 

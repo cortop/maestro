@@ -2,53 +2,51 @@
 
 # dispatch gate table
 
-Every `decisions[key]["outcome"]` a sweep can assign -- via either `decisions[key]["outcome"] = "<literal>"` or a `decisions[key] = {"outcome": "<literal>", ...}` dict literal (a conditional-expression value counted as both arms) -- in the source order `maestro/dispatcher.py`'s `dispatch()` sets them. Regenerate with `make diagram` after touching `dispatch()`; `tests/test_diagram.py` fails `make test` otherwise.
+Every `decisions[key]["outcome"]` a sweep can assign -- via either `decisions[key]["outcome"] = "<literal>"` or a `decisions[key] = {"outcome": "<literal>", ...}` dict literal (a conditional-expression value counted as both arms) -- in the source order they appear in `maestro/dispatcher.py`, labelled by the enclosing top-level function (no line numbers, so unrelated edits to the file never touch this doc). Regenerate with `make diagram` after touching a gate; `tests/test_diagram.py` fails `make test` otherwise.
 
-41 gates today.
-
-| # | outcome | source |
-|---|---------|--------|
-| 1 | `ask_failed` | `maestro/dispatcher.py:3562` |
-| 2 | `board_refused` | `maestro/dispatcher.py:3676` |
-| 3 | `phantom` | `maestro/dispatcher.py:3793` |
-| 4 | `fold_error` | `maestro/dispatcher.py:3800` |
-| 5 | `held` | `maestro/dispatcher.py:3807` |
-| 6 | `not_due` | `maestro/dispatcher.py:3812` |
-| 7 | `would_park_missing_acs` | `maestro/dispatcher.py:3819` |
-| 8 | `missing_acs` | `maestro/dispatcher.py:3830` |
-| 9 | `claimed` | `maestro/dispatcher.py:3835` |
-| 10 | `answer_routed` | `maestro/dispatcher.py:3900` |
-| 11 | `would_route_answer` | `maestro/dispatcher.py:3923` |
-| 12 | `would_route_terminating` | `maestro/dispatcher.py:3984` |
-| 13 | `route_terminating` | `maestro/dispatcher.py:3991` |
-| 14 | `would_route_blocked_dep` | `maestro/dispatcher.py:4003` |
-| 15 | `route_blocked_dep` | `maestro/dispatcher.py:4003` |
-| 16 | `would_route_researching` | `maestro/dispatcher.py:4012` |
-| 17 | `route_researching` | `maestro/dispatcher.py:4017` |
-| 18 | `would_route_implementing` | `maestro/dispatcher.py:4023` |
-| 19 | `route_implementing` | `maestro/dispatcher.py:4028` |
-| 20 | `would_route_implementing` | `maestro/dispatcher.py:4038` |
-| 21 | `worktree_refused` | `maestro/dispatcher.py:4046` |
-| 22 | `route_implementing` | `maestro/dispatcher.py:4055` |
-| 23 | `due` | `maestro/dispatcher.py:4081` |
-| 24 | `throttled` | `maestro/dispatcher.py:4110` |
-| 25 | `repo_blocked` | `maestro/dispatcher.py:4120` |
-| 26 | `capacity_skipped` | `maestro/dispatcher.py:4127` |
-| 27 | `repo_capped` | `maestro/dispatcher.py:4154` |
-| 28 | `would_ask_backend_interlocked` | `maestro/dispatcher.py:4157` |
-| 29 | `would_spawn` | `maestro/dispatcher.py:4160` |
-| 30 | `burn_parked` | `maestro/dispatcher.py:4198` |
-| 31 | `repo_capped` | `maestro/dispatcher.py:4201` |
-| 32 | `backend_interlocked` | `maestro/dispatcher.py:4207` |
-| 33 | `credential_unresolvable` | `maestro/dispatcher.py:4213` |
-| 34 | `runner_unregistered` | `maestro/dispatcher.py:4245` |
-| 35 | `runner_disabled` | `maestro/dispatcher.py:4251` |
-| 36 | `runner_binary_missing` | `maestro/dispatcher.py:4254` |
-| 37 | `runner_daemon_unreachable` | `maestro/dispatcher.py:4258` |
-| 38 | `runner_model_unavailable` | `maestro/dispatcher.py:4265` |
-| 39 | `runner_capped` | `maestro/dispatcher.py:4269` |
-| 40 | `attempts_exhausted` | `maestro/dispatcher.py:4303` |
-| 41 | `spawned` | `maestro/dispatcher.py:4322` |
+| outcome | source |
+|---------|--------|
+| `ask_failed` | `dispatcher._ask_park` |
+| `board_refused` | `dispatcher._refuse_if_tickets_dir_missing` |
+| `phantom` | `dispatcher._fold_and_gate` |
+| `fold_error` | `dispatcher._fold_and_gate` |
+| `held` | `dispatcher._fold_and_gate` |
+| `not_due` | `dispatcher._fold_and_gate` |
+| `would_park_missing_acs` | `dispatcher._fold_and_gate` |
+| `missing_acs` | `dispatcher._fold_and_gate` |
+| `claimed` | `dispatcher._fold_and_gate` |
+| `answer_routed` | `dispatcher._route_answer_fast_path` |
+| `would_route_answer` | `dispatcher._route_answer_fast_path` |
+| `would_route_terminating` | `dispatcher._route_ready_fast_path` |
+| `route_terminating` | `dispatcher._route_ready_fast_path` |
+| `would_route_blocked_dep` | `dispatcher._route_ready_fast_path` |
+| `route_blocked_dep` | `dispatcher._route_ready_fast_path` |
+| `would_route_researching` | `dispatcher._route_ready_fast_path` |
+| `route_researching` | `dispatcher._route_ready_fast_path` |
+| `would_route_implementing` | `dispatcher._route_ready_fast_path` |
+| `route_implementing` | `dispatcher._route_ready_fast_path` |
+| `would_route_implementing` | `dispatcher._route_ready_fast_path` |
+| `worktree_refused` | `dispatcher._route_ready_fast_path` |
+| `route_implementing` | `dispatcher._route_ready_fast_path` |
+| `due` | `dispatcher._classify_key` |
+| `throttled` | `dispatcher._gate_due` |
+| `repo_blocked` | `dispatcher._gate_due` |
+| `capacity_skipped` | `dispatcher._gate_due` |
+| `repo_capped` | `dispatcher._preview_spawns` |
+| `would_ask_backend_interlocked` | `dispatcher._preview_spawns` |
+| `would_spawn` | `dispatcher._preview_spawns` |
+| `burn_parked` | `dispatcher._admit_for_spawn` |
+| `repo_capped` | `dispatcher._admit_for_spawn` |
+| `backend_interlocked` | `dispatcher._admit_for_spawn` |
+| `credential_unresolvable` | `dispatcher._admit_for_spawn` |
+| `runner_unregistered` | `dispatcher._runner_admits` |
+| `runner_disabled` | `dispatcher._runner_admits` |
+| `runner_binary_missing` | `dispatcher._runner_admits` |
+| `runner_daemon_unreachable` | `dispatcher._runner_admits` |
+| `runner_model_unavailable` | `dispatcher._runner_admits` |
+| `runner_capped` | `dispatcher._runner_admits` |
+| `attempts_exhausted` | `dispatcher._spawn_due` |
+| `spawned` | `dispatcher._spawn_due` |
 
 ## Sweep-level brakes
 
@@ -56,10 +54,10 @@ These four short-circuit the entire spawn phase before any per-key outcome above
 
 | brake | source | what it guards |
 |---|---|---|
-| fleet pause | `maestro/dispatcher.py:4389` | the board-wide kill switch (`maestro fleet pause`) -- ahead of everything else; mint/sync/worktrees/backup/sessions all stay untouched and due-computation never runs, so no `decisions[key]` entry is made at all this sweep |
-| rate-limit pause | `maestro/dispatcher.py:4445` | a live 429 backoff window; while paused, nothing spawns and the spawn ledger is left untouched |
-| runaway auto-brake | `maestro/dispatcher.py:4447` | GA-5's no-progress circuit breaker, armed off `derived/health.json` |
-| spend ceiling | `maestro/dispatcher.py:4449` | GA-11's daily spend ceiling, a pure read so it still applies under `dry_run` |
+| fleet pause | `dispatcher.dispatch` | the board-wide kill switch (`maestro fleet pause`) -- ahead of everything else; mint/sync/worktrees/backup/sessions all stay untouched and due-computation never runs, so no `decisions[key]` entry is made at all this sweep |
+| rate-limit pause | `dispatcher.dispatch` | a live 429 backoff window; while paused, nothing spawns and the spawn ledger is left untouched |
+| runaway auto-brake | `dispatcher.dispatch` | GA-5's no-progress circuit breaker, armed off `derived/health.json` |
+| spend ceiling | `dispatcher.dispatch` | GA-11's daily spend ceiling, a pure read so it still applies under `dry_run` |
 
 ## Dispatcher hooks
 
@@ -67,4 +65,4 @@ Dispatcher-owned, one-shot hooks that act on a ticket's CURRENT state directly -
 
 | hook | source | what it does |
 |---|---|---|
-| post_qa_skill | `maestro/dispatcher.py:2410` | fires the config-referenced `[maestro] post_qa_skill` / `[repos.<name>] post_qa_skill` slash-command skill exactly once per ticket per QA pass, at the `qa -> awaiting-ci` trigger point -- once a ticket in `awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on every current-hash AC (`Snapshot.qa_all_passing`). Idempotent per (key, QA-verdict fingerprint) via a `PostQaSkillSpawned` event appended before the spawn. Unset (default) fires nothing -- ships dark. |
+| post_qa_skill | `dispatcher.sync_post_qa_skill` | fires the config-referenced `[maestro] post_qa_skill` / `[repos.<name>] post_qa_skill` slash-command skill exactly once per ticket per QA pass, at the `qa -> awaiting-ci` trigger point -- once a ticket in `awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on every current-hash AC (`Snapshot.qa_all_passing`). Idempotent per (key, QA-verdict fingerprint) via a `PostQaSkillSpawned` event appended before the spawn. Unset (default) fires nothing -- ships dark. |
