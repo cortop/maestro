@@ -27,7 +27,7 @@ from .events import render_log
 from .modals import (
     _ACCEPT_ALL, MENU_PROPOSAL, MenuRow, _AcceptedRecommendation, _ActionMenu, _AddAcModal, _AnswerModal,
     _CmdModal, _ConfirmModal, HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal,
-    _SuggestAcsModal, menu_actions,
+    _SpecFieldsModal, _SuggestAcsModal, menu_actions,
 )
 from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
@@ -219,6 +219,7 @@ class MaestroTUI(App):
         Binding("I", "view_inbox", "Inbox log", show=False),
         Binding("o", "runner", "Runner", show=False),
         Binding("L", "import_linear", "Linear", show=False),
+        Binding("M", "spec_fields", "Spec fields", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
         Binding("v", "ac_matrix", "ACs", show=False),
         Binding("g", "suggest_acs", "Suggest ACs", show=False),
@@ -915,6 +916,30 @@ class MaestroTUI(App):
                 self.notify(f"runner updated for {key}")
 
         self.push_screen(_RunnerModal(key, runner, runner_model, home=self._home), _on_dismiss)
+
+    def action_spec_fields(self) -> None:
+        """T-179: open the priority/dependsOn modal for the ticket on screen;
+        saving goes through `ops.set_spec_fields` (validating, no event)."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+
+        def _on_dismiss(result: dict | None) -> None:
+            if result is None:
+                return
+            try:
+                ops_mod.set_spec_fields(Config(home=self._home), key,
+                                        priority=result["priority"],
+                                        depends_on=result["depends_on"])
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
+            self.notify(f"spec fields updated for {key}")
+            self._graph = depgraph.build(self._home)  # Deps cell reads the cached graph
+            self._populate()
+
+        self.push_screen(_SpecFieldsModal(key, self._home), _on_dismiss)
 
     def action_add_ac(self) -> None:
         """T-112: open the add-AC modal for the selected ticket. All state
