@@ -41,15 +41,16 @@ from textual.worker import WorkerFailed  # noqa: E402
 
 from rich.text import Text  # noqa: E402
 
-from conftest import add_worktree, git, make_origin_and_repo, seed_phase, seed_ticket  # noqa: E402
+from conftest import _result_record, _write_stream_log, add_worktree, git, make_origin_and_repo, seed_phase, seed_ticket  # noqa: E402
 from maestro.tui.modals import _SpecFieldsModal, _TextViewModal  # noqa: E402
-from maestro import claims, config as config_mod, event_log, fleet as fleet_mod, inbox  # noqa: E402
+from maestro import backup as backup_mod, claims, config as config_mod, event_log, fleet as fleet_mod, inbox  # noqa: E402
 from maestro.projection import ticket_rows  # noqa: E402
 from maestro import dispatcher as disp_mod, ops as ops_mod, snapshot as snap_mod, store  # noqa: E402
 from maestro.cli import main as cli_main  # noqa: E402
 from maestro.statemachine import Phase  # noqa: E402
 from maestro.sessions import ClaudeCliSessions, DryRunSessions, OpencodeCliSessions, PiCliSessions  # noqa: E402
 from maestro.tui import (  # noqa: E402
+    BackupsScreen,
     ReviewScreen,
     WhyScreen,
     AcScreen,
@@ -65,10 +66,13 @@ from maestro.tui import (  # noqa: E402
     MaestroTUI,
     ProposalScreen,
     ScheduleScreen,
+    SessionsScreen,
     SpecScreen,
     EnvScreen,
+    _ActionMenu,
     _AddAcModal,
     _AnswerModal,
+    _CheckModal,
     _CmdModal,
     _ConfirmModal,
     _CreateModal,
@@ -76,11 +80,15 @@ from maestro.tui import (  # noqa: E402
     _FILTERS,
     HoldModal,
     _ImportLinearModal,
+    _DirectionModal,
     _InboxModal,
     _IntervalModal,
+    _PauseModal,
     _RunnerModal,
     _ScheduleModal,
+    _StopModal,
     _SuggestAcsModal,
+    _TicketPickModal,
     _styled_row,
 )
 
@@ -355,10 +363,10 @@ def test_quit_binding_exits_clean(seeded_home):
 # False, no exception) — the press-sweep above cannot see that, so guard it here.
 
 _BINDING_CLASSES = [
-    MaestroTUI, ReviewScreen, _TextViewModal, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
-    ScheduleScreen, ActivityScreen, AcScreen, DecisionsScreen, WhyScreen, _AcEvidenceModal, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
-    _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal, _SpecFieldsModal,
-    _ConfirmModal, HoldModal, SpecScreen, EnvScreen, _EventPayloadModal,
+    MaestroTUI, ReviewScreen, BackupsScreen, _TextViewModal, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
+    SessionsScreen, ScheduleScreen, ActivityScreen, AcScreen, DecisionsScreen, WhyScreen, _AcEvidenceModal, _ActionMenu, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal, _DirectionModal,
+    _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal, _SpecFieldsModal, _TicketPickModal,
+    _ConfirmModal, _StopModal, _CheckModal, HoldModal, _PauseModal, SpecScreen, EnvScreen, _EventPayloadModal,
 ]
 
 
@@ -1593,7 +1601,9 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
             status_widget = app.screen.query_one("#fleet-status", Static)
             assert "Paused" in str(status_widget.content)
 
-            await pilot.press("P")  # toggle_pause -> resume (was paused)
+            await pilot.press("P")  # toggle_pause -> resume confirm (was paused)
+            await pilot.pause(0.1)
+            await pilot.press("y")
             for _ in range(50):  # threaded worker: poll, don't race a fixed pause
                 await pilot.pause(0.1)
                 if fleet.pause_state(seeded_home, store.now_epoch()) is None:
@@ -1601,12 +1611,14 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
             assert fleet.pause_state(seeded_home, store.now_epoch()) is None
             assert app._exception is None
 
-            await pilot.press("P")  # toggle_pause -> pause (now unpaused)
-            for _ in range(50):  # wait for the confirm modal before answering it
+            await pilot.press("P")  # toggle_pause -> _PauseModal (now unpaused)
+            for _ in range(50):
                 await pilot.pause(0.1)
-                if not isinstance(app.screen_stack[-1], FleetScreen):
+                if isinstance(app.screen_stack[-1], _PauseModal):
                     break
-            await pilot.press("y")
+            assert isinstance(app.screen_stack[-1], _PauseModal)
+            await pilot.pause(0.1)  # let the modal take focus before answering
+            await pilot.press("enter")  # both fields empty -> pause at once
             for _ in range(50):
                 await pilot.pause(0.1)
                 if fleet.pause_state(seeded_home, store.now_epoch()) is not None:
@@ -4383,9 +4395,10 @@ def test_fleet_down_and_pause_confirm(seeded_home, monkeypatch):
             assert len(calls) == 1
 
             assert fleet.pause_state(seeded_home, store.now_epoch()) is None
-            await pilot.press("P")
+            await pilot.press("P")  # _PauseModal replaced the plain pause confirm
             await pilot.pause()
-            await pilot.press("enter")
+            assert isinstance(app.screen_stack[-1], _PauseModal)
+            await pilot.press("escape")
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert fleet.pause_state(seeded_home, store.now_epoch()) is None
@@ -5817,6 +5830,111 @@ def test_why_screen_blocked_dep(home):
             await pilot.pause()
             assert isinstance(app.screen, WhyScreen) and app.screen._key == "T-2"
             assert len(app.screen_stack) == 3
+
+
+
+
+# --------------------------------------------------------------------------- #
+# T-178: phase-aware action menu (m)                                          #
+# --------------------------------------------------------------------------- #
+
+async def _open_menu(app, pilot):
+    await pilot.press("m")
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def _choose(app, pilot, label):
+    menu = app.screen_stack[-1]
+    assert isinstance(menu, _ActionMenu)
+    idx = next(i for i, r in enumerate(menu.rows) if r.label == label)
+    menu.query_one("#menu-list").highlighted = idx
+    await pilot.press("enter")
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def _inbox_cmds(home, key):
+    return store.read_jsonl(store.inbox_path(home, key))
+
+
+def test_action_menu_degraded(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-2"
+            await _open_menu(app, pilot)
+            menu = app.screen_stack[-1]
+            assert isinstance(menu, _ActionMenu)
+            assert menu.title == "T-2 · degraded"
+            rows = {r.label: r for r in menu.rows}
+            assert rows["Retry"].enabled and rows["Discard"].enabled
+            assert not rows["Answer"].enabled and rows["Answer"].reason == "no open questions"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen_stack[-1], _ActionMenu)
+            assert _inbox_cmds(seeded_home, "T-2") == []
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_action_menu_approve_carries_qid(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        app._nudge_enabled = False
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-1"
+            await _open_menu(app, pilot)
+            await _choose(app, pilot, "Approve")
+            for _ in range(2):
+                modal = app.screen_stack[-1]
+                assert isinstance(modal, _AnswerModal)
+                assert modal.query_one("#answer-input", TextArea).text == "approve"
+                modal.action_submit()
+                await pilot.pause()
+            cmds = _inbox_cmds(seeded_home, "T-1")
+            assert [c["command"] for c in cmds] == ["ans", "ans"]
+            assert {c["args"]["qid"] for c in cmds} == {"q1", "q2"}
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_action_menu_dimmed_row_refuses(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        notes = []
+        app.notify = lambda msg, **kw: notes.append(str(msg))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await _open_menu(app, pilot)
+            await _choose(app, pilot, "Retry")
+            assert not isinstance(app.screen_stack[-1], (_ActionMenu, _ConfirmModal))
+            assert any("only for degraded tickets" in n for n in notes), notes
+            for key in ("T-1", "T-2", "T-3", "T-4", "T-5"):
+                assert _inbox_cmds(seeded_home, key) == []
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_action_menu_discard_uses_typed_confirm(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        app._nudge_enabled = False
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-2"
+            await _open_menu(app, pilot)
+            await _choose(app, pilot, "Discard")
+            assert isinstance(app.screen_stack[-1], _ConfirmModal)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert inbox.pending(seeded_home, "T-2") == []
             assert app._exception is None
 
     asyncio.run(_inner())
@@ -5839,6 +5957,22 @@ def test_why_screen_backoff_flips_to_timer(home):
             await pilot.pause(1.3)
             assert "DUE: timer" in _why(app, "#why-now")
             assert "NOT DUE" not in _why(app, "#why-now")
+
+
+def test_action_menu_no_target_warns(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        notes = []
+        app.notify = lambda msg, **kw: notes.append(str(msg))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = None
+            before = len(app.screen_stack)
+            await pilot.press("m")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert len(app.screen_stack) == before
+            assert "Select a ticket first" in notes
             assert app._exception is None
 
     asyncio.run(_inner())
@@ -5965,6 +6099,64 @@ def test_why_screen_kick_is_confirmed_and_scoped(home):
             assert app._exception is None
 
     asyncio.run(_inner())
+
+
+def test_action_menu_emits_only_human_commands(seeded_home, monkeypatch):
+    """Select every enabled row on every seeded ticket; only ANSWER_COMMANDS | msg are
+    ever queued and no phase/finalize/QA-verdict event is appended."""
+    from maestro import event_log, ops
+
+    monkeypatch.setenv("EDITOR", "true")
+    forbidden = {"PhaseChanged", "Finalized", "AcQaVerdict"}
+    keys = ["T-1", "T-2", "T-3", "T-4", "T-5"]
+    before = {k: [e["type"] for e in event_log.read(seeded_home, k)] for k in keys}
+
+    async def _row_labels(key):
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = key
+            await _open_menu(app, pilot)
+            return [r.label for r in app.screen_stack[-1].rows if r.enabled]
+
+    async def _run_row(key, label):
+        app = _make_app(seeded_home)
+        app._nudge_enabled = False
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = key
+            await _open_menu(app, pilot)
+            await _choose(app, pilot, label)
+            for _ in range(6):  # drain follow-up modals, submitting sample text or cancelling
+                top = app.screen_stack[-1]
+                if len(app.screen_stack) == 1:
+                    break
+                if isinstance(top, _AnswerModal):
+                    top.query_one("#answer-input", TextArea).text = "sample"
+                    top.action_submit()
+                elif isinstance(top, _InboxModal):
+                    top.dismiss("sample")
+                elif isinstance(top, _CmdModal):
+                    top.query_one("#cmd-input", Input).value = "retry"
+                    top._submit()
+                else:
+                    await pilot.press("escape")
+                await pilot.pause()
+            assert app._exception is None, (key, label, app._exception)
+
+    async def _all():
+        for key in keys:
+            for label in await _row_labels(key):
+                await _run_row(key, label)
+
+    asyncio.run(_all())
+    allowed = set(ops.ANSWER_COMMANDS) | {"msg"}
+    for key in keys:
+        for cmd in _inbox_cmds(seeded_home, key):
+            assert cmd["command"] in allowed, (key, cmd)
+        after = [e["type"] for e in event_log.read(seeded_home, key)]
+        new = after[len(before[key]):]
+        assert not forbidden & set(new), (key, new)
 
 
 
@@ -6330,3 +6522,1290 @@ def test_decisions_footer_and_resize_bindings():
     visible = {_bkey(b) for b in MaestroTUI.BINDINGS if not isinstance(b, Binding) or b.show}
     assert "W" in visible and "[" not in visible and "]" not in visible
     assert len(visible) <= 10
+
+
+# --- T-159: ProposalScreen decision bar --------------------------------------
+
+_PROPOSAL_MD = "# Research\n\n## Recommended\nUse the event log\n\n## Alternative 1\nUse sqlite\n\n## Alternative 2\nUse files\n"
+
+
+def _proposal_home(home, *, open_q=True, body=_PROPOSAL_MD):
+    qs = {"research-approval-T-6": "Approve?" + ops_mod._RECOMMEND_SEP + "Approve the recommended approach"} if open_q else None
+    seed_ticket(home, "T-6", "research", phase="awaiting-human", questions=qs)
+    (home / "tickets" / "T-6" / "proposal.md").write_text(body)
+    return home
+
+
+async def _open_proposal(app, pilot):
+    await pilot.pause()
+    app.push_screen(ProposalScreen(app._home, "T-6"))
+    await pilot.pause()
+    return app.screen_stack[-1]
+
+
+def _proposal_ans(home):
+    return [c for c in inbox.pending(home, "T-6") if c["command"] == "ans"]
+
+
+def test_proposal_bar_selects_alternative(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_proposal(app, pilot)
+            bar = str(screen.query_one("#proposal-bar", Static).render())
+            assert screen.query_one("#proposal-bar").display
+            for want in ("Recommended", "Use sqlite", "Use files"):
+                assert want in bar
+            await pilot.press("2")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _ConfirmModal)
+            await pilot.press("y")
+            await pilot.pause()
+            assert [c["args"] for c in _proposal_ans(home)] == [{"qid": "research-approval-T-6", "text": "alternative 2"}]
+            await pilot.press("2")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ProposalScreen)
+            assert len(_proposal_ans(home)) == 1
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_alternative_needs_confirm(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_proposal(app, pilot)
+            await pilot.press("2")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ProposalScreen)
+            await pilot.press("7")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ProposalScreen)
+            assert _proposal_ans(home) == []
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_accepts_recommendation(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_proposal(app, pilot)
+            await pilot.press("y")
+            await pilot.pause()
+            assert [c["args"] for c in _proposal_ans(home)] == [{
+                "qid": "research-approval-T-6", "text": "Approve the recommended approach",
+                "accepted_recommendation": True}]
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_needs_more(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_proposal(app, pilot)
+            await pilot.press("m")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _DirectionModal)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert _proposal_ans(home) == []
+            await pilot.press("m")
+            await pilot.pause()
+            await pilot.press(*"compare with sqlite", "enter")
+            await pilot.pause()
+            assert [c["args"] for c in _proposal_ans(home)] == [
+                {"qid": "research-approval-T-6", "text": "needs more: compare with sqlite"}]
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_hidden_without_approval_question(home):
+    _proposal_home(home, open_q=False)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_proposal(app, pilot)
+            assert not screen.query_one("#proposal-bar").display
+            for action in ("accept_recommendation", "pick_alternative", "needs_more"):
+                assert screen.check_action(action, ()) is False
+            await pilot.press("y", "2", "m")  # disabled here; `m` falls through to the app's menu
+            await pilot.pause()
+            assert not any(isinstance(s, (_ConfirmModal, _DirectionModal)) for s in app.screen_stack)
+            assert _proposal_ans(home) == []
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_section_jumps(home):
+    body = "# Research\n\n" + "".join(f"## Section {i}\n" + "line\n\n" * 30 for i in range(4))
+    _proposal_home(home, open_q=False, body=body)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 20)) as pilot:
+            screen = await _open_proposal(app, pilot)
+            scroll = screen.query_one("#proposal-body")
+            assert scroll.scroll_y == 0
+            await pilot.press("j")
+            await pilot.pause()
+            first = scroll.scroll_y
+            assert first > 0
+            await pilot.press("j")
+            await pilot.pause()
+            assert scroll.scroll_y > first
+            await pilot.press("k")
+            await pilot.pause()
+            assert scroll.scroll_y == first
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# T-160: home + backup-age banner, Backups screen                              #
+# --------------------------------------------------------------------------- #
+
+def _seed_backup(home, age_s: float) -> Path:
+    return backup_mod.create_backup(config_mod.load(str(home)), time.time() - age_s)
+
+
+async def _banner(app, pilot) -> str:
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    return app.sub_title
+
+
+def _tree_bytes(home: Path, *members: str) -> dict:
+    return {str(p.relative_to(home)): p.read_bytes()
+            for m in members for p in sorted((home / m).rglob("*")) if p.is_file()}
+
+
+def test_home_banner_shows_home_and_backup_age(seeded_home):
+    _seed_backup(seeded_home, 120)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            sub = await _banner(app, pilot)
+            assert str(seeded_home.resolve()) in sub
+            assert "backup 2m old" in sub
+            assert "⚠" not in sub
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_home_banner_warns(seeded_home, tmp_path_factory, monkeypatch):
+    async def _sub(home) -> str:
+        app = _make_app(home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            sub = await _banner(app, pilot)
+            assert app._exception is None
+            return sub
+
+    # no tarball, events present
+    assert "⚠ no backup" in asyncio.run(_sub(seeded_home))
+    # newest tarball older than 2x backup_interval (default 3600s)
+    _seed_backup(seeded_home, 3 * 3600)
+    assert "⚠ backup 3h old" in asyncio.run(_sub(seeded_home))
+    # fresh backup on a non-default home: clean
+    _seed_backup(seeded_home, 60)
+    assert "⚠" not in asyncio.run(_sub(seeded_home))
+    # phantom default home: HOME=<tmp>, TUI on <tmp>/.maestro with an empty events/
+    fake = tmp_path_factory.mktemp("fakehome")
+    monkeypatch.setenv("HOME", str(fake))
+    phantom = fake / ".maestro"
+    for d in ("events", "inbox", "tickets", "derived"):
+        (phantom / d).mkdir(parents=True)
+    (phantom / "config.toml").write_text("[maestro]\n", encoding="utf-8")
+    assert "⚠ empty default home" in asyncio.run(_sub(phantom))
+
+
+async def _open_backups(app, pilot):
+    await pilot.pause()
+    await pilot.press("F")
+    await pilot.pause()
+    assert isinstance(app.screen, FleetScreen)
+    await pilot.press("b")
+    await pilot.pause()
+    assert isinstance(app.screen, BackupsScreen)
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    return app.screen.query_one(DataTable)
+
+
+def test_backups_screen_lists_tarballs(seeded_home):
+    older = _seed_backup(seeded_home, 7200)
+    newer = _seed_backup(seeded_home, 60)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            table = await _open_backups(app, pilot)
+            rows = [[str(c) for c in table.get_row_at(i)] for i in range(table.row_count)]
+            assert [r[0] for r in rows] == [newer.name, older.name]
+            assert rows[0][1] == "1m" and rows[1][1] == "2h"
+            assert all(r[2].endswith(("B", "KB", "MB")) for r in rows)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_backups_screen_creates_backup(seeded_home):
+    bdir = backup_mod.resolve_backup_dir(config_mod.load(str(seeded_home)))
+    before = _tree_bytes(seeded_home, "events")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            table = await _open_backups(app, pilot)
+            assert table.row_count == 0
+            await pilot.press("b")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert len(list(bdir.glob("maestro-backup-*.tar.gz"))) == 1
+            assert table.row_count == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    assert _tree_bytes(seeded_home, "events") == before
+
+
+def test_backup_prune_requires_confirm(seeded_home):
+    (seeded_home / "config.toml").write_text("[maestro]\nbackup_retention = 2\n", encoding="utf-8")
+    old = _seed_backup(seeded_home, 7200)
+    mid = _seed_backup(seeded_home, 3600)
+    bdir = old.parent
+
+    def _names():
+        return sorted(p.name for p in bdir.glob("maestro-backup-*.tar.gz"))
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await _open_backups(app, pilot)
+            await pilot.press("b")
+            await pilot.pause()
+            assert isinstance(app.screen, _ConfirmModal)
+            assert old.name in str(app.screen._message) and mid.name not in str(app.screen._message)
+            await pilot.press("enter")  # default focus is Cancel
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            assert _names() == sorted([old.name, mid.name])
+            await pilot.press("b")
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            names = _names()
+            assert len(names) == 2 and old.name not in names and mid.name in names
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_backups_screen_lists_members(seeded_home):
+    _seed_backup(seeded_home, 60)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await _open_backups(app, pilot)
+            await pilot.press("enter")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert isinstance(app.screen, _TextViewModal)
+            members = app.screen.text.splitlines()
+            assert "events" in members and "tickets" in members
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, BackupsScreen)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_backups_screen_copies_restore_command(seeded_home):
+    tarball = _seed_backup(seeded_home, 60)
+    before = _tree_bytes(seeded_home, "events", "tickets", "inbox")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await _open_backups(app, pilot)
+            await pilot.press("y")
+            await pilot.pause()
+            assert app.clipboard == f"maestro --home {seeded_home} restore {tarball}"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    assert _tree_bytes(seeded_home, "events", "tickets", "inbox") == before
+
+
+def test_tui_never_restores():
+    for path in sorted((Path(__file__).parent.parent / "maestro" / "tui").rglob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        assert "restore_backup" not in src and "cmd_restore" not in src, path.name
+    assert BackupsScreen in _BINDING_CLASSES
+
+
+# T-158: b hops to blockers/dependents, O opens the PR                         #
+# --------------------------------------------------------------------------- #
+
+def _set_deps(home, key, deps):
+    spec = store.spec_path(home, key)
+    spec.write_text(spec.read_text().replace(f"# {key}\n", f"# {key}\n\ndependsOn: [{', '.join(deps)}]\n", 1))
+
+
+@pytest.fixture
+def dep_home(seeded_home):
+    seed_ticket(seeded_home, "T-6", "depends on T-5", phase="ready")
+    _set_deps(seeded_home, "T-6", ["T-5"])
+    return seeded_home
+
+
+async def _pick(app, pilot, opt_id):
+    for _ in range(40):
+        await pilot.pause(0.05)
+        if isinstance(app.screen, _TicketPickModal):
+            break
+    assert isinstance(app.screen, _TicketPickModal)
+    picker = app.screen.query_one("#ticket-pick")
+    ids = [picker.get_option_at_index(i).id for i in range(picker.option_count)]
+    return picker, ids
+
+
+def test_b_hops_to_blocker_in_place(dep_home):
+    async def _inner():
+        app = _make_app(dep_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(DetailScreen(dep_home, "T-6"))
+            await pilot.pause()
+            depth = len(app.screen_stack)
+            await pilot.press("b")
+            picker, ids = await _pick(app, pilot, "T-5")
+            assert "T-5" in ids
+            picker.highlighted = ids.index("T-5")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, DetailScreen) and app.screen._key == "T-5"
+            assert len(app.screen_stack) == depth
+            await pilot.press("escape")
+            await pilot.pause()
+            assert len(app.screen_stack) == 1
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_b_lists_dependents_done_and_missing(dep_home):
+    seed_ticket(dep_home, "T-7", "done dep", phase="done")
+    seed_ticket(dep_home, "T-8", "has done and missing deps", phase="ready")
+    _set_deps(dep_home, "T-8", ["T-7", "T-99"])
+
+    async def _inner():
+        app = _make_app(dep_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(DetailScreen(dep_home, "T-5"))
+            await pilot.pause()
+            await pilot.press("b")
+            _, ids = await _pick(app, pilot, "T-6")
+            assert "T-6" in ids
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            app.push_screen(DetailScreen(dep_home, "T-8"))
+            await pilot.pause()
+            depth = len(app.screen_stack)
+            await pilot.press("b")
+            picker, ids = await _pick(app, pilot, "T-7")
+            assert "T-7" in ids and "T-99" in ids
+            picker.highlighted = ids.index("T-99")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(app.screen_stack) == depth
+            assert isinstance(app.screen, DetailScreen) and app.screen._key == "T-8"
+            assert any("T-99" in n.message for n in app._notifications)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_b_notifies_when_nothing_to_hop_to(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(DetailScreen(seeded_home, "T-3"))
+            await pilot.pause()
+            await pilot.press("b")
+            await pilot.pause(0.3)
+            assert not isinstance(app.screen, _TicketPickModal)
+            assert any("No blockers or dependents" in n.message for n in app._notifications)
+
+    asyncio.run(_inner())
+
+
+def test_b_targets_visible_ticket(dep_home):
+    async def _inner():
+        app = _make_app(dep_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            app.push_screen(SpecScreen(dep_home, "T-6"))
+            await pilot.pause()
+            await pilot.press("b")
+            picker, ids = await _pick(app, pilot, "T-5")
+            assert ids.count("T-5") == 1 and "T-3" not in ids
+            picker.highlighted = ids.index("T-5")
+            depth = len(app.screen_stack) - 1  # minus the picker modal
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, SpecScreen) and app.screen._key == "T-5"
+            assert len(app.screen_stack) == depth
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_O_opens_pr_url(seeded_home, opened_urls):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_key = "T-3"
+            await pilot.press("O")
+            await pilot.pause()
+            assert opened_urls == ["https://github.com/cortop/maestro/pull/15"]
+            app._selected_key = "T-5"
+            await pilot.press("O")
+            await pilot.pause()
+            assert opened_urls == ["https://github.com/cortop/maestro/pull/15"]
+            assert any("No PR" in n.message for n in app._notifications)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_webbrowser_open_is_guarded(opened_urls):
+    import webbrowser
+    webbrowser.open("https://example.invalid")
+    assert opened_urls == ["https://example.invalid"]
+
+
+
+
+# --------------------------------------------------------------------------- #
+# T-162: command palette                                                       #
+# --------------------------------------------------------------------------- #
+
+def _palette_labels(app) -> list[str]:
+    from textual.command import CommandList
+    lst = app.screen.query_one(CommandList)
+    return [str(lst.get_option_at_index(i).prompt) for i in range(lst.option_count)]
+
+
+async def _palette(app, pilot, key, text=""):
+    await pilot.press(key)
+    await pilot.pause()
+    if text:
+        await pilot.press(*text)
+    for _ in range(100):  # results arrive asynchronously; wait for them under load
+        await pilot.pause(0.05)
+        if _palette_labels(app) and (not text or text.lower()[:3] in _palette_labels(app)[0].lower()):
+            break
+
+
+def test_palette_jumps_to_ticket_widening_filter(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert app._filter_idx == _filter_idx("needs-you")
+            assert "T-5" not in [str(k.value) for k in app.query_one(DataTable).rows]
+            await _palette(app, pilot, "colon", "T-5")
+            await pilot.press("enter")
+            await pilot.pause(0.5)
+            table = app.query_one(DataTable)
+            assert app._selected_key == "T-5"
+            assert app._filter_idx == _filter_idx("all")
+            assert str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value) == "T-5"
+            assert len(app.screen_stack) == 1
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_palette_jump_keeps_filter_when_visible(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            before = app._filter_idx
+            await _palette(app, pilot, "colon", "T-1")
+            await pilot.press("enter")
+            await pilot.pause(0.5)
+            assert app._selected_key == "T-1"
+            assert app._filter_idx == before
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_palette_runs_app_action(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _palette(app, pilot, "ctrl+p", "Fleet")
+            await pilot.press("enter")
+            await pilot.pause(0.5)
+            assert isinstance(app.screen, FleetScreen)
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_palette_ticket_subhits_push_screens(seeded_home):
+    store.atomic_write(store.ticket_dir(seeded_home, "T-3") / "proposal.md", "# p\n")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._refresh_now()
+            await _palette(app, pilot, "colon", "T-3")
+            labels = _palette_labels(app)
+            assert any("T-3 › Proposal" in lbl for lbl in labels)
+            assert "T-3 ready" not in labels[0] and labels[0].startswith("T-3")
+            await pilot.press("escape")
+            await pilot.pause()
+            await _palette(app, pilot, "colon", "T-4")
+            assert not any("T-4 › Proposal" in lbl for lbl in _palette_labels(app))
+            await pilot.press("escape")
+            await pilot.pause()
+            await _palette(app, pilot, "colon", "T-3 Spec")
+            await pilot.press("enter")
+            await pilot.pause(0.5)
+            assert isinstance(app.screen, SpecScreen)
+            assert app.screen._key == "T-3"
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_palette_actions_respect_check_action(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await app.run_action("fleet_panel")
+            await pilot.pause()
+            assert isinstance(app.screen, FleetScreen)
+            await _palette(app, pilot, "ctrl+p")
+            labels = _palette_labels(app)
+            assert not any(lbl.startswith("Answer") for lbl in labels), labels
+            assert any(lbl.startswith("Sweep") for lbl in labels), labels
+            assert any(lbl.startswith("Pause/Resume") for lbl in labels), labels
+            assert not any(lbl.startswith("Quit") and "(q)" in lbl for lbl in labels)
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_palette_discover_lists_hidden_actions_first(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _palette(app, pilot, "ctrl+p")
+            labels = _palette_labels(app)
+            assert any(lbl.startswith("Fleet (F)") for lbl in labels), labels
+            assert any(lbl.startswith("Refresh (r)") for lbl in labels), labels
+            assert labels.index(next(l for l in labels if l.startswith("Fleet (F)"))) < \
+                labels.index(next(l for l in labels if l.startswith("Refresh (r)")))
+            assert app._exception is None
+    asyncio.run(_inner())
+
+
+def test_palette_bindings_hidden_and_both_keys():
+    from textual.binding import Binding
+    pal = {b.key: b for b in MaestroTUI.BINDINGS if isinstance(b, Binding) and b.action == "command_palette"}
+    assert set(pal) == {"colon", "ctrl+p"}
+    assert all(not b.show for b in pal.values())
+
+
+
+
+# --------------------------------------------------------------------------- #
+# T-168: app-level P pause/resume + FleetScreen hardening                      #
+# --------------------------------------------------------------------------- #
+
+async def _await_cond(pilot, pred, n=50):
+    for _ in range(n):
+        await pilot.pause(0.1)
+        if pred():
+            return
+    assert pred()
+
+
+async def _open_fleet(app, pilot):
+    await pilot.pause()
+    await app.run_action("fleet_panel")
+    await pilot.pause()
+    assert isinstance(app.screen, FleetScreen)
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def _type(pilot, text):
+    for ch in text:
+        await pilot.press("space" if ch == " " else ch)
+
+
+def test_app_pause_key_pauses_with_duration_and_reason(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            before = time.time()
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _PauseModal))
+            await _type(pilot, "1h")
+            await pilot.press("enter")
+            await _type(pilot, "runaway")
+            await pilot.press("enter")
+            await _await_cond(pilot, lambda: fleet_mod.pause_state(seeded_home, store.now_epoch()))
+            st = fleet_mod.pause_state(seeded_home, store.now_epoch())
+            assert abs(st["until"] - (before + 3600)) < 5
+            assert st["reason"] == "runaway"
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            badge = app.screen_stack[0].query_one("#fleet-badge", Static).content
+            assert "PAUSED" in str(badge)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_app_pause_key_escape_writes_nothing(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _PauseModal))
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not fleet_mod.pause_path(seeded_home).exists()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_pause_modal_rejects_bad_duration(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _PauseModal))
+            await _type(pilot, "soon")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, _PauseModal)
+            assert str(app.screen.query_one("#pause-error").content).strip()
+            assert not fleet_mod.pause_path(seeded_home).exists()
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not fleet_mod.pause_path(seeded_home).exists()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_pause_key_offers_resume_from_disk_state(seeded_home):
+    fleet_mod.pause(seeded_home, reason="x")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            app.screen._status = {}  # state before the first status load
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            assert not isinstance(app.screen, _PauseModal)
+            await pilot.pause(0.1)
+            await pilot.press("enter")  # default-No: Cancel focused
+            await _await_cond(pilot, lambda: isinstance(app.screen, FleetScreen))
+            assert fleet_mod.pause_state(seeded_home, store.now_epoch()) is not None
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await _await_cond(pilot, lambda: fleet_mod.pause_state(seeded_home, store.now_epoch()) is None)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_up_rejects_non_integer_interval(seeded_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(fleet_mod, "up", lambda home, **kw: calls.append(kw) or {"ok": True})
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            await pilot.press("u")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _IntervalModal))
+            await _type(pilot, "abc")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, _IntervalModal)
+            assert "not an integer" in str(app.screen.query_one("#interval-error").content)
+            assert calls == []
+            app.screen.query_one("#interval-input", Input).value = ""
+            await _type(pilot, "120")
+            await pilot.press("enter")
+            await _await_cond(pilot, lambda: len(calls) == 1)
+            assert calls[0]["interval"] == 120
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_clear_rate_limit_key(seeded_home):
+    from maestro import ratelimit
+
+    def _has(app):
+        return any(getattr(x.binding, "action", None) == "clear_rate_limit"
+                   for x in app.screen.active_bindings.values())
+
+    async def _plain():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            assert not _has(app)
+
+    asyncio.run(_plain())
+
+    until_ts = time.time() + 3600
+    store.write_json(seeded_home / "derived" / ".ratelimit.json", {
+        "paused_until": until_ts, "resets_at": until_ts - 60,
+        "rate_limit_type": "five_hour", "source_key": "T-1",
+        "source_log": "x", "ts": store.iso_now(),
+    })
+
+    async def _limited():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            assert _has(app)
+            await pilot.press("R")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await _await_cond(pilot, lambda: not ratelimit.status(seeded_home, time.time())["paused"])
+            assert app._exception is None
+
+    asyncio.run(_limited())
+
+
+def test_fleet_mutations_log_result_and_error(seeded_home, monkeypatch):
+    async def _log_text(app):
+        return "\n".join(line.text for line in app.screen.query_one("#fleet-log").lines)
+
+    async def _inner(fn, needle):
+        monkeypatch.setattr(fleet_mod, "down", fn)
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            await pilot.press("d")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.2)
+            assert needle in await _log_text(app)
+            assert app._exception is None
+
+    asyncio.run(_inner(lambda home: {"stopped": "marker-ok"}, "marker-ok"))
+
+    def _boom(home):
+        raise RuntimeError("marker-boom")
+
+    asyncio.run(_inner(_boom, "marker-boom"))
+
+
+def test_fleet_real_sweep_resolves_executable_without_timeout(seeded_home, monkeypatch):
+    import shutil as shutil_mod
+
+    calls = []
+
+    def _rec(argv, **kw):
+        calls.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    async def _inner(which, first):
+        calls.clear()
+        monkeypatch.setattr(shutil_mod, "which", lambda name: which)
+        monkeypatch.setattr(subprocess, "run", _rec)
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            await pilot.press("S")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await _await_cond(pilot, lambda: len(calls) >= 1)
+            await app.workers.wait_for_complete()
+            sweeps = [c for c in calls if "dispatch" in c[0]]
+            assert len(sweeps) == 1
+            argv, kw = sweeps[0]
+            assert argv[:len(first)] == first
+            assert argv[len(first):len(first) + 3] == ["--home", str(seeded_home), "dispatch"]
+            assert "timeout" not in kw
+
+    asyncio.run(_inner(None, [sys.executable, "-m", "maestro.cli"]))
+    asyncio.run(_inner("/x/maestro", ["/x/maestro"]))
+
+# --------------------------------------------------------------------------- #
+# T-176: K -> _StopModal (Cancel default) -> ops.stop_session in a worker      #
+# --------------------------------------------------------------------------- #
+
+def _live_session(home, key="T-3"):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                            start_new_session=True)
+    _threading.Thread(target=proc.wait, daemon=True).start()  # we are the parent: reap
+    claims.write_claim(home, key, proc.pid, f"reconcile-{key}")
+    return proc
+
+
+async def _wait_modal(app, pilot, cls, timeout=10.0):
+    """The K probe runs `ps` in a worker; under load the modal lands a beat late."""
+    deadline = _time.time() + timeout
+    while not isinstance(app.screen, cls) and _time.time() < deadline:
+        await _settle(app, pilot)
+
+
+async def _wait_gone(proc, timeout=5.0):
+    deadline = _time.time() + timeout
+    while proc.poll() is None and _time.time() < deadline:
+        await asyncio.sleep(0.05)
+
+
+def test_stop_modal_defaults_to_cancel_then_stops(seeded_home):
+    proc = _live_session(seeded_home)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        try:
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                toasts = _capture_toasts(app)
+                app._selected_key = "T-3"
+                await pilot.press("K")
+                await _wait_modal(app, pilot, _StopModal)
+                assert isinstance(app.screen, _StopModal)
+                text = " ".join(str(w.render()) for w in app.screen.query("Label"))
+                assert str(proc.pid) in text and "confirmed" in text
+                await pilot.press("enter")  # Cancel is focused
+                await pilot.pause()
+                assert not isinstance(app.screen, _StopModal)
+                assert proc.poll() is None
+                await pilot.press("K")
+                await _wait_modal(app, pilot, _StopModal)
+                await pilot.click("#stop-ok")
+                await _settle(app, pilot)
+                await _wait_gone(proc)
+                await _settle(app, pilot)
+                assert proc.poll() is not None
+                assert any("stopped" in t for t in toasts), toasts
+                assert app._exception is None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    asyncio.run(_inner())
+
+
+def test_stop_warns_without_stoppable_claim(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            toasts = _capture_toasts(app)
+            app._selected_key = "T-3"
+            await pilot.press("K")
+            await _settle(app, pilot)
+            assert not isinstance(app.screen, _StopModal)
+            claims.write_claim(seeded_home, "T-3", 1, "x", kind="testrun")
+            await pilot.press("K")
+            await _settle(app, pilot)
+            assert not isinstance(app.screen, _StopModal)
+            assert len(toasts) == 2 and app._exception is None
+
+    asyncio.run(_inner())
+
+
+@pytest.mark.parametrize("checked", [False, True])
+def test_stop_note_and_nudge(seeded_home, checked):
+    proc = _live_session(seeded_home)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        try:
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                app._selected_key = "T-3"
+                before = len(inbox.pending(seeded_home, "T-3"))
+                await pilot.press("K")
+                await _wait_modal(app, pilot, _StopModal)
+                if checked:
+                    app.screen.query_one("#stop-nudge", Checkbox).value = True
+                await pilot.click("#stop-ok")
+                await _settle(app, pilot)
+                await _wait_gone(proc)
+                await _settle(app, pilot)
+                await _settle(app, pilot)
+                msgs = inbox.pending(seeded_home, "T-3")
+                spawned = [s[0] for s in app.dry.spawned]
+                if checked:
+                    assert len(msgs) == before + 1 and msgs[-1]["command"] == "msg"
+                    assert spawned == ["T-3"]
+                else:
+                    assert len(msgs) == before and spawned == []
+                assert app._exception is None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    asyncio.run(_inner())
+
+
+# --------------------------------------------------------------------------- #
+# T-169: SessionsScreen (B) -- Burners + Claims tabs                           #
+# --------------------------------------------------------------------------- #
+
+async def _sessions_table(app, pilot, table_id, want_rows=1):
+    for _ in range(100):
+        await pilot.pause(0.1)
+        table = app.screen.query_one(table_id, DataTable)
+        if table.row_count >= want_rows:
+            return table
+    raise AssertionError(f"{table_id} never reached {want_rows} row(s)")
+
+
+def _row_cells(table, key):
+    return [str(c) for c in table.get_row(key)]
+
+
+def test_sessions_screen_lists_per_key_spend(seeded_home):
+    _write_stream_log(seeded_home, "T-3", store.now_epoch() - 60, [_result_record(0.50)])
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("B")
+            await pilot.pause()
+            assert isinstance(app.screen, SessionsScreen)
+            table = await _sessions_table(app, pilot, "#burners-table")
+            assert "$0.50" in _row_cells(table, "T-3")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+# T-170: FleetScreen doctor checks table + remedies                           #
+# --------------------------------------------------------------------------- #
+
+async def _open_fleet_checks(app, pilot):
+    await pilot.pause()
+    await app.run_action("fleet_panel")
+    await pilot.pause()
+    assert isinstance(app.screen_stack[-1], FleetScreen)
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    return app.screen.query_one("#fleet-checks", DataTable)
+
+
+def _check_rows(table):
+    return [(str(table.get_row(r.key)[0]), str(table.get_row(r.key)[1])) for r in table.ordered_rows]
+
+
+async def _select_check(pilot, table, name):
+    table.move_cursor(row=table.get_row_index(name))
+    await pilot.pause()
+
+
+async def _choose_remedy(app, pilot, option_id):
+    await pilot.pause()
+    assert isinstance(app.screen_stack[-1], _CheckModal)
+    picker = app.screen.query_one("#check-remedies")
+    picker.highlighted = picker.get_option_index(option_id)
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+def test_fleet_checks_table_sorted_worst_first(seeded_home):
+    _set_deps(seeded_home, "T-4", ["T-5"])
+    _set_deps(seeded_home, "T-5", ["T-4"])
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 50)) as pilot:
+            table = await _open_fleet_checks(app, pilot)
+            rows = _check_rows(table)
+            assert ("fail", "depends_on") in rows
+            assert "ok" not in {s for s, _ in rows}
+            order = [s for s, _ in rows]
+            assert order == sorted(order, key=["fail", "warn"].index)
+            await pilot.press("o")
+            await pilot.pause()
+            rows = _check_rows(table)
+            total = len(app.screen._doctor["checks"])
+            assert len(rows) == total == len(__import__("maestro.health").health.CHECKS)
+            order = [s for s, _ in rows]
+            assert order == sorted(order, key=["fail", "warn", "ok"].index)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_sessions_screen_flags_burning_key(seeded_home):
+    for _ in range(5):
+        event_log.append(seeded_home, "T-3", "Failed", {"error": "boom"}, actor="r")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("B")
+            table = await _sessions_table(app, pilot, "#burners-table")
+            assert "repeated failure" in _row_cells(table, "T-3")
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_sessions_burner_enter_jumps_board_cursor(seeded_home):
+    _write_stream_log(seeded_home, "T-3", store.now_epoch() - 60, [_result_record(0.50)])
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("B")
+            await _sessions_table(app, pilot, "#burners-table")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not isinstance(app.screen, SessionsScreen)
+            assert app._selected_key == "T-3"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def _claim_setup(home, child_process):
+    claims.write_claim(home, "T-3", child_process.pid, "reconcile-T-3")
+    claims.write_claim(home, "T-5", 2_000_000_000, "reconcile-T-5")
+
+
+def test_sessions_claims_tab_shows_verdicts(seeded_home, child_process):
+    _claim_setup(seeded_home, child_process)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("B")
+            await pilot.pause()
+            await pilot.press("2")
+            table = await _sessions_table(app, pilot, "#claims-table", 2)
+            t3, t5 = _row_cells(table, "T-3"), _row_cells(table, "T-5")
+            assert t3[3] == "confirmed" and t3[4] == "yes"
+            assert t5[4] == "no"
+            table.move_cursor(row=table.get_row_index("T-3"))
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, LogsScreen) and app.screen._key == "T-3"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_check_dead_letter_retry(seeded_home):
+    cfg = config_mod.load(str(seeded_home))
+    ops_mod.fail(cfg, "T-2", "boom", dead_letter=True)
+    before = event_log.read(seeded_home, "T-2")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 50)) as pilot:
+            table = await _open_fleet_checks(app, pilot)
+            await _select_check(pilot, table, "dead_letters")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _CheckModal)
+            assert "dead-lettered" in str(app.screen.query_one("#check-json").render())
+            await _choose_remedy(app, pilot, "retry|T-2")
+            assert [c["command"] for c in inbox.pending(seeded_home, "T-2")] == ["retry"]
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    assert event_log.read(seeded_home, "T-2") == before
+
+
+def test_fleet_check_dead_letter_discard_typed_confirm(seeded_home):
+    cfg = config_mod.load(str(seeded_home))
+    ops_mod.fail(cfg, "T-2", "boom", dead_letter=True)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 50)) as pilot:
+            table = await _open_fleet_checks(app, pilot)
+            await _select_check(pilot, table, "dead_letters")
+            await pilot.press("enter")
+            await _choose_remedy(app, pilot, "discard|T-2")
+            assert isinstance(app.screen_stack[-1], _ConfirmModal)
+            await pilot.press("enter")  # empty input: nothing happens
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _ConfirmModal)
+            assert inbox.pending(seeded_home, "T-2") == []
+            for ch in "T-2":
+                await pilot.press(ch)
+            await pilot.pause()
+            app.screen.query_one("#confirm-ok").press()
+            await pilot.pause()
+            assert [c["command"] for c in inbox.pending(seeded_home, "T-2")] == ["discard"]
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_sessions_purge_releases_only_stale_claims(seeded_home, child_process):
+    _claim_setup(seeded_home, child_process)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("B")
+            await pilot.pause()
+            await pilot.press("2")
+            await _sessions_table(app, pilot, "#claims-table", 2)
+            await pilot.press("x")
+            await pilot.pause()
+            assert isinstance(app.screen, _ConfirmModal)
+            await pilot.press("enter")  # default is Cancel
+            await pilot.pause()
+            assert claims.claim_path(seeded_home, "T-3").exists()
+            assert claims.claim_path(seeded_home, "T-5").exists()
+            await pilot.press("x")
+            await pilot.pause()
+            await pilot.press("y")
+            for _ in range(50):
+                await pilot.pause(0.1)
+                if not claims.claim_path(seeded_home, "T-5").exists():
+                    break
+            assert not claims.claim_path(seeded_home, "T-5").exists()
+            assert claims.claim_path(seeded_home, "T-3").exists()
+            assert child_process.poll() is None
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_check_g_opens_culprit_detail(seeded_home):
+    cfg = config_mod.load(str(seeded_home))
+    ops_mod.fail(cfg, "T-2", "boom", dead_letter=True)
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 50)) as pilot:
+            table = await _open_fleet_checks(app, pilot)
+            assert dict(((n, s) for s, n in _check_rows(table)))["backup_age"] == "warn"
+            await _select_check(pilot, table, "backup_age")
+            depth = len(app.screen_stack)
+            await pilot.press("g")
+            await pilot.pause()
+            assert len(app.screen_stack) == depth and isinstance(app.screen, FleetScreen)
+            assert any("no ticket" in n.message for n in app._notifications)
+            await _select_check(pilot, table, "dead_letters")
+            await pilot.press("g")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], DetailScreen)
+            assert app.screen_stack[-1]._key == "T-2"
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_check_release_refuses_live_claim(seeded_home, child_process):
+    claims.write_claim(seeded_home, "T-3", child_process.pid, "reconcile-T-3")
+    claim_file = seeded_home / "derived" / "claims" / "T-3.json"
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 50)) as pilot:
+            table = await _open_fleet_checks(app, pilot)
+            await pilot.press("o")
+            await pilot.pause()
+            await _select_check(pilot, table, "claim_age")
+            await pilot.press("enter")
+            await _choose_remedy(app, pilot, "release|T-3")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert not isinstance(app.screen_stack[-1], _ConfirmModal)
+            assert any("live" in n.message for n in app._notifications)
+            assert claim_file.exists() and child_process.poll() is None
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_check_backup_now_never_restores(seeded_home):
+    cfg = config_mod.load(str(seeded_home))
+    before_backups = len(backup_mod.list_backups(cfg))
+    before = _tree_bytes(seeded_home, "events")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(140, 50)) as pilot:
+            table = await _open_fleet_checks(app, pilot)
+            await _select_check(pilot, table, "backup_age")
+            await pilot.press("enter")
+            await _choose_remedy(app, pilot, "backup-now|")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+    assert len(backup_mod.list_backups(cfg)) == before_backups + 1
+    assert _tree_bytes(seeded_home, "events") == before
+    for path in sorted((Path(__file__).parent.parent / "maestro" / "tui").rglob("*.py")):
+        assert "restore_backup" not in path.read_text(encoding="utf-8"), path.name
+    assert _CheckModal in _BINDING_CLASSES

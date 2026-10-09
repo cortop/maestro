@@ -62,32 +62,20 @@ def test_create_repo_flows_through_mint_to_spec_and_snapshot(home):
 
 # --- AC2: config.load parses [repos.*] tables; implicit default matches today's cfg ---
 
+def _expected_repo_table(**given):
+    """The exact table `config.load` yields: every repo-only and override key, defaults unless *given*."""
+    expected = {k: None for k in config_mod._REPO_ONLY_KEYS | set(config_mod.REPO_OVERRIDE_KEYS)}
+    expected.update(base_branch="main", branch_prefix="maestro/", default=False, mode="git",
+                    reconcile_allowed_tools=[])
+    expected.update(given)
+    return expected
+
+
 def test_config_load_parses_repos_tables(home):
     cfg = _write_multi_repo_config(home)
-    assert cfg.repos["alpha"] == {
-        "path": "/repo/alpha", "slug": "acme/alpha",
-        "base_branch": "develop", "branch_prefix": "alpha/", "default": False,
-        "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
-        "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
-        "test_command": None,
-        "prime_timeout": None, "worktree_timeout": None, "language": None,
-        "test_selector": None, "post_qa_skill": None,
-        "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
-        "ci_auto_rerun": None, "ci_rerun_grace": None, "ci_failure_excerpt": None,
-        "file_hints": None, "pr_split_threshold": None, "allowed_paths": None, "stack_tool": None,
-    }
-    assert cfg.repos["beta"] == {
-        "path": "/repo/beta", "slug": "acme/beta",
-        "base_branch": "main", "branch_prefix": "maestro/", "default": False,
-        "max_spawns_per_sweep": None, "mode": "git", "reconcile_allowed_tools": [],
-        "gh_account": None, "token_env": None, "prime": None, "base_drift_policy": None,
-        "test_command": None,
-        "prime_timeout": None, "worktree_timeout": None, "language": None,
-        "test_selector": None, "post_qa_skill": None,
-        "post_qa_skill_runner": None, "post_qa_skill_runner_model": None,
-        "ci_auto_rerun": None, "ci_rerun_grace": None, "ci_failure_excerpt": None,
-        "file_hints": None, "pr_split_threshold": None, "allowed_paths": None, "stack_tool": None,
-    }
+    assert cfg.repos["alpha"] == _expected_repo_table(
+        path="/repo/alpha", slug="acme/alpha", base_branch="develop", branch_prefix="alpha/")
+    assert cfg.repos["beta"] == _expected_repo_table(path="/repo/beta", slug="acme/beta")
 
 
 def test_no_repos_tables_yields_implicit_default_matching_repo_path(home):

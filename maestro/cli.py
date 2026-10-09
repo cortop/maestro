@@ -14,12 +14,35 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import backup, claims, credentials, decision_labels, event_log, events, fleet, health, inbox, ops, projection, ratelimit, repos as repos_mod, schedule, skills_install, snapshot as snap_mod, steplog, store
+from . import backup
+from . import claims
+from . import credentials
+from . import decision_labels
 from . import dispatcher as disp
-from .config import Config, DEFAULT_CONFIG_TOML, config_path, load, runner_path
+from . import event_log
+from . import events
+from . import fleet
+from . import health
+from . import inbox
+from . import ops
+from . import projection
+from . import ratelimit
+from . import repos as repos_mod
+from . import schedule
+from . import skills_install
+from . import snapshot as snap_mod
+from . import steplog
+from . import store
+from .config import DEFAULT_CONFIG_TOML
+from .config import Config
+from .config import config_path
+from .config import load
+from .config import runner_path
 from .providers import ollama as ollama_mod
 from .providers import pi as pi_mod
-from .sessions import DryRunSessions, build_routing_sessions, list_sessions
+from .sessions import DryRunSessions
+from .sessions import build_routing_sessions
+from .sessions import list_sessions
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
@@ -786,6 +809,15 @@ def cmd_hold(args) -> int:
         return 2
     _print(fleet.hold(home, args.key, until=until, reason=args.reason))
     return 0
+
+
+def cmd_stop(args) -> int:
+    """[human] SIGTERM one key's live session (see `ops.stop_session`). Exit 0 only
+    when the process stopped. Never added to `_AGENT_TOOL_VERBS`."""
+    cfg = _cfg(args)
+    result = ops.stop_session(cfg, args.key, wait=args.wait)
+    _print(result)
+    return 0 if result["stopped"] else 1
 
 
 def cmd_unhold(args) -> int:
@@ -1702,6 +1734,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--until", default=None, help="bare epoch or ISO-8601 timestamp")
     sp.add_argument("--reason", default=None)
     sp = add("unhold", cmd_unhold, "[human] release a ticket's hold"); sp.add_argument("key")
+
+    sp = add("stop", cmd_stop,
+             "[human] SIGTERM a key's live session (no Failed event; refuses unless the claim's "
+             "process is confirmed). Note: the ticket is usually due again next sweep and respawns "
+             "unless held; repeated stops at one observed_seq count toward max_spawn_attempts")
+    sp.add_argument("key"); sp.add_argument("--wait", type=float, default=10.0,
+                    help="seconds to wait for the process to exit (never escalates to SIGKILL)")
 
     sp = add("snapshot", cmd_snapshot, "[agent] folded snapshot"); sp.add_argument("key")
     sp = add("events", cmd_events, "[agent] event log"); sp.add_argument("key"); sp.add_argument("--since", type=int, default=0)

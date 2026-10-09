@@ -5,49 +5,99 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from textual.app import App, ComposeResult, ScreenStackError
-from textual.binding import Binding
-from textual.css.query import NoMatches
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
-from textual.worker import Worker, WorkerState
-
 from rich.markup import escape
 from rich.text import Text
+from textual.app import App
+from textual.app import ComposeResult
+from textual.app import ScreenStackError
+from textual.binding import Binding
+from textual.command import CommandPalette
+from textual.containers import Horizontal
+from textual.containers import Vertical
+from textual.content import Content
+from textual.css.query import NoMatches
+from textual.widgets import DataTable
+from textual.widgets import Footer
+from textual.widgets import Header
+from textual.widgets import Input
+from textual.widgets import RichLog
+from textual.widgets import Static
+from textual.worker import Worker
+from textual.worker import WorkerState
 
-from .. import claims, ratelimit, spend as spend_mod, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
-from ..config import Config
-from ..dispatcher import existing_prefixes, spec_runner
+from .. import claims
+from .. import config as config_mod
+from .. import depgraph
 from .. import dispatcher as disp
-from ..projection import _PHASE_RANK, parse_query, phase_predicate, ticket_rows
-from ..sessions import build_routing_sessions, reap_children
-from ..statemachine import Phase, ACTIVE_PHASES
+from .. import event_log
+from .. import fleet as fleet_mod
+from .. import gates
+from .. import health
+from .. import inbox
+from .. import ops as ops_mod
+from .. import ratelimit
+from .. import snapshot as snap_mod
+from .. import spend as spend_mod
+from .. import store
+from ..config import Config
+from ..dispatcher import existing_prefixes
+from ..dispatcher import spec_runner
+from ..projection import _PHASE_RANK
+from ..projection import parse_query
+from ..projection import phase_predicate
+from ..projection import ticket_rows
+from ..sessions import build_routing_sessions
+from ..sessions import reap_children
+from ..statemachine import ACTIVE_PHASES
+from ..statemachine import Phase
+from .commands import ActionProvider
+from .commands import TicketProvider
 from .detail import render as _render_detail
 from .events import render_log
-from .modals import (
-    _ACCEPT_ALL, _AcceptedRecommendation, _AddAcModal, _AnswerModal, _CmdModal, _ConfirmModal,
-    HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal, _SpecFieldsModal,
-    _SuggestAcsModal,
-)
-from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
-from .screens import (
-    DecisionsScreen,
-    DetailScreen,
-    ActivityScreen,
-    DepsScreen,
-    EnvScreen,
-    EventsScreen,
-    FleetScreen,
-    InboxScreen,
-    LogsScreen,
-    ProposalScreen,
-    ReviewScreen,
-    ScheduleScreen,
-    SpecScreen,
-    AcScreen,
-    WhyScreen,
-    edit_in_editor,
-)
+from .modals import _ACCEPT_ALL
+from .modals import MENU_PROPOSAL
+from .modals import HoldModal
+from .modals import MenuRow
+from .modals import _AcceptedRecommendation
+from .modals import _ActionMenu
+from .modals import _AddAcModal
+from .modals import _AnswerModal
+from .modals import _CmdModal
+from .modals import _ConfirmModal
+from .modals import _CreateModal
+from .modals import _ImportLinearModal
+from .modals import _InboxModal
+from .modals import _RunnerModal
+from .modals import _SpecFieldsModal
+from .modals import _StopModal
+from .modals import _SuggestAcsModal
+from .modals import _TicketPickModal
+from .modals import menu_actions
+from .render import _dep_color
+from .render import _fmt_duration
+from .render import _nudge_toast
+from .render import _render_badge
+from .render import _render_pulse
+from .render import _styled_row
+from .screens import AcScreen
+from .screens import ActivityScreen
+from .screens import BackupsScreen
+from .screens import DecisionsScreen
+from .screens import DepsScreen
+from .screens import DetailScreen
+from .screens import EnvScreen
+from .screens import EventsScreen
+from .screens import FleetScreen
+from .screens import InboxScreen
+from .screens import LogsScreen
+from .screens import ProposalScreen
+from .screens import ReviewScreen
+from .screens import ScheduleScreen
+from .screens import SessionsScreen
+from .screens import SpecScreen
+from .screens import WhyScreen
+from .screens import edit_in_editor
+from .screens import toggle_fleet_pause
 
 _NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
 _NEEDS_YOU_PHASE_VALUES = {p.value for p in _NEEDS_YOU_PHASES}
@@ -149,7 +199,29 @@ def _load_board(home: Path) -> dict:
         "graph": depgraph.build(home),
         "live": _load_live(home, cfg),
         "no_output_timeout": cfg.no_output_timeout,
+        "proposals": {r[-1] for r in rows if store.ticket_dir(home, r[-1]).joinpath("proposal.md").exists()},
     }
+
+
+def _home_banner(home: Path, now: float) -> str:
+    """`<resolved home> · backup <age>` plus ⚠ segments: blocking (disk reads), worker thread only."""
+    try:
+        cfg = config_mod.load(str(home))
+    except store.MaestroError:
+        cfg = Config(home=home)
+    resolved = home.resolve()
+    chk = health.check_backup_age(cfg, now)
+    if chk["age_s"] is not None:
+        age = _fmt_duration(chk["age_s"])
+        parts = [f"⚠ backup {age} old" if chk["status"] != "ok" else f"backup {age} old"]
+    elif chk["status"] != "ok":
+        parts = ["⚠ no backup"]
+    else:
+        parts = ["backup n/a"]  # disabled, or nothing to protect yet
+    events = resolved / "events"
+    if resolved == fleet_mod._default_home() and not (events.is_dir() and any(events.glob("*.jsonl"))):
+        parts.append("⚠ empty default home")
+    return " · ".join([str(resolved), *parts])
 
 
 # ANSWER_COMMANDS minus the ticket-level discard/retry (T-157).
@@ -207,6 +279,8 @@ class MaestroTUI(App):
         Binding("ctrl+r", "retry", "Retry", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("B", "sessions_panel", "Sessions & burn", show=False),
+        Binding("P", "pause_fleet", "Pause/Resume", show=False),
         Binding("T", "activity_panel", "Activity", show=False),
         Binding("D", "deps_panel", "Deps", show=False),
         Binding("e", "env_panel", "Env", show=False),
@@ -216,6 +290,7 @@ class MaestroTUI(App):
         Binding("t", "toggle_tail", "Tail/Full", show=False),
         Binding("x", "compact", "Compact", show=False),
         Binding("z", "release", "Release", show=False),
+        Binding("K", "stop_session", "Stop session", show=False),
         Binding("p", "project_rebuild", "Project", show=False),
         Binding("l", "view_logs", "Logs", show=False),
         Binding("I", "view_inbox", "Inbox log", show=False),
@@ -232,25 +307,39 @@ class MaestroTUI(App):
         Binding("N", "toggle_nudge", "Nudge on/off", show=False),
         Binding("h", "hold", "Hold", show=False),
         Binding("j", "jump_running", "Next running", show=False),
+        Binding("m", "action_menu", "Menu", show=False),
         Binding("w", "why_panel", "Why", show=False),
+        Binding("b", "blockers", "Blockers", show=False),
+        Binding("O", "open_pr", "Open PR", show=False),
         Binding("slash", "filter_query", "Search", show=False, priority=True),
         Binding("escape", "clear_query", "Clear search", show=False),
+        # T-162: Textual only auto-binds ctrl+p when nothing binds `command_palette`, so bind both.
+        Binding("ctrl+p", "command_palette", "Palette", show=False, priority=True),
+        Binding("colon", "command_palette", "Palette", show=False),
     ]
+
+    COMMANDS = App.COMMANDS | {TicketProvider, ActionProvider}
 
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
         "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
-        "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel",
+        "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel", "action_menu", "blockers", "open_pr",
     })
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
         "jump_running", "decisions", "filter_query", "clear_query",
     })
-    _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
+    _NON_TICKET_SCREENS = (FleetScreen, SessionsScreen, BackupsScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen, ReviewScreen, WhyScreen)
+
+    # T-178: actions other tickets add; a menu row appears only if the App has the action.
+    _OPTIONAL_MENU_ROWS = (
+        ("Open PR", "O", "open_pr"), ("Hold", "h", "hold"),
+        ("Stop", "K", "stop"), ("Spec fields", "M", "spec_fields"),
+    )
 
     _selected_key: str | None = None
     _tail_mode: bool = True  # default: show tail in the sidebar panel
@@ -267,6 +356,7 @@ class MaestroTUI(App):
         # T-153: `N` toggles nudging for THIS session only (no config write).
         self._nudge_enabled: bool = True
         self._badge_result: dict | None = None
+        self.sub_title = str(self._home.resolve())
         self._selected_key: str | None = None
         self._filter_idx: int = 0
         # T-166: the `/` live filter -- the applied text, its compiled predicate
@@ -279,6 +369,8 @@ class MaestroTUI(App):
         self._sort_col: int | None = None
         self._sort_desc: bool = False
         self._release_key: str | None = None
+        self._stop_key: str | None = None
+        self._stop_note = False
         self._tickets_fr: float = 2.0
         # key -> phase; None = first poll (no notifications)
         self._prev_phases: dict[str, str] | None = None
@@ -301,11 +393,33 @@ class MaestroTUI(App):
         self._no_output_timeout: int = Config.no_output_timeout
         # key -> claim identity that already toasted red.
         self._red_toasted: dict[str, tuple] = {}
+        # T-162: what the command palette searches (refreshed by `_populate`; never read from disk).
+        self._palette_tickets: list[tuple[str, str, str]] = []
+        self._palette_proposals: set[str] = set()
+
+    def _base_stack(self) -> list:
+        """The screen stack minus an open command palette, so actions judge the screen it covers."""
+        return [s for s in self.screen_stack if not isinstance(s, CommandPalette)]
+
+    def _base_screen(self):
+        stack = self._base_stack()
+        if not stack:
+            raise ScreenStackError("no screens")
+        return stack[-1]
+
+    def format_title(self, title: str, sub_title: str) -> Content:
+        """Like `App.format_title`, but a `⚠` segment of the sub_title is coloured, not dimmed."""
+        out = [Content(title)]
+        for i, seg in enumerate(sub_title.split(" · ") if sub_title else []):
+            out.append(Content(" — " if i == 0 else " · ")
+                       .stylize("dim"))
+            out.append(Content(seg).stylize("bold yellow" if seg.startswith("⚠") else "dim"))
+        return Content.assemble(*out)
 
     def _target_key(self) -> str | None:
         """The ticket the operator is looking at: the pushed screen's own ticket, else the board cursor."""
         try:
-            screen = self.screen
+            screen = self._base_screen()
         except ScreenStackError:  # unmounted app (tests call actions directly)
             return self._selected_key
         if isinstance(screen, self._KEYED_SCREENS):
@@ -320,11 +434,11 @@ class MaestroTUI(App):
         return self._selected_key
 
     def _on_board(self) -> bool:
-        return len(self.screen_stack) <= 1
+        return len(self._base_stack()) <= 1
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         try:
-            screen = self.screen
+            screen = self._base_screen()
         except ScreenStackError:
             return True
         if action in self._TICKET_ACTIONS and isinstance(screen, self._NON_TICKET_SCREENS):
@@ -521,13 +635,20 @@ class MaestroTUI(App):
             return {
                 "fleet": fleet_mod.status(self._home),
                 "provider": health.check_provider_availability(cfg, store.now_epoch()),
+                "banner": _home_banner(self._home, store.now_epoch()),
             }
         self.run_worker(_load, thread=True, group="badge", exclusive=True, name="fleet-badge")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
             self._badge_result = event.worker.result
+            self.sub_title = self._badge_result["banner"]
             self._paint_badge()
+        elif event.worker.name == "blockers":
+            if event.state == WorkerState.SUCCESS:
+                self._open_blockers_picker(*event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"blockers failed: {event.worker.error}", severity="error")
         elif event.worker.name == "nudge":
             if event.state == WorkerState.SUCCESS:
                 msg, severity = event.worker.result
@@ -538,7 +659,7 @@ class MaestroTUI(App):
             p = event.worker.result
             try:
                 self.screen_stack[0].query_one("#pulse", Static).update(_render_pulse(p))
-            except NoMatches:  # app is tearing down
+            except (NoMatches, IndexError):  # app is tearing down
                 return
             runaway = bool(p.get("runaway"))
             if runaway and not self._pulse_runaway:
@@ -559,6 +680,23 @@ class MaestroTUI(App):
                 self._on_release_probed(self._release_key, event.worker.result)
             elif event.state == WorkerState.ERROR:
                 self.notify(f"Claim probe failed: {event.worker.error}", severity="error")
+        elif event.worker.name == "stop-probe":
+            if event.state == WorkerState.SUCCESS:
+                self._on_stop_probed(self._stop_key, *event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"Claim probe failed: {event.worker.error}", severity="error")
+        elif event.worker.name == "stop-session":
+            if event.state == WorkerState.SUCCESS:
+                r = event.worker.result
+                self.notify(f"{r['key']}: {r['outcome']} (pid {r['pid']})",
+                            severity="information" if r["stopped"] else "warning")
+                if r["stopped"] and self._stop_note:  # after the stop, so the sweep sees it dead
+                    self._stop_note = False
+                    inbox.append_command(self._home, r["key"], "msg",
+                                         {"text": "Session stopped by a human (maestro stop)."})
+                    self._nudge(r["key"])
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"Stop failed: {event.worker.error}", severity="error")
         elif event.worker.name == "compact":
             if event.state == WorkerState.SUCCESS:
                 r = event.worker.result
@@ -598,7 +736,10 @@ class MaestroTUI(App):
         key = str(event.row_key.value) if event.row_key and event.row_key.value is not None else None
         self._selected_key = key
         self._refresh_bindings()
-        detail = self.query_one("#detail", Static)
+        try:
+            detail = self.query_one("#detail", Static)
+        except NoMatches:  # a modal/screen is on top (or teardown): nothing to paint
+            return
         if key is None:
             detail.update("[dim]Select a ticket[/dim]")
             self.query_one("#events", RichLog).clear()
@@ -653,6 +794,7 @@ class MaestroTUI(App):
         self._graph = data["graph"]
         self._live = data["live"]
         self._no_output_timeout = data["no_output_timeout"]
+        self._palette_proposals = data["proposals"]
         self._toast_new_red(store.now_epoch())
         self._populate()
 
@@ -710,6 +852,39 @@ class MaestroTUI(App):
             self._selected_key = target
             self._show_detail(target)
 
+    def _jump_to(self, key: str) -> bool:
+        """Put the board cursor on *key*, widening the filter to `all` (and dropping a
+        search that hides it) only when the current view doesn't show it. Returns success."""
+        while len(self.screen_stack) > 1:  # back to the board
+            self.pop_screen()
+        if key not in self._snaps:
+            self.notify(f"{key}: no such ticket", severity="warning")
+            return False
+        table = self.query_one("#tickets", DataTable)
+
+        def _visible() -> list[str]:
+            return [str(k.value) for k in table.rows]
+
+        if key not in _visible():
+            self._filter_idx = _filter_idx_by_name("all")
+            self._populate()
+        if key not in _visible() and (self._query or self._query_input_shown()):
+            self.action_clear_query()
+        visible = _visible()
+        if key not in visible:
+            self.notify(f"{key}: not on the board", severity="warning")
+            return False
+        table.move_cursor(row=visible.index(key))
+        self._selected_key = key
+        self._show_detail(key, self._snaps.get(key))
+        return True
+
+    def _open_ticket_screen(self, key: str, screen_name: str) -> None:
+        """Push one of a ticket's sub-screens (palette sub-hits)."""
+        screens = {"DetailScreen": DetailScreen, "SpecScreen": SpecScreen, "LogsScreen": LogsScreen,
+                   "EventsScreen": EventsScreen, "ProposalScreen": ProposalScreen}
+        self.push_screen(screens[screen_name](self._home, key))
+
     def _query_input_shown(self) -> bool:
         try:
             return bool(self.query_one("#query-bar", Input).display)
@@ -738,7 +913,10 @@ class MaestroTUI(App):
 
     def _apply_query(self) -> None:
         self._query_timer = None
-        text = self.query_one("#query-bar", Input).value.strip()
+        try:
+            text = self.query_one("#query-bar", Input).value.strip()
+        except NoMatches:  # debounce fired while the app is tearing down
+            return
         try:
             pred = parse_query(text) if text else None
         except ValueError as exc:
@@ -893,8 +1071,21 @@ class MaestroTUI(App):
             _on_confirm,
         )
 
+    def action_pause_fleet(self) -> None:
+        def _run(name: str, fn) -> None:
+            try:
+                self.notify(f"{name}: {fn()}")
+            except Exception as exc:
+                self.notify(f"{name} failed: {exc}", severity="error")
+            self._refresh_badge()
+
+        toggle_fleet_pause(self, self._home, _run)
+
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_sessions_panel(self) -> None:
+        self.push_screen(SessionsScreen(self._home))
 
     def action_review_panel(self) -> None:
         self.push_screen(ReviewScreen(self._home))
@@ -904,6 +1095,63 @@ class MaestroTUI(App):
 
     def action_deps_panel(self) -> None:
         self.push_screen(DepsScreen(self._home, self._target_key()))
+
+    def action_blockers(self) -> None:
+        """Pick a blocker / dependent of the ticket on screen and hop to it (read-only)."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        home = self._home
+
+        def _load() -> tuple[str, list[tuple[str, str, str]], list[tuple[str, str]]]:
+            blocks = depgraph.build(home).dependents.get(key, [])
+            return (key, depgraph.dep_status(home, key),
+                    [(b, str(getattr(snap_mod.load(home, b).phase, "value", ""))) for b in blocks])
+
+        self.run_worker(_load, thread=True, name="blockers", group="blockers", exclusive=True,
+                        exit_on_error=False)
+
+    def _open_blockers_picker(self, key: str, deps: list[tuple[str, str, str]],
+                              blocks: list[tuple[str, str]]) -> None:
+        if not deps and not blocks:
+            self.notify("No blockers or dependents", severity="warning")
+            return
+        missing = {d for d, _, phase in deps if phase == "missing"}
+        groups: list[tuple[str, list[tuple[str, str]]]] = []
+        if deps:
+            groups.append(("Blocked by", [
+                (d, f"[dim]{d} {emoji} {phase}[/dim]" if emoji == "✅" else f"{d} {emoji} {phase}")
+                for d, emoji, phase in deps]))
+        if blocks:
+            groups.append(("Blocks", [(b, f"{b} {phase}") for b, phase in blocks]))
+
+        def _picked(target: str | None) -> None:
+            if target is None:
+                return
+            if target in missing:
+                self.notify(f"{target} does not exist", severity="warning")
+                return
+            screen = self.screen
+            if isinstance(screen, DetailScreen):
+                self.switch_screen(DetailScreen(self._home, target))
+            elif isinstance(screen, SpecScreen):
+                self.switch_screen(SpecScreen(self._home, target))
+            else:
+                self.push_screen(DetailScreen(self._home, target))
+
+        self.push_screen(_TicketPickModal(f"{key}: blockers and dependents", groups), _picked)
+
+    def action_open_pr(self) -> None:
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        url = snap_mod.load(self._home, key).pr_url
+        if not url:
+            self.notify(f"No PR for {key}", severity="warning")
+            return
+        self.open_url(url)
 
     def action_show_spec(self) -> None:
         key = self._target_key()
@@ -1128,7 +1376,7 @@ class MaestroTUI(App):
 
         self.push_screen(_ImportLinearModal(), _on_dismiss)
 
-    def action_answer(self) -> None:
+    def action_answer(self, initial: str = "") -> None:
         key = self._target_key()
         snap = snap_mod.load(self._home, key) if key is not None else None
         if snap is None or not snap.open_questions:
@@ -1147,10 +1395,18 @@ class MaestroTUI(App):
             snap.open_questions.items(),
             key=lambda qt: ops_mod.parse_round_question(qt[1])[0] or float("inf"),
         )
-        self._walk_questions(key, questions, 0, 0)
+        self._walk_questions(key, questions, 0, 0, initial)
+
+    def action_answer_approve(self) -> None:
+        """Menu Approve: the `a` walker pre-filled with "approve" -- always a qid-carrying `ans`."""
+        self.action_answer("approve")
+
+    def action_answer_reject(self) -> None:
+        self.action_answer("reject")
 
     def _walk_questions(
-        self, key: str, questions: list[tuple[str, str]], idx: int, answered: int
+        self, key: str, questions: list[tuple[str, str]], idx: int, answered: int,
+        initial: str = "",
     ) -> None:
         if idx >= len(questions):
             if answered:
@@ -1189,7 +1445,7 @@ class MaestroTUI(App):
                         unanswered.append((q_qid, q_text))
                 if queued:
                     self.notify(f"{queued} recommendation(s) queued for {key}")
-                self._walk_questions(key, unanswered, 0, answered + queued)
+                self._walk_questions(key, unanswered, 0, answered + queued, initial)
                 return
             # T-140: Ctrl+R dismisses with an `_AcceptedRecommendation` (a str
             # subclass equal to the recommendation) -- carry the accept marker
@@ -1199,12 +1455,69 @@ class MaestroTUI(App):
             if isinstance(answer, _AcceptedRecommendation):
                 args["accepted_recommendation"] = True
             inbox.append_command(self._home, key, "ans", args)
-            self._walk_questions(key, questions, idx + 1, answered + 1)
+            self._walk_questions(key, questions, idx + 1, answered + 1, initial)
 
         self.push_screen(
-            _AnswerModal(key, qid, position, total, body, recommend, remaining, self._home),
+            _AnswerModal(key, qid, position, total, body, recommend, remaining, self._home, initial),
             _on_dismiss,
         )
+
+    def action_action_menu(self) -> None:
+        """T-178: the phase-aware action menu for the targeted ticket. Everything the
+        menu offers is an existing action, so it adds no write path. The claim verdict
+        shells out to `ps` (`gates.runner_editable`), so it is resolved once, here, on
+        a thread worker before the menu is pushed -- never `claims.is_claimed`."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        if isinstance(self.screen, _ActionMenu):
+            return
+        home = self._home
+
+        def _probe() -> None:
+            snap = snap_mod.load(home, key)
+            spec = store.spec_path(home, key)
+            try:
+                has_acs = snap_mod.has_acs(spec.read_text(encoding="utf-8"))
+            except OSError:
+                has_acs = False
+            rows = menu_actions(
+                snap.phase,
+                open_questions=len(snap.open_questions),
+                has_pr=snap.pr_number is not None,
+                claim=claims.read_claim(home, key) is not None,
+                has_acs=has_acs,
+                has_proposal=(home / "tickets" / key / "proposal.md").exists(),
+                runner_editable=gates.runner_editable(home, key, snap),
+                extras=tuple(r for r in self._OPTIONAL_MENU_ROWS if hasattr(self, f"action_{r[2]}")),
+            )
+            try:
+                self.call_from_thread(self._push_action_menu, key, snap.phase, rows)
+            except RuntimeError:  # app torn down mid-probe
+                pass
+
+        self.run_worker(_probe, thread=True, group="action-menu", exclusive=True,
+                        name="action-menu", exit_on_error=False)
+
+    def _push_action_menu(self, key: str, phase: str, rows: list[MenuRow]) -> None:
+        if isinstance(self.screen, _ActionMenu) or self._target_key() != key:
+            return
+        self.push_screen(_ActionMenu(key, phase, rows), self._on_menu_chosen)
+
+    def _on_menu_chosen(self, row: MenuRow | None) -> None:
+        if row is None:
+            return
+        key = self._target_key()
+        if key is None:
+            return
+        if not row.enabled:
+            self.notify(f"{key}: {row.label} unavailable -- {row.reason}", severity="warning")
+            return
+        if row.action == MENU_PROPOSAL:
+            self.push_screen(ProposalScreen(self._home, key))
+            return
+        self.call_later(self.run_action, row.action)
 
     def action_compact(self) -> None:
         key = self._target_key()
@@ -1263,6 +1576,51 @@ class MaestroTUI(App):
             lambda: claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age),
             thread=True, name="release-probe",
         )
+
+    def action_stop_session(self) -> None:
+        """T-176: `K` -- confirm, then SIGTERM the target ticket's live session."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        claim = claims.read_claim(self._home, key)
+        if not claim:
+            self.notify(f"{key}: no live session to stop", severity="warning")
+            return
+        if claim.get("kind") in ("testrun", "restack"):
+            self.notify(f"{key}: {claim['kind']} is dispatcher-owned, not a session",
+                        severity="warning")
+            return
+        cfg = Config(home=self._home)
+        self._stop_key = key
+
+        def _probe() -> tuple[dict, dict | None]:  # `ps` shells out: off the UI thread
+            rows = claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age)
+            return claim, next((r for r in rows if r["key"] == key), None)
+
+        self.run_worker(_probe, thread=True, name="stop-probe")
+
+    def _on_stop_probed(self, key: str, claim: dict, row: dict | None) -> None:
+        if row is None:
+            self.notify(f"{key}: no live session to stop", severity="warning")
+            return
+        silence = None
+        if claim.get("log_path"):
+            try:
+                silence = round(store.now_epoch() - os.stat(claim["log_path"]).st_mtime)
+            except OSError:
+                pass
+
+        def _on_dismiss(result: tuple[bool, bool] | None) -> None:
+            if not result or not result[0]:
+                return
+            self._stop_note = result[1]
+            cfg = Config(home=self._home)
+            self.run_worker(lambda: ops_mod.stop_session(cfg, key), thread=True, name="stop-session")
+
+        self.push_screen(
+            _StopModal(key, pid=row["pid"], age_s=row["age_s"], verdict=row["verdict"], silence_s=silence),
+            _on_dismiss)
 
     def _on_release_probed(self, key: str, rows: list[dict]) -> None:
         row = next((r for r in rows if r["key"] == key), None)
@@ -1393,6 +1751,7 @@ class MaestroTUI(App):
                     self.notify(f"{key}: {phase}", severity="warning", timeout=6)
         self._prev_phases = new_phases
         self._snap_cache = {k: (sn.phase, len(sn.open_questions)) for k, sn in snaps_by_key.items()}
+        self._palette_tickets = [(r[-1], r[2], snaps_by_key[r[-1]].phase) for r in all_rows]
 
         # Build filter bar: show counts per filter, bold the active one
         parts = []

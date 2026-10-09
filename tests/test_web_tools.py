@@ -150,13 +150,37 @@ def test_agent_tool_verbs_named_exactly():
     """AC: exactly one Bash(maestro <verb>:*) rule per [agent]-tagged verb plus
     env/show/create, and no rule for the human-only/irreversible verbs."""
     granted = set(_AGENT_TOOL_VERBS)
+    # sorted-registry
     expected = {
-        "local-backup", "snapshot", "events", "append", "set-phase", "ask",
-        "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-        "verify-ac", "qa-brief", "qa-verdict", "capture-tests", "finalize", "checked", "release",
-        "check-conflicts", "check-merged", "fold-steps", "worktree", "locate", "pr-size",
+        "append",
+        "ask",
+        "capture-tests",
+        "check-conflicts",
+        "check-merged",
+        "checked",
+        "create",
+        "env",
+        "events",
+        "fail",
+        "finalize",
+        "fold-inbox",
+        "fold-steps",
+        "impl-turn",
+        "inbox-ack",
+        "local-backup",
+        "locate",
+        "observe-spec",
+        "pr-size",
+        "qa-brief",
+        "qa-verdict",
+        "release",
         "reply-review",
-        "env", "show", "create",
+        "requeue",
+        "set-phase",
+        "show",
+        "snapshot",
+        "verify-ac",
+        "worktree",
     }
     assert granted == expected
     assert not (granted & set(_HUMAN_ONLY_VERBS))

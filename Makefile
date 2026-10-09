@@ -4,14 +4,13 @@ export MAESTRO_HOME ?= $(HOME)/.maestro/maestro-dev
 
 PY := .venv/bin/python
 
-.PHONY: help install test test-serial t lint diagram dry dispatch loop status doctor project reconcile fleet-up fleet-down fleet-pause fleet-resume autocomplete backup restore prune-logs run-tui-dev
-
+.PHONY: help
 help:
 	@echo "make install     editable install + put 'maestro' on PATH"
 	@echo "make test        run the test suite in parallel (pytest-xdist, -n auto)"
 	@echo "make test-serial run the test suite in one process (easier to debug)"
 	@echo "make t F=tests/test_x.py K=expr   run a targeted subset, stop at first failure"
-	@echo "make lint        ruff (pyflakes rules) over maestro/ + tests/"
+	@echo "make lint        ruff (pyflakes + hot-file import order) over maestro/ + tests/"
 	@echo "make diagram     regenerate docs/state-machine.md + docs/dispatch-gates.md"
 	@echo "make dry         one dispatcher sweep, read-only preview (would_mint + would_spawn)"
 	@echo "make dispatch    one REAL sweep (spawns claude reconcilers for due tickets)"
@@ -30,6 +29,7 @@ help:
 	@echo "make autocomplete            install zsh completion script"
 	@echo "make run-tui-dev             launch the TUI against MAESTRO_HOME"
 
+.PHONY: install
 install:
 	$(PY) -m pip -q install -e ".[dev,tui]"
 	mkdir -p $(HOME)/.local/bin && ln -sf $(PWD)/.venv/bin/maestro $(HOME)/.local/bin/maestro
@@ -38,16 +38,20 @@ install:
 # Parallel by default: the suite is mostly subprocess/git wait, so -n auto is
 # ~6x faster than serial. Every test owns its tmp_path home, so workers never
 # share state. `make test-serial` for pdb / ordering-dependent debugging.
+.PHONY: test
 test:
 	$(PY) -m pytest -q -n auto
 
+.PHONY: test-serial
 test-serial:
 	$(PY) -m pytest -q
 
 # Targeted run: `make t F=tests/test_ops.py`, `make t K=qa_gate`, or both.
+.PHONY: t
 t:
 	$(PY) -m pytest -q -x $(F) $(if $(K),-k "$(K)",)
 
+.PHONY: lint
 lint:
 	$(PY) -m ruff check maestro tests
 
@@ -55,25 +59,32 @@ lint:
 # maestro/statemachine.py + an AST walk of maestro/dispatcher.py -- regenerate
 # after touching either. tests/test_diagram.py fails `make test` if these
 # committed files drift from the generator.
+.PHONY: diagram
 diagram:
 	$(PY) -m maestro.diagram
 
+.PHONY: dry
 dry:
 	maestro dispatch --dry-run
 
+.PHONY: dispatch
 dispatch:
 	maestro dispatch
 
+.PHONY: loop
 loop:
 	@echo "dispatching every 300s against $(MAESTRO_HOME) — Ctrl-C to stop"
 	@while true; do maestro dispatch; sleep 300; done
 
+.PHONY: status
 status:
 	maestro status
 
+.PHONY: doctor
 doctor:
 	maestro doctor
 
+.PHONY: project
 project:
 	maestro project
 
@@ -94,6 +105,7 @@ project:
 # and the spawn ledger all behave normally but scoped to that key, and a throttled target
 # idles instead of a normal sweep's slot-substitution. Reach for `--key` to exercise/watch
 # that machinery for one ticket; reach for this target to just watch the next step run.
+.PHONY: reconcile
 reconcile:
 	@test -n "$(KEY)" || (echo "usage: make reconcile KEY=M-1" && exit 1)
 	@ENV_JSON=$$(maestro env --key "$(KEY)"); \
@@ -106,34 +118,42 @@ reconcile:
 	fi; \
 	cd "$$REPO" && claude -p "$$COMMAND $(KEY)" --permission-mode acceptEdits
 
+.PHONY: backup
 backup:
 	maestro backup
 
 # Restore the latest snapshot into MAESTRO_HOME. Refuses to overwrite a non-empty
 # board unless FORCE=1 (e.g. `make restore FORCE=1`).
+.PHONY: restore
 restore:
 	maestro restore $(if $(FORCE),--force,)
 
 # Delete stale session logs (per session_log_retention_days / session_log_max_per_ticket)
 # across every ticket. DRY_RUN=1 to preview counts/bytes without deleting anything.
+.PHONY: prune-logs
 prune-logs:
 	maestro prune-logs --all $(if $(DRY_RUN),--dry-run,)
 
+.PHONY: fleet-up
 fleet-up:
 	maestro fleet up
 
+.PHONY: fleet-down
 fleet-down:
 	maestro fleet down
 
+.PHONY: fleet-pause
 fleet-pause:
 	maestro fleet pause $(if $(FOR),--for $(FOR),) $(if $(REASON),--reason "$(REASON)",)
 
+.PHONY: fleet-resume
 fleet-resume:
 	maestro fleet resume
 
 COMPLETION_SCRIPT := maestro/_assets/completions/_maestro
 COMPLETION_DIR := $(HOME)/.zsh/completions
 
+.PHONY: autocomplete
 autocomplete:
 	@mkdir -p $(COMPLETION_DIR)
 	@cp $(COMPLETION_SCRIPT) $(COMPLETION_DIR)/_maestro
@@ -142,5 +162,6 @@ autocomplete:
 	fi
 	@echo "maestro completion installed — restart your shell or: source ~/.zshrc"
 
+.PHONY: run-tui-dev
 run-tui-dev:
 	.venv/bin/maestro --home ${MAESTRO_HOME} tui

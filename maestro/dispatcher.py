@@ -22,18 +22,39 @@ import shlex
 import shutil
 import signal
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
-from typing import Callable, Iterable, NamedTuple
+from typing import Callable
+from typing import Iterable
+from typing import NamedTuple
 
-from . import alarm, claims, credentials, events as E
-from . import event_log, fleet, inbox, notify, ratelimit, schedule, snapshot as snap_mod, spend, steplog, store
+from . import alarm
+from . import claims
 from . import config as config_mod
+from . import credentials
+from . import event_log
+from . import events as E
+from . import fleet
+from . import inbox
+from . import notify
+from . import ratelimit
+from . import schedule
+from . import snapshot as snap_mod
+from . import spend
+from . import steplog
+from . import store
 from .config import Config
-from .gates import backend_interlock_reason, parse_spec_overrides, spec_priority, spec_runner  # noqa: F401 (re-export)
+from .gates import backend_interlock_reason  # noqa: F401 (re-export)
+from .gates import parse_spec_overrides  # noqa: F401 (re-export)
+from .gates import spec_priority  # noqa: F401 (re-export)
+from .gates import spec_runner  # noqa: F401 (re-export)
 from .idempotency import content_hash
 from .sessions import SessionManager
-from .statemachine import ACTIVE_PHASES, Phase, SLEEPING_PHASES, TERMINAL_PHASES
+from .statemachine import ACTIVE_PHASES
+from .statemachine import SLEEPING_PHASES
+from .statemachine import TERMINAL_PHASES
+from .statemachine import Phase
 
 
 @dataclass
@@ -181,17 +202,40 @@ def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution
 # "restore" (the one irreversible verb), "fleet" (launchd + the pause kill
 # switch), or any other human-only verb here -- and never collapse this to
 # the bare wildcard "maestro:*", which grants all of those at once.
+# sorted-registry
 AGENT_TOOL_VERBS = (
-    # The 24 "[agent]"-tagged verbs registered in build_parser().
-    "local-backup", "snapshot", "events", "append", "set-phase", "ask",
-    "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-    "verify-ac", "qa-brief", "qa-verdict", "capture-tests", "finalize", "checked", "release",
-    "check-conflicts", "check-merged", "fold-steps", "worktree", "locate", "pr-size",
-    "reply-review",
-    # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
-    "env",     # every phase preamble's first command, all phase files
-    "show",    # maestro-reconcile-passive.md reads pending_inbox through it
+    # The "[agent]"-tagged verbs registered in build_parser() (enforced by
+    # tests/test_web_tools.py::test_agent_grant_matches_cli_agent_tags), plus
+    # env/show/create, which skills genuinely invoke but build_parser() doesn't tag.
+    "append",
+    "ask",
+    "capture-tests",
+    "check-conflicts",
+    "check-merged",
+    "checked",
     "create",  # maestro-reconcile-awaiting-human.md mints implementation tickets
+    "env",  # every phase preamble's first command, all phase files
+    "events",
+    "fail",
+    "finalize",
+    "fold-inbox",
+    "fold-steps",
+    "impl-turn",
+    "inbox-ack",
+    "local-backup",
+    "locate",
+    "observe-spec",
+    "pr-size",
+    "qa-brief",
+    "qa-verdict",
+    "release",
+    "reply-review",
+    "requeue",
+    "set-phase",
+    "show",  # maestro-reconcile-passive.md reads pending_inbox through it
+    "snapshot",
+    "verify-ac",
+    "worktree",
 )
 
 # The coarse wildcard a human grants by hand in a settings file (see this
@@ -1763,7 +1807,8 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     if now - last_sync < interval:
         return {"checked": 0}
 
-    from . import providers, repos  # lazy: avoid a hard import-time dependency
+    from . import providers  # lazy: avoid a hard import-time dependency
+    from . import repos  # lazy: avoid a hard import-time dependency
 
     vcs = providers.get_vcs(cfg)
     checked = 0
@@ -2683,7 +2728,8 @@ def sync_test_runs(cfg: Config, now: float) -> dict:
     even while `[maestro] test_command` itself is unset.
     """
     home = cfg.home
-    from . import ops, repos as repos_mod
+    from . import ops
+    from . import repos as repos_mod
 
     if not cfg.test_command and not any(t.get("test_command") for t in cfg.repos.values()):
         return {"checked": 0}
@@ -2791,7 +2837,8 @@ def _fold_test_run(cfg: Config, key: str, claim: dict) -> None:
     log_path = _test_run_log_path(home, key)
     claims.release(home, key)
     cwd = claim.get("cwd") or str(_worker_cwd(cfg, key))
-    from . import ops, repos as repos_mod
+    from . import ops
+    from . import repos as repos_mod
 
     # T-83: the same per-key resolved command `_start_test_run` was launched
     # with -- never `cfg.test_command` directly, so a mid-flight config change
@@ -2914,7 +2961,9 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
     configured fails closed once instead of bouncing forever or silently
     scanning with the wrong regex.
     """
-    from . import ops, repos as repos_mod, testlang
+    from . import ops
+    from . import repos as repos_mod
+    from . import testlang
 
     if not record.get("passed"):
         fresh = snap_mod.rebuild(cfg.home, key)
@@ -3228,7 +3277,8 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
         pid = claim.get("pid")
         kill(pid)
         claims.release(home, key)
-        from . import health, ops
+        from . import health
+        from . import ops
         if provider_state == "_sentinel":
             provider = health.check_provider_availability(cfg, now)
             provider_state = provider["state"] if provider["status"] != "ok" else None
@@ -3971,7 +4021,8 @@ def _route_ready_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bo
     if cfg.ready_fast_path != "on" or Phase(snap.phase) != Phase.READY:
         return False
 
-    from . import ops, repos as repos_mod
+    from . import ops
+    from . import repos as repos_mod
 
     if not dry_run:
         ops.observe_spec(cfg, key, actor="dispatcher")
@@ -4186,7 +4237,8 @@ def _admit_for_spawn(sweep: _Sweep, key: str, binding, active: set[str],
     ``(credential, runner, runner_model)`` when *key* may spawn, else None.
     *memo* holds this sweep's per-repo spawn counts and credential / runner
     probe caches."""
-    from . import burn, ops
+    from . import burn
+    from . import ops
 
     cfg, decisions, hook_errors = sweep.cfg, sweep.decisions, sweep.hook_errors
     # RB-11: a burning key is dead-lettered before any other gate, so it

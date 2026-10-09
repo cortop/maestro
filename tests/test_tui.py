@@ -2151,3 +2151,34 @@ def test_activity_tail_skips_torn_line(home):
     event_log.append(home, "T-3", "Note", {"text": "real"}, actor="t")
     got = tail.poll()
     assert [e["type"] for e in got] == ["Note"] and got[0]["payload"] == {"text": "real"}
+
+
+def test_menu_actions_table():
+    from maestro.tui import menu_actions
+
+    def enabled(phase, **kw):
+        base = dict(open_questions=0, has_pr=False, claim=False, has_acs=True,
+                    has_proposal=False, runner_editable=True)
+        rows = menu_actions(phase, **{**base, **kw})
+        assert all(r.reason for r in rows if not r.enabled)
+        assert all(not r.reason for r in rows if r.enabled)
+        return {r.label for r in rows if r.enabled}
+
+    assert {"Retry", "Discard"} <= enabled("degraded")
+    assert not {"Retry", "Discard"} & enabled("implementing", has_pr=True)
+    assert not {"Retry", "Discard"} & enabled("in-review", has_pr=True)
+    for phase in ("awaiting-human", "degraded"):
+        assert {"Answer", "Approve", "Reject"} <= enabled(phase, open_questions=2)
+    for phase in ("awaiting-human", "implementing", "in-review", "degraded"):
+        assert not {"Answer", "Approve", "Reject"} & enabled(phase)
+    assert not {"Retry", "Discard"} & enabled("awaiting-human", open_questions=1)
+    assert "Runner" not in enabled("implementing", runner_editable=False)
+    assert "Suggest ACs" in enabled("ready", has_acs=False)
+    assert "Suggest ACs" not in enabled("ready", has_acs=True)
+    assert "Proposal" in enabled("ready", has_proposal=True)
+    assert "Release claim" in enabled("implementing", claim=True)
+    assert "Release claim" not in enabled("implementing")
+    rows = menu_actions("ready", open_questions=0, has_pr=False, claim=False, has_acs=True,
+                        has_proposal=False, runner_editable=True,
+                        extras=(("Hold", "h", "hold"),))
+    assert rows[-1].label == "Hold" and rows[-1].enabled

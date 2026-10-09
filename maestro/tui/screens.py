@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
+import sys
+import tarfile
 import time
 from collections import deque
 from datetime import datetime
@@ -12,26 +16,87 @@ from pathlib import Path
 
 from rich.markup import escape as rich_escape
 from rich.text import Text
+from textual.app import ComposeResult
+from textual.app import SuspendNotSupported
 from textual.binding import Binding
-from textual.app import ComposeResult, SuspendNotSupported
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal
+from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input, Markdown, RichLog, Static, Tree
-from textual.worker import Worker, WorkerState
+from textual.widgets import DataTable
+from textual.widgets import Footer
+from textual.widgets import Header
+from textual.widgets import Input
+from textual.widgets import Markdown
+from textual.widgets import RichLog
+from textual.widgets import Static
+from textual.widgets import TabbedContent
+from textual.widgets import TabPane
+from textual.widgets import Tree
+from textual.worker import Worker
+from textual.worker import WorkerState
 
-from .. import burn, claims, projection, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, repos, snapshot as snap_mod, store
+from .. import backup as backup_mod
+from .. import burn
+from .. import claims
+from .. import config as config_mod
+from .. import depgraph
 from .. import dispatcher
-from ..config import Config
-from ..dispatcher import list_keys, schedule_status, spec_runner
-from ..sessions import list_sessions
-from .detail import render as _render_detail, render_pending as _render_pending
-from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, fmt_duration, phase_dwell,
-                     render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
-from .modals import (_ACCEPT_ALL, _AcceptedRecommendation, _AnswerModal, _AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _InboxModal, _IntervalModal,
-                     _ScheduleModal, _TextViewModal)
+from .. import event_log
+from .. import fleet as fleet_mod
+from .. import health
+from .. import inbox
+from .. import ops
+from .. import projection
+from .. import ratelimit
+from .. import repos
 from .. import repos as repos_mod
+from .. import snapshot as snap_mod
+from .. import store
+from ..config import Config
+from ..dispatcher import list_keys
+from ..dispatcher import schedule_status
+from ..dispatcher import spec_runner
+from ..sessions import list_sessions
+from ..statemachine import Phase
+from . import checks as checks_mod
 from . import why as why_mod
-from .render import _fmt_duration, _dep_label, _fmt_epoch, _nudge_toast, _render_dep_header, _render_env, _render_fleet
+from .detail import render as _render_detail
+from .detail import render_pending as _render_pending
+from .events import _TAIL_N
+from .events import CATEGORY_NAMES
+from .events import EventTail
+from .events import category_of
+from .events import event_row
+from .events import event_summary
+from .events import fmt_duration
+from .events import phase_dwell
+from .events import render_dwell
+from .events import render_inbox
+from .events import render_log_line
+from .events import render_opencode_log_line
+from .events import render_pi_log_line
+from .modals import _ACCEPT_ALL
+from .modals import _AcceptedRecommendation
+from .modals import _AcEvidenceModal
+from .modals import _AddAcModal
+from .modals import _AnswerModal
+from .modals import _CheckModal
+from .modals import _ConfirmModal
+from .modals import _DirectionModal
+from .modals import _EventPayloadModal
+from .modals import _InboxModal
+from .modals import _IntervalModal
+from .modals import _PauseModal
+from .modals import _ScheduleModal
+from .modals import _TextViewModal
+from .render import _dep_label
+from .render import _fmt_duration
+from .render import _fmt_epoch
+from .render import _nudge_toast
+from .render import _render_dep_header
+from .render import _render_env
+from .render import _render_fleet
 
 
 def editor_argv(path: Path, line: int | None = None) -> list[str]:
@@ -510,8 +575,49 @@ class LogsScreen(Screen):
 def _session_header(sess: dict, outcome: str, info: dict) -> str:
     """One-line per-session banner: id, start ts, format, outcome, runner, model (markup-escaped)."""
     from rich.markup import escape
+
     from .. import steplog
     return escape(steplog.format_session_header(sess, outcome, info))
+
+
+def toggle_fleet_pause(app, home: Path, run, *, top_keys=None) -> None:
+    """One pause/resume flow for the board's and FleetScreen's `P`.
+
+    Reads the on-disk pause state at the keypress (never a cached copy): paused ->
+    default-No resume confirm; else `_PauseModal`. `run(name, fn)` executes the
+    mutation (`fleet.pause`/`fleet.resume`) -- the caller decides how and reports.
+    """
+    now = store.now_epoch()
+    state = fleet_mod.pause_state(home, now)
+    if state is not None:
+        since = state.get("since")
+        age = _fmt_duration(now - float(since)) if since else "?"
+        until = state.get("until")
+        until_s = _fmt_epoch(until) if until else "resumed"
+        msg = (f"Resume? (paused {age} ago, reason: {state.get('reason') or '—'}, "
+               f"until {until_s})")
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                run("fleet-resume", lambda: fleet_mod.resume(home))
+
+        app.push_screen(_ConfirmModal(msg), _on_confirm)
+        return
+
+    def _on_pause(result) -> None:
+        if result is None:
+            return
+        seconds, reason = result
+        until = store.now_epoch() + seconds if seconds is not None else None
+        run("fleet-pause", lambda: fleet_mod.pause(home, until=until, reason=reason))
+
+    app.push_screen(_PauseModal(top_keys), _on_pause)
+
+
+def _sweep_argv(home: Path, *args: str) -> list[str]:
+    exe = shutil.which("maestro")
+    base = [exe] if exe else [sys.executable, "-m", "maestro.cli"]
+    return [*base, "--home", str(home), *args]
 
 
 class FleetScreen(Screen):
@@ -527,11 +633,19 @@ class FleetScreen(Screen):
         ("S", "dispatch_real", "Real sweep"),
         ("p", "project_rebuild", "Project"),
         ("P", "toggle_pause", "Pause/Resume"),
+        ("R", "clear_rate_limit", "Clear rate limit"),
         ("r", "refresh_status", "Refresh"),
+        ("b", "backups", "Backups"),
+        ("o", "toggle_ok", "Show ok"),
+        ("g", "check_jump", "Jump to ticket"),
     ]
+
+    _MUTATIONS = ("fleet-up", "fleet-down", "fleet-pause", "fleet-resume", "clear-rate-limit")
 
     CSS = """
     FleetScreen #fleet-status { padding: 1 2; height: 1fr; }
+    FleetScreen #fleet-checks-header { padding: 0 2; }
+    FleetScreen #fleet-checks { height: 10; }
     FleetScreen #fleet-log    { height: 8; border-top: solid $primary; padding: 0 1; }
     """
 
@@ -540,15 +654,21 @@ class FleetScreen(Screen):
         self._home = home
         self._status: dict = {}
         self._doctor: dict = {}
-        self._log_lines: list[str] = []
+        self._show_ok = False
+        self._rows: dict[str, dict] = {}  # check name -> check, as last rendered
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("[dim]Loading…[/dim]", id="fleet-status")
-        yield Static("", id="fleet-log")
+        yield Static("", id="fleet-checks-header", markup=False)
+        yield DataTable(id="fleet-checks", cursor_type="row")
+        yield RichLog(id="fleet-log", markup=True, wrap=True)
         yield Footer()
 
     def on_mount(self) -> None:
+        table = self.query_one("#fleet-checks", DataTable)
+        table.add_columns("Status", "Check", "Detail")
+        table.focus()
         self._refresh_worker()
         # health.report() shells out to gh/launchctl/worktree probes and can run past
         # 10s; a shorter interval than that keeps cancelling it via exclusive=True
@@ -575,15 +695,212 @@ class FleetScreen(Screen):
                 self.query_one("#fleet-status", Static).update(
                     _render_fleet(self._status, self._doctor)
                 )
+                self._populate_checks()
+                self.refresh_bindings()
+            elif event.worker.name in self._MUTATIONS:
+                self._log(f"{event.worker.name}: {rich_escape(str(event.worker.result))}")
+                self._after_mutation()
             elif event.worker.name in ("dispatch-sweep", "dispatch-sweep-real", "project-rebuild"):
-                self._log(str(event.worker.result))
+                self._log(rich_escape(str(event.worker.result)))
+            elif event.worker.name == "check-release-probe":
+                self._on_release_probed(self._release_key, event.worker.result)
+            elif event.worker.name == "check-backup-now":
+                self._log(f"backup written: {rich_escape(str(event.worker.result))}")
+                self._refresh_worker()
         elif event.state == WorkerState.ERROR:
-            self._log(f"[red]{event.worker.name} failed: {event.worker.error}[/red]")
+            self._log(f"[red]{event.worker.name} failed: {rich_escape(str(event.worker.error))}[/red]")
+            if event.worker.name in self._MUTATIONS:
+                self._after_mutation()
+
+    # --- T-170: doctor checks table + remedies -------------------------------
+
+    _STATUS_STYLE = {"fail": "bold red", "warn": "yellow", "ok": "green"}
+
+    def _populate_checks(self) -> None:
+        """Rebuild #fleet-checks from the already-loaded doctor payload, keeping the cursor row."""
+        checks = checks_mod.sort_checks(list(self._doctor.get("checks") or []))
+        shown = [c for c in checks if self._show_ok or c.get("status") != "ok"]
+        self._rows = {str(c["name"]): c for c in shown}
+        table = self.query_one("#fleet-checks", DataTable)
+        keep = None
+        if table.row_count and table.cursor_row < table.row_count:
+            keep = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        table.clear()
+        for c in shown:
+            status = str(c.get("status"))
+            table.add_row(Text(status, style=self._STATUS_STYLE.get(status, "")),
+                          Text(str(c["name"])), Text(str(c.get("detail", ""))), key=str(c["name"]))
+        if keep in self._rows:
+            table.move_cursor(row=list(self._rows).index(keep))
+        self.query_one("#fleet-checks-header", Static).update(
+            "Doctor checks: " + checks_mod.counts_line(checks)
+            + ("" if self._show_ok else "  (o: show ok)"))
+
+    def action_toggle_ok(self) -> None:
+        self._show_ok = not self._show_ok
+        self._populate_checks()
+
+    def _selected_check(self) -> dict | None:
+        table = self.query_one("#fleet-checks", DataTable)
+        if not table.row_count:
+            return None
+        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        return self._rows.get(row_key)
+
+    def action_check_jump(self) -> None:
+        check = self._selected_check()
+        keys = checks_mod.culprit_keys(check) if check else []
+        if not keys:
+            self.notify("no ticket for this check", severity="warning")
+            return
+        self.app.push_screen(DetailScreen(self._home, keys[0]))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        check = self._selected_check()
+        if check is None:
+            return
+        remedies: list[tuple[str, str | None, str]] = []
+        notes: list[str] = []
+        for remedy, label in checks_mod.keyless_remedies(check):
+            remedies.append((remedy, None, label))
+        for key in checks_mod.culprit_keys(check):
+            for remedy, label in checks_mod.key_remedies(check):
+                if remedy in checks_mod.DEGRADED_ONLY:
+                    phase = snap_mod.load(self._home, key).phase
+                    if phase != "degraded":
+                        if not any(n.startswith(f"{key}: ") for n in notes):
+                            notes.append(f"{key}: not degraded (phase {phase})")
+                        continue
+                remedies.append((remedy, key, f"{label} {key}"))
+        self.app.push_screen(_CheckModal(check, remedies, notes), self._on_remedy)
+
+    def _on_remedy(self, choice: tuple[str, str | None] | None) -> None:
+        if not choice:
+            return
+        remedy, key = choice
+        if remedy in (checks_mod.RETRY, checks_mod.DISCARD) and key:
+            self._queue_degraded(key, remedy)
+        elif remedy == checks_mod.LOGS and key:
+            self.app.push_screen(LogsScreen(self._home, key))
+        elif remedy == checks_mod.SPEC and key:
+            self.app.push_screen(SpecScreen(self._home, key))
+        elif remedy == checks_mod.RELEASE and key:
+            self._release_claim(key)
+        elif remedy == checks_mod.BACKUP_NOW:
+            self._backup_now()
+        elif remedy == checks_mod.ADD_AC and key:
+            self._add_ac(key)
+        elif remedy == checks_mod.SUGGEST_ACS and key:
+            self._suggest_acs(key)
+
+    def _queue_degraded(self, key: str, command: str) -> None:
+        """Key-explicit retry / discard: an inbox command only, never a phase write."""
+        if snap_mod.load(self._home, key).phase != Phase.DEGRADED.value:
+            self.notify(f"{key}: '{command}' only applies to degraded tickets", severity="warning")
+            return
+
+        def _queue() -> None:
+            inbox.append_command(self._home, key, command, {})
+            self.notify(f"'{command}' queued for {key}")
+            self.app._nudge(key)
+
+        if command == "discard":
+            self.app._confirm_discard(key, _queue)
+        else:
+            _queue()
+
+    def _release_claim(self, key: str) -> None:
+        cfg = config_mod.load(str(self._home))
+        # describe_claims shells out to `ps`; never active_keys/is_claimed (they release as a side effect).
+        self._release_key = key
+        self.run_worker(
+            lambda: claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age),
+            thread=True, name="check-release-probe", exit_on_error=False)
+
+    def _on_release_probed(self, key: str, rows: list[dict]) -> None:
+        row = next((r for r in rows if r["key"] == key), None)
+        if row is None:
+            self.notify(f"{key}: no claim to release")
+            return
+        if row["claimed"]:
+            self.notify(f"{key}: claim is live (pid {row['pid']}, {row['verdict']})",
+                        severity="warning")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                claims.release(self._home, key)
+                self.notify(f"Claim released for {key}")
+
+        self.app.push_screen(_ConfirmModal(f"Release claim for [bold]{key}[/bold]?"), _on_confirm)
+
+    def _backup_now(self) -> None:
+        cfg = config_mod.load(str(self._home))
+        self._log("backing up … ")
+        self.run_worker(lambda: backup_mod.create_backup(cfg, store.now_epoch()),
+                        thread=True, name="check-backup-now", exit_on_error=False)
+
+    def _add_ac(self, key: str) -> None:
+        def _on_dismiss(text: str | None) -> None:
+            if text is None:
+                return
+            try:
+                ops.add_ac(Config(home=self._home), key, text)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
+            self.notify(f"AC added to {key}")
+            self._refresh_worker()
+
+        self.app.push_screen(_AddAcModal(key), _on_dismiss)
+
+    def _suggest_acs(self, key: str) -> None:
+        spec_file = store.spec_path(self._home, key)
+        if snap_mod.has_acs(spec_file.read_text(encoding="utf-8") if spec_file.exists() else ""):
+            self.notify(f"{key} already has acceptance criteria", severity="warning")
+            return
+        cfg = Config(home=self._home)
+        # Run on the app so its own "suggest-acs" handler opens the review modal.
+        self.app._suggest_acs_key = key
+        self.app.run_worker(lambda: ops.suggest_acs(cfg, key), thread=True, name="suggest-acs",
+                            exit_on_error=False)
+
+    def _after_mutation(self) -> None:
+        """Refresh only once the mutation has landed, so the read never races it."""
+        self._refresh_worker()
+        refresh = getattr(self.app, "_refresh_badge", None)
+        if refresh is not None:
+            refresh()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "clear_rate_limit":
+            return bool((self._doctor.get("rate_limit") or {}).get("paused"))
+        return True
+
+    def action_clear_rate_limit(self) -> None:
+        if not ratelimit.status(self._home, store.now_epoch()).get("paused"):
+            self._log("no rate-limit pause to clear")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self.run_worker(
+                    lambda: {"cleared": ratelimit.clear(self._home)},
+                    thread=True, name="clear-rate-limit", exit_on_error=False)
+
+        self.app.push_screen(
+            _ConfirmModal("Clear the [bold]rate-limit pause[/bold]? Spawns resume immediately."),
+            _on_confirm,
+        )
 
     # --- key actions ---------------------------------------------------------
 
     def action_refresh_status(self) -> None:
         self._refresh_worker()
+
+    def action_backups(self) -> None:
+        self.app.push_screen(BackupsScreen(self._home))
 
     def action_fleet_up(self) -> None:
         def _on_interval(interval: int | None) -> None:
@@ -592,10 +909,9 @@ class FleetScreen(Screen):
             self.run_worker(
                 lambda: fleet_mod.up(self._home, interval=interval,
                                      cfg=config_mod.load(str(self._home))),
-                thread=True, name="fleet-up",
+                thread=True, name="fleet-up", exit_on_error=False,
             )
             self._log(f"fleet up --interval {interval} … ")
-            self._refresh_worker()
 
         self.app.push_screen(_IntervalModal(), _on_interval)
 
@@ -603,9 +919,9 @@ class FleetScreen(Screen):
         def _on_confirm(ok: bool | None) -> None:
             if not ok:
                 return
-            self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down")
+            self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down",
+                            exit_on_error=False)
             self._log("fleet down … ")
-            self._refresh_worker()
 
         self.app.push_screen(
             _ConfirmModal("Take the [bold]fleet down[/bold]? Dispatch stops until you bring it up."),
@@ -613,33 +929,23 @@ class FleetScreen(Screen):
         )
 
     def action_toggle_pause(self) -> None:
-        paused = self._status.get("paused", False)
-        if paused:
-            self.run_worker(lambda: fleet_mod.resume(self._home), thread=True, name="fleet-resume")
-            self._log("fleet resume … ")
-            self._refresh_worker()
-            return
+        top = sorted(((self._doctor.get("spawns_last_hour") or {}).get("by_key") or {}).items(),
+                     key=lambda kv: -kv[1])[:3]
 
-        def _on_confirm(ok: bool | None) -> None:
-            if not ok:
-                return
-            self.run_worker(lambda: fleet_mod.pause(self._home), thread=True, name="fleet-pause")
-            self._log("fleet pause … ")
-            self._refresh_worker()
+        def _run(name: str, fn) -> None:
+            self._log(f"{name} … ")
+            self.run_worker(fn, thread=True, name=name, exit_on_error=False)
 
-        self.app.push_screen(
-            _ConfirmModal("[bold]Pause[/bold] the fleet? No new sessions spawn until resumed."),
-            _on_confirm,
-        )
+        toggle_fleet_pause(self.app, self._home, _run, top_keys=top or None)
 
     def action_dispatch_sweep(self) -> None:
         self._log("dispatching (dry-run) … ")
-        self.run_worker(self._run_dispatch, thread=True, name="dispatch-sweep")
+        self.run_worker(self._run_dispatch, thread=True, name="dispatch-sweep", exit_on_error=False)
 
     def _run_dispatch(self) -> str:
         try:
             p = subprocess.run(
-                ["maestro", "--home", str(self._home), "dispatch", "--dry-run"],
+                _sweep_argv(self._home, "dispatch", "--dry-run"),
                 capture_output=True, text=True, timeout=30,
             )
             return (p.stdout or p.stderr or "done").strip()
@@ -651,7 +957,7 @@ class FleetScreen(Screen):
             if not confirmed:
                 return
             self._log("dispatching (real sweep) … ")
-            self.run_worker(self._run_dispatch_real, thread=True, name="dispatch-sweep-real")
+            self.run_worker(self._run_dispatch_real, thread=True, name="dispatch-sweep-real", exit_on_error=False)
 
         self.app.push_screen(
             _ConfirmModal("Run a [bold]real[/bold] dispatch sweep? This may mint and spawn sessions."),
@@ -661,8 +967,8 @@ class FleetScreen(Screen):
     def _run_dispatch_real(self) -> str:
         try:
             p = subprocess.run(
-                ["maestro", "--home", str(self._home), "dispatch"],
-                capture_output=True, text=True, timeout=30,
+                _sweep_argv(self._home, "dispatch"),
+                capture_output=True, text=True,
             )
             return (p.stdout or p.stderr or "done").strip()
         except Exception as exc:
@@ -670,7 +976,7 @@ class FleetScreen(Screen):
 
     def action_project_rebuild(self) -> None:
         self._log("rebuilding projection … ")
-        self.run_worker(self._run_project, thread=True, name="project-rebuild")
+        self.run_worker(self._run_project, thread=True, name="project-rebuild", exit_on_error=False)
 
     def _run_project(self) -> str:
         try:
@@ -681,9 +987,382 @@ class FleetScreen(Screen):
             return str(exc)
 
     def _log(self, msg: str) -> None:
-        self._log_lines.append(msg)
-        del self._log_lines[:-6]
-        self.query_one("#fleet-log", Static).update("\n".join(self._log_lines))
+        self.query_one("#fleet-log", RichLog).write(msg)
+
+
+class BackupsScreen(Screen):
+    """Backup tarballs of this home: list, take one now, inspect, copy the restore command.
+
+    Never restores: `y` only puts the CLI command on the clipboard for a shell, because a
+    reset needs the human's explicit, in-the-moment go-ahead.
+    """
+
+    HELP = 'Backup tarballs. b backs up now, enter lists members, y copies the restore command. escape goes back.'
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("b", "backup", "Backup now"),
+        ("enter", "members", "Members"),
+        ("y", "copy_restore", "Copy restore"),
+        ("r", "refresh_list", "Refresh"),
+    ]
+
+    CSS = """
+    BackupsScreen #backups-header { padding: 0 2; height: auto; }
+    BackupsScreen #backups-table  { height: 1fr; }
+    """
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+        self._cfg: Config | None = None
+        self._paths: list[Path] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("[dim]Loading…[/dim]", id="backups-header")
+        yield DataTable(id="backups-table", cursor_type="row")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Backups"
+        table = self.query_one("#backups-table", DataTable)
+        table.add_column("Name")
+        table.add_column("Age")
+        table.add_column("Size")
+        table.focus()
+        self._reload()
+
+    # --- workers (thread: stat, launchctl) -----------------------------------
+
+    def _reload(self) -> None:
+        self.run_worker(self._load, thread=True, group="backups-load", exclusive=True,
+                        name="backups-load")
+
+    def _load(self) -> dict:
+        cfg = config_mod.load(str(self._home))
+        now = store.now_epoch()
+        rows = []
+        for path in reversed(backup_mod.list_backups(cfg)):
+            epoch = backup_mod._epoch_from_name(path.name)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            rows.append((path, None if epoch is None else now - epoch, size))
+        nxt = None
+        if cfg.backup_interval and cfg.backup_interval > 0 and fleet_mod.status(self._home)["loaded"]:
+            cursor = store.read_json(self._home / "derived" / ".backup_cursor.json", {}) or {}
+            if cursor.get("epoch"):
+                nxt = cursor["epoch"] + cfg.backup_interval
+        return {"cfg": cfg, "rows": rows, "dir": backup_mod.resolve_backup_dir(cfg), "next": nxt}
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        name = event.worker.name
+        if event.state == WorkerState.ERROR:
+            self.notify(f"{name} failed: {event.worker.error}", severity="error")
+            return
+        if event.state != WorkerState.SUCCESS:
+            return
+        if name == "backups-load":
+            self._paint(event.worker.result)
+        elif name == "backup-create":
+            self.notify(f"Backed up: {event.worker.result.name}")
+            self._reload()
+        elif name == "backup-members":
+            tarball, names = event.worker.result
+            self.app.push_screen(_TextViewModal(f"{tarball.name}: members", "\n".join(names) or "(empty)"))
+
+    def _paint(self, data: dict) -> None:
+        self._cfg = data["cfg"]
+        self._paths = [p for p, _, _ in data["rows"]]
+        head = f"[dim]dir[/dim] {rich_escape(str(data['dir']))}"
+        if data["next"]:
+            head += f"   [dim]next ≈[/dim] {_fmt_epoch(data['next'])}"
+        self.query_one("#backups-header", Static).update(head)
+        table = self.query_one("#backups-table", DataTable)
+        table.clear()
+        for path, age, size in data["rows"]:
+            table.add_row(path.name, "—" if age is None else _fmt_duration(age),
+                          "—" if size is None else _fmt_size(size))
+
+    # --- key actions ---------------------------------------------------------
+
+    def _highlighted(self) -> Path | None:
+        row = self.query_one("#backups-table", DataTable).cursor_row
+        return self._paths[row] if 0 <= row < len(self._paths) else None
+
+    def action_refresh_list(self) -> None:
+        self._reload()
+
+    def action_backup(self) -> None:
+        cfg = self._cfg
+        if cfg is None:
+            self.notify("Still loading…", severity="warning")
+            return
+        keep = cfg.backup_retention
+        existing = backup_mod.list_backups(cfg)
+        # create_backup prunes to `keep` after writing; a same-second stamp replaces
+        # a tarball instead of adding one, so this can over-name, never under-name.
+        doomed = existing[:len(existing) + 1 - keep] if keep and keep > 0 else []
+
+        def _go() -> None:
+            self.run_worker(lambda: backup_mod.create_backup(cfg, store.now_epoch()),
+                            thread=True, name="backup-create")
+
+        if not doomed:
+            _go()
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                _go()
+
+        names = ", ".join(p.name for p in doomed)
+        self.app.push_screen(
+            _ConfirmModal(f"backup_retention is {keep}: this backup deletes [bold]{rich_escape(names)}[/bold]. Continue?"),
+            _on_confirm)
+
+    def action_members(self) -> None:
+        tarball = self._highlighted()
+        if tarball is None:
+            return
+
+        def _names() -> tuple[Path, list[str]]:
+            with tarfile.open(tarball, "r:gz") as tar:
+                return tarball, tar.getnames()
+
+        self.run_worker(_names, thread=True, name="backup-members")
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self.action_members()
+
+    def action_copy_restore(self) -> None:
+        tarball = self._highlighted()
+        if tarball is None:
+            return
+        cmd = f"maestro --home {shlex.quote(str(self._home))} restore {shlex.quote(str(tarball))}"
+        self.app.copy_to_clipboard(cmd)
+        self.notify(f"Copied (run it in a shell): {cmd}")
+
+
+def _fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB"):
+        if n < 1024:
+            return f"{n} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+class SessionsScreen(Screen):
+    """Sessions & burn: per-key spawns/spend/burn flags (Burners) and claim-file liveness (Claims).
+
+    Read-only except `x`, which purges only claims a real sweep would drop (`claimed == False`),
+    re-checked at confirm time. Stopping a live session is `K` on the board, not here.
+    """
+
+    HELP = 'Burners and claims. enter jumps (board / logs), x purges stale claims, click a header to sort. escape goes back.'
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        # priority: otherwise the board's own `enter` (focus_detail) also fires after the table's.
+        Binding("enter", "open_row", "Open", priority=True),
+        ("x", "purge_stale", "Purge stale"),
+        ("r", "refresh_all", "Refresh"),
+        ("1", "show_tab('burners-pane')", "Burners"),
+        ("2", "show_tab('claims-pane')", "Claims"),
+    ]
+
+    CSS = """
+    SessionsScreen DataTable { height: 1fr; }
+    """
+
+    _BURNER_COLS = ("Key", "Phase", "Spawns/hr (agent-equiv)", "$/hr", "Flag")
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+        self._burners: list[dict] = []
+        self._claims: list[dict] = []
+        self._sort_col = 3
+        self._sort_desc = True
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with TabbedContent(initial="burners-pane", id="sessions-tabs"):
+            with TabPane("Burners", id="burners-pane"):
+                yield DataTable(id="burners-table", cursor_type="row")
+            with TabPane("Claims", id="claims-pane"):
+                yield DataTable(id="claims-table", cursor_type="row")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Sessions & burn"
+        burners = self.query_one("#burners-table", DataTable)
+        for col in self._BURNER_COLS:
+            burners.add_column(col)
+        claims_t = self.query_one("#claims-table", DataTable)
+        for col in ("Key", "PID", "Age", "Verdict", "Survives sweep"):
+            claims_t.add_column(col)
+        burners.focus()
+        self._load_burners()
+        self._load_claims()
+        # health.report() shells out to gh/launchctl (see FleetScreen); describe_claims shells out to ps.
+        self.set_interval(30.0, self._load_burners)
+        self.set_interval(10.0, self._load_claims)
+
+    # --- workers (threads: both shell out) ------------------------------------
+
+    def _load_burners(self) -> None:
+        self.run_worker(self._burners_data, thread=True, group="sessions-burners", exclusive=True,
+                        name="sessions-burners")
+
+    def _burners_data(self) -> list[dict]:
+        cfg = config_mod.load(str(self._home))
+        rpt = health.report(cfg, store.now_epoch())
+        burn_chk = next((c for c in rpt.get("checks", []) if c.get("name") == "burn"), {})
+        repeated = burn_chk.get("repeated_failure_by_key") or {}
+        stalled = burn_chk.get("no_progress_by_key") or {}
+        spawns = (rpt.get("spawns_last_hour") or {}).get("by_key") or {}
+        spend = rpt.get("spend_usd_by_key") or {}
+        keys = set(spawns) | set(spend) | set(rpt.get("burning_keys") or [])
+        rows = []
+        for key in keys:
+            flags = [name for name, m in (("repeated failure", repeated), ("no progress", stalled))
+                     if key in m]
+            rows.append({"key": key, "phase": snap_mod.load(self._home, key).phase,
+                         "spawns": spawns.get(key, 0), "usd": spend.get(key, 0.0),
+                         "flag": ", ".join(flags)})
+        return rows
+
+    def _load_claims(self) -> None:
+        self.run_worker(self._claims_data, thread=True, group="sessions-claims", exclusive=True,
+                        name="sessions-claims")
+
+    def _claims_data(self) -> list[dict]:
+        cfg = config_mod.load(str(self._home))
+        return claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age)
+
+    def _purge_data(self) -> list[str]:
+        """Re-describe, then release only what is STILL stale -- never a `claimed` row, and never
+        via `claims.active_keys`/`is_claimed` (both release as a side effect)."""
+        cfg = config_mod.load(str(self._home))
+        rows = claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age)
+        dropped = [r["key"] for r in rows if not r["claimed"]]
+        for key in dropped:
+            claims.release(self._home, key)
+        return dropped
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        name = event.worker.name
+        if not name.startswith("sessions-"):
+            return
+        if event.state == WorkerState.ERROR:
+            self.notify(f"{name} failed: {event.worker.error}", severity="error")
+        elif event.state == WorkerState.SUCCESS:
+            if name == "sessions-burners":
+                self._burners = event.worker.result
+                self._paint_burners()
+            elif name == "sessions-claims":
+                self._claims = event.worker.result
+                self._paint_claims()
+            elif name == "sessions-purge":
+                dropped = event.worker.result
+                self.notify(f"purged: {', '.join(dropped)}" if dropped else "no stale claims")
+                self._load_claims()
+
+    # --- painting ---------------------------------------------------------------
+
+    _SORT_KEYS = (lambda r: r["key"], lambda r: r["phase"], lambda r: r["spawns"],
+                  lambda r: r["usd"], lambda r: r["flag"])
+
+    def _paint_burners(self) -> None:
+        table = self.query_one("#burners-table", DataTable)
+        cur = None
+        if table.row_count:
+            try:
+                cur = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            except Exception:
+                cur = None
+        rows = sorted(self._burners, key=self._SORT_KEYS[self._sort_col], reverse=self._sort_desc)
+        table.clear()
+        for r in rows:
+            table.add_row(r["key"], r["phase"], f"{r['spawns']:g}", f"${r['usd']:.2f}",
+                          r["flag"] or "—", key=r["key"])
+        if cur is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(cur), scroll=False)
+            except Exception:
+                pass
+
+    def _paint_claims(self) -> None:
+        table = self.query_one("#claims-table", DataTable)
+        cur = None
+        if table.row_count:
+            try:
+                cur = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            except Exception:
+                cur = None
+        table.clear()
+        for r in self._claims:
+            table.add_row(r["key"], str(r["pid"]), _fmt_duration(r["age_s"]), r["verdict"],
+                          "yes" if r["claimed"] else "no", key=r["key"])
+        if cur is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(cur), scroll=False)
+            except Exception:
+                pass
+
+    # --- events / actions ---------------------------------------------------------
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        if event.data_table.id != "burners-table":
+            return
+        col = event.column_index
+        if col == self._sort_col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col, self._sort_desc = col, col in (2, 3)
+        self._paint_burners()
+
+    def action_open_row(self) -> None:
+        """Enter: jump the board to the Burners row's key / open logs for the Claims row's key."""
+        burners = self.query_one("#sessions-tabs", TabbedContent).active == "burners-pane"
+        table = self.query_one("#burners-table" if burners else "#claims-table", DataTable)
+        if not table.row_count:
+            return
+        try:
+            key = str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+        except Exception:
+            return
+        if burners:
+            self.app._jump_to(key)
+        else:
+            self.app.push_screen(LogsScreen(self._home, key))
+
+    def action_show_tab(self, pane: str) -> None:
+        self.query_one("#sessions-tabs", TabbedContent).active = pane
+        self.query_one("#burners-table" if pane == "burners-pane" else "#claims-table", DataTable).focus()
+
+    def action_refresh_all(self) -> None:
+        self._load_burners()
+        self._load_claims()
+
+    def action_purge_stale(self) -> None:
+        stale = [r["key"] for r in self._claims if not r["claimed"]]
+        if not stale:
+            self.notify("no stale claims")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self.run_worker(self._purge_data, thread=True, name="sessions-purge",
+                                exit_on_error=False)
+
+        self.app.push_screen(
+            _ConfirmModal(f"Release [bold]{len(stale)}[/bold] stale claim(s): "
+                          f"[bold]{rich_escape(', '.join(stale))}[/bold]?"),
+            _on_confirm)
 
 
 class DepsScreen(Screen):
@@ -848,27 +1527,70 @@ class SpecScreen(Screen):
         self._refresh()
 
 
-class ProposalScreen(Screen):
-    """Read-only viewer for a ticket's proposal.md."""
+# Phrases the ProposalScreen decision bar sends; the awaiting-human skill routes on them
+# (pinned by tests/test_reconcile_skill.py).
+ANSWER_ALTERNATIVE = "alternative"
+ANSWER_NEEDS_MORE = "needs more"
 
-    HELP = 'Proposal document for one ticket. escape goes back.'
+_ALT_HEADING_RE = re.compile(r"^##\s+Alternative\s+(\d+)\b", re.IGNORECASE)
+
+
+def parse_proposal_options(text: str) -> list[tuple[str, str]]:
+    """`[(label, title)]` for `## Recommended` and every `## Alternative N` in proposal.md.
+    Label is `Recommended` or `N`; title is the section's first non-empty line."""
+    out: list[tuple[str, str]] = []
+    label: str | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            m = _ALT_HEADING_RE.match(line)
+            if m:
+                label = m.group(1)
+            elif line[3:].strip().lower().startswith("recommended"):
+                label = "Recommended"
+            else:
+                label = None
+            if label is not None:
+                out.append((label, ""))
+        elif label is not None and line.strip() and not out[-1][1]:
+            out[-1] = (label, line.strip().lstrip("#").strip())
+    return out
+
+
+class ProposalScreen(Screen):
+    """Viewer for a ticket's proposal.md, with a decision bar while a research approval is open."""
+
+    HELP = ('Proposal document for one ticket. escape goes back. While approval is pending: '
+            'y accepts the recommendation, 1-9 picks an alternative (confirms), m asks for more research; '
+            'j/k jump between sections.')
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("r", "refresh_proposal", "Refresh"),
-    ]
+        ("y", "accept_recommendation", "Accept"),
+        ("m", "needs_more", "Needs more"),
+        ("j", "next_section", "Next section"),
+        ("k", "prev_section", "Prev section"),
+    ] + [(str(n), f"pick_alternative({n})", "") for n in range(1, 10)]
 
-    CSS = "ProposalScreen #proposal-body { height: 1fr; }"
+    CSS = """
+    ProposalScreen #proposal-body { height: 1fr; }
+    ProposalScreen #proposal-bar { dock: bottom; height: auto; padding: 0 1; background: $panel; }
+    """
 
     def __init__(self, home: Path, key: str) -> None:
         super().__init__()
         self._home = home
         self._key = key
+        self._qid = f"research-approval-{key}"
+        self._open = False
+        self._recommend: str | None = None
+        self._options: list[tuple[str, str]] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll(id="proposal-body"):
             yield Markdown("", id="proposal-md")
+        yield Static("", id="proposal-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -882,6 +1604,78 @@ class ProposalScreen(Screen):
         path = self._home / "tickets" / self._key / "proposal.md"
         text = path.read_text() if path.exists() else "(no proposal.md)"
         self.query_one("#proposal-md", Markdown).update(text)
+        self._options = parse_proposal_options(text)
+        snap = snap_mod.load(self._home, self._key)
+        q = snap.open_questions.get(self._qid)
+        self._open = q is not None
+        self._recommend = ops.parse_round_question(q)[3] if q is not None else None
+        bar = self.query_one("#proposal-bar", Static)
+        bar.display = self._open
+        if self._open:
+            rows = [f"[bold]{'y' if label == 'Recommended' else label}[/bold] "
+                    f"{'Recommended' if label == 'Recommended' else 'Alternative ' + label}: {rich_escape(title)}"
+                    for label, title in self._options]
+            rows.append("[bold]m[/bold] needs more research")
+            bar.update("  ".join(rows))
+        self.refresh_bindings()
+
+    def _answer_pending(self) -> bool:
+        return any(c.get("command") == "ans" and (c.get("args") or {}).get("qid") == self._qid
+                   for c in inbox.pending(self._home, self._key))
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in ("accept_recommendation", "pick_alternative", "needs_more"):
+            if not self._open or self._answer_pending():
+                return False
+            if action == "accept_recommendation" and not self._recommend:
+                return False
+        return True
+
+    def _send(self, args: dict) -> None:
+        inbox.append_command(self._home, self._key, "ans", {"qid": self._qid, **args})
+        self.notify(f"Answer queued for {self._key}")
+        self.refresh_bindings()
+
+    def action_accept_recommendation(self) -> None:
+        if self._recommend:
+            self._send({"text": self._recommend, "accepted_recommendation": True})
+
+    def action_pick_alternative(self, n: int) -> None:
+        title = next((t for label, t in self._options if label == str(n)), None)
+        if title is None:
+            self.notify(f"No ## Alternative {n} in this proposal", severity="warning")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self._send({"text": f"{ANSWER_ALTERNATIVE} {n}"})
+
+        self.app.push_screen(
+            _ConfirmModal(f"Approve [bold]Alternative {n}[/bold]: {rich_escape(title)}?"), _on_confirm)
+
+    def action_needs_more(self) -> None:
+        def _on_direction(text: str | None) -> None:
+            if text:
+                self._send({"text": f"{ANSWER_NEEDS_MORE}: {text}"})
+
+        self.app.push_screen(_DirectionModal(self._key), _on_direction)
+
+    def _jump(self, step: int) -> None:
+        body = self.query_one("#proposal-body", VerticalScroll)
+        ys = sorted(w.virtual_region.y for w in self.query_one("#proposal-md", Markdown).query("MarkdownH2"))
+        cur = body.scroll_y
+        if step > 0:
+            target = next((y for y in ys if y > cur), None)
+        else:
+            target = next((y for y in reversed(ys) if y < cur), 0 if cur > 0 else None)
+        if target is not None:
+            body.scroll_to(y=target, animate=False)
+
+    def action_next_section(self) -> None:
+        self._jump(1)
+
+    def action_prev_section(self) -> None:
+        self._jump(-1)
 
 
 class DetailScreen(Screen):

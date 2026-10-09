@@ -11,11 +11,14 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
+import time
 import urllib.error
 from pathlib import Path
 
 from . import backup
+from . import claims
 from . import events as E
 from . import context as context_mod
 from . import config as config_mod
@@ -1726,41 +1729,32 @@ def _run_named_test(profile: "testlang.LanguageProfile", test_command: str, cwd:
 
 
 def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher") -> dict:
-    """T-79: run every ANNOTATED AC's own `test:`/`check:` check at *cwd*'s
-    current tree state, and record each as an AcCheckCaptured event -- the
-    per-AC counterpart to `capture_tests`'s whole-suite run.
+    """Run every ANNOTATED AC's own `test:`/`check:` check at *cwd*'s current tree
+    state, and record each as an AcCheckCaptured event -- the per-AC counterpart
+    to `capture_tests`'s whole-suite run.
 
-    Called by `dispatcher._route_test_run` only once the suite itself is
-    already green -- never spawns an agent session, exactly like
-    `capture_tests`; both are a plain `subprocess.run` this (dispatcher)
-    process makes directly. Cached per (tree_key, ac_hash), same rule as
-    `capture_tests`: a tree state already checked is not re-run, just re-read.
-    No-op (`{"all_passed": True, "checked": [], "summary": ""}`) when the spec
-    has no acs section at all or no ACs carry an annotation.
+    Called by `dispatcher._route_test_run` only once the suite itself is green;
+    never spawns an agent session, exactly like `capture_tests` (a plain
+    `subprocess.run` in the dispatcher process). Cached per (tree_key, ac_hash):
+    a tree state already checked is re-read, not re-run. No-op
+    (`{"all_passed": True, "checked": [], "summary": "", "unsupported": []}`)
+    when the spec has no acs section or no AC carries an annotation.
 
-    T-84: a `test:` annotation's added/deleted-name extraction and selector
-    syntax are selected per `binding.language` (`testlang.resolve_strict`) --
-    never hardcoded pytest here. `binding.language` is already fail-closed at
-    `config.load()` time (an unrecognized value refuses to load the home at
-    all -- see `config._REPO_TABLE_KEYS`'s validation), so `resolve_strict`
-    raising `UnsupportedLanguage` here should never actually happen; it is
-    caught anyway (defense in depth against a binding constructed by some
-    other path). T-96: an UNSET `language` whose guess (this annotation's own
-    path extension, checked by `resolve_strict`) contradicts the silent
-    python default raises `MismatchedLanguage` instead -- caught alongside
-    `UnsupportedLanguage`, same treatment. Either way this is surfaced via
-    the `"unsupported"` key instead of ever running (and thus ever
-    failing-closed forever) a check against the wrong language's regex --
-    the caller (`_route_test_run`) turns a non-empty `"unsupported"` into one
-    clear, one-time `ops.fail(..., dead_letter=True)` rather than a bounce
-    back to `implementing`.
+    A `test:` annotation's added/deleted-name extraction and selector syntax are
+    selected per `binding.language` (`testlang.resolve_strict`), never hardcoded
+    to pytest. `binding.language` is fail-closed at `config.load()`, so
+    `UnsupportedLanguage` should not occur here; it is caught anyway as defense
+    in depth. An UNSET `language` whose guess (the annotation path's extension)
+    contradicts the python default raises `MismatchedLanguage`, caught the same
+    way. Either is surfaced via the `"unsupported"` key instead of running a
+    check against the wrong language's regex; `_route_test_run` turns a
+    non-empty `"unsupported"` into one `ops.fail(..., dead_letter=True)`.
 
-    T-98: `binding.language` stays the EXTRACTION axis only. `binding.
-    test_selector` (also fail-closed at `config.load()`) is the orthogonal
-    INVOCATION axis -- unset, `_run_named_test` composes through the
-    resolved profile's own `format_selector` exactly as before this ticket;
-    set, it overrides only how a named test is run, never which names are
-    extracted from the diff.
+    `binding.language` is the EXTRACTION axis only. `binding.test_selector`
+    (also fail-closed at `config.load()`) is the orthogonal INVOCATION axis:
+    unset, `_run_named_test` composes through the resolved profile's
+    `format_selector`; set, it overrides only how a named test is run, never
+    which names are extracted from the diff.
     """
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():
@@ -3159,3 +3153,43 @@ def sync_tracker(cfg: Config, name: str | None = None) -> dict:
 
     imported = {tname: tracker.import_new(cfg.home) for tname, tracker in trackers.items()}
     return {"imported": imported, "total": sum(imported.values())}
+
+
+def stop_session(cfg: Config, key: str, *, wait: float = 10.0) -> dict:
+    """[human] SIGTERM one key's live reconciler session, appending NOTHING to the log.
+
+    Refuses (``stopped: False``, no signal sent) with no claim, a dispatcher-owned
+    ``testrun`` / ``restack`` claim, a verdict other than ``confirmed`` (re-probed
+    right before signalling), or a pid that does not lead its own process group.
+    Never escalates to SIGKILL; a survivor is reported and its claim left alone. A dead
+    process's claim is reclaimed by the next sweep's ``claims.active_keys``. No
+    ``Failed`` event, so ``failure_count`` / backoff are untouched (unlike the watchdog).
+    """
+    home = cfg.home
+    claim = claims.read_claim(home, key)
+    out: dict = {"key": key, "pid": None, "verdict": "unknown", "stopped": False}
+    if not claim:
+        return {**out, "outcome": "refused: no claim"}
+    out["pid"] = claim.get("pid")
+    kind = claim.get("kind")
+    if kind in ("testrun", "restack"):
+        return {**out, "outcome": f"refused: {kind} claim is dispatcher-owned"}
+    pid = claims._sanitize_pid(claim.get("pid"))
+    verdict = claims.verify_claim(home, key)
+    out["verdict"] = verdict
+    if pid is None or verdict != "confirmed":
+        return {**out, "outcome": f"refused: process identity {verdict}"}
+    try:
+        if os.getpgid(pid) != pid:
+            return {**out, "outcome": "refused: pid does not lead its own process group"}
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return {**out, "stopped": True, "outcome": "already gone"}
+    except OSError as e:
+        return {**out, "outcome": f"refused: {e}"}
+    deadline = time.monotonic() + max(0.0, wait)
+    while claims.pid_alive(pid):
+        if time.monotonic() >= deadline:
+            return {**out, "outcome": f"still running after {wait:g}s"}
+        time.sleep(0.05)
+    return {**out, "stopped": True, "outcome": "stopped"}

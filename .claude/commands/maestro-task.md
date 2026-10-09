@@ -57,6 +57,9 @@ Synthesise what you know into a structured spec:
   must actually land in the branch's diff) instead of a self-attestation. `check:`'s command
   just needs to exit 0 — it does NOT verify the check was added by this branch, so prefer
   `test:` whenever the AC is "add a test for X".
+  When drafting a `test:` path, suggest a NEW feature-named file (`tests/test_<feature>.py`;
+  TUI: `tests/test_tui_<feature>.py`) rather than an existing shared one like
+  `tests/test_tui_runtime.py` or `tests/test_dispatcher.py`.
 - **priority**: default `2` unless the user said otherwise
 - **dependsOn**: omit unless the user named a dependency
 

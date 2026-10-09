@@ -55,8 +55,10 @@ Inspect each qid key in `answered_questions`:
 
 **If `KIND == research`** (research approval question — qid starts with `research-approval-`):
 Read the proposal at `$MHOME/tickets/$KEY/proposal.md`. Inspect the answer:
-- **"needs more"** → route back to researching:
-  `maestro set-phase "$KEY" researching --reason "needs more research per human"`
+- **"needs more"** (match the answer's prefix case-insensitively; anything after `needs more:` is
+  the human's direction) → route back to researching, carrying the direction verbatim:
+  `maestro set-phase "$KEY" researching --reason "needs more research per human: <direction verbatim>"`
+  (no direction given → `--reason "needs more research per human"`)
 - **"alternative N"** (e.g. "alternative 2") → extract the Nth alternative's section from proposal.md
 - **any other approval** (yes/ok/approve/recommended) → use the `## Recommended` section from proposal.md
 

@@ -28,7 +28,7 @@ below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on 
 - `make install` — editable install of `.[dev,tui]` + symlink `maestro` onto PATH.
 - `make test` — full suite in parallel (~30s). **Run before finishing.**
   `make t F=tests/test_x.py K=expr` — targeted run, stops at first failure.
-  `make test-serial` — one process (for pdb). `make lint` — ruff (pyflakes rules only).
+  `make test-serial` — one process (for pdb). `make lint` — ruff: pyflakes plus single-line sorted imports (isort I001) in the hot files listed under `[tool.ruff.lint.per-file-ignores]` in `pyproject.toml` (dispatcher, cli, tui/app, tui/screens, tests/test_dispatcher).
 - `make status` / `make doctor` — board state / fleet health.
 - `make reconcile KEY=<KEY>` — run ONE reconcile step in the foreground, skipping the sweep.
 - `make dry` — one dispatcher sweep, read-only preview (`would_mint` + `would_spawn`, no
@@ -78,8 +78,10 @@ Core (correctness-critical):
 - `sessions.py` — spawn/list reconciler sessions (`claude -p`, opencode, pi backends).
 - `config.py` — project-agnostic `config.toml` loading/validation. Every `[maestro]` key
   is one row of `config.KNOBS` (coercion + whether `[repos.<name>]` may override it);
-  unknown keys fail `config.load()` closed. Adding a knob: a `Config` field, a `KNOBS`
-  row, a commented line in `DEFAULT_CONFIG_TOML` (`tests/test_config.py` checks all three).
+  unknown keys fail `config.load()` closed. Adding a knob: pick its `# --- <section> ---`
+  and insert at its alphabetical slot there in all three lists -- a `Config` field, a `KNOBS`
+  row, a commented line in `DEFAULT_CONFIG_TOML` (plus a `RepoBinding` field if `per_repo`,
+  same section and slot); `tests/test_config.py` checks section and order.
 - `repos.py` — per-ticket repo binding (`[repos.<name>]`). `gates.py` — spec front-matter reads.
 
 Guards and budgets:
@@ -111,6 +113,21 @@ Home layout (under `MAESTRO_HOME`): `tickets/<KEY>/spec.md` (human-owned),
 `events/<KEY>.jsonl` (+ `.archive.jsonl`), `inbox/<KEY>.jsonl`, `derived/snapshots/`,
 `derived/cursors/`, `derived/*.md` dashboards, `agent-logs/<KEY>/`, `tickets/_deadletter/`.
 
+## Where to add X
+
+Each extension point has exactly one documented slot. Follow it literally -- appending to
+a shared tail position is what produced the merge-conflict hunks this section exists to end.
+
+| Extension point | Slot |
+|---|---|
+| Dispatch gate | A new if-block inside its stage function (`dispatcher._fold_and_gate`, `dispatcher._classify_key`, `dispatcher._gate_due`, `dispatcher._admit_for_spawn`, `dispatcher._runner_admits`). Never re-indent or wrap existing blocks. Regenerate the gates doc (`make diagram`). |
+| Event type | A constant in `events`, plus one handler in `snapshot._FOLDERS` (or an entry in `snapshot._UNFOLDED`). |
+| Doctor check | A def next to its thematic neighbours in `health`, plus its alphabetical slot in `health.CHECKS`. |
+| Config knob | Its `# --- <section> ---` and alphabetical slot in all three places (see `config.KNOBS` above). |
+| Agent verb | Its alphabetical slot in `dispatcher.AGENT_TOOL_VERBS`, plus the `[agent]` tag in `cli.build_parser`. |
+| TUI key / screen / modal | In `maestro/tui/` per the rules in Architecture (screens in `screens.py`, modals in `modals.py`). Refer to TUI symbols by file path, not dotted refs: the drift test only resolves single-dot top-level names. |
+| Tests | A NEW `tests/test_<feature>.py` (TUI: `tests/test_tui_<feature>.py`). Never append a ticket section to the end of `tests/test_tui_runtime.py`, `tests/test_dispatcher.py`, `tests/test_repos.py` or `tests/test_health.py`. Exceptions: binding-sweep entries, and a spec AC whose `test:` annotation already names a path. |
+
 ## Write-ownership rules (do not violate)
 
 - **Humans** edit only `tickets/<KEY>/spec.md` and append to inboxes (`maestro ans`).
@@ -129,12 +146,24 @@ A change isn't done until a test exercises the real surface end-to-end:
   network, `launchctl` — never the component under test.
 - If you touch the log, dispatcher, claims or fold, add/adjust a test proving the
   invariant (idempotency, fencing, crash safety, single-writer) still holds.
-- **TUI:** mount the real `MaestroTUI` in `tests/test_tui_runtime.py` with
-  `async with app.run_test() as pilot:`, drive real keys, assert `app._exception is None`.
+- **TUI:** mount the real `MaestroTUI` with `async with app.run_test() as pilot:` in a NEW
+  `tests/test_tui_<feature>.py`, drive real keys, assert `app._exception is None`.
   Mocking `query_one` / `push_screen` / `notify` does not count. New bindings, screens and
-  modals must be covered by the binding sweep and `test_every_binding_action_resolves`.
+  modals must be covered by the binding sweep and `test_every_binding_action_resolves`
+  (those entries are the only additions that belong in `tests/test_tui_runtime.py`).
 - Shared test helpers live in `tests/conftest.py` (`seed_ticket`, `seed_phase`,
   `make_origin_and_repo`, `git`, `run_doctor`, …) — reuse them instead of re-copying.
+
+## Docstrings and comments: present tense, no prose counts
+
+- Describe what the code does now; history goes in the commit or PR body, not the docstring.
+- Never count or list a growing set in prose; point at the source of truth instead
+  (e.g. "every name in `health.CHECKS`").
+- A short `# T-NNN:` tag is fine. Don't mass-strip existing tags, and don't reword lines you
+  aren't changing.
+
+Two concurrent tickets that each append a sentence to the same docstring line, or bump the
+same prose count, conflict on that line.
 
 ## Reconciler skills
 

@@ -1277,3 +1277,36 @@ def test_triage_checks_inflight_overlap():
             assert f"`{phase}`" in text.split("## Overlap check")[1].split("## `triaging`")[0], (path, phase)
         assert "dependsOn" in text.split("## Overlap check")[1], path
         assert "approval question" in text, path
+
+
+def test_awaiting_human_skill_matches_proposal_bar_phrases():
+    from maestro.tui.screens import ANSWER_ALTERNATIVE, ANSWER_NEEDS_MORE
+    for path in (_commands_path("awaiting-human"), _skills_path("awaiting-human")):
+        body = _strip_frontmatter(path.read_text())
+        assert f'**"{ANSWER_NEEDS_MORE}"**' in body
+        assert f'**"{ANSWER_ALTERNATIVE} N"**' in body
+        assert "case-insensitively" in body
+        assert ('maestro set-phase "$KEY" researching --reason '
+                '"needs more research per human: <direction verbatim>"') in body
+
+
+def test_skill_points_new_tests_at_feature_files():
+    claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    skill = (REPO_ROOT / ".claude" / "commands"
+             / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
+    task = (REPO_ROOT / ".claude" / "commands" / "maestro-task.md").read_text(encoding="utf-8")
+    for text in (claude, skill):
+        assert "test_tui_<feature>.py" in text
+        assert "binding sweep" in text
+        assert "test_every_binding_action_resolves" in text
+        assert "extend `tests/test_tui_runtime.py`" not in text
+    assert "tests/test_<feature>.py" in claude and "feature-file rule" in skill.lower()
+    assert "feature-named" in task
+
+
+def test_skill_states_present_tense_docstring_rule():
+    for path in (_commands_path("implementing"), _skills_path("implementing"),
+                 Path(__file__).resolve().parent.parent / "CLAUDE.md"):
+        text = " ".join(path.read_text().split())
+        assert "present tense" in text, f"{path}: missing the present-tense docstring rule"
+        assert "growing set" in text, f"{path}: missing the no-prose-count rule"

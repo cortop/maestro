@@ -30,9 +30,20 @@ testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py311"
+# High enough that isort never wraps a long lazy import (E501 is not selected).
+line-length = 400
 extend-exclude = ["lab"]
 
 [tool.ruff.lint]
-# Pyflakes only: unused imports/variables, redefinitions, undefined names --
-# the class of drift a 4k-line module hides from a reader. No style rules.
-select = ["F"]
+# Pyflakes (unused imports/variables, redefinitions, undefined names) plus isort,
+# scoped below to the hot modules whose packed imports caused merge conflicts.
+select = ["F", "I"]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+known-first-party = ["maestro"]
+known-local-folder = ["conftest"]
+
+[tool.ruff.lint.per-file-ignores]
+# I001 applies ONLY to these files: everywhere else is ignored.
+"!{maestro/dispatcher.py,maestro/cli.py,maestro/tui/app.py,maestro/tui/screens.py,tests/test_dispatcher.py}" = ["I001"]

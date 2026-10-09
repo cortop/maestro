@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -11,9 +12,10 @@ from textual.screen import ModalScreen
 from textual.widgets import (
     Button, Checkbox, Input, Label, OptionList, Select, SelectionList, Static, TextArea,
 )
+from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
-from .. import depgraph, dispatcher, gates, ops, schedule, store
+from .. import depgraph, dispatcher, fleet, gates, ops, schedule, store
 from ..providers import ollama as ollama_mod
 from ..providers import pi as pi_mod
 from ..statemachine import Phase
@@ -80,8 +82,10 @@ class _AnswerModal(ModalScreen):
     """
 
     def __init__(self, key: str, qid: str, position: int | None, total: int | None,
-                 question_text: str, recommend: str | None, remaining: int, home: Path) -> None:
+                 question_text: str, recommend: str | None, remaining: int, home: Path,
+                 initial: str = "") -> None:
         super().__init__()
+        self._initial = initial
         self._key = key
         self._qid = qid
         self._position = position
@@ -115,7 +119,7 @@ class _AnswerModal(ModalScreen):
                     "[dim]Ctrl+R accept this recommendation · "
                     "Ctrl+G accept all remaining recommendations[/dim]"
                 )
-            yield TextArea(id="answer-input")
+            yield TextArea(self._initial, id="answer-input")
             with Horizontal(id="answer-buttons"):
                 yield Button("Submit", id="answer-submit-button", variant="primary")
             yield Label("[dim]Enter → newline · Ctrl+S or button → submit · Esc → cancel[/dim]")
@@ -169,6 +173,114 @@ _DEFAULT_COMMANDS: list[tuple[str, str]] = [
 def _commands_for(phase: str) -> list[tuple[str, str]]:
     """The reference list `_CmdModal` shows for *phase*."""
     return _PHASE_COMMANDS.get(phase, _DEFAULT_COMMANDS)
+
+
+class MenuRow(NamedTuple):
+    """One row of the `m` action menu: what to show, which key it mirrors, the App
+    action it runs, and (when not enabled) why it doesn't apply."""
+    label: str
+    hotkey: str
+    action: str
+    enabled: bool
+    reason: str
+
+
+# Pseudo-action for the proposal row: not an App action (DetailScreen's `p` is
+# screen-local), so the app pushes ProposalScreen itself.
+MENU_PROPOSAL = "menu_proposal"
+
+
+def menu_actions(phase: str, *, open_questions: int, has_pr: bool, claim: bool,
+                 has_acs: bool, has_proposal: bool, runner_editable: bool,
+                 extras: tuple[tuple[str, str, str], ...] = ()) -> list[MenuRow]:
+    """The `m` menu for a ticket: every human action, enabled or dimmed with a reason.
+
+    Pure. Rows only name existing App actions (plus `MENU_PROPOSAL`), so the menu adds
+    no write path of its own. *extras* are (label, hotkey, action) rows for actions
+    other tickets add; the caller passes only those present on the App."""
+    degraded = phase == Phase.DEGRADED.value
+    no_q = "" if open_questions else "no open questions"
+    only_degraded = "" if degraded else "only for degraded tickets"
+    rows = [
+        ("Answer", "a", "answer", no_q),
+        ("Approve", "a", "answer_approve", no_q),
+        ("Reject", "a", "answer_reject", no_q),
+        ("Message", "i", "inbox_message", ""),
+        ("Command", "c", "cmd", ""),
+        ("Retry", "ctrl+r", "retry", only_degraded),
+        ("Discard", "ctrl+d", "discard", only_degraded),
+        ("Spec", "s", "show_spec", ""),
+        ("Edit spec", "E", "edit_spec", ""),
+        ("Logs", "l", "view_logs", ""),
+        ("Inbox log", "I", "view_inbox", ""),
+        ("Runner", "o", "runner", "" if runner_editable else "a session is live"),
+        ("Add AC", "A", "add_ac", ""),
+        ("Suggest ACs", "g", "suggest_acs", "spec already has ACs" if has_acs else ""),
+        ("AC matrix", "v", "ac_matrix", ""),
+        ("Post-QA", "Q", "trigger_post_qa", "" if has_pr else "no PR open"),
+        ("Compact", "x", "compact", ""),
+        ("Release claim", "z", "release", "" if claim else "no claim"),
+        ("Detail", "enter", "focus_detail", ""),
+        ("Deps", "D", "deps_panel", ""),
+        ("Proposal", "p", MENU_PROPOSAL, "" if has_proposal else "no proposal.md"),
+    ]
+    out = [MenuRow(label, hk, act, not why, why) for label, hk, act, why in rows]
+    out += [MenuRow(label, hk, act, True, "") for label, hk, act in extras]
+    return out
+
+
+class _ActionMenu(ModalScreen):
+    """The `m` menu (T-178): an OptionList of `MenuRow`s titled `<KEY> · <phase>`.
+    Dismisses with the chosen row (enabled or dimmed -- the app decides what a dimmed
+    one does) or None on Esc. It writes nothing itself."""
+
+    DEFAULT_CSS = """
+    _ActionMenu {
+        align: center middle;
+    }
+    #menu-dialog {
+        width: 60;
+        height: auto;
+        max-height: 90%;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    #menu-list { height: auto; max-height: 30; }
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, key: str, phase: str, rows: list[MenuRow]) -> None:
+        super().__init__()
+        self._key = key
+        self._phase = phase
+        self.rows = rows
+        self.title = f"{key} · {phase}"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="menu-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] · {self._phase}", id="menu-title")
+            yield OptionList(*[self._option(r) for r in self.rows], id="menu-list")
+            yield Label("[dim]Enter runs the row · Esc closes[/dim]")
+
+    @staticmethod
+    def _option(row: MenuRow) -> Option:
+        text = Text(f"{row.hotkey:<7} {row.label}")
+        if not row.enabled:
+            text.stylize("dim")
+            text.append(f"  ({row.reason})", style="dim italic")
+        return Option(text)
+
+    def on_mount(self) -> None:
+        self.query_one("#menu-list", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.dismiss(self.rows[event.option_index])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class _CmdModal(ModalScreen):
@@ -366,25 +478,89 @@ class _SuggestAcsModal(ModalScreen):
 
 
 class _IntervalModal(ModalScreen):
-    """Prompt for a dispatch interval (seconds) before calling fleet up."""
+    """Prompt for a dispatch interval (seconds) before calling fleet up.
+
+    Blank means 300; a non-integer shows an inline error and keeps the modal open.
+    """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="answer-dialog"):
             yield Label("[bold]Fleet up[/bold] — set dispatch interval")
-            yield Input(placeholder="Interval in seconds (default: 300)", id="interval-input")
+            yield Input(placeholder=f"Seconds (blank = 300; minimum {fleet.MIN_INTERVAL})",
+                        id="interval-input")
+            yield Label("", id="interval-error")
 
     def on_mount(self) -> None:
         self.query_one("#interval-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        note = ""
+        try:
+            val = int(event.value.strip()) if event.value.strip() else None
+        except ValueError:
+            val = None
+        if val is not None and val < fleet.MIN_INTERVAL:
+            note = f"[yellow]will be clamped to {fleet.MIN_INTERVAL}s[/yellow]"
+        self.query_one("#interval-error", Label).update(note)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         raw = event.value.strip()
         try:
             interval = int(raw) if raw else 300
         except ValueError:
-            interval = 300
+            self.query_one("#interval-error", Label).update(
+                f"[red]not an integer: {raw!r}[/red]")
+            return
         self.dismiss(interval)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _PauseModal(ModalScreen):
+    """Pause the fleet: a duration (blank = until resumed, parsed by
+    `schedule.parse_every`) and an optional reason. ``top_keys`` (FleetScreen only)
+    lists the busiest keys of the last hour. Enter with both fields empty pauses
+    at once. Dismisses with ``(seconds_or_None, reason_or_None)``, or None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, top_keys: list[tuple[str, int]] | None = None) -> None:
+        super().__init__()
+        self._top_keys = top_keys or []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label("[bold]Pause the fleet[/bold] — no new sessions spawn until resumed")
+            if self._top_keys:
+                yield Label("[dim]busiest last hour: "
+                            + ", ".join(f"{k} ({n})" for k, n in self._top_keys) + "[/dim]")
+            yield Input(placeholder="Duration (30m / 2h / 7d; blank = until resumed)",
+                        id="pause-duration")
+            yield Label("", id="pause-error")
+            yield Input(placeholder="Reason (optional)", id="pause-reason")
+
+    def on_mount(self) -> None:
+        self.query_one("#pause-duration", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        raw = self.query_one("#pause-duration", Input).value.strip()
+        reason = self.query_one("#pause-reason", Input).value.strip()
+        seconds = None
+        if raw:
+            try:
+                seconds = schedule.parse_every(raw)
+            except ValueError as e:
+                self.query_one("#pause-error", Label).update(f"[red]{e}[/red]")
+                self.query_one("#pause-duration", Input).focus()
+                return
+        self.query_one("#pause-error", Label).update("")
+        if event.input.id == "pause-duration" and (raw or reason):
+            self.query_one("#pause-reason", Input).focus()
+            return
+        self.dismiss((seconds, reason or None))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -605,6 +781,37 @@ class _InboxModal(ModalScreen):
         self.dismiss(None)
 
 
+class _DirectionModal(ModalScreen):
+    """Prompt for a research direction; dismisses with the text, or None on cancel/empty."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    _DirectionModal { align: center middle; }
+    #direction-dialog { width: 70%; border: solid $accent; padding: 1 2; background: $surface; }
+    """
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="direction-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] — what should the next research round cover?")
+            yield Input(placeholder="Direction (Enter to send, Esc to cancel)", id="direction-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#direction-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if text:
+            self.dismiss(text)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class HoldModal(ModalScreen):
     """Hold one ticket: a duration (blank = until released, parsed by
     `schedule.parse_every`) and an optional reason. Dismisses with
@@ -744,6 +951,46 @@ class _ConfirmModal(ModalScreen):
         self.dismiss(False)
 
 
+class _StopModal(ModalScreen):
+    """T-176: confirm stopping one live session; Cancel is focused, so a bare Enter is a no-op.
+
+    Dismisses ``(True, note_and_nudge)`` on Stop, ``None`` on Cancel / Esc.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    _StopModal #stop-buttons { height: auto; margin-top: 1; }
+    """
+
+    def __init__(self, key: str, *, pid, age_s, verdict: str, silence_s) -> None:
+        super().__init__()
+        self._key, self._pid, self._verdict = key, pid, verdict
+        self._age = "—" if age_s is None else f"{age_s}s"
+        self._silence = "—" if silence_s is None else f"{silence_s}s"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label(f"Stop the live session for [bold]{self._key}[/bold]? (SIGTERM, no Failed event)")
+            yield Label(f"pid {self._pid} · age {self._age} · verdict {self._verdict} · silent {self._silence}")
+            yield Checkbox("Note the stop in the inbox and nudge", value=False, id="stop-nudge")
+            with Horizontal(id="stop-buttons"):
+                yield Button("Cancel", id="stop-cancel")
+                yield Button("Stop", id="stop-ok", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#stop-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "stop-ok":
+            self.dismiss((True, self.query_one("#stop-nudge", Checkbox).value))
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _SessionPickModal(ModalScreen):
     """Pick one captured session (newest first); dismisses with its index in *labels*, None on cancel."""
 
@@ -763,6 +1010,37 @@ class _SessionPickModal(ModalScreen):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option_index)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _TicketPickModal(ModalScreen):
+    """Pick one ticket from titled groups (shared ticket picker); dismisses with its key, None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, groups: list[tuple[str, list[tuple[str, str]]]]) -> None:
+        super().__init__()
+        self._title = title
+        self._groups = groups
+
+    def compose(self) -> ComposeResult:
+        options: list[Option] = []
+        for heading, entries in self._groups:
+            options.append(Option(Text(heading, style="bold"), disabled=True))
+            options.extend(Option(Text.from_markup(label), id=key) for key, label in entries)
+        with Vertical(id="answer-dialog"):
+            yield Label(self._title)
+            yield OptionList(*options, id="ticket-pick")
+
+    def on_mount(self) -> None:
+        picker = self.query_one("#ticket-pick", OptionList)
+        picker.focus()
+        picker.action_first()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1189,4 +1467,56 @@ class _SpecFieldsModal(ModalScreen):
         self.dismiss({"priority": priority, "depends_on": self._deps()})
 
     def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _CheckModal(ModalScreen):
+    """T-170: one doctor check -- its full dict as JSON (markup off) plus the remedies that apply.
+
+    *remedies* is ``[(remedy, key, label)]``, built by FleetScreen; *notes* are lines explaining
+    why a key offers none. Dismisses with ``(remedy, key)`` for the chosen option, or None."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    DEFAULT_CSS = """
+    _CheckModal { align: center middle; }
+    _CheckModal #check-dialog { width: 90%; height: 85%; border: solid $accent;
+                                padding: 1 2; background: $surface; }
+    _CheckModal #check-scroll { height: 1fr; }
+    _CheckModal #check-remedies { height: auto; max-height: 10; }
+    """
+
+    def __init__(self, check: dict, remedies: list[tuple[str, str | None, str]],
+                 notes: list[str] | None = None) -> None:
+        super().__init__()
+        self._check = check
+        self._remedies = remedies
+        self._notes = notes or []
+
+    def compose(self) -> ComposeResult:
+        c = self._check
+        with Vertical(id="check-dialog"):
+            yield Label(f"{c.get('name')} · {c.get('status')}  [Enter] run remedy · [Esc] close",
+                        markup=False)
+            with VerticalScroll(id="check-scroll"):
+                yield Static(json.dumps(c, indent=2, default=str), id="check-json", markup=False)
+            for note in self._notes:
+                yield Label(note, markup=False)
+            if self._remedies:
+                yield OptionList(
+                    *(Option(Text(label), id=f"{remedy}|{key or ''}")
+                      for remedy, key, label in self._remedies),
+                    id="check-remedies")
+
+    def on_mount(self) -> None:
+        if self._remedies:
+            picker = self.query_one("#check-remedies", OptionList)
+            picker.focus()
+            picker.action_first()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        remedy, _, key = str(event.option.id).partition("|")
+        self.dismiss((remedy, key or None))
+
+    def action_close(self) -> None:
         self.dismiss(None)
