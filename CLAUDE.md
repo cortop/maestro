@@ -28,7 +28,7 @@ below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on 
 - `make install` — editable install of `.[dev,tui]` + symlink `maestro` onto PATH.
 - `make test` — full suite in parallel (~30s). **Run before finishing.**
   `make t F=tests/test_x.py K=expr` — targeted run, stops at first failure.
-  `make test-serial` — one process (for pdb). `make lint` — ruff (pyflakes rules only).
+  `make test-serial` — one process (for pdb). `make lint` — ruff: pyflakes plus single-line sorted imports (isort I001) in the hot files listed under `[tool.ruff.lint.per-file-ignores]` in `pyproject.toml` (dispatcher, cli, tui/app, tui/screens, tests/test_dispatcher).
 - `make status` / `make doctor` — board state / fleet health.
 - `make reconcile KEY=<KEY>` — run ONE reconcile step in the foreground, skipping the sweep.
 - `make dry` — one dispatcher sweep, read-only preview (`would_mint` + `would_spawn`, no
