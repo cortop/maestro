@@ -66,6 +66,21 @@ without a judgment call? If so, dispatch an `Agent`-tool sub-agent to find it �
 human round-trip on it. Only put a question in the round if a sub-agent genuinely cannot resolve
 it: a product/scope decision, an ambiguous intent, or an explicit approval gate.
 
+## Overlap check: in-flight tickets touching the same code
+No file layout prevents two tickets in flight from editing the same function; only scheduling
+does. Before asking, run one cheap check — a report, not an analysis:
+1. **List in-flight tickets.** Read `<MHOME>/derived/WORKSTATE.md` (generated; read-only) and
+   take every other ticket in `implementing`, `qa`, `awaiting-ci` or `in-review`.
+2. **Collect what this ticket will touch**: the files and functions its spec names, plus the
+   hints from `maestro locate "$KEY"` when the spec is vague.
+3. **Compare** against each in-flight ticket's `<MHOME>/tickets/<OTHER>/spec.md` and, where it
+   has a PR, the changed files its `<MHOME>/derived/context/<OTHER>.md` records. Match on the
+   same file *and* the same function or symbol — a shared file alone is not a hit, and a
+   common symbol name alone is not either.
+4. **On a hit**, name it in the approval question — which ticket, which file/function — and
+   recommend `dependsOn: <OTHER>` so the human can serialize the two tickets. On no hit, say
+   nothing. Use only the verbs and tools this phase already has; do not call `gh`.
+
 ## `triaging`: route to approval
 Every ticket gets an explicit human hop before work starts — AD-7 replaced the old hidden
 tier-2 implementing-phase due-gate with this real, visible phase instead of a second, redundant
@@ -75,7 +90,7 @@ dispatch a sub-agent rather than asking), then ask the whole settled frontier in
 each numbered with your recommended answer:
 ```bash
 maestro ask "$KEY" \
-  --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. OK?" "<your recommendation>" "" "proceed" \
+  --question "Pick up $KEY — <one-line plan>. AC: <bulleted>. <overlap with <OTHER> in <file/function> — recommend dependsOn <OTHER>, if the overlap check hit>. OK?" "<your recommendation>" "" "proceed" \
   --question "<other settled question, if any>" "<your recommendation>" "" "proceed"
 ```
 This appends `QuestionAsked` and moves the ticket to `awaiting-human`, where

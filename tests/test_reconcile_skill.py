@@ -1266,3 +1266,14 @@ def test_generated_doc_conflict_rule():
         assert "resolve every other conflicted file first" in text, path
         assert ".venv/bin/python -m maestro.diagram" in text, path
         assert "docs/dispatch-gates.md" in text and "docs/state-machine.md" in text, path
+
+
+def test_triage_checks_inflight_overlap():
+    for path in (_commands_path("triaging"), _skills_path("triaging")):
+        text = path.read_text()
+        assert "Overlap check" in text, path
+        assert "derived/WORKSTATE.md" in text, path
+        for phase in ("implementing", "qa", "awaiting-ci", "in-review"):
+            assert f"`{phase}`" in text.split("## Overlap check")[1].split("## `triaging`")[0], (path, phase)
+        assert "dependsOn" in text.split("## Overlap check")[1], path
+        assert "approval question" in text, path
