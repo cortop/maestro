@@ -1291,3 +1291,11 @@ def test_skill_points_new_tests_at_feature_files():
         assert "extend `tests/test_tui_runtime.py`" not in text
     assert "tests/test_<feature>.py" in claude and "feature-file rule" in skill.lower()
     assert "feature-named" in task
+
+
+def test_skill_states_present_tense_docstring_rule():
+    for path in (_commands_path("implementing"), _skills_path("implementing"),
+                 Path(__file__).resolve().parent.parent / "CLAUDE.md"):
+        text = " ".join(path.read_text().split())
+        assert "present tense" in text, f"{path}: missing the present-tense docstring rule"
+        assert "growing set" in text, f"{path}: missing the no-prose-count rule"

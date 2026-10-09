@@ -1729,41 +1729,32 @@ def _run_named_test(profile: "testlang.LanguageProfile", test_command: str, cwd:
 
 
 def run_ac_checks(cfg: Config, key: str, cwd: Path, *, actor: str = "dispatcher") -> dict:
-    """T-79: run every ANNOTATED AC's own `test:`/`check:` check at *cwd*'s
-    current tree state, and record each as an AcCheckCaptured event -- the
-    per-AC counterpart to `capture_tests`'s whole-suite run.
+    """Run every ANNOTATED AC's own `test:`/`check:` check at *cwd*'s current tree
+    state, and record each as an AcCheckCaptured event -- the per-AC counterpart
+    to `capture_tests`'s whole-suite run.
 
-    Called by `dispatcher._route_test_run` only once the suite itself is
-    already green -- never spawns an agent session, exactly like
-    `capture_tests`; both are a plain `subprocess.run` this (dispatcher)
-    process makes directly. Cached per (tree_key, ac_hash), same rule as
-    `capture_tests`: a tree state already checked is not re-run, just re-read.
-    No-op (`{"all_passed": True, "checked": [], "summary": ""}`) when the spec
-    has no acs section at all or no ACs carry an annotation.
+    Called by `dispatcher._route_test_run` only once the suite itself is green;
+    never spawns an agent session, exactly like `capture_tests` (a plain
+    `subprocess.run` in the dispatcher process). Cached per (tree_key, ac_hash):
+    a tree state already checked is re-read, not re-run. No-op
+    (`{"all_passed": True, "checked": [], "summary": "", "unsupported": []}`)
+    when the spec has no acs section or no AC carries an annotation.
 
-    T-84: a `test:` annotation's added/deleted-name extraction and selector
-    syntax are selected per `binding.language` (`testlang.resolve_strict`) --
-    never hardcoded pytest here. `binding.language` is already fail-closed at
-    `config.load()` time (an unrecognized value refuses to load the home at
-    all -- see `config._REPO_TABLE_KEYS`'s validation), so `resolve_strict`
-    raising `UnsupportedLanguage` here should never actually happen; it is
-    caught anyway (defense in depth against a binding constructed by some
-    other path). T-96: an UNSET `language` whose guess (this annotation's own
-    path extension, checked by `resolve_strict`) contradicts the silent
-    python default raises `MismatchedLanguage` instead -- caught alongside
-    `UnsupportedLanguage`, same treatment. Either way this is surfaced via
-    the `"unsupported"` key instead of ever running (and thus ever
-    failing-closed forever) a check against the wrong language's regex --
-    the caller (`_route_test_run`) turns a non-empty `"unsupported"` into one
-    clear, one-time `ops.fail(..., dead_letter=True)` rather than a bounce
-    back to `implementing`.
+    A `test:` annotation's added/deleted-name extraction and selector syntax are
+    selected per `binding.language` (`testlang.resolve_strict`), never hardcoded
+    to pytest. `binding.language` is fail-closed at `config.load()`, so
+    `UnsupportedLanguage` should not occur here; it is caught anyway as defense
+    in depth. An UNSET `language` whose guess (the annotation path's extension)
+    contradicts the python default raises `MismatchedLanguage`, caught the same
+    way. Either is surfaced via the `"unsupported"` key instead of running a
+    check against the wrong language's regex; `_route_test_run` turns a
+    non-empty `"unsupported"` into one `ops.fail(..., dead_letter=True)`.
 
-    T-98: `binding.language` stays the EXTRACTION axis only. `binding.
-    test_selector` (also fail-closed at `config.load()`) is the orthogonal
-    INVOCATION axis -- unset, `_run_named_test` composes through the
-    resolved profile's own `format_selector` exactly as before this ticket;
-    set, it overrides only how a named test is run, never which names are
-    extracted from the diff.
+    `binding.language` is the EXTRACTION axis only. `binding.test_selector`
+    (also fail-closed at `config.load()`) is the orthogonal INVOCATION axis:
+    unset, `_run_named_test` composes through the resolved profile's
+    `format_selector`; set, it overrides only how a named test is run, never
+    which names are extracted from the diff.
     """
     spec_path = store.spec_path(cfg.home, key)
     if not spec_path.exists():

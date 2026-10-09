@@ -154,6 +154,17 @@ A change isn't done until a test exercises the real surface end-to-end:
 - Shared test helpers live in `tests/conftest.py` (`seed_ticket`, `seed_phase`,
   `make_origin_and_repo`, `git`, `run_doctor`, …) — reuse them instead of re-copying.
 
+## Docstrings and comments: present tense, no prose counts
+
+- Describe what the code does now; history goes in the commit or PR body, not the docstring.
+- Never count or list a growing set in prose; point at the source of truth instead
+  (e.g. "every name in `health.CHECKS`").
+- A short `# T-NNN:` tag is fine. Don't mass-strip existing tags, and don't reword lines you
+  aren't changing.
+
+Two concurrent tickets that each append a sentence to the same docstring line, or bump the
+same prose count, conflict on that line.
+
 ## Reconciler skills
 
 Per-phase behavior lives in `.claude/commands/maestro-reconcile-<phase>.md`. `skills/` and
