@@ -781,6 +781,37 @@ class _InboxModal(ModalScreen):
         self.dismiss(None)
 
 
+class _DirectionModal(ModalScreen):
+    """Prompt for a research direction; dismisses with the text, or None on cancel/empty."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    _DirectionModal { align: center middle; }
+    #direction-dialog { width: 70%; border: solid $accent; padding: 1 2; background: $surface; }
+    """
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="direction-dialog"):
+            yield Label(f"[bold]{self._key}[/bold] — what should the next research round cover?")
+            yield Input(placeholder="Direction (Enter to send, Esc to cancel)", id="direction-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#direction-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if text:
+            self.dismiss(text)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class HoldModal(ModalScreen):
     """Hold one ticket: a duration (blank = until released, parsed by
     `schedule.parse_every`) and an optional reason. Dismisses with
