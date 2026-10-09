@@ -65,6 +65,7 @@ from .modals import _ImportLinearModal
 from .modals import _InboxModal
 from .modals import _RunnerModal
 from .modals import _SpecFieldsModal
+from .modals import _StopModal
 from .modals import _SuggestAcsModal
 from .modals import _TicketPickModal
 from .modals import menu_actions
@@ -259,6 +260,7 @@ class MaestroTUI(App):
         Binding("t", "toggle_tail", "Tail/Full", show=False),
         Binding("x", "compact", "Compact", show=False),
         Binding("z", "release", "Release", show=False),
+        Binding("K", "stop_session", "Stop session", show=False),
         Binding("p", "project_rebuild", "Project", show=False),
         Binding("l", "view_logs", "Logs", show=False),
         Binding("I", "view_inbox", "Inbox log", show=False),
@@ -331,6 +333,8 @@ class MaestroTUI(App):
         self._sort_col: int | None = None
         self._sort_desc: bool = False
         self._release_key: str | None = None
+        self._stop_key: str | None = None
+        self._stop_note = False
         self._tickets_fr: float = 2.0
         # key -> phase; None = first poll (no notifications)
         self._prev_phases: dict[str, str] | None = None
@@ -616,6 +620,23 @@ class MaestroTUI(App):
                 self._on_release_probed(self._release_key, event.worker.result)
             elif event.state == WorkerState.ERROR:
                 self.notify(f"Claim probe failed: {event.worker.error}", severity="error")
+        elif event.worker.name == "stop-probe":
+            if event.state == WorkerState.SUCCESS:
+                self._on_stop_probed(self._stop_key, *event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"Claim probe failed: {event.worker.error}", severity="error")
+        elif event.worker.name == "stop-session":
+            if event.state == WorkerState.SUCCESS:
+                r = event.worker.result
+                self.notify(f"{r['key']}: {r['outcome']} (pid {r['pid']})",
+                            severity="information" if r["stopped"] else "warning")
+                if r["stopped"] and self._stop_note:  # after the stop, so the sweep sees it dead
+                    self._stop_note = False
+                    inbox.append_command(self._home, r["key"], "msg",
+                                         {"text": "Session stopped by a human (maestro stop)."})
+                    self._nudge(r["key"])
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"Stop failed: {event.worker.error}", severity="error")
         elif event.worker.name == "compact":
             if event.state == WorkerState.SUCCESS:
                 r = event.worker.result
@@ -1455,6 +1476,51 @@ class MaestroTUI(App):
             lambda: claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age),
             thread=True, name="release-probe",
         )
+
+    def action_stop_session(self) -> None:
+        """T-176: `K` -- confirm, then SIGTERM the target ticket's live session."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        claim = claims.read_claim(self._home, key)
+        if not claim:
+            self.notify(f"{key}: no live session to stop", severity="warning")
+            return
+        if claim.get("kind") in ("testrun", "restack"):
+            self.notify(f"{key}: {claim['kind']} is dispatcher-owned, not a session",
+                        severity="warning")
+            return
+        cfg = Config(home=self._home)
+        self._stop_key = key
+
+        def _probe() -> tuple[dict, dict | None]:  # `ps` shells out: off the UI thread
+            rows = claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age)
+            return claim, next((r for r in rows if r["key"] == key), None)
+
+        self.run_worker(_probe, thread=True, name="stop-probe")
+
+    def _on_stop_probed(self, key: str, claim: dict, row: dict | None) -> None:
+        if row is None:
+            self.notify(f"{key}: no live session to stop", severity="warning")
+            return
+        silence = None
+        if claim.get("log_path"):
+            try:
+                silence = round(store.now_epoch() - os.stat(claim["log_path"]).st_mtime)
+            except OSError:
+                pass
+
+        def _on_dismiss(result: tuple[bool, bool] | None) -> None:
+            if not result or not result[0]:
+                return
+            self._stop_note = result[1]
+            cfg = Config(home=self._home)
+            self.run_worker(lambda: ops_mod.stop_session(cfg, key), thread=True, name="stop-session")
+
+        self.push_screen(
+            _StopModal(key, pid=row["pid"], age_s=row["age_s"], verdict=row["verdict"], silence_s=silence),
+            _on_dismiss)
 
     def _on_release_probed(self, key: str, rows: list[dict]) -> None:
         row = next((r for r in rows if r["key"] == key), None)

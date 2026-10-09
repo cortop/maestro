@@ -29,6 +29,7 @@ from .modals import (
     _PHASE_COMMANDS,
     _RunnerModal,
     _ScheduleModal,
+    _StopModal,
     _SuggestAcsModal,
     _TicketPickModal,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "HoldModal",
     "_RunnerModal",
     "_ScheduleModal",
+    "_StopModal",
     "_SuggestAcsModal",
     "_TicketPickModal",
     "_DEFAULT_COMMANDS",
