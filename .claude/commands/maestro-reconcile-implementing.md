@@ -270,6 +270,11 @@ Otherwise implement the spec's Acceptance criteria:
    `verifying` stage (once `test_command` is armed) is the place for long runs, not this
    session. If you exceed ~`max_impl_turns` edit/test cycles without converging: `maestro fail
    "$KEY" "non-converging: <why>"` and exit.
+   **Docstrings and comments (house rule):** write them in the present tense, describing what
+   the code does now -- history belongs in the commit or PR body, never appended to a docstring
+   line. Never count or list a growing set in prose ("N ops-owned types"); point at its source
+   of truth instead (e.g. "every name in `health.CHECKS`"). A short `# T-NNN:` tag is fine; don't
+   mass-strip existing tags or reword lines you aren't changing.
 3. **If step 1 was a fix round, record it now** — the counterpart to the QA fail that sent you
    back, and the thing that bounds the implementing↔qa ping-pong:
    ```bash

@@ -1,13 +1,12 @@
-"""GA-2: `maestro append --type <T>` accepted any T and wrote it straight to the log,
-so every invariant `ops` enforces (max_impl_turns ceiling, unverified-AC gate,
-independent QA gate, backoff/dead-letter routing, RB-12's captured-test-run gate,
-T-79's per-AC captured-check gate) was one raw append away from irrelevant.
-`cmd_append` now refuses the ops-owned types -- most with an error naming the verb
-to use instead, and T-79's `AcCheckCaptured` (dispatcher-owned, no manual verb at
-all) with its own message -- a denylist, not an allowlist, so the legitimate raw
-appends (`events.SIDE_EFFECTING`, plus ad-hoc types like Note and
-ResearchProposed, and AD-7's now-historical-only `Approved`) keep working
-unchanged.
+"""`maestro append --type <T>` refuses every ops-owned event type, so the invariants
+`ops` enforces (impl-turn ceiling, unverified-AC gate, independent QA gate,
+backoff/dead-letter routing, captured-test-run and per-AC captured-check gates)
+cannot be bypassed with a raw append.
+
+`cmd_append` names the verb to use instead for each denied type; `AcCheckCaptured`
+is dispatcher-owned, with no manual verb, and gets its own message. It is a
+denylist, not an allowlist: the legitimate raw appends (`events.SIDE_EFFECTING`,
+plus ad-hoc types like Note and ResearchProposed) keep working unchanged.
 """
 import pytest
 
@@ -30,7 +29,7 @@ DENIED = [
 
 
 # ---------------------------------------------------------------------------
-# The ops-owned types with a real verb refuse, name it, and append nothing.
+# Ops-owned types with a real verb refuse, name it, and append nothing.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("denied_type, verb", DENIED)
