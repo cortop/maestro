@@ -1468,3 +1468,55 @@ class _SpecFieldsModal(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class _CheckModal(ModalScreen):
+    """T-170: one doctor check -- its full dict as JSON (markup off) plus the remedies that apply.
+
+    *remedies* is ``[(remedy, key, label)]``, built by FleetScreen; *notes* are lines explaining
+    why a key offers none. Dismisses with ``(remedy, key)`` for the chosen option, or None."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    DEFAULT_CSS = """
+    _CheckModal { align: center middle; }
+    _CheckModal #check-dialog { width: 90%; height: 85%; border: solid $accent;
+                                padding: 1 2; background: $surface; }
+    _CheckModal #check-scroll { height: 1fr; }
+    _CheckModal #check-remedies { height: auto; max-height: 10; }
+    """
+
+    def __init__(self, check: dict, remedies: list[tuple[str, str | None, str]],
+                 notes: list[str] | None = None) -> None:
+        super().__init__()
+        self._check = check
+        self._remedies = remedies
+        self._notes = notes or []
+
+    def compose(self) -> ComposeResult:
+        c = self._check
+        with Vertical(id="check-dialog"):
+            yield Label(f"{c.get('name')} · {c.get('status')}  [Enter] run remedy · [Esc] close",
+                        markup=False)
+            with VerticalScroll(id="check-scroll"):
+                yield Static(json.dumps(c, indent=2, default=str), id="check-json", markup=False)
+            for note in self._notes:
+                yield Label(note, markup=False)
+            if self._remedies:
+                yield OptionList(
+                    *(Option(Text(label), id=f"{remedy}|{key or ''}")
+                      for remedy, key, label in self._remedies),
+                    id="check-remedies")
+
+    def on_mount(self) -> None:
+        if self._remedies:
+            picker = self.query_one("#check-remedies", OptionList)
+            picker.focus()
+            picker.action_first()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        remedy, _, key = str(event.option.id).partition("|")
+        self.dismiss((remedy, key or None))
+
+    def action_close(self) -> None:
+        self.dismiss(None)
