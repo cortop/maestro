@@ -57,6 +57,7 @@ from .screens import (
     ProposalScreen,
     ReviewScreen,
     ScheduleScreen,
+    SessionsScreen,
     SpecScreen,
     WhyScreen,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "ProposalScreen",
     "ReviewScreen",
     "ScheduleScreen",
+    "SessionsScreen",
     "SpecScreen",
     "_ACCEPT_ALL",
     "_AcEvidenceModal",

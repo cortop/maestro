@@ -93,6 +93,7 @@ from .screens import LogsScreen
 from .screens import ProposalScreen
 from .screens import ReviewScreen
 from .screens import ScheduleScreen
+from .screens import SessionsScreen
 from .screens import SpecScreen
 from .screens import WhyScreen
 from .screens import edit_in_editor
@@ -278,6 +279,7 @@ class MaestroTUI(App):
         Binding("ctrl+r", "retry", "Retry", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("B", "sessions_panel", "Sessions & burn", show=False),
         Binding("P", "pause_fleet", "Pause/Resume", show=False),
         Binding("T", "activity_panel", "Activity", show=False),
         Binding("D", "deps_panel", "Deps", show=False),
@@ -329,7 +331,7 @@ class MaestroTUI(App):
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
         "jump_running", "decisions", "filter_query", "clear_query",
     })
-    _NON_TICKET_SCREENS = (FleetScreen, BackupsScreen, EnvScreen, ScheduleScreen, ActivityScreen)
+    _NON_TICKET_SCREENS = (FleetScreen, SessionsScreen, BackupsScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen, ReviewScreen, WhyScreen)
 
@@ -1081,6 +1083,9 @@ class MaestroTUI(App):
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
+
+    def action_sessions_panel(self) -> None:
+        self.push_screen(SessionsScreen(self._home))
 
     def action_review_panel(self) -> None:
         self.push_screen(ReviewScreen(self._home))

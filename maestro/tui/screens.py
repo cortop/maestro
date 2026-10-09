@@ -30,6 +30,8 @@ from textual.widgets import Input
 from textual.widgets import Markdown
 from textual.widgets import RichLog
 from textual.widgets import Static
+from textual.widgets import TabbedContent
+from textual.widgets import TabPane
 from textual.widgets import Tree
 from textual.worker import Worker
 from textual.worker import WorkerState
@@ -976,6 +978,217 @@ def _fmt_size(n: int) -> str:
             return f"{n} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
+
+
+class SessionsScreen(Screen):
+    """Sessions & burn: per-key spawns/spend/burn flags (Burners) and claim-file liveness (Claims).
+
+    Read-only except `x`, which purges only claims a real sweep would drop (`claimed == False`),
+    re-checked at confirm time. Stopping a live session is `K` on the board, not here.
+    """
+
+    HELP = 'Burners and claims. enter jumps (board / logs), x purges stale claims, click a header to sort. escape goes back.'
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        # priority: otherwise the board's own `enter` (focus_detail) also fires after the table's.
+        Binding("enter", "open_row", "Open", priority=True),
+        ("x", "purge_stale", "Purge stale"),
+        ("r", "refresh_all", "Refresh"),
+        ("1", "show_tab('burners-pane')", "Burners"),
+        ("2", "show_tab('claims-pane')", "Claims"),
+    ]
+
+    CSS = """
+    SessionsScreen DataTable { height: 1fr; }
+    """
+
+    _BURNER_COLS = ("Key", "Phase", "Spawns/hr (agent-equiv)", "$/hr", "Flag")
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+        self._burners: list[dict] = []
+        self._claims: list[dict] = []
+        self._sort_col = 3
+        self._sort_desc = True
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with TabbedContent(initial="burners-pane", id="sessions-tabs"):
+            with TabPane("Burners", id="burners-pane"):
+                yield DataTable(id="burners-table", cursor_type="row")
+            with TabPane("Claims", id="claims-pane"):
+                yield DataTable(id="claims-table", cursor_type="row")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Sessions & burn"
+        burners = self.query_one("#burners-table", DataTable)
+        for col in self._BURNER_COLS:
+            burners.add_column(col)
+        claims_t = self.query_one("#claims-table", DataTable)
+        for col in ("Key", "PID", "Age", "Verdict", "Survives sweep"):
+            claims_t.add_column(col)
+        burners.focus()
+        self._load_burners()
+        self._load_claims()
+        # health.report() shells out to gh/launchctl (see FleetScreen); describe_claims shells out to ps.
+        self.set_interval(30.0, self._load_burners)
+        self.set_interval(10.0, self._load_claims)
+
+    # --- workers (threads: both shell out) ------------------------------------
+
+    def _load_burners(self) -> None:
+        self.run_worker(self._burners_data, thread=True, group="sessions-burners", exclusive=True,
+                        name="sessions-burners")
+
+    def _burners_data(self) -> list[dict]:
+        cfg = config_mod.load(str(self._home))
+        rpt = health.report(cfg, store.now_epoch())
+        burn_chk = next((c for c in rpt.get("checks", []) if c.get("name") == "burn"), {})
+        repeated = burn_chk.get("repeated_failure_by_key") or {}
+        stalled = burn_chk.get("no_progress_by_key") or {}
+        spawns = (rpt.get("spawns_last_hour") or {}).get("by_key") or {}
+        spend = rpt.get("spend_usd_by_key") or {}
+        keys = set(spawns) | set(spend) | set(rpt.get("burning_keys") or [])
+        rows = []
+        for key in keys:
+            flags = [name for name, m in (("repeated failure", repeated), ("no progress", stalled))
+                     if key in m]
+            rows.append({"key": key, "phase": snap_mod.load(self._home, key).phase,
+                         "spawns": spawns.get(key, 0), "usd": spend.get(key, 0.0),
+                         "flag": ", ".join(flags)})
+        return rows
+
+    def _load_claims(self) -> None:
+        self.run_worker(self._claims_data, thread=True, group="sessions-claims", exclusive=True,
+                        name="sessions-claims")
+
+    def _claims_data(self) -> list[dict]:
+        cfg = config_mod.load(str(self._home))
+        return claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age)
+
+    def _purge_data(self) -> list[str]:
+        """Re-describe, then release only what is STILL stale -- never a `claimed` row, and never
+        via `claims.active_keys`/`is_claimed` (both release as a side effect)."""
+        cfg = config_mod.load(str(self._home))
+        rows = claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age)
+        dropped = [r["key"] for r in rows if not r["claimed"]]
+        for key in dropped:
+            claims.release(self._home, key)
+        return dropped
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        name = event.worker.name
+        if not name.startswith("sessions-"):
+            return
+        if event.state == WorkerState.ERROR:
+            self.notify(f"{name} failed: {event.worker.error}", severity="error")
+        elif event.state == WorkerState.SUCCESS:
+            if name == "sessions-burners":
+                self._burners = event.worker.result
+                self._paint_burners()
+            elif name == "sessions-claims":
+                self._claims = event.worker.result
+                self._paint_claims()
+            elif name == "sessions-purge":
+                dropped = event.worker.result
+                self.notify(f"purged: {', '.join(dropped)}" if dropped else "no stale claims")
+                self._load_claims()
+
+    # --- painting ---------------------------------------------------------------
+
+    _SORT_KEYS = (lambda r: r["key"], lambda r: r["phase"], lambda r: r["spawns"],
+                  lambda r: r["usd"], lambda r: r["flag"])
+
+    def _paint_burners(self) -> None:
+        table = self.query_one("#burners-table", DataTable)
+        cur = None
+        if table.row_count:
+            try:
+                cur = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            except Exception:
+                cur = None
+        rows = sorted(self._burners, key=self._SORT_KEYS[self._sort_col], reverse=self._sort_desc)
+        table.clear()
+        for r in rows:
+            table.add_row(r["key"], r["phase"], f"{r['spawns']:g}", f"${r['usd']:.2f}",
+                          r["flag"] or "—", key=r["key"])
+        if cur is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(cur), scroll=False)
+            except Exception:
+                pass
+
+    def _paint_claims(self) -> None:
+        table = self.query_one("#claims-table", DataTable)
+        cur = None
+        if table.row_count:
+            try:
+                cur = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            except Exception:
+                cur = None
+        table.clear()
+        for r in self._claims:
+            table.add_row(r["key"], str(r["pid"]), _fmt_duration(r["age_s"]), r["verdict"],
+                          "yes" if r["claimed"] else "no", key=r["key"])
+        if cur is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(cur), scroll=False)
+            except Exception:
+                pass
+
+    # --- events / actions ---------------------------------------------------------
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        if event.data_table.id != "burners-table":
+            return
+        col = event.column_index
+        if col == self._sort_col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col, self._sort_desc = col, col in (2, 3)
+        self._paint_burners()
+
+    def action_open_row(self) -> None:
+        """Enter: jump the board to the Burners row's key / open logs for the Claims row's key."""
+        burners = self.query_one("#sessions-tabs", TabbedContent).active == "burners-pane"
+        table = self.query_one("#burners-table" if burners else "#claims-table", DataTable)
+        if not table.row_count:
+            return
+        try:
+            key = str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+        except Exception:
+            return
+        if burners:
+            self.app._jump_to(key)
+        else:
+            self.app.push_screen(LogsScreen(self._home, key))
+
+    def action_show_tab(self, pane: str) -> None:
+        self.query_one("#sessions-tabs", TabbedContent).active = pane
+        self.query_one("#burners-table" if pane == "burners-pane" else "#claims-table", DataTable).focus()
+
+    def action_refresh_all(self) -> None:
+        self._load_burners()
+        self._load_claims()
+
+    def action_purge_stale(self) -> None:
+        stale = [r["key"] for r in self._claims if not r["claimed"]]
+        if not stale:
+            self.notify("no stale claims")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self.run_worker(self._purge_data, thread=True, name="sessions-purge",
+                                exit_on_error=False)
+
+        self.app.push_screen(
+            _ConfirmModal(f"Release [bold]{len(stale)}[/bold] stale claim(s): "
+                          f"[bold]{rich_escape(', '.join(stale))}[/bold]?"),
+            _on_confirm)
 
 
 class DepsScreen(Screen):

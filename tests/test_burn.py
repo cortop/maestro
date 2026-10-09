@@ -14,8 +14,7 @@ from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from test_dispatcher import _EphemeralSessions
-from test_spend import _result_record, _write_stream_log
-from conftest import seed_phase
+from conftest import _result_record, _write_stream_log, seed_phase
 
 
 def _sweep_doctor(home):

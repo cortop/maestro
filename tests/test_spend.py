@@ -12,21 +12,7 @@ from maestro import spend, store
 from maestro.cli import main
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
-from conftest import seed_phase
-
-
-def _write_stream_log(home, key, epoch, records):
-    session_id = f"reconcile-{key}-{epoch:.6f}"
-    path = home / "agent-logs" / key / f"{session_id}.stream.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = "".join(json.dumps(r) + "\n" for r in records)
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
-def _result_record(cost):
-    return {"type": "result", "total_cost_usd": cost, "num_turns": 3, "duration_ms": 1000,
-            "usage": {"input_tokens": 100, "output_tokens": 50}}
+from conftest import _result_record, _write_stream_log, seed_phase
 
 
 def _write_pi_log(home, key, epoch, turn_costs):
