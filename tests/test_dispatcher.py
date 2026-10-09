@@ -10,11 +10,19 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from maestro import cli, claims, dispatcher as disp
-from maestro import event_log, inbox, ops, snapshot as snap_mod, store
+from maestro import claims
+from maestro import cli
+from maestro import dispatcher as disp
+from maestro import event_log
+from maestro import inbox
+from maestro import ops
+from maestro import snapshot as snap_mod
+from maestro import store
 from maestro.config import Config
-from maestro.sessions import ClaudeCliSessions, DryRunSessions
+from maestro.sessions import ClaudeCliSessions
+from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
+
 from conftest import seed_phase
 
 
@@ -1703,8 +1711,10 @@ def test_watchdog_reap_during_outage_tags_failed_event_with_provider_marker(home
     non-ok, the appended Failed event's payload carries a provider marker
     (kind="provider") plus the observed state -- proven over a REAL
     dispatch(cfg, DryRunSessions(), ...) sweep, not a direct ops.fail call."""
-    from maestro import health, store as store_mod
     import json as json_mod
+
+    from maestro import health
+    from maestro import store as store_mod
 
     cfg.max_session_seconds = 100
     seed_phase(home, "T-1", Phase.IMPLEMENTING)  # this is the one the watchdog reaps
@@ -2378,7 +2388,8 @@ def test_paused_sweep_still_writes_heartbeat(home, cfg):
 def test_doctor_reports_paused_board(home):
     import json
 
-    from maestro import cli, fleet
+    from maestro import cli
+    from maestro import fleet
 
     fleet.pause(home, reason="doctor check")
     disp.dispatch(Config(home=home), DryRunSessions(), now=1000)
@@ -2415,7 +2426,8 @@ def test_raising_hook_does_not_abort_the_sweep(home, cfg, monkeypatch):
 def test_every_listed_hook_is_wrapped(home, cfg, monkeypatch):
     """AC1's explicit list: tracker sync, schedule, worktree sync, backup,
     notify -- each raises in turn and the sweep still completes and spawns."""
-    from maestro import backup, notify
+    from maestro import backup
+    from maestro import notify
 
     hooks = {
         "sync_external_sources": (disp, "sync_external_sources"),
