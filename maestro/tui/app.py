@@ -5,50 +5,91 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from textual.app import App, ComposeResult, ScreenStackError
-from textual.binding import Binding
-from textual.css.query import NoMatches
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
-from textual.worker import Worker, WorkerState
-
 from rich.markup import escape
 from rich.text import Text
+from textual.app import App
+from textual.app import ComposeResult
+from textual.app import ScreenStackError
+from textual.binding import Binding
+from textual.containers import Horizontal
+from textual.containers import Vertical
+from textual.css.query import NoMatches
+from textual.widgets import DataTable
+from textual.widgets import Footer
+from textual.widgets import Header
+from textual.widgets import Input
+from textual.widgets import RichLog
+from textual.widgets import Static
+from textual.worker import Worker
+from textual.worker import WorkerState
 
-from .. import claims, gates, ratelimit, spend as spend_mod, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
-from ..config import Config
-from ..dispatcher import existing_prefixes, spec_runner
+from .. import claims
+from .. import config as config_mod
+from .. import depgraph
 from .. import dispatcher as disp
-from ..projection import _PHASE_RANK, parse_query, phase_predicate, ticket_rows
-from ..sessions import build_routing_sessions, reap_children
-from ..statemachine import Phase, ACTIVE_PHASES
+from .. import event_log
+from .. import fleet as fleet_mod
+from .. import gates
+from .. import health
+from .. import inbox
+from .. import ops as ops_mod
+from .. import ratelimit
+from .. import snapshot as snap_mod
+from .. import spend as spend_mod
+from .. import store
+from ..config import Config
+from ..dispatcher import existing_prefixes
+from ..dispatcher import spec_runner
+from ..projection import _PHASE_RANK
+from ..projection import parse_query
+from ..projection import phase_predicate
+from ..projection import ticket_rows
+from ..sessions import build_routing_sessions
+from ..sessions import reap_children
+from ..statemachine import ACTIVE_PHASES
+from ..statemachine import Phase
 from .detail import render as _render_detail
 from .events import render_log
-from .modals import (
-    _ACCEPT_ALL, MENU_PROPOSAL, MenuRow, _AcceptedRecommendation, _ActionMenu, _AddAcModal, _AnswerModal,
-    _CmdModal, _ConfirmModal, HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal,
-    _SpecFieldsModal, _SuggestAcsModal, _TicketPickModal, menu_actions,
-)
-from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
-from .screens import (
-    DecisionsScreen,
-    DetailScreen,
-    ActivityScreen,
-    DepsScreen,
-    EnvScreen,
-    EventsScreen,
-    FleetScreen,
-    toggle_fleet_pause,
-    InboxScreen,
-    LogsScreen,
-    ProposalScreen,
-    ReviewScreen,
-    ScheduleScreen,
-    SpecScreen,
-    AcScreen,
-    WhyScreen,
-    edit_in_editor,
-)
+from .modals import _ACCEPT_ALL
+from .modals import MENU_PROPOSAL
+from .modals import HoldModal
+from .modals import MenuRow
+from .modals import _AcceptedRecommendation
+from .modals import _ActionMenu
+from .modals import _AddAcModal
+from .modals import _AnswerModal
+from .modals import _CmdModal
+from .modals import _ConfirmModal
+from .modals import _CreateModal
+from .modals import _ImportLinearModal
+from .modals import _InboxModal
+from .modals import _RunnerModal
+from .modals import _SpecFieldsModal
+from .modals import _SuggestAcsModal
+from .modals import _TicketPickModal
+from .modals import menu_actions
+from .render import _dep_color
+from .render import _nudge_toast
+from .render import _render_badge
+from .render import _render_pulse
+from .render import _styled_row
+from .screens import AcScreen
+from .screens import ActivityScreen
+from .screens import DecisionsScreen
+from .screens import DepsScreen
+from .screens import DetailScreen
+from .screens import EnvScreen
+from .screens import EventsScreen
+from .screens import FleetScreen
+from .screens import InboxScreen
+from .screens import LogsScreen
+from .screens import ProposalScreen
+from .screens import ReviewScreen
+from .screens import ScheduleScreen
+from .screens import SpecScreen
+from .screens import WhyScreen
+from .screens import edit_in_editor
+from .screens import toggle_fleet_pause
 
 _NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
 _NEEDS_YOU_PHASE_VALUES = {p.value for p in _NEEDS_YOU_PHASES}
