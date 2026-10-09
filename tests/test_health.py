@@ -710,21 +710,24 @@ def test_doctor_resolves_per_home_plist_ignoring_a_legacy_decoy(home, tmp_path, 
     assert not any(line == f"list {fleet.LEGACY_LABEL}" for line in lines)
 
 
+def _registry_check_names() -> set[str]:
+    return {fn.__name__.removeprefix("check_") for fn in health.CHECKS}
+
+
+def test_checks_registry_order_and_uniqueness():
+    """CHECKS has no duplicate entry and keeps check_home_structure first."""
+    assert len(set(health.CHECKS)) == len(health.CHECKS)
+    assert health.CHECKS[0] is health.check_home_structure
+    assert len(_registry_check_names()) == len(health.CHECKS)
+
+
 def test_doctor_cli_includes_check_registry(home, cfg):
     """AC3: `maestro doctor` runs the full check registry via the real CLI."""
     seed_phase(home, "T-1", Phase.READY)
     code, out = run_doctor(home)
     assert code == 0
     names = {c["name"] for c in out["checks"]}
-    assert names == {"home_structure", "heartbeat", "backup_age", "claim_age", "claim_no_output",
-                      "dead_letters", "phantom_keys", "watchdog_loops", "depends_on", "launchctl",
-                      "repo_preflight", "unknown_repo_bindings", "language_binding",
-                      "missing_reconcile_skill",
-                      "reconciler_permissions", "spawn_floor", "daily_spend", "burn",
-                      "gh_credential_reachability", "ollama_models", "pi_models", "runner_binary",
-                      "pi_version", "worktree_health", "worktree_branch", "worktree_witness", "holds",
-                      "provider_availability",
-                      "missing_acs", "ac_annotation_parse", "unresolvable_spec_hints"}
+    assert names == _registry_check_names()
     assert all(c["status"] in {"ok", "warn", "fail"} for c in out["checks"])
 
 
@@ -769,37 +772,11 @@ def test_doctor_json_check_names_and_exit_code_match_pre_change_baseline(home):
     """AC3: real `maestro doctor` (JSON stdout) over a temp MAESTRO_HOME prints
     the same check-name set and the same exit code (0) as the captured
     pre-change baseline -- iterating CHECKS instead of slicing it must not
-    add, drop, or rename a single check. (T-48 legitimately grew the registry
-    by one -- `claim_no_output` -- after this baseline was captured; folded in
-    here rather than re-captured, since T-46's own invariant, "iterating
-    doesn't silently add/drop/rename", still holds for every other name. T-33
-    grew it by one more -- `ollama_models` -- same treatment. T-38 (OC-2) grew
-    it by one more still -- `runner_binary` -- same treatment. MTO-1 grew it by one
-    more still -- `worktree_health` -- same treatment. MTO-8 grew it by one more
-    still -- `provider_availability` -- same treatment. RB-11 grew it by one more
-    still -- `burn` -- same treatment. T-65 (OC-7) grew it by one more still --
-    `watchdog_loops` -- same treatment. T-56 (PI-4) grew it by one more still --
-    `pi_version` -- same treatment. T-61 (PI-9) grew it by one more still --
-    `pi_models` -- same treatment. T-77 (RB-17) grew it by one more still --
-    `phantom_keys` -- same treatment. T-80 grew it by one more still --
-    `missing_acs` -- same treatment. T-95 grew it by one more still --
-    `worktree_witness` -- same treatment. T-96 grew it by one more still --
-    `language_binding` -- same treatment. T-98 grew it by one more still --
-    `ac_annotation_parse` -- same treatment. T-99 grew it by one more still --
-    `home_structure` -- same treatment. Another ticket grew it by one more
-    still -- `worktree_branch` -- same treatment. T-124 grew it by one more
-    still -- `unresolvable_spec_hints` -- same treatment.)"""
-    baseline_names = {
-        "home_structure", "heartbeat", "backup_age", "claim_age", "claim_no_output", "dead_letters",
-        "phantom_keys", "watchdog_loops", "depends_on", "repo_preflight", "unknown_repo_bindings",
-        "language_binding", "missing_reconcile_skill", "reconciler_permissions", "spawn_floor",
-        "daily_spend", "gh_credential_reachability", "launchctl", "ollama_models",
-        "pi_models", "runner_binary", "pi_version", "worktree_health", "worktree_branch", "worktree_witness", "holds",
-        "provider_availability", "burn", "missing_acs", "ac_annotation_parse", "unresolvable_spec_hints",
-    }
+    add, drop, or rename a single check. The expected names derive from
+    `health.CHECKS`, so a new check needs no edit here."""
     code, out = run_doctor(home)
     assert code == 0
-    assert {c["name"] for c in out["checks"]} == baseline_names
+    assert {c["name"] for c in out["checks"]} == _registry_check_names()
 
 
 # --- GA-8: negative min_spawn_interval rejected at load, 0 stays legal ---------

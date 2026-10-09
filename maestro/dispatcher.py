@@ -181,17 +181,40 @@ def resolve_credential(binding, cache: dict) -> credentials.CredentialResolution
 # "restore" (the one irreversible verb), "fleet" (launchd + the pause kill
 # switch), or any other human-only verb here -- and never collapse this to
 # the bare wildcard "maestro:*", which grants all of those at once.
+# sorted-registry
 AGENT_TOOL_VERBS = (
-    # The 24 "[agent]"-tagged verbs registered in build_parser().
-    "local-backup", "snapshot", "events", "append", "set-phase", "ask",
-    "fold-inbox", "inbox-ack", "observe-spec", "requeue", "fail", "impl-turn",
-    "verify-ac", "qa-brief", "qa-verdict", "capture-tests", "finalize", "checked", "release",
-    "check-conflicts", "check-merged", "fold-steps", "worktree", "locate", "pr-size",
-    "reply-review",
-    # Not "[agent]"-tagged, but genuinely invoked by skills (grep skills/*.md):
-    "env",     # every phase preamble's first command, all phase files
-    "show",    # maestro-reconcile-passive.md reads pending_inbox through it
+    # The "[agent]"-tagged verbs registered in build_parser() (enforced by
+    # tests/test_web_tools.py::test_agent_grant_matches_cli_agent_tags), plus
+    # env/show/create, which skills genuinely invoke but build_parser() doesn't tag.
+    "append",
+    "ask",
+    "capture-tests",
+    "check-conflicts",
+    "check-merged",
+    "checked",
     "create",  # maestro-reconcile-awaiting-human.md mints implementation tickets
+    "env",  # every phase preamble's first command, all phase files
+    "events",
+    "fail",
+    "finalize",
+    "fold-inbox",
+    "fold-steps",
+    "impl-turn",
+    "inbox-ack",
+    "local-backup",
+    "locate",
+    "observe-spec",
+    "pr-size",
+    "qa-brief",
+    "qa-verdict",
+    "release",
+    "reply-review",
+    "requeue",
+    "set-phase",
+    "show",  # maestro-reconcile-passive.md reads pending_inbox through it
+    "snapshot",
+    "verify-ac",
+    "worktree",
 )
 
 # The coarse wildcard a human grants by hand in a settings file (see this
