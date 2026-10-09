@@ -78,8 +78,10 @@ Core (correctness-critical):
 - `sessions.py` — spawn/list reconciler sessions (`claude -p`, opencode, pi backends).
 - `config.py` — project-agnostic `config.toml` loading/validation. Every `[maestro]` key
   is one row of `config.KNOBS` (coercion + whether `[repos.<name>]` may override it);
-  unknown keys fail `config.load()` closed. Adding a knob: a `Config` field, a `KNOBS`
-  row, a commented line in `DEFAULT_CONFIG_TOML` (`tests/test_config.py` checks all three).
+  unknown keys fail `config.load()` closed. Adding a knob: pick its `# --- <section> ---`
+  and insert at its alphabetical slot there in all three lists -- a `Config` field, a `KNOBS`
+  row, a commented line in `DEFAULT_CONFIG_TOML` (plus a `RepoBinding` field if `per_repo`,
+  same section and slot); `tests/test_config.py` checks section and order.
 - `repos.py` — per-ticket repo binding (`[repos.<name>]`). `gates.py` — spec front-matter reads.
 
 Guards and budgets:

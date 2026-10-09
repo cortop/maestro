@@ -19,19 +19,22 @@ from . import schedule, store, testlang
 @dataclass
 class Config:
     home: Path
-    max_concurrency: int = 12
-    reconcile_steady_interval: int = 300   # seconds between awaiting-ci re-checks
-    # Hard floor on how often ONE key may be re-spawned WITHOUT a phase change,
-    # regardless of why it is due. Independent of claim liveness (a session that dies
-    # in <1s frees its claim instantly) and of the launchd cadence, so it still bounds
-    # the fleet when the dispatcher is invoked faster than intended. None = fall back
-    # to reconcile_steady_interval. Human signals (inbox/spec edit) bypass it, and so
-    # does a phase hand-off (T-136) -- a key whose folded phase differs from the phase
-    # it was last spawned in already made progress, so only a same-phase respawn (no
-    # progress) is held to this floor.
-    min_spawn_interval: int | None = None
+
+    # --- spawn & concurrency ---
     backoff_base: int = 30                 # seconds; exp backoff on transient failure
     backoff_cap: int = 3600
+    # RB-11: threshold shared by `maestro doctor`'s per-key burn WARN (byte-identical
+    # `Failed` text, or spawns piling up with `observed_seq` frozen -- see burn.py) AND,
+    # if it trips, `burn.should_park`'s dead-letter park -- a per-key rate cap distinct
+    # from the fleet-wide `runaway_spawns_per_hour`/`daily_spend_ceiling_usd` gates
+    # (the 2026-08-14 T-55/T-56 incident: $1.40/hr per key, weeks from either ceiling).
+    # 0 disables both the WARN and the park.
+    burn_repeat_threshold: int = 5
+    # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
+    # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
+    # by `maestro doctor` and the TUI fleet panel alongside today's actual spend.
+    daily_spend_ceiling_usd: float | None = None
+    max_concurrency: int = 12
     # Cumulative-failure threshold before `ops.fail` dead-letters a ticket into
     # DEGRADED (STALLED + phase change). `failure_count` is a lifetime counter
     # that never resets -- not even when a human revives a DEGRADED ticket
@@ -54,6 +57,48 @@ class Config:
     # comments in `statemachine.PHASE_CLASS` and `snapshot`'s STALLED arm.
     max_failures: int = 4
     max_impl_turns: int = 20               # ralph-loop circuit breaker
+    # Watchdog: fail a key instead of respawning once it has been spawned this many
+    # times with observed_seq unchanged (no progress). Resets the moment seq advances.
+    max_spawn_attempts: int = 5
+    # Hard floor on how often ONE key may be re-spawned WITHOUT a phase change,
+    # regardless of why it is due. Independent of claim liveness (a session that dies
+    # in <1s frees its claim instantly) and of the launchd cadence, so it still bounds
+    # the fleet when the dispatcher is invoked faster than intended. None = fall back
+    # to reconcile_steady_interval. Human signals (inbox/spec edit) bypass it, and so
+    # does a phase hand-off (T-136) -- a key whose folded phase differs from the phase
+    # it was last spawned in already made progress, so only a same-phase respawn (no
+    # progress) is held to this floor.
+    min_spawn_interval: int | None = None
+    ratelimit_fallback_pause: int = 1800  # pause length when resetsAt is missing/invalid/past
+    # Fleet-wide rate-limit gate (maestro/ratelimit.py): a rejected rate_limit_event
+    # pauses ALL spawns until resets_at + ratelimit_grace, clamped to ratelimit_max_pause.
+    ratelimit_grace: int = 60          # seconds added after resetsAt before resuming (clock-skew buffer)
+    ratelimit_max_pause: int = 21600   # cap on any single pause; 0 disables the gate
+    reconcile_steady_interval: int = 300   # seconds between awaiting-ci re-checks
+    # GA-5: seconds `dispatch()` arms `fleet.pause` for when it observes the same
+    # `runaway` condition `maestro doctor` reports (health.spawn_rate(...)["total"]
+    # > health.spawn_budget(cfg)) -- the auto-brake beside the fleet-wide rate-limit
+    # gate. 0 disables the auto-brake while leaving doctor's advisory intact;
+    # `runaway_spawns_per_hour = 0` disables both (spawn_budget() returns 0).
+    runaway_pause_cooldown: int = 900
+    # Fleet-wide spawns/hour above which `maestro doctor` trips `runaway` (exit 1).
+    # None = derive from what the spawn-rate floor itself permits (see health.py);
+    # 0 disables the check.
+    runaway_spawns_per_hour: int | None = None
+
+    # --- timeouts & watchdog ---
+    # Ceiling (seconds) on a single foreground Bash call inside a reconciler session,
+    # exported to every spawned runner as `BASH_MAX_TIMEOUT_MS` AND `BASH_DEFAULT_TIMEOUT_MS`
+    # (Claude Code's own knobs; the built-in ceiling is 600s, which maestro's own ~2700-test
+    # suite cannot finish inside, and the built-in default for a bare call with no explicit
+    # timeout is 120s, which backgrounds a reconciler's own unannotated Bash calls). The
+    # implementing skill runs the suite as ONE foreground call bounded by this, so it is the
+    # budget the suite must fit in. 0 = don't export (runner default). Not per-repo: the env
+    # is fixed at spawn, before the ticket's repo binding is consulted by the skill.
+    bash_max_timeout: int = 1800
+    # Watchdog: reap a claim whose session has run past this many seconds (0 disables).
+    # Generous by default -- real implementation sessions legitimately run 30-60+ min.
+    max_session_seconds: int = 7200
     # RB-15: NOT max_impl_turns -- that counter is self-reported (a session that
     # never calls `maestro impl-turn`, or calls it once, binds nothing; measured
     # 2026-08-15: turn 2 by that counter, 191 raw model turns, 61.1M input tokens,
@@ -68,28 +113,8 @@ class Config:
     # -- an existing home is unchanged until it opts in, matching
     # min_spawn_interval/test_command's posture.
     max_session_turns: int = 0
-    # Watchdog: reap a claim whose session has run past this many seconds (0 disables).
-    # Generous by default -- real implementation sessions legitimately run 30-60+ min.
-    max_session_seconds: int = 7200
-    # Watchdog: fail a key instead of respawning once it has been spawned this many
-    # times with observed_seq unchanged (no progress). Resets the moment seq advances.
-    max_spawn_attempts: int = 5
-    # Watchdog: reap a claim whose session LOG hasn't been written to in this many
-    # seconds (0 disables) -- catches a wedged-but-alive session (no output, no
-    # error, no exit) long before max_session_seconds would ever trip, since
-    # `claims.active_keys` only checks pid-liveness. Independent of the age-based
-    # clock above (a fresh no-progress log resets this even past claim epoch age).
-    # Exempt when the claim has no `log_path` (capture_session_logs = false --
-    # missing data, never reap on it; falls back to the age-based rule only).
-    # Must be >= bash_max_timeout (below) when non-zero: a reconciler emits NOTHING to
-    # its stream log for the whole of a foreground Bash call (the test suite), so a
-    # silence budget shorter than the Bash ceiling reaps a healthy session mid-suite.
-    # `load()` fails closed on an explicit inconsistency rather than letting it bite
-    # at 3am; an UNSET bash_max_timeout shrinks to this value instead (so a board
-    # that set only this knob before the ceiling existed keeps loading).
-    no_output_timeout: int = 1800
     # RB-15: a THIRD, independent watchdog clock -- the dispatcher-side backstop
-    # for `max_session_turns` above. Deliberately separate from
+    # for `max_session_turns`. Deliberately separate from
     # `max_session_seconds` (which stays a generous ceiling so a legitimate
     # 30-60+ min session is never killed) -- this one is meant to be set
     # SHORTER, as a wall-clock approximation of "this session has almost
@@ -100,6 +125,36 @@ class Config:
     # itself (a board running only `pi`, which has no native cap at all, can
     # set this alone). 0 (default) disables the backstop.
     max_turn_wallclock_seconds: int = 0
+    # Watchdog: reap a claim whose session LOG hasn't been written to in this many
+    # seconds (0 disables) -- catches a wedged-but-alive session (no output, no
+    # error, no exit) long before max_session_seconds would ever trip, since
+    # `claims.active_keys` only checks pid-liveness. Independent of the age-based
+    # clock (`max_session_seconds`; a fresh no-progress log resets this even past claim epoch age).
+    # Exempt when the claim has no `log_path` (capture_session_logs = false --
+    # missing data, never reap on it; falls back to the age-based rule only).
+    # Must be >= bash_max_timeout when non-zero: a reconciler emits NOTHING to
+    # its stream log for the whole of a foreground Bash call (the test suite), so a
+    # silence budget shorter than the Bash ceiling reaps a healthy session mid-suite.
+    # `load()` fails closed on an explicit inconsistency rather than letting it bite
+    # at 3am; an UNSET bash_max_timeout shrinks to this value instead (so a board
+    # that set only this knob before the ceiling existed keeps loading).
+    no_output_timeout: int = 1800
+    # T-90: bounds the config-declared `prime` command (`ops._run_prime`), separate
+    # from `worktree_timeout` -- raising one has zero effect on the other (the
+    # trap this ticket exists to close: `worktree_timeout` raised for a slow checkout
+    # while `prime` stayed capped at the old hard-coded default). Resolved the same
+    # way as `prime` itself: a `[repos.<name>]` table's own `prime_timeout` wins,
+    # unset inherits this board-wide default -- see `repos.RepoBinding.prime_timeout`.
+    prime_timeout: int = 600
+    # T-89: bounds health.check_provider_availability's confirmation TCP probe --
+    # a real result is reused for this many seconds (per probed host) instead of
+    # re-probing on every doctor sweep/badge refresh. 0 disables caching (always
+    # probes fresh), same convention as no_output_timeout/backup_interval.
+    provider_probe_interval_s: int = 300
+    # Ceiling on how long an "unknown" (unverifiable identity) claim may still be
+    # honored via raw pid liveness before it is released with no kill/no event.
+    # Generously large so it never races T-13's max_session_seconds watchdog.
+    unverified_claim_max_age: int = 24 * 3600
     # MTO-1: `git worktree add`/adopt's own timeout (worktree_ensure), separate from every
     # other short git plumbing call in ops.py (those stay on the internal 30s _GIT_TIMEOUT).
     # A monorepo checkout (~230k tracked files) measured ~56s; 30s killed it mid-checkout,
@@ -107,51 +162,140 @@ class Config:
     # complete (directory present) but wasn't. 600s is generous headroom for that case --
     # raise it further for a larger repo still.
     worktree_timeout: int = 600
-    # T-90: bounds the config-declared `prime` command (`ops._run_prime`), separate
-    # from `worktree_timeout` above -- raising one has zero effect on the other (the
-    # trap this ticket exists to close: `worktree_timeout` raised for a slow checkout
-    # while `prime` stayed capped at the old hard-coded default). Resolved the same
-    # way as `prime` itself: a `[repos.<name>]` table's own `prime_timeout` wins,
-    # unset inherits this board-wide default -- see `repos.RepoBinding.prime_timeout`.
-    prime_timeout: int = 600
-    # Ceiling (seconds) on a single foreground Bash call inside a reconciler session,
-    # exported to every spawned runner as `BASH_MAX_TIMEOUT_MS` AND `BASH_DEFAULT_TIMEOUT_MS`
-    # (Claude Code's own knobs; the built-in ceiling is 600s, which maestro's own ~2700-test
-    # suite cannot finish inside, and the built-in default for a bare call with no explicit
-    # timeout is 120s, which backgrounds a reconciler's own unannotated Bash calls). The
-    # implementing skill runs the suite as ONE foreground call bounded by this, so it is the
-    # budget the suite must fit in. 0 = don't export (runner default). Not per-repo: the env
-    # is fixed at spawn, before the ticket's repo binding is consulted by the skill.
-    bash_max_timeout: int = 1800
-    # GA-11: enforced (not advisory) fleet-wide daily spend ceiling, folded from
-    # session logs' `total_cost_usd` by maestro/spend.py. None = no ceiling. Surfaced
-    # by `maestro doctor` and the TUI fleet panel alongside today's actual spend.
-    daily_spend_ceiling_usd: float | None = None
-    # Fleet-wide spawns/hour above which `maestro doctor` trips `runaway` (exit 1).
-    # None = derive from what the spawn-rate floor itself permits (see health.py);
-    # 0 disables the check.
-    runaway_spawns_per_hour: int | None = None
-    # GA-5: seconds `dispatch()` arms `fleet.pause` for when it observes the same
-    # `runaway` condition `maestro doctor` reports (health.spawn_rate(...)["total"]
-    # > health.spawn_budget(cfg)) -- the auto-brake beside the fleet-wide rate-limit
-    # gate. 0 disables the auto-brake while leaving doctor's advisory intact;
-    # `runaway_spawns_per_hour = 0` disables both (spawn_budget() returns 0).
-    runaway_pause_cooldown: int = 900
-    # RB-11: threshold shared by `maestro doctor`'s per-key burn WARN (byte-identical
-    # `Failed` text, or spawns piling up with `observed_seq` frozen -- see burn.py) AND,
-    # if it trips, `burn.should_park`'s dead-letter park -- a per-key rate cap distinct
-    # from the fleet-wide `runaway_spawns_per_hour`/`daily_spend_ceiling_usd` gates above
-    # (the 2026-08-14 T-55/T-56 incident: $1.40/hr per key, weeks from either ceiling).
-    # 0 disables both the WARN and the park.
-    burn_repeat_threshold: int = 5
-    repo_path: str | None = None           # primary repo the reconciler builds in
-    branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
-    # GA-20: `prime` fallback for the implicit default binding (repos.implicit_default) --
-    # lets a single-repo home with no [repos.*] table at all (e.g. this project's own
-    # dogfood home) declare a dependency-install command without adopting the multi-repo
-    # [repos.<name>] shape. A [repos.<name>] table's own `prime` always wins over this.
-    # See RepoBinding.prime (maestro/repos.py) for what runs it, when, and how.
-    prime: str | None = None
+
+    # --- CI & review ---
+    # MTO-2: when dispatcher.sync_worktrees finds an awaiting-ci/in-review ticket's
+    # worktree behind its repo's base branch, which policy decides whether that drift
+    # alone re-routes it to `implementing` (and so triggers a rebase + force-push,
+    # restarting CI). "always" is today's unconditional behavior (byte-identical for a
+    # board that sets nothing but this to "always"); "daily" routes at most once per
+    # calendar day per ticket (see schedule.dedup_bucket); "on_conflict" never routes on
+    # drift alone -- only a GitHub-reported CONFLICTING PR (ops.route_conflict) still
+    # rebases. Default "on_conflict": the mode that cannot livelock a fast-moving shared
+    # integration branch, which is the entire reason this knob exists -- see MTO-2. A
+    # board whose base branch only ever advances on its own merges can opt back into
+    # "always" explicitly. Per-[repos.<name>] override wins over this board-wide default,
+    # resolved the same way as base_branch/branch_prefix (see repos.RepoBinding). An
+    # unrecognized value fails closed at config load (refuse to start), never silently
+    # falls back -- see _BASE_DRIFT_POLICIES.
+    base_drift_policy: str = "on_conflict"
+    # T-123: opt-in CI auto-rerun-once-per-head. On a failing `pr_status` poll,
+    # `dispatcher._observe_ci` requests one `gh run rerun --failed` for the
+    # head SHA instead of immediately routing to `implementing` -- measured on
+    # the dogfood board: 19 of 33 CI-failing episodes went green on a re-run
+    # with no code change (two known flaky tests), each already having cost a
+    # median $0.57 implementing spawn, a push and a CI cycle. False (default)
+    # is byte-identical to before this knob existed. Per-[repos.<name>]
+    # override wins, same "table wins, unset inherits" precedence as
+    # `test_command` -- see `repos.RepoBinding.ci_auto_rerun`.
+    ci_auto_rerun: bool = False
+    # T-123: capture <= 2KB of the failed job's log tail (via the VCS's
+    # `failed_log_tail`) into `CiObserved.payload.failure_excerpt` on the
+    # observation that actually routes to `implementing` after a rerun --
+    # surfaced in the routing reason and `derived/context/<KEY>.md` so the
+    # next reconciler starts from the real failure text instead of
+    # re-deriving it from scratch. False (default) is byte-identical. Same
+    # precedence as `ci_auto_rerun`.
+    ci_failure_excerpt: bool = False
+    # T-123: seconds a still-failing poll withholds routing after the one
+    # rerun request for a head SHA, bridging the gap before GitHub's rollup
+    # reflects the rerun having actually started -- a still-failing poll past
+    # this window is trusted as the rerun's real, final outcome and routes to
+    # `implementing`. Same precedence as `ci_auto_rerun`.
+    ci_rerun_grace: int = 900
+    # T-126: lines changed (additions + deletions vs base) above which the
+    # `implementing` skill stops before `gh pr create` (or before pushing
+    # further commits to an already-open PR) and proposes a stack of smaller
+    # PRs via `maestro ask` instead -- measured deterministically by
+    # `ops.pr_size` (a `git diff --numstat` helper), never eyeballed by the
+    # agent. 0 disables the check entirely (ships dark at that value). Per-
+    # [repos.<name>] override wins, same "table wins, unset inherits"
+    # precedence as `test_command` -- see `repos.RepoBinding.pr_split_threshold`.
+    pr_split_threshold: int = 800
+    review_noise_authors: list = field(default_factory=list)
+    # T-125: review-comment noise pre-filter for `dispatcher._observe_reviews` --
+    # a COMMENTED/APPROVED/INLINE_COMMENT body that fullmatches one of these
+    # regexes, or whose author is listed in `review_noise_authors` (exact login,
+    # e.g. "github-actions[bot]"), is still recorded as ReviewFeedbackReceived
+    # (history stays complete) but contributes nothing to the routing reason --
+    # CHANGES_REQUESTED is never filtered, regardless of either list. Empty by
+    # default: ships byte-identical to before this ticket until a board opts in,
+    # so the moment real review-comment volume appears its go/no-go can be
+    # measured instead of guessed. Regexes are compiled fail-closed at
+    # config.load() (see _validate_review_noise_patterns) -- a malformed pattern
+    # refuses to start, naming the knob, rather than raising later mid-poll.
+    review_noise_patterns: list = field(default_factory=list)
+
+    # --- QA/AC gates ---
+    # T-149: globs (`**` crosses directories) a branch's diff may touch. A diff
+    # touching anything outside routes to `awaiting-human` for approval
+    # (`dispatcher._route_test_run`, keyed on tree state like the H4 gate).
+    # Empty (default) means no restriction. Per-[repos.<name>] override wins --
+    # see `repos.RepoBinding.allowed_paths`.
+    allowed_paths: list = field(default_factory=list)
+    # T-85: `set_phase(..., AWAITING_CI)` refuses unless every current-hash spec AC carries a
+    # PASSING spec-axis QA verdict -- not merely no *failing* one (HEAD's `_refuse_if_qa_failing`
+    # only blocked a recorded fail; zero verdicts silently passed). Default ON; OFF reverts to
+    # HEAD's weaker check -- see ops._refuse_if_qa_incomplete.
+    awaiting_ci_qa_gate: bool = True
+    # T-96: the board-wide DEFAULT for `[repos.<name>] language`, same
+    # precedence as test_command (a table's own `language` wins; unset
+    # inherits this). Before this field existed, `[maestro] language` was
+    # accepted by `load()` (top-level `[maestro]` keys aren't fail-closed
+    # against an allowlist) but silently never read anywhere -- a board-wide
+    # setting that looked honored but wasn't. None (default, unchanged) means
+    # no board-wide override; a repo table with no `language` of its own
+    # still resolves to "python" exactly as before this field existed.
+    language: str | None = None
+    # T-115: board-wide DEFAULT slash-command skill to fire, exactly once per
+    # QA pass, at the `qa -> awaiting-ci` trigger point -- once a ticket in
+    # `awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on
+    # EVERY current-hash AC (`Snapshot.qa_all_passing`, the same predicate
+    # T-86's undraft step already uses). A `[repos.<name>] post_qa_skill`
+    # override wins, same "table wins, unset inherits" precedence as
+    # `test_command`/`language` -- see `repos.RepoBinding.post_qa_skill`.
+    # None (default) fires nothing -- ships dark, byte-identical to before
+    # this knob existed. A set-but-malformed value (not a leading-`/`
+    # slash-command name) fails `config.load()` closed, same posture as
+    # `language`/`test_selector` (see `_validate_skill_name`). The spawned
+    # session is dispatcher-owned (`dispatcher.sync_post_qa_skill`), counted
+    # against `max_concurrency` like a reconciler spawn, and can never move
+    # the ticket's phase or block `awaiting-ci` -- it carries no maestro-verb
+    # `--allowedTools` grant.
+    post_qa_skill: str | None = None
+    # T-117: `post_qa_skill`'s own runner override -- same "table wins, unset
+    # inherits" precedence as `post_qa_skill` itself (see
+    # `repos.RepoBinding.post_qa_skill_runner`). None (default) means
+    # "claude", byte-identical to before this knob existed: `sync_post_qa_skill`
+    # never threaded a `runner` through `sessions.spawn` before T-117.
+    # Deliberately UNVALIDATED at `config.load()` -- mirrors `runner`,
+    # not `post_qa_skill`'s own `_validate_skill_name` fail-closed regex: this
+    # is a runner name, not a slash-command, a different shape entirely, and
+    # an unregistered/disabled name is instead caught by the same non-claude
+    # preflight `resolve_runner`'s own callers already fail closed against
+    # (`dispatcher._runner_preflight`).
+    post_qa_skill_runner: str | None = None
+    # T-117: `post_qa_skill`'s own runner_model override. None falls back to
+    # the board-wide `runner_model` default -- the same fallback
+    # `resolve_runner` gives a real reconciler spawn with no spec override.
+    # Unvalidated at load, same posture as `post_qa_skill_runner`.
+    post_qa_skill_runner_model: str | None = None
+    # T-85: `maestro qa-verdict` refuses (raises, no event appended) unless the ticket's
+    # folded phase is `qa` -- the write-path counterpart to the runner-level spawn denylist
+    # (dispatcher.phase_verb_denylist('implementing') already blocks the CLI verb itself, but
+    # that's a permission grant, not an invariant; this closes the gap for a runner that grants
+    # it anyway). Default ON; OFF reverts to HEAD's behavior (a verdict is honored from any
+    # phase) -- see ops.record_qa_verdict.
+    qa_phase_gate: bool = True
+    # T-23: gate a second, parallel QA sub-agent in the `qa` reconcile step that checks
+    # CLAUDE.md conventions + a Fowler-smell baseline (the "standards" axis) alongside the
+    # existing AD-4 "spec" axis (does the diff satisfy the AC?) -- RF-7 moved this axis here
+    # from `implementing`. Default OFF -- it roughly doubles sub-agent spend per qa step, and
+    # per the T-23 spec a mandatory second axis is explicitly not approved scope. A
+    # standards-axis fail is recorded (`maestro qa-verdict --axis standards`) but is advisory
+    # only: unlike a spec-axis fail, it does NOT block `set-phase awaiting-ci` (see
+    # ops._refuse_if_qa_failing).
+    qa_standards_axis: bool = False
     # RB-12: the real command maestro itself runs (subprocess, its OWN exit code
     # captured -- never an agent's word) to prove the suite passes before it will
     # let `implementing -> qa` through (see ops.capture_tests / ops._refuse_if_tests_stale).
@@ -174,172 +318,8 @@ class Config:
     # name deleted and re-added within that language's test-file scope)
     # never counts. False disables.
     test_deletion_gate: bool = True
-    # T-96: the board-wide DEFAULT for `[repos.<name>] language`, same
-    # precedence as test_command above (a table's own `language` wins; unset
-    # inherits this). Before this field existed, `[maestro] language` was
-    # accepted by `load()` (top-level `[maestro]` keys aren't fail-closed
-    # against an allowlist) but silently never read anywhere -- a board-wide
-    # setting that looked honored but wasn't. None (default, unchanged) means
-    # no board-wide override; a repo table with no `language` of its own
-    # still resolves to "python" exactly as before this field existed.
-    language: str | None = None
-    # T-115: board-wide DEFAULT slash-command skill to fire, exactly once per
-    # QA pass, at the `qa -> awaiting-ci` trigger point -- once a ticket in
-    # `awaiting-ci`/`in-review` carries a passing spec-axis QA verdict on
-    # EVERY current-hash AC (`Snapshot.qa_all_passing`, the same predicate
-    # T-86's undraft step already uses). A `[repos.<name>] post_qa_skill`
-    # override wins, same "table wins, unset inherits" precedence as
-    # `test_command`/`language` above -- see `repos.RepoBinding.post_qa_skill`.
-    # None (default) fires nothing -- ships dark, byte-identical to before
-    # this knob existed. A set-but-malformed value (not a leading-`/`
-    # slash-command name) fails `config.load()` closed, same posture as
-    # `language`/`test_selector` (see `_validate_skill_name`). The spawned
-    # session is dispatcher-owned (`dispatcher.sync_post_qa_skill`), counted
-    # against `max_concurrency` like a reconciler spawn, and can never move
-    # the ticket's phase or block `awaiting-ci` -- it carries no maestro-verb
-    # `--allowedTools` grant.
-    post_qa_skill: str | None = None
-    # T-117: `post_qa_skill`'s own runner override -- same "table wins, unset
-    # inherits" precedence as `post_qa_skill` itself (see
-    # `repos.RepoBinding.post_qa_skill_runner`). None (default) means
-    # "claude", byte-identical to before this knob existed: `sync_post_qa_skill`
-    # never threaded a `runner` through `sessions.spawn` before T-117.
-    # Deliberately UNVALIDATED at `config.load()` -- mirrors `runner` above,
-    # not `post_qa_skill`'s own `_validate_skill_name` fail-closed regex: this
-    # is a runner name, not a slash-command, a different shape entirely, and
-    # an unregistered/disabled name is instead caught by the same non-claude
-    # preflight `resolve_runner`'s own callers already fail closed against
-    # (`dispatcher._runner_preflight`).
-    post_qa_skill_runner: str | None = None
-    # T-117: `post_qa_skill`'s own runner_model override. None falls back to
-    # the board-wide `runner_model` default above -- the same fallback
-    # `resolve_runner` gives a real reconciler spawn with no spec override.
-    # Unvalidated at load, same posture as `post_qa_skill_runner` just above.
-    post_qa_skill_runner_model: str | None = None
-    # T-124: board-wide DEFAULT for `[repos.<name>] file_hints` -- same "table
-    # wins, unset inherits" precedence as test_command/language above. False
-    # (default) ships dark: `context.regenerate` computes no locate hints and
-    # the dossier is byte-identical to before this knob existed. True makes
-    # `derived/context/<KEY>.md` grow "## Suggested starting points"/"## Symbol
-    # map"/"## Files edited in prior sessions" sections from `maestro/locate.py`.
-    file_hints: bool = False
-    # GA-15: override for `maestro install-commands --user` / the doctor check's
-    # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
-    # env var takes precedence over this when set -- see skills_install.user_commands_dir).
-    user_commands_dir: str | None = None
-    # OC-1: the opencode counterpart of `user_commands_dir` above -- opencode
-    # resolves its own custom commands from a directory it defines, not Claude
-    # Code's. None = ~/.config/opencode/command (MAESTRO_OPENCODE_COMMANDS_DIR
-    # env var takes precedence -- see skills_install.opencode_user_commands_dir).
-    opencode_user_commands_dir: str | None = None
-    # GA-16: override for the doctor permission-surface check's user-scope settings
-    # layer (Claude Code resolves permissions across a repo's settings.local.json/
-    # settings.json AND this file). None = ~/.claude/settings.json
-    # (MAESTRO_USER_SETTINGS_PATH env var takes precedence over this when set --
-    # see health.user_settings_path). Injectable so no test ever reads a
-    # developer's real ~/.claude/settings.json.
-    user_settings_path: str | None = None
-    # [repos.<name>] tables: name -> {path, slug, base_branch, branch_prefix, default}.
-    # Optional -- when empty, repos.resolve() synthesizes an implicit default binding
-    # from repo_path/branch_prefix so every existing single-repo config works untouched.
-    repos: dict = field(default_factory=dict)
-    permission_mode: str = "acceptEdits"   # claude permission mode for reconcilers
-    reconcile_model: str = "sonnet"        # model for spawned reconciler sessions
-    # Provider selection (names resolved by providers/registry).
-    providers: dict = field(default_factory=lambda: {
-        "tracker": "none",
-        "vcs": "none",
-        "fetcher": "none",
-        "implementer": "claude_skill",
-    })
-    # Free-form per-provider settings, e.g. provider_config["tracker"]["project_key"].
-    provider_config: dict = field(default_factory=dict)
-    # Command used to spawn a reconciler session (project may override).
-    reconcile_command: str = "/maestro-reconcile"
-    capture_session_logs: bool = True
-    session_log_format: str = "stream-json"  # "stream-json" | "text"
-    session_log_retention_days: int | None = 14   # prune logs older than N days; 0/None = unlimited
-    session_log_max_per_ticket: int | None = 200  # keep at most N logs per ticket; 0/None = unlimited
-    prune_interval: int = 3600          # seconds between dispatcher auto-prune ticks (0 disables)
-    nudge_on_human_input: bool = True  # trigger in-process dispatch after ans/cmd/create
-    research_model: str = "opus"       # model for kind=research tickets
-    research_effort: str = "high"      # effort for kind=research tickets
-    default_effort: str | None = None  # global effort default; None = omit --effort entirely
-    # T-118: `ops.suggest_acs` knobs. None = today's behaviour (reconcile_model / the
-    # built-in `ops.SUGGEST_ACS_PROMPT`). The prompt is a format string over {spec}.
-    suggest_acs_model: str | None = None
-    suggest_acs_prompt: str | None = None
-    # RF-2: board-wide fallback for the implementation-spawn runner, when a spec carries
-    # no `runner:`/`runner_model:` override (dispatcher.resolve_runner). "claude" and
-    # "opencode" (OC-4) are the registered runners -- see dispatcher._REGISTERED_RUNNERS.
-    runner: str = "claude"
-    runner_model: str | None = None
-    # OC-3: board-wide kill switch for which runner name(s) `dispatch()` will ever
-    # spawn under -- consulted in the spawn loop BEFORE OC-2's own preflight (the
-    # binary probe, the daemon probe), so flipping a spec's `runner:` to a name
-    # this list doesn't carry never even reaches those probes. A scalar or a list
-    # in config.toml (see `_normalize_runner_enabled`); default is claude-only, so
-    # an existing home with no `[maestro] runner_enabled` line behaves exactly as
-    # before this ticket. "claude" itself is never gated by this knob -- every
-    # phase other than `implementing` always spawns claude regardless (RF-2), and
-    # gating it here would let one typo'd list wedge the entire fleet.
-    runner_enabled: list = field(default_factory=lambda: ["claude"])
-    reconcile_web_tools: bool = True   # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
-    # GA-10: board-wide --allowedTools additions beyond the maestro-verb grant (cli.py's
-    # _AGENT_TOOL_VERBS) and reconcile_web_tools -- e.g. a repo's own git/gh/test surface.
-    # Threaded per key through sessions.spawn (see dispatcher.resolved_allowed_tools), unioned
-    # with the resolved repo's own [repos.<name>] reconcile_allowed_tools, into ONE
-    # --allowedTools flag. Default [] -- today's behavior for every existing home.
-    reconcile_allowed_tools: list = field(default_factory=list)
-    # Declarative recurring triggers: [[scheduled]] array-of-tables, each a dict with
-    # name/prompt/every (+ optional kind/priority/prefix/enabled).
-    scheduled: list = field(default_factory=list)
-    # Ceiling on how long an "unknown" (unverifiable identity) claim may still be
-    # honored via raw pid liveness before it is released with no kill/no event.
-    # Generously large so it never races T-13's max_session_seconds watchdog.
-    unverified_claim_max_age: int = 24 * 3600
-    backup_interval: int = 3600        # seconds between dispatcher auto-backups (0 disables)
-    backup_retention: int | None = 24  # keep most-recent N snapshots; 0/None = keep all
-    backup_dir: str | None = None      # where snapshots live; None = sibling of the home
-    # Refuse to fast-forward/spawn into repo_path while it's mid-merge/rebase or carries
-    # a real conflict hunk (see dispatcher.repo_preflight). Fails open on a broken probe.
-    repo_preflight: bool = True
-    # MTO-2: when dispatcher.sync_worktrees finds an awaiting-ci/in-review ticket's
-    # worktree behind its repo's base branch, which policy decides whether that drift
-    # alone re-routes it to `implementing` (and so triggers a rebase + force-push,
-    # restarting CI). "always" is today's unconditional behavior (byte-identical for a
-    # board that sets nothing but this to "always"); "daily" routes at most once per
-    # calendar day per ticket (see schedule.dedup_bucket); "on_conflict" never routes on
-    # drift alone -- only a GitHub-reported CONFLICTING PR (ops.route_conflict) still
-    # rebases. Default "on_conflict": the mode that cannot livelock a fast-moving shared
-    # integration branch, which is the entire reason this knob exists -- see MTO-2. A
-    # board whose base branch only ever advances on its own merges can opt back into
-    # "always" explicitly. Per-[repos.<name>] override wins over this board-wide default,
-    # resolved the same way as base_branch/branch_prefix (see repos.RepoBinding). An
-    # unrecognized value fails closed at config load (refuse to start), never silently
-    # falls back -- see _BASE_DRIFT_POLICIES.
-    base_drift_policy: str = "on_conflict"
-    # T-23: gate a second, parallel QA sub-agent in the `qa` reconcile step that checks
-    # CLAUDE.md conventions + a Fowler-smell baseline (the "standards" axis) alongside the
-    # existing AD-4 "spec" axis (does the diff satisfy the AC?) -- RF-7 moved this axis here
-    # from `implementing`. Default OFF -- it roughly doubles sub-agent spend per qa step, and
-    # per the T-23 spec a mandatory second axis is explicitly not approved scope. A
-    # standards-axis fail is recorded (`maestro qa-verdict --axis standards`) but is advisory
-    # only: unlike a spec-axis fail, it does NOT block `set-phase awaiting-ci` (see
-    # ops._refuse_if_qa_failing).
-    qa_standards_axis: bool = False
-    # T-85: `maestro qa-verdict` refuses (raises, no event appended) unless the ticket's
-    # folded phase is `qa` -- the write-path counterpart to the runner-level spawn denylist
-    # (dispatcher.phase_verb_denylist('implementing') already blocks the CLI verb itself, but
-    # that's a permission grant, not an invariant; this closes the gap for a runner that grants
-    # it anyway). Default ON; OFF reverts to HEAD's behavior (a verdict is honored from any
-    # phase) -- see ops.record_qa_verdict.
-    qa_phase_gate: bool = True
-    # T-85: `set_phase(..., AWAITING_CI)` refuses unless every current-hash spec AC carries a
-    # PASSING spec-axis QA verdict -- not merely no *failing* one (HEAD's `_refuse_if_qa_failing`
-    # only blocked a recorded fail; zero verdicts silently passed). Default ON; OFF reverts to
-    # HEAD's weaker check -- see ops._refuse_if_qa_incomplete.
-    awaiting_ci_qa_gate: bool = True
+
+    # --- fast paths ---
     # T-122: whether the dispatcher's own due loop routes an exact-literal
     # human approval (a pending "ok"/"yes"/etc paired with an `ops.ask`
     # content-hash qid, non-research ticket -- see dispatcher's
@@ -356,6 +336,7 @@ class Config:
     # answers for one key) keeps today's spawn. An unrecognized value fails
     # `config.load()` closed -- see `_ANSWER_FAST_PATH_MODES`.
     answer_fast_path: str = "off"
+    nudge_on_human_input: bool = True  # trigger in-process dispatch after ans/cmd/create
     # T-138: whether the dispatcher's own sweep applies the `ready` phase's
     # fully-scripted rules directly (dependsOn check, kind/mode branch,
     # `worktree_ensure`, `set-phase`) instead of spawning a `claude -p`
@@ -369,16 +350,121 @@ class Config:
     # rules are deterministic, so there is nothing to A/B. An unrecognized
     # value fails `config.load()` closed -- see `_READY_FAST_PATH_MODES`.
     ready_fast_path: str = "off"
+
+    # --- runners & models ---
+    default_effort: str | None = None  # global effort default; None = omit --effort entirely
+    permission_mode: str = "acceptEdits"   # claude permission mode for reconcilers
+    # GA-10: board-wide --allowedTools additions beyond the maestro-verb grant (cli.py's
+    # _AGENT_TOOL_VERBS) and reconcile_web_tools -- e.g. a repo's own git/gh/test surface.
+    # Threaded per key through sessions.spawn (see dispatcher.resolved_allowed_tools), unioned
+    # with the resolved repo's own [repos.<name>] reconcile_allowed_tools, into ONE
+    # --allowedTools flag. Default [] -- today's behavior for every existing home.
+    reconcile_allowed_tools: list = field(default_factory=list)
+    # Command used to spawn a reconciler session (project may override).
+    reconcile_command: str = "/maestro-reconcile"
+    reconcile_model: str = "sonnet"        # model for spawned reconciler sessions
+    reconcile_web_tools: bool = True   # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
+    research_effort: str = "high"      # effort for kind=research tickets
+    research_model: str = "opus"       # model for kind=research tickets
+    # RF-2: board-wide fallback for the implementation-spawn runner, when a spec carries
+    # no `runner:`/`runner_model:` override (dispatcher.resolve_runner). "claude" and
+    # "opencode" (OC-4) are the registered runners -- see dispatcher._REGISTERED_RUNNERS.
+    runner: str = "claude"
+    # OC-3: board-wide kill switch for which runner name(s) `dispatch()` will ever
+    # spawn under -- consulted in the spawn loop BEFORE OC-2's own preflight (the
+    # binary probe, the daemon probe), so flipping a spec's `runner:` to a name
+    # this list doesn't carry never even reaches those probes. A scalar or a list
+    # in config.toml (see `_normalize_runner_enabled`); default is claude-only, so
+    # an existing home with no `[maestro] runner_enabled` line behaves exactly as
+    # before this ticket. "claude" itself is never gated by this knob -- every
+    # phase other than `implementing` always spawns claude regardless (RF-2), and
+    # gating it here would let one typo'd list wedge the entire fleet.
+    runner_enabled: list = field(default_factory=lambda: ["claude"])
+    runner_model: str | None = None
+    # T-118: `ops.suggest_acs` knobs. None = today's behaviour (reconcile_model / the
+    # built-in `ops.SUGGEST_ACS_PROMPT`). The prompt is a format string over {spec}.
+    suggest_acs_model: str | None = None
+    suggest_acs_prompt: str | None = None
+
+    # --- housekeeping ---
+    archive_after: int | None = None   # seconds a DONE ticket stays visible before archive_done moves
+                                        # it out of list_keys; None disables the tick, 0 = next sweep
+    backup_dir: str | None = None      # where snapshots live; None = sibling of the home
+    backup_interval: int = 3600        # seconds between dispatcher auto-backups (0 disables)
+    backup_retention: int | None = 24  # keep most-recent N snapshots; 0/None = keep all
+    capture_session_logs: bool = True
     # Maintenance ticks (dispatcher.run_compact_tick / run_archive_tick).
     compact_interval: int = 0          # seconds between dispatcher-driven compact sweeps (0 disables)
     compact_min_events: int = 200      # only compact a key once its folded log reaches this many events
-    archive_after: int | None = None   # seconds a DONE ticket stays visible before archive_done moves
-                                        # it out of list_keys; None disables the tick, 0 = next sweep
-    # Fleet-wide rate-limit gate (maestro/ratelimit.py): a rejected rate_limit_event
-    # pauses ALL spawns until resets_at + ratelimit_grace, clamped to ratelimit_max_pause.
-    ratelimit_grace: int = 60          # seconds added after resetsAt before resuming (clock-skew buffer)
-    ratelimit_fallback_pause: int = 1800  # pause length when resetsAt is missing/invalid/past
-    ratelimit_max_pause: int = 21600   # cap on any single pause; 0 disables the gate
+    # T-124: board-wide DEFAULT for `[repos.<name>] file_hints` -- same "table
+    # wins, unset inherits" precedence as test_command/language. False
+    # (default) ships dark: `context.regenerate` computes no locate hints and
+    # the dossier is byte-identical to before this knob existed. True makes
+    # `derived/context/<KEY>.md` grow "## Suggested starting points"/"## Symbol
+    # map"/"## Files edited in prior sessions" sections from `maestro/locate.py`.
+    file_hints: bool = False
+    # OC-1: the opencode counterpart of `user_commands_dir` -- opencode
+    # resolves its own custom commands from a directory it defines, not Claude
+    # Code's. None = ~/.config/opencode/command (MAESTRO_OPENCODE_COMMANDS_DIR
+    # env var takes precedence -- see skills_install.opencode_user_commands_dir).
+    opencode_user_commands_dir: str | None = None
+    prune_interval: int = 3600          # seconds between dispatcher auto-prune ticks (0 disables)
+    session_log_format: str = "stream-json"  # "stream-json" | "text"
+    session_log_max_per_ticket: int | None = 200  # keep at most N logs per ticket; 0/None = unlimited
+    session_log_retention_days: int | None = 14   # prune logs older than N days; 0/None = unlimited
+    # GA-15: override for `maestro install-commands --user` / the doctor check's
+    # user-scope fallback. None = ~/.claude/commands (MAESTRO_USER_COMMANDS_DIR
+    # env var takes precedence over this when set -- see skills_install.user_commands_dir).
+    user_commands_dir: str | None = None
+    # GA-16: override for the doctor permission-surface check's user-scope settings
+    # layer (Claude Code resolves permissions across a repo's settings.local.json/
+    # settings.json AND this file). None = ~/.claude/settings.json
+    # (MAESTRO_USER_SETTINGS_PATH env var takes precedence over this when set --
+    # see health.user_settings_path). Injectable so no test ever reads a
+    # developer's real ~/.claude/settings.json.
+    user_settings_path: str | None = None
+
+    # --- env & security ---
+    branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
+    # GA-20: `prime` fallback for the implicit default binding (repos.implicit_default) --
+    # lets a single-repo home with no [repos.*] table at all (e.g. this project's own
+    # dogfood home) declare a dependency-install command without adopting the multi-repo
+    # [repos.<name>] shape. A [repos.<name>] table's own `prime` always wins over this.
+    # See RepoBinding.prime (maestro/repos.py) for what runs it, when, and how.
+    prime: str | None = None
+    repo_path: str | None = None           # primary repo the reconciler builds in
+    # Refuse to fast-forward/spawn into repo_path while it's mid-merge/rebase or carries
+    # a real conflict hunk (see dispatcher.repo_preflight). Fails open on a broken probe.
+    repo_preflight: bool = True
+    # T-144: exact env var names or fnmatch globs (e.g. "GH_TOKEN_*") to drop
+    # from every spawned reconciler's env AND every dispatcher-run subprocess
+    # (`ops.capture_tests`/`run_ac_checks`, `_start_test_run`, `_start_restack`)
+    # -- for a human's own shell secrets that would otherwise ride along
+    # ambiently (a nudge spawned from `ans`/`cmd`/`create`, or a foreground
+    # `maestro dispatch`, inherits the invoking shell's full env). Board-wide
+    # only, unlike token_env/api_key_env below (which are per-repo/per-tracker
+    # and dropped automatically -- see `scrubbed_env`). Empty by default:
+    # ships byte-identical to before this ticket. `GH_TOKEN` itself is never
+    # dropped even if listed here (see `scrubbed_env`'s docstring).
+    scrub_env: list = field(default_factory=list)
+
+    # --- tables & state (not [maestro] knobs) ---
+    # [repos.<name>] tables: name -> {path, slug, base_branch, branch_prefix, default}.
+    # Optional -- when empty, repos.resolve() synthesizes an implicit default binding
+    # from repo_path/branch_prefix so every existing single-repo config works untouched.
+    repos: dict = field(default_factory=dict)
+    # Provider selection (names resolved by providers/registry).
+    providers: dict = field(default_factory=lambda: {
+        "tracker": "none",
+        "vcs": "none",
+        "fetcher": "none",
+        "implementer": "claude_skill",
+    })
+    # Free-form per-provider settings, e.g. provider_config["tracker"]["project_key"].
+    provider_config: dict = field(default_factory=dict)
+    # Declarative recurring triggers: [[scheduled]] array-of-tables, each a dict with
+    # name/prompt/every (+ optional kind/priority/prefix/enabled).
+    scheduled: list = field(default_factory=list)
     # Outbound notify tick: fires on a key's first entry into awaiting-human/degraded/done.
     notify_command: str | None = None  # shell command; KEY/PHASE/QUESTION in env; None = disabled
     webhook_urls: list = field(default_factory=list)  # JSON-POSTed via stdlib urllib
@@ -394,74 +480,6 @@ class Config:
     # seconds (the ticket's "within the hour" bar). spend_warn_fractions is the one
     # exception -- those fire at most once per UTC date regardless of this knob.
     alarm_cooldown_s: int = 3600
-    # T-89: bounds health.check_provider_availability's confirmation TCP probe --
-    # a real result is reused for this many seconds (per probed host) instead of
-    # re-probing on every doctor sweep/badge refresh. 0 disables caching (always
-    # probes fresh), same convention as no_output_timeout/backup_interval.
-    provider_probe_interval_s: int = 300
-    # T-123: opt-in CI auto-rerun-once-per-head. On a failing `pr_status` poll,
-    # `dispatcher._observe_ci` requests one `gh run rerun --failed` for the
-    # head SHA instead of immediately routing to `implementing` -- measured on
-    # the dogfood board: 19 of 33 CI-failing episodes went green on a re-run
-    # with no code change (two known flaky tests), each already having cost a
-    # median $0.57 implementing spawn, a push and a CI cycle. False (default)
-    # is byte-identical to before this knob existed. Per-[repos.<name>]
-    # override wins, same "table wins, unset inherits" precedence as
-    # `test_command` -- see `repos.RepoBinding.ci_auto_rerun`.
-    ci_auto_rerun: bool = False
-    # T-123: seconds a still-failing poll withholds routing after the one
-    # rerun request for a head SHA, bridging the gap before GitHub's rollup
-    # reflects the rerun having actually started -- a still-failing poll past
-    # this window is trusted as the rerun's real, final outcome and routes to
-    # `implementing`. Same precedence as `ci_auto_rerun` above.
-    ci_rerun_grace: int = 900
-    # T-123: capture <= 2KB of the failed job's log tail (via the VCS's
-    # `failed_log_tail`) into `CiObserved.payload.failure_excerpt` on the
-    # observation that actually routes to `implementing` after a rerun --
-    # surfaced in the routing reason and `derived/context/<KEY>.md` so the
-    # next reconciler starts from the real failure text instead of
-    # re-deriving it from scratch. False (default) is byte-identical. Same
-    # precedence as `ci_auto_rerun` above.
-    ci_failure_excerpt: bool = False
-    # T-125: review-comment noise pre-filter for `dispatcher._observe_reviews` --
-    # a COMMENTED/APPROVED/INLINE_COMMENT body that fullmatches one of these
-    # regexes, or whose author is listed in `review_noise_authors` (exact login,
-    # e.g. "github-actions[bot]"), is still recorded as ReviewFeedbackReceived
-    # (history stays complete) but contributes nothing to the routing reason --
-    # CHANGES_REQUESTED is never filtered, regardless of either list. Empty by
-    # default: ships byte-identical to before this ticket until a board opts in,
-    # so the moment real review-comment volume appears its go/no-go can be
-    # measured instead of guessed. Regexes are compiled fail-closed at
-    # config.load() (see _validate_review_noise_patterns) -- a malformed pattern
-    # refuses to start, naming the knob, rather than raising later mid-poll.
-    review_noise_patterns: list = field(default_factory=list)
-    review_noise_authors: list = field(default_factory=list)
-    # T-126: lines changed (additions + deletions vs base) above which the
-    # `implementing` skill stops before `gh pr create` (or before pushing
-    # further commits to an already-open PR) and proposes a stack of smaller
-    # PRs via `maestro ask` instead -- measured deterministically by
-    # `ops.pr_size` (a `git diff --numstat` helper), never eyeballed by the
-    # agent. 0 disables the check entirely (ships dark at that value). Per-
-    # [repos.<name>] override wins, same "table wins, unset inherits"
-    # precedence as `test_command` -- see `repos.RepoBinding.pr_split_threshold`.
-    pr_split_threshold: int = 800
-    # T-149: globs (`**` crosses directories) a branch's diff may touch. A diff
-    # touching anything outside routes to `awaiting-human` for approval
-    # (`dispatcher._route_test_run`, keyed on tree state like the H4 gate).
-    # Empty (default) means no restriction. Per-[repos.<name>] override wins --
-    # see `repos.RepoBinding.allowed_paths`.
-    allowed_paths: list = field(default_factory=list)
-    # T-144: exact env var names or fnmatch globs (e.g. "GH_TOKEN_*") to drop
-    # from every spawned reconciler's env AND every dispatcher-run subprocess
-    # (`ops.capture_tests`/`run_ac_checks`, `_start_test_run`, `_start_restack`)
-    # -- for a human's own shell secrets that would otherwise ride along
-    # ambiently (a nudge spawned from `ans`/`cmd`/`create`, or a foreground
-    # `maestro dispatch`, inherits the invoking shell's full env). Board-wide
-    # only, unlike token_env/api_key_env below (which are per-repo/per-tracker
-    # and dropped automatically -- see `scrubbed_env`). Empty by default:
-    # ships byte-identical to before this ticket. `GH_TOKEN` itself is never
-    # dropped even if listed here (see `scrubbed_env`'s docstring).
-    scrub_env: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -910,87 +928,96 @@ class Knob:
 
 
 KNOBS: tuple[Knob, ...] = (
-    Knob("max_concurrency", _int),
-    Knob("reconcile_steady_interval", _int),
-    Knob("min_spawn_interval", _nonneg_int),
+    # --- spawn & concurrency ---
     Knob("backoff_base", _int),
     Knob("backoff_cap", _int),
+    Knob("burn_repeat_threshold", _int),
+    Knob("daily_spend_ceiling_usd", _float),
+    Knob("max_concurrency", _int),
     Knob("max_failures", _int),
     Knob("max_impl_turns", _int),
-    Knob("max_session_turns", _int),
-    Knob("max_session_seconds", _int),
     Knob("max_spawn_attempts", _int),
-    Knob("no_output_timeout", _int),
-    Knob("max_turn_wallclock_seconds", _int),
-    Knob("worktree_timeout", _int, per_repo=True),
-    Knob("prime_timeout", _int, per_repo=True),
-    Knob("ci_auto_rerun", _bool, per_repo=True),
-    Knob("ci_rerun_grace", _int, per_repo=True),
-    Knob("ci_failure_excerpt", _bool, per_repo=True),
-    Knob("pr_split_threshold", _nonneg_int, per_repo=True),
-    Knob("allowed_paths", _allowed_paths, per_repo=True),
-    Knob("daily_spend_ceiling_usd", _float),
-    Knob("runaway_spawns_per_hour", _int),
+    Knob("min_spawn_interval", _nonneg_int),
+    Knob("ratelimit_fallback_pause", _int),
+    Knob("ratelimit_grace", _int),
+    Knob("ratelimit_max_pause", _int),
+    Knob("reconcile_steady_interval", _int),
     Knob("runaway_pause_cooldown", _int),
-    Knob("burn_repeat_threshold", _int),
-    Knob("reconcile_command", _str),
-    Knob("repo_path", _str),
-    Knob("branch_prefix", _str),
-    Knob("prime", _opt_str),
-    Knob("test_command", _opt_str, per_repo=True),
-    Knob("test_deletion_gate", _bool),
+    Knob("runaway_spawns_per_hour", _int),
+    # --- timeouts & watchdog ---
+    Knob("bash_max_timeout", _int),
+    Knob("max_session_seconds", _int),
+    Knob("max_session_turns", _int),
+    Knob("max_turn_wallclock_seconds", _int),
+    Knob("no_output_timeout", _int),
+    Knob("prime_timeout", _int, per_repo=True),
+    Knob("provider_probe_interval_s", _int),
+    Knob("unverified_claim_max_age", _int),
+    Knob("worktree_timeout", _int, per_repo=True),
+    # --- CI & review ---
+    Knob("base_drift_policy", _choice(_BASE_DRIFT_POLICIES), per_repo=True),
+    Knob("ci_auto_rerun", _bool, per_repo=True),
+    Knob("ci_failure_excerpt", _bool, per_repo=True),
+    Knob("ci_rerun_grace", _int, per_repo=True),
+    Knob("pr_split_threshold", _nonneg_int, per_repo=True),
+    Knob("review_noise_authors", _string_list),
+    Knob("review_noise_patterns", _review_noise_patterns),
+    # --- QA/AC gates ---
+    Knob("allowed_paths", _allowed_paths, per_repo=True),
+    Knob("awaiting_ci_qa_gate", _bool),
     Knob("language", _choice(testlang.SUPPORTED, optional=True), per_repo=True),
     Knob("post_qa_skill", _skill_name, per_repo=True),
     Knob("post_qa_skill_runner", _opt_str, per_repo=True),
     Knob("post_qa_skill_runner_model", _opt_str, per_repo=True),
-    Knob("file_hints", _bool, per_repo=True),
-    Knob("user_commands_dir", _str),
-    Knob("opencode_user_commands_dir", _str),
-    Knob("user_settings_path", _str),
-    Knob("permission_mode", _str),
-    Knob("reconcile_model", _str),
-    Knob("capture_session_logs", _bool),
-    Knob("session_log_format", _str),
-    Knob("session_log_retention_days", _int),
-    Knob("session_log_max_per_ticket", _int),
-    Knob("prune_interval", _int),
+    Knob("qa_phase_gate", _bool),
+    Knob("qa_standards_axis", _bool),
+    Knob("test_command", _opt_str, per_repo=True),
+    Knob("test_deletion_gate", _bool),
+    # --- fast paths ---
+    Knob("answer_fast_path", _choice(_ANSWER_FAST_PATH_MODES)),
     Knob("nudge_on_human_input", _bool),
-    Knob("research_model", _str),
-    Knob("research_effort", _str),
+    Knob("ready_fast_path", _choice(_READY_FAST_PATH_MODES)),
+    # --- runners & models ---
     Knob("default_effort", _opt_str),
+    Knob("permission_mode", _str),
+    Knob("reconcile_allowed_tools", _list),
+    Knob("reconcile_command", _str),
+    Knob("reconcile_model", _str),
+    Knob("reconcile_web_tools", _bool),
+    Knob("research_effort", _str),
+    Knob("research_model", _str),
+    Knob("runner", _str),
+    Knob("runner_enabled", _runner_enabled),
+    Knob("runner_model", _opt_str),
     Knob("suggest_acs_model", _opt_str),
     Knob("suggest_acs_prompt", _suggest_acs_prompt),
-    Knob("runner", _str),
-    Knob("runner_model", _opt_str),
-    Knob("runner_enabled", _runner_enabled),
-    Knob("reconcile_web_tools", _bool),
-    Knob("reconcile_allowed_tools", _list),
-    Knob("unverified_claim_max_age", _int),
+    # --- housekeeping ---
+    Knob("archive_after", _int),
+    Knob("backup_dir", _str),
     Knob("backup_interval", _int),
     Knob("backup_retention", _int),
-    Knob("backup_dir", _str),
-    Knob("repo_preflight", _bool),
-    Knob("base_drift_policy", _choice(_BASE_DRIFT_POLICIES), per_repo=True),
-    Knob("qa_standards_axis", _bool),
-    Knob("qa_phase_gate", _bool),
-    Knob("awaiting_ci_qa_gate", _bool),
-    Knob("answer_fast_path", _choice(_ANSWER_FAST_PATH_MODES)),
-    Knob("ready_fast_path", _choice(_READY_FAST_PATH_MODES)),
+    Knob("capture_session_logs", _bool),
     Knob("compact_interval", _int),
     Knob("compact_min_events", _int),
-    Knob("archive_after", _int),
-    Knob("ratelimit_grace", _int),
-    Knob("ratelimit_fallback_pause", _int),
-    Knob("ratelimit_max_pause", _int),
-    Knob("provider_probe_interval_s", _int),
-    Knob("review_noise_patterns", _review_noise_patterns),
-    Knob("review_noise_authors", _string_list),
+    Knob("file_hints", _bool, per_repo=True),
+    Knob("opencode_user_commands_dir", _str),
+    Knob("prune_interval", _int),
+    Knob("session_log_format", _str),
+    Knob("session_log_max_per_ticket", _int),
+    Knob("session_log_retention_days", _int),
+    Knob("user_commands_dir", _str),
+    Knob("user_settings_path", _str),
+    # --- env & security ---
+    Knob("branch_prefix", _str),
+    Knob("prime", _opt_str),
+    Knob("repo_path", _str),
+    Knob("repo_preflight", _bool),
     Knob("scrub_env", _string_list),
 )
 
-# `bash_max_timeout` is recognized but resolved after the table, because its
-# default depends on the already-loaded `no_output_timeout` (see load()).
-MAESTRO_KEYS = frozenset({k.name for k in KNOBS} | {"bash_max_timeout"})
+# `bash_max_timeout` is declared here too, but load() re-resolves it after the table,
+# because its default depends on the already-loaded `no_output_timeout`.
+MAESTRO_KEYS = frozenset({k.name for k in KNOBS})
 
 # [repos.<name>] keys that override the board-wide knob of the same name:
 # the table's value wins, unset inherits (resolved in `repos._binding_from_table`).
@@ -1183,85 +1210,18 @@ DEFAULT_CONFIG_TOML = """\
 # maestro configuration (project-agnostic). Fill in your providers.
 
 [maestro]
-max_concurrency = 12              # one COUNTED spawn: sizing the fleet at N concurrent
-                                   # sessions can mean slightly more than N agents running
-                                   # at once -- a `qa` session fans out ONE extra
-                                   # `Agent`-tool Standards-axis sub-agent INSIDE that one
-                                   # session when qa_standards_axis is on (see
-                                   # health.spawn_rate/spawn_budget, denominated in
-                                   # agent-equivalents, not sessions, for exactly this
-                                   # reason). The Implementer<->QA loop itself is real,
-                                   # separately-counted dispatcher spawns bouncing between
-                                   # `implementing` and `qa` (RF-7), not in-session fan-out.
-reconcile_steady_interval = 300
-# suggest_acs_model = "opus"      # T-118: model `ops.suggest_acs` (the TUI's suggest-ACs
-                                  # action) passes to `claude -p` -- default: unset, falls
-                                  # back to reconcile_model.
-# suggest_acs_prompt = "Draft 3-6 ACs as a JSON array of strings:\\n\\n{spec}"
-                                  # T-118: prompt template over the {spec} placeholder (the
-                                  # ticket's spec.md text; write a literal brace as {{ }}) --
-                                  # default: unset, uses the built-in prompt in
-                                  # ops.SUGGEST_ACS_PROMPT. A template lacking {spec}, or
-                                  # naming another placeholder, fails config load closed.
-# min_spawn_interval = 300        # hard floor between two spawns of the SAME key IN
-                                  # THE SAME PHASE (default: reconcile_steady_interval).
-                                  # Bounds the fleet even if the dispatcher is fired too
-                                  # often. A phase hand-off since the last spawn bypasses
-                                  # it -- only a same-phase respawn is held to this floor.
-                                  # 0 disables the floor entirely for that key (a
-                                  # legitimate debugging mode -- `maestro doctor` warns
-                                  # when the effective value is 0). Negative is rejected
-                                  # at load (exit 2), not silently clamped to 0.
+# --- spawn & concurrency ---
 backoff_base = 30
-max_failures = 4                 # lifetime (never-reset) failure count -> dead-letter
-                                  # (DEGRADED); a one-shot trip, not a per-attempt retry
-                                  # budget -- see the field's docstring in this module.
-max_impl_turns = 20
-# max_session_turns = 250         # RB-15: raw model-turn cap per spawned session (0
-                                  # disables), enforced natively at spawn where the runner
-                                  # supports one (claude --max-turns; opencode's generated
-                                  # --agent stub gets a `steps:` ceiling) -- NOT the same
-                                  # counter as max_impl_turns (self-reported implementer/QA
-                                  # rounds). pi has no native equivalent; relies entirely on
-                                  # max_turn_wallclock_seconds below.
-# max_session_seconds = 7200      # kill+fail a claim whose session ran longer than this
-                                  # (0 disables). Generous default -- real implementation
-                                  # sessions legitimately run 30-60+ min.
-# max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
-                                  # zero progress (observed_seq unchanged)
-# no_output_timeout = 1800        # kill+fail a claim whose session LOG hasn't been written
-                                  # to in this many seconds (0 disables); independent of
-                                  # max_session_seconds above. Exempt when the claim has no
-                                  # log_path (capture_session_logs = false).
-                                  # Must be >= bash_max_timeout below when non-zero (a
-                                  # foreground Bash call writes nothing to the log while it
-                                  # runs) -- config.load refuses an explicit shorter value;
-                                  # with bash_max_timeout unset, the ceiling shrinks to fit.
-# bash_max_timeout = 1800         # ceiling on ONE foreground Bash call inside a reconciler
-                                  # (exported as BASH_MAX_TIMEOUT_MS and BASH_DEFAULT_TIMEOUT_MS
-                                  # to the spawned runner; Claude Code's built-in ceiling is
-                                  # 600s and its built-in bare-call default is 120s). This is
-                                  # the budget the implementing skill's single foreground test
-                                  # run must fit in -- raise it for a slower suite, and raise
-                                  # no_output_timeout above with it. 0 = don't export.
-# max_turn_wallclock_seconds = 900  # RB-15: dispatcher-side backstop for max_session_turns
-                                  # (0 disables) -- a wall-clock approximation ("this session
-                                  # has almost certainly blown its turn budget by now"),
-                                  # deliberately shorter than max_session_seconds above.
-                                  # pi's ONLY protection (no native turn cap of its own);
-                                  # defense-in-depth for claude/opencode too, in case the
-                                  # native cap is ignored.
-worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1); raise this
-                                  # for a monorepo whose checkout legitimately takes longer --
-                                  # never scale it down, a killed-mid-checkout worktree looks
-                                  # complete (dir present) but isn't. Per-[repos.<name>] override
-                                  # wins (T-90).
-prime_timeout = 600              # T-90: bounds the `prime` command below/[repos.<name>] prime --
-                                  # a SEPARATE budget from worktree_timeout above; raising one has
-                                  # no effect on the other. Raise this for a repo whose cold
-                                  # dependency install (e.g. `yarn install` in a large web
-                                  # checkout) legitimately exceeds 10 minutes. Per-[repos.<name>]
-                                  # override wins (T-90).
+# backoff_cap = 3600            # ceiling (s) on the exponential backoff after a transient failure
+# burn_repeat_threshold = 5       # RB-11: a PER-KEY rate cap, distinct from the fleet-wide
+                                  # fleet-wide knobs -- catches sustained no-progress spend/spawns
+                                  # on ONE ticket long before it could ever trip a fleet-wide
+                                  # ceiling (measured: $1.40/hr per key, weeks from either).
+                                  # `maestro doctor` WARNs once a key repeats byte-identical
+                                  # failure text, or piles up spawns with observed_seq frozen,
+                                  # this many times; the same threshold parks (dead-letters)
+                                  # the key instead of respawning it once its failure text
+                                  # repeats. 0 disables both the WARN and the park.
 daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # session spend reaches this (enforced, not advisory;
                                   # surfaced by `maestro doctor` + the TUI fleet panel).
@@ -1274,42 +1234,92 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # generous headroom above a normal day, still an order
                                   # of magnitude below the 2026-07-19 runaway's $845.
                                   # Tune this to your own board's baseline; do not unset it.
-# runaway_spawns_per_hour = 200   # `maestro doctor` trips runaway above this fleet-wide
-                                  # spawns/hour (default: derived from the spawn floor
-                                  # itself; 0 disables the check)
+max_concurrency = 12              # one COUNTED spawn: sizing the fleet at N concurrent
+                                   # sessions can mean slightly more than N agents running
+                                   # at once -- a `qa` session fans out ONE extra
+                                   # `Agent`-tool Standards-axis sub-agent INSIDE that one
+                                   # session when qa_standards_axis is on (see
+                                   # health.spawn_rate/spawn_budget, denominated in
+                                   # agent-equivalents, not sessions, for exactly this
+                                   # reason). The Implementer<->QA loop itself is real,
+                                   # separately-counted dispatcher spawns bouncing between
+                                   # `implementing` and `qa` (RF-7), not in-session fan-out.
+max_failures = 4                 # lifetime (never-reset) failure count -> dead-letter
+                                  # (DEGRADED); a one-shot trip, not a per-attempt retry
+                                  # budget -- see the field's docstring in this module.
+max_impl_turns = 20
+# max_spawn_attempts = 5          # fail instead of respawning after this many spawns with
+                                  # zero progress (observed_seq unchanged)
+# min_spawn_interval = 300        # hard floor between two spawns of the SAME key IN
+                                  # THE SAME PHASE (default: reconcile_steady_interval).
+                                  # Bounds the fleet even if the dispatcher is fired too
+                                  # often. A phase hand-off since the last spawn bypasses
+                                  # it -- only a same-phase respawn is held to this floor.
+                                  # 0 disables the floor entirely for that key (a
+                                  # legitimate debugging mode -- `maestro doctor` warns
+                                  # when the effective value is 0). Negative is rejected
+                                  # at load (exit 2), not silently clamped to 0.
+# ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
+# ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
+# ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
+reconcile_steady_interval = 300
 # runaway_pause_cooldown = 900    # seconds dispatch() auto-arms fleet.pause for on the
                                   # same runaway signal doctor reports (0 disables the
                                   # auto-brake; runaway_spawns_per_hour = 0 disables both)
-# burn_repeat_threshold = 5       # RB-11: a PER-KEY rate cap, distinct from the fleet-wide
-                                  # knobs above -- catches sustained no-progress spend/spawns
-                                  # on ONE ticket long before it could ever trip a fleet-wide
-                                  # ceiling (measured: $1.40/hr per key, weeks from either).
-                                  # `maestro doctor` WARNs once a key repeats byte-identical
-                                  # failure text, or piles up spawns with observed_seq frozen,
-                                  # this many times; the same threshold parks (dead-letters)
-                                  # the key instead of respawning it once its failure text
-                                  # repeats. 0 disables both the WARN and the park.
-# runner_enabled = ["claude"]     # board-wide kill switch: dispatch() only ever spawns a
-                                  # runner named here (default: claude only). A scalar
-                                  # ("claude") works too. Consulted before OC-2's own
-                                  # preflight (binary probe, daemon probe) -- flipping this
-                                  # is the only lever needed to arm/disarm a non-claude
-                                  # runner fleet-wide, no spec edits required.
-# reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
-# reconcile_allowed_tools = ["Bash(npm test:*)"]   # board-wide --allowedTools additions, unioned
-                                  # with the resolved repo's own [repos.<name>]
-                                  # reconcile_allowed_tools (default [] -- no extra grant)
-# unverified_claim_max_age = 86400  # ceiling (s) for honoring an unverifiable ("unknown"
-                                    # identity) claim by raw pid liveness before releasing it
+# runaway_spawns_per_hour = 200   # `maestro doctor` trips runaway above this fleet-wide
+                                  # spawns/hour (default: derived from the spawn floor
+                                  # itself; 0 disables the check)
+
+# --- timeouts & watchdog ---
+# bash_max_timeout = 1800         # ceiling on ONE foreground Bash call inside a reconciler
+                                  # (exported as BASH_MAX_TIMEOUT_MS and BASH_DEFAULT_TIMEOUT_MS
+                                  # to the spawned runner; Claude Code's built-in ceiling is
+                                  # 600s and its built-in bare-call default is 120s). This is
+                                  # the budget the implementing skill's single foreground test
+                                  # run must fit in -- raise it for a slower suite, and raise
+                                  # no_output_timeout with it. 0 = don't export.
+# max_session_seconds = 7200      # kill+fail a claim whose session ran longer than this
+                                  # (0 disables). Generous default -- real implementation
+                                  # sessions legitimately run 30-60+ min.
+# max_session_turns = 250         # RB-15: raw model-turn cap per spawned session (0
+                                  # disables), enforced natively at spawn where the runner
+                                  # supports one (claude --max-turns; opencode's generated
+                                  # --agent stub gets a `steps:` ceiling) -- NOT the same
+                                  # counter as max_impl_turns (self-reported implementer/QA
+                                  # rounds). pi has no native equivalent; relies entirely on
+                                  # max_turn_wallclock_seconds.
+# max_turn_wallclock_seconds = 900  # RB-15: dispatcher-side backstop for max_session_turns
+                                  # (0 disables) -- a wall-clock approximation ("this session
+                                  # has almost certainly blown its turn budget by now"),
+                                  # deliberately shorter than max_session_seconds.
+                                  # pi's ONLY protection (no native turn cap of its own);
+                                  # defense-in-depth for claude/opencode too, in case the
+                                  # native cap is ignored.
+# no_output_timeout = 1800        # kill+fail a claim whose session LOG hasn't been written
+                                  # to in this many seconds (0 disables); independent of
+                                  # max_session_seconds. Exempt when the claim has no
+                                  # log_path (capture_session_logs = false).
+                                  # Must be >= bash_max_timeout when non-zero (a
+                                  # foreground Bash call writes nothing to the log while it
+                                  # runs) -- config.load refuses an explicit shorter value;
+                                  # with bash_max_timeout unset, the ceiling shrinks to fit.
+prime_timeout = 600              # T-90: bounds the `prime` command below/[repos.<name>] prime --
+                                  # a SEPARATE budget from worktree_timeout; raising one has
+                                  # no effect on the other. Raise this for a repo whose cold
+                                  # dependency install (e.g. `yarn install` in a large web
+                                  # checkout) legitimately exceeds 10 minutes. Per-[repos.<name>]
+                                  # override wins (T-90).
 # provider_probe_interval_s = 300  # reuse check_provider_availability's TCP probe result for this
                                   # many seconds per host instead of re-probing every sweep (0 disables caching)
-# backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
-# backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
-# backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
-# prune_interval = 3600           # auto-prune stale session logs on this cadence (0 disables)
-# session_log_retention_days = 14 # delete session logs older than N days (0/None = keep all)
-# session_log_max_per_ticket = 200 # keep at most N session logs per ticket (0/None = unlimited)
-# repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
+# unverified_claim_max_age = 86400  # ceiling (s) for honoring an unverifiable ("unknown"
+                                    # identity) claim by raw pid liveness before releasing it
+worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1); raise this
+                                  # for a monorepo whose checkout legitimately takes longer --
+                                  # never scale it down, a killed-mid-checkout worktree looks
+                                  # complete (dir present) but isn't. Per-[repos.<name>] override
+                                  # wins (T-90).
+
+# --- CI & review ---
 # base_drift_policy = "on_conflict" # "always" | "daily" | "on_conflict" -- whether a worktree
                                   # merely BEHIND its base branch (not GitHub-CONFLICTING) alone
                                   # re-routes an awaiting-ci/in-review ticket back to implementing
@@ -1318,62 +1328,54 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # "always" = today's unconditional behavior; "daily" = at most
                                   # once/calendar-day/ticket. Per-[repos.<name>] override wins.
                                   # Unknown value fails config load closed (see _BASE_DRIFT_POLICIES).
-# prime = "python3 -m venv .venv && .venv/bin/pip install -q -e '.[dev,tui]'"
-                                  # dependency-install command for the implicit default binding
-                                  # (no [repos.*] table at all -- see [repos.<name>] prime below
-                                  # for the multi-repo equivalent). Run ONCE per fresh worktree by
-                                  # `maestro worktree ensure`, cwd=worktree, with $WT/$REPO/$KEY
-                                  # in its environment -- never by the dispatcher.
-# test_command = ".venv/bin/python -m pytest -q"   # RB-12: this is the BOARD-WIDE DEFAULT --
-                                  # unset (default) leaves every existing home behaving exactly
-                                  # as today. [repos.<name>] test_command below overrides this
-                                  # per repo, and a repo-level command arms the gate even while
-                                  # this board-wide key stays unset. Once armed (by either key)
-                                  # for a repo, `implementing -> qa` refuses (`maestro set-phase
-                                  # ... qa`, non-zero exit, no event) unless `maestro
-                                  # capture-tests <key>` has a passing record captured by MAESTRO
-                                  # ITSELF (a real subprocess, its own exit code) at the CURRENT
-                                  # tree state (commit sha + a hash of the dirty tree) -- a
-                                  # self-reported "tests pass" note never satisfies this. A
-                                  # matching record is reused, never re-run, so a 60s sweep never
-                                  # re-runs a 115s suite for nothing. `--force` on `set-phase`
-                                  # overrides, same as the unverified-ACs gate. No-ops for a
-                                  # `mode = "local"` binding (no suite to run).
-# test_deletion_gate = true        # T-84 (H4): a green suite is a weak oracle for REMOVAL. The
-                                  # verifying stage diffs test names (per-language, see
-                                  # [repos.<name>] language below) against base; net deletions
-                                  # route to awaiting-human for sign-off instead of QA (renames
-                                  # never count; an answered sign-off for the same tree state
-                                  # passes). false disables.
+# ci_auto_rerun = true             # T-123: on a failing PR poll, request one `gh run
+                                  # rerun --failed` for the head SHA instead of
+                                  # immediately routing to `implementing` -- measured:
+                                  # 19/33 CI-failing episodes on this board went green
+                                  # on a re-run with no code change. False (default) is
+                                  # byte-identical. Per-[repos.<name>] override wins.
+# ci_failure_excerpt = true        # T-123: capture <= 2KB of the failed job's log tail
+                                  # into CiObserved.payload.failure_excerpt on the
+                                  # observation that routes to `implementing` after a
+                                  # rerun -- surfaced in the routing reason and
+                                  # derived/context/<KEY>.md. False (default) is
+                                  # byte-identical.
+# ci_rerun_grace = 900             # T-123: seconds a still-failing poll withholds
+                                  # routing after the one rerun request for a head SHA,
+                                  # bridging the gap before GitHub's rollup reflects the
+                                  # rerun -- past this window a still-failing poll is
+                                  # trusted as the rerun's real outcome and routes.
+# pr_split_threshold = 800        # T-126: lines changed (additions + deletions vs base) above
+                                  # which `implementing` proposes a stack of smaller PRs
+                                  # (`maestro ask`) instead of opening/growing one big one. 0
+                                  # disables the check. Per-[repos.<name>] override wins.
+# review_noise_authors = []       # T-125: exact review-author logins (e.g. "github-actions[bot]")
+                                  # filtered the same way as review_noise_patterns.
+# review_noise_patterns = []      # T-125: regexes (fullmatch); a matching COMMENTED/APPROVED/
+                                  # INLINE_COMMENT review body still records ReviewFeedbackReceived
+                                  # but routes nothing (CHANGES_REQUESTED is never filtered).
+                                  # Empty by default -- ships dark. A malformed regex fails
+                                  # config load closed.
+
+# --- QA/AC gates ---
+# allowed_paths = ["maestro/**", "tests/**"]  # T-149: globs (`**` crosses directories) a branch's
+                                  # diff may touch. A diff touching anything outside routes to
+                                  # awaiting-human with an approval question listing those files
+                                  # (an answered approval for the same tree state passes). Empty
+                                  # (default) means no restriction. Per-[repos.<name>] override wins.
+# awaiting_ci_qa_gate = true       # T-85: default ON (shown here) refuses `set-phase awaiting-ci`
+                                  # unless every current-hash AC has a PASSING spec-axis QA
+                                  # verdict, not merely no failing one -- set false to revert to
+                                  # pre-T-85's weaker check
 # language = "go"                  # T-96: board-wide DEFAULT for [repos.<name>] language (below) --
                                   # same "table wins, unset inherits" precedence as test_command
-                                  # above. Only needed for a single-repo home with no [repos.*]
+                                  # (see test_command). Only needed for a single-repo home with no [repos.*]
                                   # table at all; a multi-repo home sets language per table
                                   # instead. Unset (default) means every repo binding with no
                                   # language of its own resolves to "python", unchanged. Setting
                                   # test_command on a non-python repo with language left unset
                                   # (here AND per-table) fails a test:-annotated AC closed, once,
                                   # legibly -- see [repos.<name>] language below.
-# file_hints = true                # T-124: board-wide DEFAULT for [repos.<name>] file_hints
-                                  # (below) -- same "table wins, unset inherits" precedence as
-                                  # test_command above. false (default) ships dark: the context
-                                  # dossier is byte-identical to before this knob existed. true
-                                  # adds "## Suggested starting points"/"## Symbol map"/"## Files
-                                  # edited in prior sessions" sections computed by
-                                  # maestro/locate.py -- run `maestro locate --eval` first and
-                                  # confirm its merged-list recall@5 at least matches the
-                                  # MENTION-only baseline before turning this on for real.
-# qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
-                                  # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
-                                  # only (does not block awaiting-ci), roughly doubles QA spend
-# qa_phase_gate = true             # T-85: default ON (shown here) refuses `maestro qa-verdict`
-                                  # (no event appended) unless the ticket's folded phase is `qa`
-                                  # -- set false to revert to pre-T-85 behavior (a verdict
-                                  # honored from any phase)
-# awaiting_ci_qa_gate = true       # T-85: default ON (shown here) refuses `set-phase awaiting-ci`
-                                  # unless every current-hash AC has a PASSING spec-axis QA
-                                  # verdict, not merely no failing one -- set false to revert to
-                                  # pre-T-85's weaker check
 # post_qa_skill = "/my-pr-polish"  # T-115: board-wide DEFAULT skill to fire, exactly once per QA
                                   # pass, at the qa -> awaiting-ci trigger point (once every
                                   # current-hash AC carries a passing spec-axis QA verdict) --
@@ -1396,14 +1398,36 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # fires post_qa_skill on demand, bypassing the QA-pass gate and
                                   # its once-per-pass dedup -- useful to re-run the skill, or to
                                   # try it before a real QA pass reaches awaiting-ci.
-# compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
-                                  # (0 disables; a manual `maestro compact <key>` always works)
-# compact_min_events = 200        # skip compacting a key until its folded log reaches this size
-# archive_after = 259200          # seconds a DONE ticket stays visible before being moved out of
-                                  # list_keys/dashboards (None disables; 0 = archive next sweep)
-# ratelimit_grace = 60            # seconds added after resetsAt before resuming spawns
-# ratelimit_fallback_pause = 1800 # seconds to pause when resetsAt is missing/invalid/past
-# ratelimit_max_pause = 21600     # cap on any single pause (0 disables the gate)
+# qa_phase_gate = true             # T-85: default ON (shown here) refuses `maestro qa-verdict`
+                                  # (no event appended) unless the ticket's folded phase is `qa`
+                                  # -- set false to revert to pre-T-85 behavior (a verdict
+                                  # honored from any phase)
+# qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
+                                  # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
+                                  # only (does not block awaiting-ci), roughly doubles QA spend
+# test_command = ".venv/bin/python -m pytest -q"   # RB-12: this is the BOARD-WIDE DEFAULT --
+                                  # unset (default) leaves every existing home behaving exactly
+                                  # as today. [repos.<name>] test_command below overrides this
+                                  # per repo, and a repo-level command arms the gate even while
+                                  # this board-wide key stays unset. Once armed (by either key)
+                                  # for a repo, `implementing -> qa` refuses (`maestro set-phase
+                                  # ... qa`, non-zero exit, no event) unless `maestro
+                                  # capture-tests <key>` has a passing record captured by MAESTRO
+                                  # ITSELF (a real subprocess, its own exit code) at the CURRENT
+                                  # tree state (commit sha + a hash of the dirty tree) -- a
+                                  # self-reported "tests pass" note never satisfies this. A
+                                  # matching record is reused, never re-run, so a 60s sweep never
+                                  # re-runs a 115s suite for nothing. `--force` on `set-phase`
+                                  # overrides, same as the unverified-ACs gate. No-ops for a
+                                  # `mode = "local"` binding (no suite to run).
+# test_deletion_gate = true        # T-84 (H4): a green suite is a weak oracle for REMOVAL. The
+                                  # verifying stage diffs test names (per-language, see
+                                  # [repos.<name>] language below) against base; net deletions
+                                  # route to awaiting-human for sign-off instead of QA (renames
+                                  # never count; an answered sign-off for the same tree state
+                                  # passes). false disables.
+
+# --- fast paths ---
 # answer_fast_path = "off"         # T-122: "off" | "shadow" | "on" -- whether the dispatcher's
                                   # due loop routes an exact-literal human approval ("ok"/"yes"/
                                   # "approve"/etc, paired with an ops.ask content-hash qid, on a
@@ -1416,6 +1440,7 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # "dispatcher", acks, and records answer_routed; every other
                                   # answer shape keeps today's spawn. Unknown value fails config
                                   # load closed (see _ANSWER_FAST_PATH_MODES).
+# nudge_on_human_input = true   # run an in-process dispatch right after `ans`/`cmd`/`create`
 # ready_fast_path = "off"          # T-138: "off" | "on" -- whether the dispatcher's own sweep
                                   # applies the `ready` phase's fully-scripted rules inline
                                   # (dependsOn, kind/mode, worktree_ensure, set-phase) instead of
@@ -1426,39 +1451,77 @@ daily_spend_ceiling_usd = 150.0  # dispatch() spawns nothing once today's folded
                                   # witnessed-worktree refusal (which parks awaiting-human
                                   # instead). Unknown value fails config load closed (see
                                   # _READY_FAST_PATH_MODES).
-# ci_auto_rerun = true             # T-123: on a failing PR poll, request one `gh run
-                                  # rerun --failed` for the head SHA instead of
-                                  # immediately routing to `implementing` -- measured:
-                                  # 19/33 CI-failing episodes on this board went green
-                                  # on a re-run with no code change. False (default) is
-                                  # byte-identical. Per-[repos.<name>] override wins.
-# ci_rerun_grace = 900             # T-123: seconds a still-failing poll withholds
-                                  # routing after the one rerun request for a head SHA,
-                                  # bridging the gap before GitHub's rollup reflects the
-                                  # rerun -- past this window a still-failing poll is
-                                  # trusted as the rerun's real outcome and routes.
-# ci_failure_excerpt = true        # T-123: capture <= 2KB of the failed job's log tail
-                                  # into CiObserved.payload.failure_excerpt on the
-                                  # observation that routes to `implementing` after a
-                                  # rerun -- surfaced in the routing reason and
-                                  # derived/context/<KEY>.md. False (default) is
-                                  # byte-identical.
-# review_noise_patterns = []      # T-125: regexes (fullmatch); a matching COMMENTED/APPROVED/
-                                  # INLINE_COMMENT review body still records ReviewFeedbackReceived
-                                  # but routes nothing (CHANGES_REQUESTED is never filtered).
-                                  # Empty by default -- ships dark. A malformed regex fails
-                                  # config load closed.
-# review_noise_authors = []       # T-125: exact review-author logins (e.g. "github-actions[bot]")
-                                  # filtered the same way as review_noise_patterns above.
-# pr_split_threshold = 800        # T-126: lines changed (additions + deletions vs base) above
-                                  # which `implementing` proposes a stack of smaller PRs
-                                  # (`maestro ask`) instead of opening/growing one big one. 0
-                                  # disables the check. Per-[repos.<name>] override wins.
-# allowed_paths = ["maestro/**", "tests/**"]  # T-149: globs (`**` crosses directories) a branch's
-                                  # diff may touch. A diff touching anything outside routes to
-                                  # awaiting-human with an approval question listing those files
-                                  # (an answered approval for the same tree state passes). Empty
-                                  # (default) means no restriction. Per-[repos.<name>] override wins.
+
+# --- runners & models ---
+# default_effort = "high"      # global --effort default for spawned sessions (unset = omit --effort)
+# permission_mode = "acceptEdits"   # claude --permission-mode for spawned reconcilers
+# reconcile_allowed_tools = ["Bash(npm test:*)"]   # board-wide --allowedTools additions, unioned
+                                  # with the resolved repo's own [repos.<name>]
+                                  # reconcile_allowed_tools (default [] -- no extra grant)
+# reconcile_command = "/maestro-reconcile"   # slash command a spawned reconciler runs
+# reconcile_model = "sonnet"      # model for spawned reconciler sessions
+# reconcile_web_tools = true      # grant spawned reconcilers WebSearch/WebFetch via --allowedTools
+# research_effort = "high"       # --effort for kind=research tickets
+# research_model = "opus"         # model for kind=research tickets
+# runner = "claude"               # board-wide fallback runner for implementation spawns when a spec
+                                  # carries no `runner:` override ("claude" | "opencode" | "pi")
+# runner_enabled = ["claude"]     # board-wide kill switch: dispatch() only ever spawns a
+                                  # runner named here (default: claude only). A scalar
+                                  # ("claude") works too. Consulted before OC-2's own
+                                  # preflight (binary probe, daemon probe) -- flipping this
+                                  # is the only lever needed to arm/disarm a non-claude
+                                  # runner fleet-wide, no spec edits required.
+# runner_model = "qwen3-coder:30b"   # board-wide fallback model for that runner (unset = runner default)
+# suggest_acs_model = "opus"      # T-118: model `ops.suggest_acs` (the TUI's suggest-ACs
+                                  # action) passes to `claude -p` -- default: unset, falls
+                                  # back to reconcile_model.
+# suggest_acs_prompt = "Draft 3-6 ACs as a JSON array of strings:\\n\\n{spec}"
+                                  # T-118: prompt template over the {spec} placeholder (the
+                                  # ticket's spec.md text; write a literal brace as {{ }}) --
+                                  # default: unset, uses the built-in prompt in
+                                  # ops.SUGGEST_ACS_PROMPT. A template lacking {spec}, or
+                                  # naming another placeholder, fails config load closed.
+
+# --- housekeeping ---
+# archive_after = 259200          # seconds a DONE ticket stays visible before being moved out of
+                                  # list_keys/dashboards (None disables; 0 = archive next sweep)
+# backup_dir = "~/.maestro/myhome-backups"   # default: a sibling dir of the home
+# backup_interval = 3600          # auto-snapshot events/tickets/inbox/config on this cadence (0 disables)
+# backup_retention = 24           # keep this many most-recent snapshots (0 = keep all)
+# capture_session_logs = true   # write each spawned session's output under agent-logs/<KEY>/
+# compact_interval = 21600        # fold pre-snapshot events into the archive on this cadence
+                                  # (0 disables; a manual `maestro compact <key>` always works)
+# compact_min_events = 200        # skip compacting a key until its folded log reaches this size
+# file_hints = true                # T-124: board-wide DEFAULT for [repos.<name>] file_hints
+                                  # (below) -- same "table wins, unset inherits" precedence as
+                                  # test_command. false (default) ships dark: the context
+                                  # dossier is byte-identical to before this knob existed. true
+                                  # adds "## Suggested starting points"/"## Symbol map"/"## Files
+                                  # edited in prior sessions" sections computed by
+                                  # maestro/locate.py -- run `maestro locate --eval` first and
+                                  # confirm its merged-list recall@5 at least matches the
+                                  # MENTION-only baseline before turning this on for real.
+# opencode_user_commands_dir = "~/.config/opencode/command"   # override for `install-commands`'s
+                                  # opencode target (MAESTRO_OPENCODE_COMMANDS_DIR wins when set)
+# prune_interval = 3600           # auto-prune stale session logs on this cadence (0 disables)
+# session_log_format = "stream-json"   # "stream-json" | "text"
+# session_log_max_per_ticket = 200 # keep at most N session logs per ticket (0/None = unlimited)
+# session_log_retention_days = 14 # delete session logs older than N days (0/None = keep all)
+# user_commands_dir = "~/.claude/commands"   # override for `install-commands --user` (MAESTRO_USER_COMMANDS_DIR
+                                  # wins when set)
+# user_settings_path = "~/.claude/settings.json"   # user-scope settings layer for the doctor
+                                  # permission-surface check (MAESTRO_USER_SETTINGS_PATH wins when set)
+
+# --- env & security ---
+# branch_prefix = "maestro/"   # branch name prefix for ticket worktrees
+# prime = "python3 -m venv .venv && .venv/bin/pip install -q -e '.[dev,tui]'"
+                                  # dependency-install command for the implicit default binding
+                                  # (no [repos.*] table at all -- see [repos.<name>] prime below
+                                  # for the multi-repo equivalent). Run ONCE per fresh worktree by
+                                  # `maestro worktree ensure`, cwd=worktree, with $WT/$REPO/$KEY
+                                  # in its environment -- never by the dispatcher.
+# repo_path = "/abs/path/to/repo"   # primary repo the reconciler builds in (single-repo homes)
+# repo_preflight = true            # refuse to spawn/sync into a mid-merge or conflict-marked repo_path
 # scrub_env = ["GH_TOKEN_*"]      # T-144: exact names or fnmatch globs dropped from every
                                   # spawned reconciler's env and every dispatcher-run test/check
                                   # subprocess -- for a human shell's own secrets. Board-wide

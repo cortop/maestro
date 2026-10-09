@@ -1828,7 +1828,7 @@ def test_max_concurrency_documents_sub_agent_amplification():
     max_concurrency_line = next(
         line for line in DEFAULT_CONFIG_TOML.splitlines() if line.startswith("max_concurrency"))
     idx = DEFAULT_CONFIG_TOML.index(max_concurrency_line)
-    block_end = DEFAULT_CONFIG_TOML.index("\nreconcile_steady_interval", idx)
+    block_end = DEFAULT_CONFIG_TOML.index("\nmax_failures", idx)
     block = DEFAULT_CONFIG_TOML[idx:block_end]
     assert "Agent" in block and "sub-agent" in block
 
