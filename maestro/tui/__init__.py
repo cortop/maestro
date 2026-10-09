@@ -27,6 +27,7 @@ from .modals import (
     _PHASE_COMMANDS,
     _RunnerModal,
     _ScheduleModal,
+    _StopModal,
     _SuggestAcsModal,
 )
 from .render import (
@@ -90,6 +91,7 @@ __all__ = [
     "HoldModal",
     "_RunnerModal",
     "_ScheduleModal",
+    "_StopModal",
     "_SuggestAcsModal",
     "_DEFAULT_COMMANDS",
     "_EventPayloadModal",

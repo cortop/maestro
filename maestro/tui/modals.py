@@ -856,6 +856,46 @@ class _ConfirmModal(ModalScreen):
         self.dismiss(False)
 
 
+class _StopModal(ModalScreen):
+    """T-176: confirm stopping one live session; Cancel is focused, so a bare Enter is a no-op.
+
+    Dismisses ``(True, note_and_nudge)`` on Stop, ``None`` on Cancel / Esc.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    _StopModal #stop-buttons { height: auto; margin-top: 1; }
+    """
+
+    def __init__(self, key: str, *, pid, age_s, verdict: str, silence_s) -> None:
+        super().__init__()
+        self._key, self._pid, self._verdict = key, pid, verdict
+        self._age = "—" if age_s is None else f"{age_s}s"
+        self._silence = "—" if silence_s is None else f"{silence_s}s"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label(f"Stop the live session for [bold]{self._key}[/bold]? (SIGTERM, no Failed event)")
+            yield Label(f"pid {self._pid} · age {self._age} · verdict {self._verdict} · silent {self._silence}")
+            yield Checkbox("Note the stop in the inbox and nudge", value=False, id="stop-nudge")
+            with Horizontal(id="stop-buttons"):
+                yield Button("Cancel", id="stop-cancel")
+                yield Button("Stop", id="stop-ok", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#stop-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "stop-ok":
+            self.dismiss((True, self.query_one("#stop-nudge", Checkbox).value))
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _SessionPickModal(ModalScreen):
     """Pick one captured session (newest first); dismisses with its index in *labels*, None on cancel."""
 

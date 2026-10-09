@@ -11,11 +11,14 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
+import time
 import urllib.error
 from pathlib import Path
 
 from . import backup
+from . import claims
 from . import events as E
 from . import context as context_mod
 from . import config as config_mod
@@ -3159,3 +3162,43 @@ def sync_tracker(cfg: Config, name: str | None = None) -> dict:
 
     imported = {tname: tracker.import_new(cfg.home) for tname, tracker in trackers.items()}
     return {"imported": imported, "total": sum(imported.values())}
+
+
+def stop_session(cfg: Config, key: str, *, wait: float = 10.0) -> dict:
+    """[human] SIGTERM one key's live reconciler session, appending NOTHING to the log.
+
+    Refuses (``stopped: False``, no signal sent) with no claim, a dispatcher-owned
+    ``testrun`` / ``restack`` claim, a verdict other than ``confirmed`` (re-probed
+    right before signalling), or a pid that does not lead its own process group.
+    Never escalates to SIGKILL; a survivor is reported and its claim left alone. A dead
+    process's claim is reclaimed by the next sweep's ``claims.active_keys``. No
+    ``Failed`` event, so ``failure_count`` / backoff are untouched (unlike the watchdog).
+    """
+    home = cfg.home
+    claim = claims.read_claim(home, key)
+    out: dict = {"key": key, "pid": None, "verdict": "unknown", "stopped": False}
+    if not claim:
+        return {**out, "outcome": "refused: no claim"}
+    out["pid"] = claim.get("pid")
+    kind = claim.get("kind")
+    if kind in ("testrun", "restack"):
+        return {**out, "outcome": f"refused: {kind} claim is dispatcher-owned"}
+    pid = claims._sanitize_pid(claim.get("pid"))
+    verdict = claims.verify_claim(home, key)
+    out["verdict"] = verdict
+    if pid is None or verdict != "confirmed":
+        return {**out, "outcome": f"refused: process identity {verdict}"}
+    try:
+        if os.getpgid(pid) != pid:
+            return {**out, "outcome": "refused: pid does not lead its own process group"}
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return {**out, "stopped": True, "outcome": "already gone"}
+    except OSError as e:
+        return {**out, "outcome": f"refused: {e}"}
+    deadline = time.monotonic() + max(0.0, wait)
+    while claims.pid_alive(pid):
+        if time.monotonic() >= deadline:
+            return {**out, "outcome": f"still running after {wait:g}s"}
+        time.sleep(0.05)
+    return {**out, "stopped": True, "outcome": "stopped"}

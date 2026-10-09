@@ -788,6 +788,15 @@ def cmd_hold(args) -> int:
     return 0
 
 
+def cmd_stop(args) -> int:
+    """[human] SIGTERM one key's live session (see `ops.stop_session`). Exit 0 only
+    when the process stopped. Never added to `_AGENT_TOOL_VERBS`."""
+    cfg = _cfg(args)
+    result = ops.stop_session(cfg, args.key, wait=args.wait)
+    _print(result)
+    return 0 if result["stopped"] else 1
+
+
 def cmd_unhold(args) -> int:
     """[human] release a ticket's hold (never an agent verb)."""
     home = _cfg(args).home
@@ -1702,6 +1711,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--until", default=None, help="bare epoch or ISO-8601 timestamp")
     sp.add_argument("--reason", default=None)
     sp = add("unhold", cmd_unhold, "[human] release a ticket's hold"); sp.add_argument("key")
+
+    sp = add("stop", cmd_stop,
+             "[human] SIGTERM a key's live session (no Failed event; refuses unless the claim's "
+             "process is confirmed). Note: the ticket is usually due again next sweep and respawns "
+             "unless held; repeated stops at one observed_seq count toward max_spawn_attempts")
+    sp.add_argument("key"); sp.add_argument("--wait", type=float, default=10.0,
+                    help="seconds to wait for the process to exit (never escalates to SIGKILL)")
 
     sp = add("snapshot", cmd_snapshot, "[agent] folded snapshot"); sp.add_argument("key")
     sp = add("events", cmd_events, "[agent] event log"); sp.add_argument("key"); sp.add_argument("--since", type=int, default=0)
