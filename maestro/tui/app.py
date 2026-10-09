@@ -5,51 +5,93 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from textual.app import App, ComposeResult, ScreenStackError
-from textual.binding import Binding
-from textual.command import CommandPalette
-from textual.css.query import NoMatches
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
-from textual.worker import Worker, WorkerState
-
 from rich.markup import escape
 from rich.text import Text
+from textual.app import App
+from textual.app import ComposeResult
+from textual.app import ScreenStackError
+from textual.binding import Binding
+from textual.command import CommandPalette
+from textual.containers import Horizontal
+from textual.containers import Vertical
+from textual.css.query import NoMatches
+from textual.widgets import DataTable
+from textual.widgets import Footer
+from textual.widgets import Header
+from textual.widgets import Input
+from textual.widgets import RichLog
+from textual.widgets import Static
+from textual.worker import Worker
+from textual.worker import WorkerState
 
-from .. import claims, gates, ratelimit, spend as spend_mod, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops as ops_mod, snapshot as snap_mod, store
-from ..config import Config
-from ..dispatcher import existing_prefixes, spec_runner
+from .. import claims
+from .. import config as config_mod
+from .. import depgraph
 from .. import dispatcher as disp
-from ..projection import _PHASE_RANK, parse_query, phase_predicate, ticket_rows
-from ..sessions import build_routing_sessions, reap_children
-from ..statemachine import Phase, ACTIVE_PHASES
-from .commands import ActionProvider, TicketProvider
+from .. import event_log
+from .. import fleet as fleet_mod
+from .. import gates
+from .. import health
+from .. import inbox
+from .. import ops as ops_mod
+from .. import ratelimit
+from .. import snapshot as snap_mod
+from .. import spend as spend_mod
+from .. import store
+from ..config import Config
+from ..dispatcher import existing_prefixes
+from ..dispatcher import spec_runner
+from ..projection import _PHASE_RANK
+from ..projection import parse_query
+from ..projection import phase_predicate
+from ..projection import ticket_rows
+from ..sessions import build_routing_sessions
+from ..sessions import reap_children
+from ..statemachine import ACTIVE_PHASES
+from ..statemachine import Phase
+from .commands import ActionProvider
+from .commands import TicketProvider
 from .detail import render as _render_detail
 from .events import render_log
-from .modals import (
-    _ACCEPT_ALL, MENU_PROPOSAL, MenuRow, _AcceptedRecommendation, _ActionMenu, _AddAcModal, _AnswerModal,
-    _CmdModal, _ConfirmModal, HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal,
-    _SpecFieldsModal, _SuggestAcsModal, menu_actions,
-)
-from .render import _dep_color, _nudge_toast, _render_badge, _render_pulse, _styled_row
-from .screens import (
-    DecisionsScreen,
-    DetailScreen,
-    ActivityScreen,
-    DepsScreen,
-    EnvScreen,
-    EventsScreen,
-    FleetScreen,
-    InboxScreen,
-    LogsScreen,
-    ProposalScreen,
-    ReviewScreen,
-    ScheduleScreen,
-    SpecScreen,
-    AcScreen,
-    WhyScreen,
-    edit_in_editor,
-)
+from .modals import _ACCEPT_ALL
+from .modals import MENU_PROPOSAL
+from .modals import HoldModal
+from .modals import MenuRow
+from .modals import _AcceptedRecommendation
+from .modals import _ActionMenu
+from .modals import _AddAcModal
+from .modals import _AnswerModal
+from .modals import _CmdModal
+from .modals import _ConfirmModal
+from .modals import _CreateModal
+from .modals import _ImportLinearModal
+from .modals import _InboxModal
+from .modals import _RunnerModal
+from .modals import _SpecFieldsModal
+from .modals import _SuggestAcsModal
+from .modals import _TicketPickModal
+from .modals import menu_actions
+from .render import _dep_color
+from .render import _nudge_toast
+from .render import _render_badge
+from .render import _render_pulse
+from .render import _styled_row
+from .screens import AcScreen
+from .screens import ActivityScreen
+from .screens import DecisionsScreen
+from .screens import DepsScreen
+from .screens import DetailScreen
+from .screens import EnvScreen
+from .screens import EventsScreen
+from .screens import FleetScreen
+from .screens import InboxScreen
+from .screens import LogsScreen
+from .screens import ProposalScreen
+from .screens import ReviewScreen
+from .screens import ScheduleScreen
+from .screens import SpecScreen
+from .screens import WhyScreen
+from .screens import edit_in_editor
 
 _NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
 _NEEDS_YOU_PHASE_VALUES = {p.value for p in _NEEDS_YOU_PHASES}
@@ -237,6 +279,8 @@ class MaestroTUI(App):
         Binding("j", "jump_running", "Next running", show=False),
         Binding("m", "action_menu", "Menu", show=False),
         Binding("w", "why_panel", "Why", show=False),
+        Binding("b", "blockers", "Blockers", show=False),
+        Binding("O", "open_pr", "Open PR", show=False),
         Binding("slash", "filter_query", "Search", show=False, priority=True),
         Binding("escape", "clear_query", "Clear search", show=False),
         # T-162: Textual only auto-binds ctrl+p when nothing binds `command_palette`, so bind both.
@@ -250,7 +294,7 @@ class MaestroTUI(App):
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
         "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
-        "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel", "action_menu",
+        "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel", "action_menu", "blockers", "open_pr",
     })
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
@@ -556,6 +600,11 @@ class MaestroTUI(App):
         if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
             self._badge_result = event.worker.result
             self._paint_badge()
+        elif event.worker.name == "blockers":
+            if event.state == WorkerState.SUCCESS:
+                self._open_blockers_picker(*event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"blockers failed: {event.worker.error}", severity="error")
         elif event.worker.name == "nudge":
             if event.state == WorkerState.SUCCESS:
                 msg, severity = event.worker.result
@@ -969,6 +1018,63 @@ class MaestroTUI(App):
 
     def action_deps_panel(self) -> None:
         self.push_screen(DepsScreen(self._home, self._target_key()))
+
+    def action_blockers(self) -> None:
+        """Pick a blocker / dependent of the ticket on screen and hop to it (read-only)."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        home = self._home
+
+        def _load() -> tuple[str, list[tuple[str, str, str]], list[tuple[str, str]]]:
+            blocks = depgraph.build(home).dependents.get(key, [])
+            return (key, depgraph.dep_status(home, key),
+                    [(b, str(getattr(snap_mod.load(home, b).phase, "value", ""))) for b in blocks])
+
+        self.run_worker(_load, thread=True, name="blockers", group="blockers", exclusive=True,
+                        exit_on_error=False)
+
+    def _open_blockers_picker(self, key: str, deps: list[tuple[str, str, str]],
+                              blocks: list[tuple[str, str]]) -> None:
+        if not deps and not blocks:
+            self.notify("No blockers or dependents", severity="warning")
+            return
+        missing = {d for d, _, phase in deps if phase == "missing"}
+        groups: list[tuple[str, list[tuple[str, str]]]] = []
+        if deps:
+            groups.append(("Blocked by", [
+                (d, f"[dim]{d} {emoji} {phase}[/dim]" if emoji == "✅" else f"{d} {emoji} {phase}")
+                for d, emoji, phase in deps]))
+        if blocks:
+            groups.append(("Blocks", [(b, f"{b} {phase}") for b, phase in blocks]))
+
+        def _picked(target: str | None) -> None:
+            if target is None:
+                return
+            if target in missing:
+                self.notify(f"{target} does not exist", severity="warning")
+                return
+            screen = self.screen
+            if isinstance(screen, DetailScreen):
+                self.switch_screen(DetailScreen(self._home, target))
+            elif isinstance(screen, SpecScreen):
+                self.switch_screen(SpecScreen(self._home, target))
+            else:
+                self.push_screen(DetailScreen(self._home, target))
+
+        self.push_screen(_TicketPickModal(f"{key}: blockers and dependents", groups), _picked)
+
+    def action_open_pr(self) -> None:
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        url = snap_mod.load(self._home, key).pr_url
+        if not url:
+            self.notify(f"No PR for {key}", severity="warning")
+            return
+        self.open_url(url)
 
     def action_show_spec(self) -> None:
         key = self._target_key()

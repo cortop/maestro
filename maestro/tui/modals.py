@@ -880,6 +880,37 @@ class _SessionPickModal(ModalScreen):
         self.dismiss(None)
 
 
+class _TicketPickModal(ModalScreen):
+    """Pick one ticket from titled groups (shared ticket picker); dismisses with its key, None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, groups: list[tuple[str, list[tuple[str, str]]]]) -> None:
+        super().__init__()
+        self._title = title
+        self._groups = groups
+
+    def compose(self) -> ComposeResult:
+        options: list[Option] = []
+        for heading, entries in self._groups:
+            options.append(Option(Text(heading, style="bold"), disabled=True))
+            options.extend(Option(Text.from_markup(label), id=key) for key, label in entries)
+        with Vertical(id="answer-dialog"):
+            yield Label(self._title)
+            yield OptionList(*options, id="ticket-pick")
+
+    def on_mount(self) -> None:
+        picker = self.query_one("#ticket-pick", OptionList)
+        picker.focus()
+        picker.action_first()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class _ScheduleModal(ModalScreen):
     """Add/edit form for one `[[scheduled]]` task; dismisses with a result dict or None."""
 
