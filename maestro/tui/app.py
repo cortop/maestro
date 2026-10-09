@@ -11,6 +11,7 @@ from textual.app import App
 from textual.app import ComposeResult
 from textual.app import ScreenStackError
 from textual.binding import Binding
+from textual.command import CommandPalette
 from textual.containers import Horizontal
 from textual.containers import Vertical
 from textual.content import Content
@@ -49,6 +50,8 @@ from ..sessions import build_routing_sessions
 from ..sessions import reap_children
 from ..statemachine import ACTIVE_PHASES
 from ..statemachine import Phase
+from .commands import ActionProvider
+from .commands import TicketProvider
 from .detail import render as _render_detail
 from .events import render_log
 from .modals import _ACCEPT_ALL
@@ -195,6 +198,7 @@ def _load_board(home: Path) -> dict:
         "graph": depgraph.build(home),
         "live": _load_live(home, cfg),
         "no_output_timeout": cfg.no_output_timeout,
+        "proposals": {r[-1] for r in rows if store.ticket_dir(home, r[-1]).joinpath("proposal.md").exists()},
     }
 
 
@@ -307,7 +311,12 @@ class MaestroTUI(App):
         Binding("O", "open_pr", "Open PR", show=False),
         Binding("slash", "filter_query", "Search", show=False, priority=True),
         Binding("escape", "clear_query", "Clear search", show=False),
+        # T-162: Textual only auto-binds ctrl+p when nothing binds `command_palette`, so bind both.
+        Binding("ctrl+p", "command_palette", "Palette", show=False, priority=True),
+        Binding("colon", "command_palette", "Palette", show=False),
     ]
+
+    COMMANDS = App.COMMANDS | {TicketProvider, ActionProvider}
 
     # Actions that act on one ticket: hidden on screens that aren't about a ticket.
     _TICKET_ACTIONS = frozenset({
@@ -382,6 +391,19 @@ class MaestroTUI(App):
         self._no_output_timeout: int = Config.no_output_timeout
         # key -> claim identity that already toasted red.
         self._red_toasted: dict[str, tuple] = {}
+        # T-162: what the command palette searches (refreshed by `_populate`; never read from disk).
+        self._palette_tickets: list[tuple[str, str, str]] = []
+        self._palette_proposals: set[str] = set()
+
+    def _base_stack(self) -> list:
+        """The screen stack minus an open command palette, so actions judge the screen it covers."""
+        return [s for s in self.screen_stack if not isinstance(s, CommandPalette)]
+
+    def _base_screen(self):
+        stack = self._base_stack()
+        if not stack:
+            raise ScreenStackError("no screens")
+        return stack[-1]
 
     def format_title(self, title: str, sub_title: str) -> Content:
         """Like `App.format_title`, but a `⚠` segment of the sub_title is coloured, not dimmed."""
@@ -395,7 +417,7 @@ class MaestroTUI(App):
     def _target_key(self) -> str | None:
         """The ticket the operator is looking at: the pushed screen's own ticket, else the board cursor."""
         try:
-            screen = self.screen
+            screen = self._base_screen()
         except ScreenStackError:  # unmounted app (tests call actions directly)
             return self._selected_key
         if isinstance(screen, self._KEYED_SCREENS):
@@ -410,11 +432,11 @@ class MaestroTUI(App):
         return self._selected_key
 
     def _on_board(self) -> bool:
-        return len(self.screen_stack) <= 1
+        return len(self._base_stack()) <= 1
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         try:
-            screen = self.screen
+            screen = self._base_screen()
         except ScreenStackError:
             return True
         if action in self._TICKET_ACTIONS and isinstance(screen, self._NON_TICKET_SCREENS):
@@ -770,6 +792,7 @@ class MaestroTUI(App):
         self._graph = data["graph"]
         self._live = data["live"]
         self._no_output_timeout = data["no_output_timeout"]
+        self._palette_proposals = data["proposals"]
         self._toast_new_red(store.now_epoch())
         self._populate()
 
@@ -826,6 +849,39 @@ class MaestroTUI(App):
             table.move_cursor(row=visible.index(target))
             self._selected_key = target
             self._show_detail(target)
+
+    def _jump_to(self, key: str) -> bool:
+        """Put the board cursor on *key*, widening the filter to `all` (and dropping a
+        search that hides it) only when the current view doesn't show it. Returns success."""
+        while len(self.screen_stack) > 1:  # back to the board
+            self.pop_screen()
+        if key not in self._snaps:
+            self.notify(f"{key}: no such ticket", severity="warning")
+            return False
+        table = self.query_one("#tickets", DataTable)
+
+        def _visible() -> list[str]:
+            return [str(k.value) for k in table.rows]
+
+        if key not in _visible():
+            self._filter_idx = _filter_idx_by_name("all")
+            self._populate()
+        if key not in _visible() and (self._query or self._query_input_shown()):
+            self.action_clear_query()
+        visible = _visible()
+        if key not in visible:
+            self.notify(f"{key}: not on the board", severity="warning")
+            return False
+        table.move_cursor(row=visible.index(key))
+        self._selected_key = key
+        self._show_detail(key, self._snaps.get(key))
+        return True
+
+    def _open_ticket_screen(self, key: str, screen_name: str) -> None:
+        """Push one of a ticket's sub-screens (palette sub-hits)."""
+        screens = {"DetailScreen": DetailScreen, "SpecScreen": SpecScreen, "LogsScreen": LogsScreen,
+                   "EventsScreen": EventsScreen, "ProposalScreen": ProposalScreen}
+        self.push_screen(screens[screen_name](self._home, key))
 
     def _query_input_shown(self) -> bool:
         try:
@@ -1690,6 +1746,7 @@ class MaestroTUI(App):
                     self.notify(f"{key}: {phase}", severity="warning", timeout=6)
         self._prev_phases = new_phases
         self._snap_cache = {k: (sn.phase, len(sn.open_questions)) for k, sn in snaps_by_key.items()}
+        self._palette_tickets = [(r[-1], r[2], snaps_by_key[r[-1]].phase) for r in all_rows]
 
         # Build filter bar: show counts per filter, bold the active one
         parts = []
