@@ -413,6 +413,13 @@ def test_no_notification_on_first_populate(seeded_home):
     asyncio.run(_inner())
 
 
+def test_no_key_bound_twice():
+    """An app-level key bound twice would silently shadow one of its actions."""
+    keys = [_bkey(b) for b in MaestroTUI.BINDINGS]
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    assert not dupes, f"keys bound more than once: {dupes}"
+
+
 # --------------------------------------------------------------------------- #
 # (e) TUI-19: bottom bar shows a reduced set of shortcuts                     #
 # --------------------------------------------------------------------------- #
