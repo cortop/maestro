@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import subprocess
 import sys
@@ -11,6 +12,16 @@ from maestro import cli, dispatcher as disp, event_log, skills_install, snapshot
 from maestro.config import Config  # noqa: E402
 from maestro.statemachine import Phase  # noqa: E402
 from fault_injection import FaultInjector  # noqa: E402
+from maestro.sessions import ClaudeCliSessions, OpencodeCliSessions, PiCliSessions  # noqa: E402
+
+# The flat `tests/test_tui_*.py` modules import textual at module level (the optional
+# `tui` extra). Without it they are not collected -- the importorskip every TUI module
+# used to repeat by hand. `test_tui_layout.py` is pure file inspection and always runs.
+if importlib.util.find_spec("textual") is None:
+    collect_ignore_glob = [
+        p.name for p in Path(__file__).parent.glob("test_tui_*.py")
+        if p.name != "test_tui_layout.py"
+    ] + ["tui_support.py"]
 
 
 # The suite performs ~200 real commits per run (159 `make_origin_and_repo`
@@ -156,6 +167,20 @@ def opened_urls(monkeypatch):
     urls: list[str] = []
     monkeypatch.setattr(webbrowser, "open", lambda url, *a, **kw: urls.append(url) or True)
     return urls
+
+
+@pytest.fixture(autouse=True)
+def _no_real_spawns(request, monkeypatch):
+    """T-153/T-187: a human-input modal submit nudges a sweep; no `test_tui*` module
+    may reach a real `claude`/`opencode`/`pi` Popen. Autouse and keyed on the module
+    name, so a new TUI test file cannot lose the guard."""
+    if not request.module.__name__.startswith("test_tui"):
+        return
+
+    def _boom(*a, **kw):
+        raise AssertionError("a real CLI backend spawn was attempted in a TUI test")
+    for cls in (ClaudeCliSessions, OpencodeCliSessions, PiCliSessions):
+        monkeypatch.setattr(cls, "spawn", _boom)
 
 
 def seed_ticket(home, key, title, *, phase=None, questions=None, pr=None, tier=1):
