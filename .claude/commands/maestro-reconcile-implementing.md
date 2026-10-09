@@ -234,8 +234,12 @@ Otherwise implement the spec's Acceptance criteria:
    that exercises the actual surface and shows the feature working end-to-end: drive the real
    `maestro` CLI / a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`) over a temp
    home and assert the resulting events/snapshot/output. For the TUI (`tui*.py`) the proof must
-   **mount the real app** — extend `tests/test_tui_runtime.py` (`async with app.run_test() as
-   pilot:` + the binding sweep / `test_every_binding_action_resolves`). Mock only the external
+   **mount the real app** (`async with app.run_test() as pilot:`) in a NEW
+   `tests/test_tui_<feature>.py`; only binding-sweep entries (the binding sweep /
+   `test_every_binding_action_resolves`) go in `tests/test_tui_runtime.py`. Feature-file rule:
+   put every new test in a NEW `tests/test_<feature>.py`, never at the end of a big shared
+   test file (`test_dispatcher.py`, `test_repos.py`, `test_health.py`) — unless a spec AC's
+   `test:` annotation already names that path. Mock only the external
    `claude -p` / network / `launchctl` boundary — test the real thing under review everywhere
    else. The Bash tool's cwd is already `<WT>` (the dispatcher spawns this session there), so the
    test invocation below needs no `cd`. Its dependency tree (including the `tui` extra, so TUI
