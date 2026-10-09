@@ -15,6 +15,7 @@ from .modals import (
     _AcEvidenceModal,
     _AddAcModal,
     _AnswerModal,
+    _CheckModal,
     _CmdModal,
     _ConfirmModal,
     _CreateModal,
@@ -64,6 +65,7 @@ from .screens import (
 __all__ = [
     "MenuRow",
     "_ActionMenu",
+    "_CheckModal",
     "menu_actions",
     "AcScreen",
     "WhyScreen",
