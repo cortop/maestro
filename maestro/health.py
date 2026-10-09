@@ -1794,17 +1794,40 @@ def check_holds(cfg: Config, now: float) -> dict:
 # appending, or reordering an entry here is enough to include it; only
 # check_heartbeat's plist override is special-cased, by identity, since it's
 # the one check with a caller-supplied kwarg to thread through.
-CHECKS = (check_home_structure, check_heartbeat, check_backup_age, check_claim_age, check_claim_no_output,
-          check_dead_letters, check_phantom_keys, check_missing_acs, check_ac_annotation_parse,
-          check_unresolvable_spec_hints,
-          check_watchdog_loops,
-          check_depends_on, check_repo_preflight, check_unknown_repo_bindings,
-          check_language_binding, check_missing_reconcile_skill,
-          check_reconciler_permissions, check_spawn_floor, check_daily_spend, check_burn,
-          check_gh_credential_reachability, check_launchctl, check_ollama_models, check_pi_models,
-          check_runner_binary, check_pi_version, check_worktree_health, check_worktree_branch,
-          check_worktree_witness, check_holds,
-          check_provider_availability)
+# sorted-registry: after 1
+CHECKS = (
+    check_home_structure,
+    check_ac_annotation_parse,
+    check_backup_age,
+    check_burn,
+    check_claim_age,
+    check_claim_no_output,
+    check_daily_spend,
+    check_dead_letters,
+    check_depends_on,
+    check_gh_credential_reachability,
+    check_heartbeat,
+    check_holds,
+    check_language_binding,
+    check_launchctl,
+    check_missing_acs,
+    check_missing_reconcile_skill,
+    check_ollama_models,
+    check_phantom_keys,
+    check_pi_models,
+    check_pi_version,
+    check_provider_availability,
+    check_reconciler_permissions,
+    check_repo_preflight,
+    check_runner_binary,
+    check_spawn_floor,
+    check_unknown_repo_bindings,
+    check_unresolvable_spec_hints,
+    check_watchdog_loops,
+    check_worktree_branch,
+    check_worktree_health,
+    check_worktree_witness,
+)
 
 
 # The checks that take a `plist=` override: both need the INSTALLED LaunchAgent

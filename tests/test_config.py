@@ -86,11 +86,20 @@ def test_repo_override_unset_inherits_board_wide_value(home, key):
 
 
 _OVERRIDE_SAMPLES = {
-    "worktree_timeout": 5, "prime_timeout": 6, "ci_auto_rerun": True, "ci_rerun_grace": 7,
-    "ci_failure_excerpt": True, "pr_split_threshold": 0, "test_command": "make check",
-    "language": "go", "post_qa_skill": "/polish", "post_qa_skill_runner": "pi",
-    "post_qa_skill_runner_model": "m", "file_hints": True, "base_drift_policy": "on_conflict",
     "allowed_paths": ["src/**"],
+    "base_drift_policy": "on_conflict",
+    "ci_auto_rerun": True,
+    "ci_failure_excerpt": True,
+    "ci_rerun_grace": 7,
+    "file_hints": True,
+    "language": "go",
+    "post_qa_skill": "/polish",
+    "post_qa_skill_runner": "pi",
+    "post_qa_skill_runner_model": "m",
+    "pr_split_threshold": 0,
+    "prime_timeout": 6,
+    "test_command": "make check",
+    "worktree_timeout": 5,
 }
 
 
