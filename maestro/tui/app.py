@@ -783,7 +783,10 @@ class MaestroTUI(App):
 
     def _apply_query(self) -> None:
         self._query_timer = None
-        text = self.query_one("#query-bar", Input).value.strip()
+        try:
+            text = self.query_one("#query-bar", Input).value.strip()
+        except NoMatches:  # debounce fired while the app is tearing down
+            return
         try:
             pred = parse_query(text) if text else None
         except ValueError as exc:
