@@ -28,7 +28,7 @@ from .events import render_log
 from .modals import (
     _ACCEPT_ALL, MENU_PROPOSAL, MenuRow, _AcceptedRecommendation, _ActionMenu, _AddAcModal, _AnswerModal,
     _CmdModal, _ConfirmModal, HoldModal, _CreateModal, _ImportLinearModal, _InboxModal, _RunnerModal,
-    _SpecFieldsModal, _SuggestAcsModal, menu_actions,
+    _SpecFieldsModal, _SuggestAcsModal, _TicketPickModal, menu_actions,
 )
 from .render import _dep_color, _fmt_duration, _nudge_toast, _render_badge, _render_pulse, _styled_row
 from .screens import (
@@ -257,6 +257,8 @@ class MaestroTUI(App):
         Binding("j", "jump_running", "Next running", show=False),
         Binding("m", "action_menu", "Menu", show=False),
         Binding("w", "why_panel", "Why", show=False),
+        Binding("b", "blockers", "Blockers", show=False),
+        Binding("O", "open_pr", "Open PR", show=False),
         Binding("slash", "filter_query", "Search", show=False, priority=True),
         Binding("escape", "clear_query", "Clear search", show=False),
     ]
@@ -265,7 +267,7 @@ class MaestroTUI(App):
     _TICKET_ACTIONS = frozenset({
         "answer", "cmd", "retry", "discard", "deps_panel", "show_spec", "edit_spec", "runner",
         "add_ac", "ac_matrix", "suggest_acs", "trigger_post_qa", "compact", "release", "hold", "focus_detail",
-        "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel", "action_menu",
+        "view_events", "inbox_message", "view_logs", "view_inbox", "why_panel", "action_menu", "blockers", "open_pr",
     })
     # Board-only actions: meaningless once any other screen is pushed.
     _BOARD_ACTIONS = frozenset({
@@ -570,6 +572,11 @@ class MaestroTUI(App):
             self._badge_result = event.worker.result
             self.sub_title = self._badge_result["banner"]
             self._paint_badge()
+        elif event.worker.name == "blockers":
+            if event.state == WorkerState.SUCCESS:
+                self._open_blockers_picker(*event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                self.notify(f"blockers failed: {event.worker.error}", severity="error")
         elif event.worker.name == "nudge":
             if event.state == WorkerState.SUCCESS:
                 msg, severity = event.worker.result
@@ -952,6 +959,63 @@ class MaestroTUI(App):
 
     def action_deps_panel(self) -> None:
         self.push_screen(DepsScreen(self._home, self._target_key()))
+
+    def action_blockers(self) -> None:
+        """Pick a blocker / dependent of the ticket on screen and hop to it (read-only)."""
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        home = self._home
+
+        def _load() -> tuple[str, list[tuple[str, str, str]], list[tuple[str, str]]]:
+            blocks = depgraph.build(home).dependents.get(key, [])
+            return (key, depgraph.dep_status(home, key),
+                    [(b, str(getattr(snap_mod.load(home, b).phase, "value", ""))) for b in blocks])
+
+        self.run_worker(_load, thread=True, name="blockers", group="blockers", exclusive=True,
+                        exit_on_error=False)
+
+    def _open_blockers_picker(self, key: str, deps: list[tuple[str, str, str]],
+                              blocks: list[tuple[str, str]]) -> None:
+        if not deps and not blocks:
+            self.notify("No blockers or dependents", severity="warning")
+            return
+        missing = {d for d, _, phase in deps if phase == "missing"}
+        groups: list[tuple[str, list[tuple[str, str]]]] = []
+        if deps:
+            groups.append(("Blocked by", [
+                (d, f"[dim]{d} {emoji} {phase}[/dim]" if emoji == "✅" else f"{d} {emoji} {phase}")
+                for d, emoji, phase in deps]))
+        if blocks:
+            groups.append(("Blocks", [(b, f"{b} {phase}") for b, phase in blocks]))
+
+        def _picked(target: str | None) -> None:
+            if target is None:
+                return
+            if target in missing:
+                self.notify(f"{target} does not exist", severity="warning")
+                return
+            screen = self.screen
+            if isinstance(screen, DetailScreen):
+                self.switch_screen(DetailScreen(self._home, target))
+            elif isinstance(screen, SpecScreen):
+                self.switch_screen(SpecScreen(self._home, target))
+            else:
+                self.push_screen(DetailScreen(self._home, target))
+
+        self.push_screen(_TicketPickModal(f"{key}: blockers and dependents", groups), _picked)
+
+    def action_open_pr(self) -> None:
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        url = snap_mod.load(self._home, key).pr_url
+        if not url:
+            self.notify(f"No PR for {key}", severity="warning")
+            return
+        self.open_url(url)
 
     def action_show_spec(self) -> None:
         key = self._target_key()
