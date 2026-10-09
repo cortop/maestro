@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -27,7 +28,7 @@ from ..sessions import list_sessions
 from .detail import render as _render_detail, render_pending as _render_pending
 from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, fmt_duration, phase_dwell,
                      render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
-from .modals import (_ACCEPT_ALL, _AcceptedRecommendation, _AnswerModal, _AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _InboxModal, _IntervalModal,
+from .modals import (_ACCEPT_ALL, _AcceptedRecommendation, _AnswerModal, _AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _DirectionModal, _InboxModal, _IntervalModal,
                      _ScheduleModal, _TextViewModal)
 from .. import repos as repos_mod
 from . import why as why_mod
@@ -848,27 +849,70 @@ class SpecScreen(Screen):
         self._refresh()
 
 
-class ProposalScreen(Screen):
-    """Read-only viewer for a ticket's proposal.md."""
+# Phrases the ProposalScreen decision bar sends; the awaiting-human skill routes on them
+# (pinned by tests/test_reconcile_skill.py).
+ANSWER_ALTERNATIVE = "alternative"
+ANSWER_NEEDS_MORE = "needs more"
 
-    HELP = 'Proposal document for one ticket. escape goes back.'
+_ALT_HEADING_RE = re.compile(r"^##\s+Alternative\s+(\d+)\b", re.IGNORECASE)
+
+
+def parse_proposal_options(text: str) -> list[tuple[str, str]]:
+    """`[(label, title)]` for `## Recommended` and every `## Alternative N` in proposal.md.
+    Label is `Recommended` or `N`; title is the section's first non-empty line."""
+    out: list[tuple[str, str]] = []
+    label: str | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            m = _ALT_HEADING_RE.match(line)
+            if m:
+                label = m.group(1)
+            elif line[3:].strip().lower().startswith("recommended"):
+                label = "Recommended"
+            else:
+                label = None
+            if label is not None:
+                out.append((label, ""))
+        elif label is not None and line.strip() and not out[-1][1]:
+            out[-1] = (label, line.strip().lstrip("#").strip())
+    return out
+
+
+class ProposalScreen(Screen):
+    """Viewer for a ticket's proposal.md, with a decision bar while a research approval is open."""
+
+    HELP = ('Proposal document for one ticket. escape goes back. While approval is pending: '
+            'y accepts the recommendation, 1-9 picks an alternative (confirms), m asks for more research; '
+            'j/k jump between sections.')
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("r", "refresh_proposal", "Refresh"),
-    ]
+        ("y", "accept_recommendation", "Accept"),
+        ("m", "needs_more", "Needs more"),
+        ("j", "next_section", "Next section"),
+        ("k", "prev_section", "Prev section"),
+    ] + [(str(n), f"pick_alternative({n})", "") for n in range(1, 10)]
 
-    CSS = "ProposalScreen #proposal-body { height: 1fr; }"
+    CSS = """
+    ProposalScreen #proposal-body { height: 1fr; }
+    ProposalScreen #proposal-bar { dock: bottom; height: auto; padding: 0 1; background: $panel; }
+    """
 
     def __init__(self, home: Path, key: str) -> None:
         super().__init__()
         self._home = home
         self._key = key
+        self._qid = f"research-approval-{key}"
+        self._open = False
+        self._recommend: str | None = None
+        self._options: list[tuple[str, str]] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll(id="proposal-body"):
             yield Markdown("", id="proposal-md")
+        yield Static("", id="proposal-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -882,6 +926,78 @@ class ProposalScreen(Screen):
         path = self._home / "tickets" / self._key / "proposal.md"
         text = path.read_text() if path.exists() else "(no proposal.md)"
         self.query_one("#proposal-md", Markdown).update(text)
+        self._options = parse_proposal_options(text)
+        snap = snap_mod.load(self._home, self._key)
+        q = snap.open_questions.get(self._qid)
+        self._open = q is not None
+        self._recommend = ops.parse_round_question(q)[3] if q is not None else None
+        bar = self.query_one("#proposal-bar", Static)
+        bar.display = self._open
+        if self._open:
+            rows = [f"[bold]{'y' if label == 'Recommended' else label}[/bold] "
+                    f"{'Recommended' if label == 'Recommended' else 'Alternative ' + label}: {rich_escape(title)}"
+                    for label, title in self._options]
+            rows.append("[bold]m[/bold] needs more research")
+            bar.update("  ".join(rows))
+        self.refresh_bindings()
+
+    def _answer_pending(self) -> bool:
+        return any(c.get("command") == "ans" and (c.get("args") or {}).get("qid") == self._qid
+                   for c in inbox.pending(self._home, self._key))
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in ("accept_recommendation", "pick_alternative", "needs_more"):
+            if not self._open or self._answer_pending():
+                return False
+            if action == "accept_recommendation" and not self._recommend:
+                return False
+        return True
+
+    def _send(self, args: dict) -> None:
+        inbox.append_command(self._home, self._key, "ans", {"qid": self._qid, **args})
+        self.notify(f"Answer queued for {self._key}")
+        self.refresh_bindings()
+
+    def action_accept_recommendation(self) -> None:
+        if self._recommend:
+            self._send({"text": self._recommend, "accepted_recommendation": True})
+
+    def action_pick_alternative(self, n: int) -> None:
+        title = next((t for label, t in self._options if label == str(n)), None)
+        if title is None:
+            self.notify(f"No ## Alternative {n} in this proposal", severity="warning")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self._send({"text": f"{ANSWER_ALTERNATIVE} {n}"})
+
+        self.app.push_screen(
+            _ConfirmModal(f"Approve [bold]Alternative {n}[/bold]: {rich_escape(title)}?"), _on_confirm)
+
+    def action_needs_more(self) -> None:
+        def _on_direction(text: str | None) -> None:
+            if text:
+                self._send({"text": f"{ANSWER_NEEDS_MORE}: {text}"})
+
+        self.app.push_screen(_DirectionModal(self._key), _on_direction)
+
+    def _jump(self, step: int) -> None:
+        body = self.query_one("#proposal-body", VerticalScroll)
+        ys = sorted(w.virtual_region.y for w in self.query_one("#proposal-md", Markdown).query("MarkdownH2"))
+        cur = body.scroll_y
+        if step > 0:
+            target = next((y for y in ys if y > cur), None)
+        else:
+            target = next((y for y in reversed(ys) if y < cur), 0 if cur > 0 else None)
+        if target is not None:
+            body.scroll_to(y=target, animate=False)
+
+    def action_next_section(self) -> None:
+        self._jump(1)
+
+    def action_prev_section(self) -> None:
+        self._jump(-1)
 
 
 class DetailScreen(Screen):

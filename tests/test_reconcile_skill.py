@@ -1266,3 +1266,14 @@ def test_generated_doc_conflict_rule():
         assert "resolve every other conflicted file first" in text, path
         assert ".venv/bin/python -m maestro.diagram" in text, path
         assert "docs/dispatch-gates.md" in text and "docs/state-machine.md" in text, path
+
+
+def test_awaiting_human_skill_matches_proposal_bar_phrases():
+    from maestro.tui.screens import ANSWER_ALTERNATIVE, ANSWER_NEEDS_MORE
+    for path in (_commands_path("awaiting-human"), _skills_path("awaiting-human")):
+        body = _strip_frontmatter(path.read_text())
+        assert f'**"{ANSWER_NEEDS_MORE}"**' in body
+        assert f'**"{ANSWER_ALTERNATIVE} N"**' in body
+        assert "case-insensitively" in body
+        assert ('maestro set-phase "$KEY" researching --reason '
+                '"needs more research per human: <direction verbatim>"') in body
