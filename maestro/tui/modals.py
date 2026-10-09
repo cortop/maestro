@@ -15,7 +15,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
-from .. import depgraph, dispatcher, gates, ops, schedule, store
+from .. import depgraph, dispatcher, fleet, gates, ops, schedule, store
 from ..providers import ollama as ollama_mod
 from ..providers import pi as pi_mod
 from ..statemachine import Phase
@@ -478,25 +478,89 @@ class _SuggestAcsModal(ModalScreen):
 
 
 class _IntervalModal(ModalScreen):
-    """Prompt for a dispatch interval (seconds) before calling fleet up."""
+    """Prompt for a dispatch interval (seconds) before calling fleet up.
+
+    Blank means 300; a non-integer shows an inline error and keeps the modal open.
+    """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="answer-dialog"):
             yield Label("[bold]Fleet up[/bold] — set dispatch interval")
-            yield Input(placeholder="Interval in seconds (default: 300)", id="interval-input")
+            yield Input(placeholder=f"Seconds (blank = 300; minimum {fleet.MIN_INTERVAL})",
+                        id="interval-input")
+            yield Label("", id="interval-error")
 
     def on_mount(self) -> None:
         self.query_one("#interval-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        note = ""
+        try:
+            val = int(event.value.strip()) if event.value.strip() else None
+        except ValueError:
+            val = None
+        if val is not None and val < fleet.MIN_INTERVAL:
+            note = f"[yellow]will be clamped to {fleet.MIN_INTERVAL}s[/yellow]"
+        self.query_one("#interval-error", Label).update(note)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         raw = event.value.strip()
         try:
             interval = int(raw) if raw else 300
         except ValueError:
-            interval = 300
+            self.query_one("#interval-error", Label).update(
+                f"[red]not an integer: {raw!r}[/red]")
+            return
         self.dismiss(interval)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _PauseModal(ModalScreen):
+    """Pause the fleet: a duration (blank = until resumed, parsed by
+    `schedule.parse_every`) and an optional reason. ``top_keys`` (FleetScreen only)
+    lists the busiest keys of the last hour. Enter with both fields empty pauses
+    at once. Dismisses with ``(seconds_or_None, reason_or_None)``, or None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, top_keys: list[tuple[str, int]] | None = None) -> None:
+        super().__init__()
+        self._top_keys = top_keys or []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="answer-dialog"):
+            yield Label("[bold]Pause the fleet[/bold] — no new sessions spawn until resumed")
+            if self._top_keys:
+                yield Label("[dim]busiest last hour: "
+                            + ", ".join(f"{k} ({n})" for k, n in self._top_keys) + "[/dim]")
+            yield Input(placeholder="Duration (30m / 2h / 7d; blank = until resumed)",
+                        id="pause-duration")
+            yield Label("", id="pause-error")
+            yield Input(placeholder="Reason (optional)", id="pause-reason")
+
+    def on_mount(self) -> None:
+        self.query_one("#pause-duration", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        raw = self.query_one("#pause-duration", Input).value.strip()
+        reason = self.query_one("#pause-reason", Input).value.strip()
+        seconds = None
+        if raw:
+            try:
+                seconds = schedule.parse_every(raw)
+            except ValueError as e:
+                self.query_one("#pause-error", Label).update(f"[red]{e}[/red]")
+                self.query_one("#pause-duration", Input).focus()
+                return
+        self.query_one("#pause-error", Label).update("")
+        if event.input.id == "pause-duration" and (raw or reason):
+            self.query_one("#pause-reason", Input).focus()
+            return
+        self.dismiss((seconds, reason or None))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

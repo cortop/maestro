@@ -38,6 +38,7 @@ from .screens import (
     EnvScreen,
     EventsScreen,
     FleetScreen,
+    toggle_fleet_pause,
     InboxScreen,
     LogsScreen,
     ProposalScreen,
@@ -207,6 +208,7 @@ class MaestroTUI(App):
         Binding("ctrl+r", "retry", "Retry", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("P", "pause_fleet", "Pause/Resume", show=False),
         Binding("T", "activity_panel", "Activity", show=False),
         Binding("D", "deps_panel", "Deps", show=False),
         Binding("e", "env_panel", "Env", show=False),
@@ -902,6 +904,16 @@ class MaestroTUI(App):
             _ConfirmModal(f"Discard [bold]{key}[/bold]? This cannot be undone.", require=key),
             _on_confirm,
         )
+
+    def action_pause_fleet(self) -> None:
+        def _run(name: str, fn) -> None:
+            try:
+                self.notify(f"{name}: {fn()}")
+            except Exception as exc:
+                self.notify(f"{name} failed: {exc}", severity="error")
+            self._refresh_badge()
+
+        toggle_fleet_pause(self, self._home, _run)
 
     def action_fleet_panel(self) -> None:
         self.push_screen(FleetScreen(self._home))
