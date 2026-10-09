@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from textual.content import Content
 from rich.markup import escape
 from rich.text import Text
 from textual.app import App
@@ -14,6 +13,7 @@ from textual.app import ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.containers import Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.widgets import DataTable
 from textual.widgets import Footer
@@ -70,13 +70,14 @@ from .modals import _SuggestAcsModal
 from .modals import _TicketPickModal
 from .modals import menu_actions
 from .render import _dep_color
+from .render import _fmt_duration
 from .render import _nudge_toast
 from .render import _render_badge
 from .render import _render_pulse
 from .render import _styled_row
 from .screens import AcScreen
-from .screens import BackupsScreen
 from .screens import ActivityScreen
+from .screens import BackupsScreen
 from .screens import DecisionsScreen
 from .screens import DepsScreen
 from .screens import DetailScreen
