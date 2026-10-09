@@ -31,6 +31,11 @@ class RepoBinding:
     slug: str | None
     base_branch: str
     branch_prefix: str
+    # --- repo-only (no board-wide knob) ---
+    # GA-17: this repo's gh credential -- see maestro/credentials.py. token_env
+    # wins when both are set. Neither set (both None, today's default) means
+    # "use the ambient gh account", unchanged from before this ticket.
+    gh_account: str | None = None
     # MR-5 safety rail: caps how many keys THIS repo may spawn in one dispatcher
     # sweep, independent of max_concurrency/min_spawn_interval/max_spawn_attempts
     # (all still apply on top). None = uncapped -- today's behavior.
@@ -42,15 +47,6 @@ class RepoBinding:
     # unrecognized value falls back to "git" -- never silently write in place
     # from a typo'd config.
     mode: str = "git"
-    # GA-10: this repo's own --allowedTools additions (e.g. its git/gh/test surface),
-    # unioned with the board-wide Config.reconcile_allowed_tools list -- never a
-    # replacement, so [] means "nothing extra beyond board-wide", not "no tools at all".
-    reconcile_allowed_tools: list = field(default_factory=list)
-    # GA-17: this repo's gh credential -- see maestro/credentials.py. token_env
-    # wins when both are set. Neither set (both None, today's default) means
-    # "use the ambient gh account", unchanged from before this ticket.
-    gh_account: str | None = None
-    token_env: str | None = None
     # GA-20: shell command `maestro worktree ensure` runs, cwd=worktree, with
     # $WT/$REPO/$KEY in its environment, once per fresh worktree -- installs
     # this repo's dependency tree (venv/npm/etc.) so the implementing step
@@ -60,23 +56,58 @@ class RepoBinding:
     # never by dispatch() (see maestro/ops.py:worktree_ensure). None (default)
     # runs nothing -- unchanged behavior for every repo that doesn't set it.
     prime: str | None = None
+    # GA-10: this repo's own --allowedTools additions (e.g. its git/gh/test surface),
+    # unioned with the board-wide Config.reconcile_allowed_tools list -- never a
+    # replacement, so [] means "nothing extra beyond board-wide", not "no tools at all".
+    reconcile_allowed_tools: list = field(default_factory=list)
+    # T-132: "auto" (default -- see resolve_stack_tool, the sole reader) or
+    # "git" (forces the legacy git/gh flow, never probes for `gt`). No
+    # board-wide [maestro] default to inherit -- unlike base_drift_policy/
+    # test_command, this is per-repo only (see config._STACK_TOOLS).
+    stack_tool: str = "auto"
+    # T-98: this repo's test-INVOCATION template, orthogonal to `language`'s
+    # extraction axis -- see `testlang.render_selector`/`selector_for`, the
+    # sole readers. None (unset -- no [maestro]-level default, same posture
+    # as `language`) keeps `testlang.resolve(language).format_selector`
+    # verbatim (ships dark). A format string over `testlang.
+    # SELECTOR_PLACEHOLDERS`, validated fail-closed at `config.load()` the
+    # same way `language` is -- see `testlang.validate_selector_template`.
+    test_selector: str | None = None
+    token_env: str | None = None
+
+    # --- timeouts & watchdog ---
+    # T-90: this repo's timeout overrides, already resolved against the board-wide
+    # [maestro] prime_timeout/worktree_timeout defaults -- same resolution shape as
+    # base_drift_policy (table value wins, unset inherits the board-wide one).
+    prime_timeout: int = 600
+    worktree_timeout: int = 600
+
+    # --- CI & review ---
     # MTO-2: this repo's base_drift_policy, already resolved against the
     # board-wide [maestro] base_drift_policy default -- see
     # dispatcher.sync_worktrees, the sole reader. "always" | "daily" |
     # "on_conflict"; both values are validated at config.load (fail closed),
     # so by the time a RepoBinding exists this is always one of the three.
     base_drift_policy: str = "on_conflict"
-    # T-83: this repo's test_command override, already resolved against the
-    # board-wide [maestro] test_command default -- see resolve(),
-    # the sole reader every RB-12/RB-14/T-79 test-verification gate goes
-    # through instead of Config.test_command directly. None means the gate is
-    # fully disabled for this key (ships dark).
-    test_command: str | None = None
-    # T-90: this repo's timeout overrides, already resolved against the board-wide
-    # [maestro] prime_timeout/worktree_timeout defaults -- same resolution shape as
-    # base_drift_policy above (table value wins, unset inherits the board-wide one).
-    prime_timeout: int = 600
-    worktree_timeout: int = 600
+    # T-123: this repo's CI auto-rerun-once-per-head overrides, already
+    # resolved against the board-wide [maestro] defaults -- see resolve(),
+    # the sole reader `dispatcher._observe_ci` goes through. Same "table
+    # wins, unset inherits" precedence as prime_timeout/worktree_timeout.
+    ci_auto_rerun: bool = False
+    ci_failure_excerpt: bool = False
+    ci_rerun_grace: int = 900
+    # T-126: this repo's pr_split_threshold override, already resolved against
+    # the board-wide [maestro] pr_split_threshold default -- see resolve(),
+    # the sole reader `ops.pr_size` goes through. 0 disables the check for
+    # this key.
+    pr_split_threshold: int = 800
+
+    # --- QA/AC gates ---
+    # T-149: this repo's allowed_paths override, already resolved against the
+    # board-wide [maestro] allowed_paths default -- see resolve(), the sole
+    # reader `dispatcher._route_test_run` goes through. Empty means no
+    # restriction.
+    allowed_paths: list = field(default_factory=list)
     # T-84: this repo's test surface language, selecting the added/deleted
     # test-name extractor + selector formatter every T-79 `test:` annotation
     # and the H4 test-deletion gate resolve through (`testlang.resolve`).
@@ -87,14 +118,6 @@ class RepoBinding:
     # `testlang.SUPPORTED` -- config.load fails closed on anything else, the
     # same posture as base_drift_policy.
     language: str | None = None
-    # T-98: this repo's test-INVOCATION template, orthogonal to `language`'s
-    # extraction axis -- see `testlang.render_selector`/`selector_for`, the
-    # sole readers. None (unset -- no [maestro]-level default, same posture
-    # as `language`) keeps `testlang.resolve(language).format_selector`
-    # verbatim (ships dark). A format string over `testlang.
-    # SELECTOR_PLACEHOLDERS`, validated fail-closed at `config.load()` the
-    # same way `language` is -- see `testlang.validate_selector_template`.
-    test_selector: str | None = None
     # T-115: this repo's post_qa_skill override, already resolved against the
     # board-wide [maestro] post_qa_skill default -- see resolve(), the sole
     # reader `dispatcher.sync_post_qa_skill` goes through. None means the
@@ -107,33 +130,19 @@ class RepoBinding:
     # spawn with no spec override.
     post_qa_skill_runner: str | None = None
     post_qa_skill_runner_model: str | None = None
-    # T-123: this repo's CI auto-rerun-once-per-head overrides, already
-    # resolved against the board-wide [maestro] defaults -- see resolve(),
-    # the sole reader `dispatcher._observe_ci` goes through. Same "table
-    # wins, unset inherits" precedence as prime_timeout/worktree_timeout.
-    ci_auto_rerun: bool = False
-    ci_rerun_grace: int = 900
-    ci_failure_excerpt: bool = False
+    # T-83: this repo's test_command override, already resolved against the
+    # board-wide [maestro] test_command default -- see resolve(),
+    # the sole reader every RB-12/RB-14/T-79 test-verification gate goes
+    # through instead of Config.test_command directly. None means the gate is
+    # fully disabled for this key (ships dark).
+    test_command: str | None = None
+
+    # --- housekeeping ---
     # T-124: this repo's file_hints override, already resolved against the
     # board-wide [maestro] file_hints default -- see resolve(), the sole
     # reader `maestro/locate.py`/`context.regenerate` go through. False
     # (default) means `maestro/locate.py` computes nothing (ships dark).
     file_hints: bool = False
-    # T-126: this repo's pr_split_threshold override, already resolved against
-    # the board-wide [maestro] pr_split_threshold default -- see resolve(),
-    # the sole reader `ops.pr_size` goes through. 0 disables the check for
-    # this key.
-    pr_split_threshold: int = 800
-    # T-149: this repo's allowed_paths override, already resolved against the
-    # board-wide [maestro] allowed_paths default -- see resolve(), the sole
-    # reader `dispatcher._route_test_run` goes through. Empty means no
-    # restriction.
-    allowed_paths: list = field(default_factory=list)
-    # T-132: "auto" (default -- see resolve_stack_tool, the sole reader) or
-    # "git" (forces the legacy git/gh flow, never probes for `gt`). No
-    # board-wide [maestro] default to inherit -- unlike base_drift_policy/
-    # test_command above, this is per-repo only (see config._STACK_TOOLS).
-    stack_tool: str = "auto"
 
 
 def _glob_regex(pattern: str) -> re.Pattern:
