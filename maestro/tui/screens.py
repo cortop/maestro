@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from collections import deque
 from datetime import datetime
@@ -33,6 +34,7 @@ from textual.widgets import Tree
 from textual.worker import Worker
 from textual.worker import WorkerState
 
+from .. import backup as backup_mod
 from .. import burn
 from .. import claims
 from .. import config as config_mod
@@ -628,6 +630,7 @@ class FleetScreen(Screen):
         ("P", "toggle_pause", "Pause/Resume"),
         ("R", "clear_rate_limit", "Clear rate limit"),
         ("r", "refresh_status", "Refresh"),
+        ("b", "backups", "Backups"),
     ]
 
     _MUTATIONS = ("fleet-up", "fleet-down", "fleet-pause", "fleet-resume", "clear-rate-limit")
@@ -720,6 +723,9 @@ class FleetScreen(Screen):
     def action_refresh_status(self) -> None:
         self._refresh_worker()
 
+    def action_backups(self) -> None:
+        self.app.push_screen(BackupsScreen(self._home))
+
     def action_fleet_up(self) -> None:
         def _on_interval(interval: int | None) -> None:
             if interval is None:
@@ -806,6 +812,170 @@ class FleetScreen(Screen):
 
     def _log(self, msg: str) -> None:
         self.query_one("#fleet-log", RichLog).write(msg)
+
+
+class BackupsScreen(Screen):
+    """Backup tarballs of this home: list, take one now, inspect, copy the restore command.
+
+    Never restores: `y` only puts the CLI command on the clipboard for a shell, because a
+    reset needs the human's explicit, in-the-moment go-ahead.
+    """
+
+    HELP = 'Backup tarballs. b backs up now, enter lists members, y copies the restore command. escape goes back.'
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("b", "backup", "Backup now"),
+        ("enter", "members", "Members"),
+        ("y", "copy_restore", "Copy restore"),
+        ("r", "refresh_list", "Refresh"),
+    ]
+
+    CSS = """
+    BackupsScreen #backups-header { padding: 0 2; height: auto; }
+    BackupsScreen #backups-table  { height: 1fr; }
+    """
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self._home = home
+        self._cfg: Config | None = None
+        self._paths: list[Path] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("[dim]Loading…[/dim]", id="backups-header")
+        yield DataTable(id="backups-table", cursor_type="row")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = "Backups"
+        table = self.query_one("#backups-table", DataTable)
+        table.add_column("Name")
+        table.add_column("Age")
+        table.add_column("Size")
+        table.focus()
+        self._reload()
+
+    # --- workers (thread: stat, launchctl) -----------------------------------
+
+    def _reload(self) -> None:
+        self.run_worker(self._load, thread=True, group="backups-load", exclusive=True,
+                        name="backups-load")
+
+    def _load(self) -> dict:
+        cfg = config_mod.load(str(self._home))
+        now = store.now_epoch()
+        rows = []
+        for path in reversed(backup_mod.list_backups(cfg)):
+            epoch = backup_mod._epoch_from_name(path.name)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            rows.append((path, None if epoch is None else now - epoch, size))
+        nxt = None
+        if cfg.backup_interval and cfg.backup_interval > 0 and fleet_mod.status(self._home)["loaded"]:
+            cursor = store.read_json(self._home / "derived" / ".backup_cursor.json", {}) or {}
+            if cursor.get("epoch"):
+                nxt = cursor["epoch"] + cfg.backup_interval
+        return {"cfg": cfg, "rows": rows, "dir": backup_mod.resolve_backup_dir(cfg), "next": nxt}
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        name = event.worker.name
+        if event.state == WorkerState.ERROR:
+            self.notify(f"{name} failed: {event.worker.error}", severity="error")
+            return
+        if event.state != WorkerState.SUCCESS:
+            return
+        if name == "backups-load":
+            self._paint(event.worker.result)
+        elif name == "backup-create":
+            self.notify(f"Backed up: {event.worker.result.name}")
+            self._reload()
+        elif name == "backup-members":
+            tarball, names = event.worker.result
+            self.app.push_screen(_TextViewModal(f"{tarball.name}: members", "\n".join(names) or "(empty)"))
+
+    def _paint(self, data: dict) -> None:
+        self._cfg = data["cfg"]
+        self._paths = [p for p, _, _ in data["rows"]]
+        head = f"[dim]dir[/dim] {rich_escape(str(data['dir']))}"
+        if data["next"]:
+            head += f"   [dim]next ≈[/dim] {_fmt_epoch(data['next'])}"
+        self.query_one("#backups-header", Static).update(head)
+        table = self.query_one("#backups-table", DataTable)
+        table.clear()
+        for path, age, size in data["rows"]:
+            table.add_row(path.name, "—" if age is None else _fmt_duration(age),
+                          "—" if size is None else _fmt_size(size))
+
+    # --- key actions ---------------------------------------------------------
+
+    def _highlighted(self) -> Path | None:
+        row = self.query_one("#backups-table", DataTable).cursor_row
+        return self._paths[row] if 0 <= row < len(self._paths) else None
+
+    def action_refresh_list(self) -> None:
+        self._reload()
+
+    def action_backup(self) -> None:
+        cfg = self._cfg
+        if cfg is None:
+            self.notify("Still loading…", severity="warning")
+            return
+        keep = cfg.backup_retention
+        existing = backup_mod.list_backups(cfg)
+        # create_backup prunes to `keep` after writing; a same-second stamp replaces
+        # a tarball instead of adding one, so this can over-name, never under-name.
+        doomed = existing[:len(existing) + 1 - keep] if keep and keep > 0 else []
+
+        def _go() -> None:
+            self.run_worker(lambda: backup_mod.create_backup(cfg, store.now_epoch()),
+                            thread=True, name="backup-create")
+
+        if not doomed:
+            _go()
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                _go()
+
+        names = ", ".join(p.name for p in doomed)
+        self.app.push_screen(
+            _ConfirmModal(f"backup_retention is {keep}: this backup deletes [bold]{rich_escape(names)}[/bold]. Continue?"),
+            _on_confirm)
+
+    def action_members(self) -> None:
+        tarball = self._highlighted()
+        if tarball is None:
+            return
+
+        def _names() -> tuple[Path, list[str]]:
+            with tarfile.open(tarball, "r:gz") as tar:
+                return tarball, tar.getnames()
+
+        self.run_worker(_names, thread=True, name="backup-members")
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self.action_members()
+
+    def action_copy_restore(self) -> None:
+        tarball = self._highlighted()
+        if tarball is None:
+            return
+        cmd = f"maestro --home {shlex.quote(str(self._home))} restore {shlex.quote(str(tarball))}"
+        self.app.copy_to_clipboard(cmd)
+        self.notify(f"Copied (run it in a shell): {cmd}")
+
+
+def _fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB"):
+        if n < 1024:
+            return f"{n} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
 
 
 class DepsScreen(Screen):

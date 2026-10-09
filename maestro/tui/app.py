@@ -13,6 +13,7 @@ from textual.app import ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.containers import Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.widgets import DataTable
 from textual.widgets import Footer
@@ -70,12 +71,14 @@ from .modals import _SuggestAcsModal
 from .modals import _TicketPickModal
 from .modals import menu_actions
 from .render import _dep_color
+from .render import _fmt_duration
 from .render import _nudge_toast
 from .render import _render_badge
 from .render import _render_pulse
 from .render import _styled_row
 from .screens import AcScreen
 from .screens import ActivityScreen
+from .screens import BackupsScreen
 from .screens import DecisionsScreen
 from .screens import DepsScreen
 from .screens import DetailScreen
@@ -195,6 +198,27 @@ def _load_board(home: Path) -> dict:
     }
 
 
+def _home_banner(home: Path, now: float) -> str:
+    """`<resolved home> · backup <age>` plus ⚠ segments: blocking (disk reads), worker thread only."""
+    try:
+        cfg = config_mod.load(str(home))
+    except store.MaestroError:
+        cfg = Config(home=home)
+    resolved = home.resolve()
+    chk = health.check_backup_age(cfg, now)
+    if chk["age_s"] is not None:
+        age = _fmt_duration(chk["age_s"])
+        parts = [f"⚠ backup {age} old" if chk["status"] != "ok" else f"backup {age} old"]
+    elif chk["status"] != "ok":
+        parts = ["⚠ no backup"]
+    else:
+        parts = ["backup n/a"]  # disabled, or nothing to protect yet
+    events = resolved / "events"
+    if resolved == fleet_mod._default_home() and not (events.is_dir() and any(events.glob("*.jsonl"))):
+        parts.append("⚠ empty default home")
+    return " · ".join([str(resolved), *parts])
+
+
 # ANSWER_COMMANDS minus the ticket-level discard/retry (T-157).
 _PER_QUESTION_COMMANDS = frozenset(ops_mod.ANSWER_COMMANDS) - {"discard", "retry"}
 
@@ -296,7 +320,7 @@ class MaestroTUI(App):
         "cycle_filter", "create", "narrow_detail", "widen_detail", "project_rebuild",
         "jump_running", "decisions", "filter_query", "clear_query",
     })
-    _NON_TICKET_SCREENS = (FleetScreen, EnvScreen, ScheduleScreen, ActivityScreen)
+    _NON_TICKET_SCREENS = (FleetScreen, BackupsScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
                       ProposalScreen, ReviewScreen, WhyScreen)
 
@@ -321,6 +345,7 @@ class MaestroTUI(App):
         # T-153: `N` toggles nudging for THIS session only (no config write).
         self._nudge_enabled: bool = True
         self._badge_result: dict | None = None
+        self.sub_title = str(self._home.resolve())
         self._selected_key: str | None = None
         self._filter_idx: int = 0
         # T-166: the `/` live filter -- the applied text, its compiled predicate
@@ -357,6 +382,15 @@ class MaestroTUI(App):
         self._no_output_timeout: int = Config.no_output_timeout
         # key -> claim identity that already toasted red.
         self._red_toasted: dict[str, tuple] = {}
+
+    def format_title(self, title: str, sub_title: str) -> Content:
+        """Like `App.format_title`, but a `⚠` segment of the sub_title is coloured, not dimmed."""
+        out = [Content(title)]
+        for i, seg in enumerate(sub_title.split(" · ") if sub_title else []):
+            out.append(Content(" — " if i == 0 else " · ")
+                       .stylize("dim"))
+            out.append(Content(seg).stylize("bold yellow" if seg.startswith("⚠") else "dim"))
+        return Content.assemble(*out)
 
     def _target_key(self) -> str | None:
         """The ticket the operator is looking at: the pushed screen's own ticket, else the board cursor."""
@@ -577,12 +611,14 @@ class MaestroTUI(App):
             return {
                 "fleet": fleet_mod.status(self._home),
                 "provider": health.check_provider_availability(cfg, store.now_epoch()),
+                "banner": _home_banner(self._home, store.now_epoch()),
             }
         self.run_worker(_load, thread=True, group="badge", exclusive=True, name="fleet-badge")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
             self._badge_result = event.worker.result
+            self.sub_title = self._badge_result["banner"]
             self._paint_badge()
         elif event.worker.name == "blockers":
             if event.state == WorkerState.SUCCESS:
@@ -819,7 +855,10 @@ class MaestroTUI(App):
 
     def _apply_query(self) -> None:
         self._query_timer = None
-        text = self.query_one("#query-bar", Input).value.strip()
+        try:
+            text = self.query_one("#query-bar", Input).value.strip()
+        except NoMatches:  # debounce fired while the app is tearing down
+            return
         try:
             pred = parse_query(text) if text else None
         except ValueError as exc:
