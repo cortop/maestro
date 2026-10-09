@@ -13,26 +13,80 @@ from pathlib import Path
 
 from rich.markup import escape as rich_escape
 from rich.text import Text
+from textual.app import ComposeResult
+from textual.app import SuspendNotSupported
 from textual.binding import Binding
-from textual.app import ComposeResult, SuspendNotSupported
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal
+from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input, Markdown, RichLog, Static, Tree
-from textual.worker import Worker, WorkerState
+from textual.widgets import DataTable
+from textual.widgets import Footer
+from textual.widgets import Header
+from textual.widgets import Input
+from textual.widgets import Markdown
+from textual.widgets import RichLog
+from textual.widgets import Static
+from textual.widgets import Tree
+from textual.worker import Worker
+from textual.worker import WorkerState
 
-from .. import burn, claims, projection, config as config_mod, depgraph, event_log, fleet as fleet_mod, health, inbox, ops, ratelimit, repos, snapshot as snap_mod, store
+from .. import burn
+from .. import claims
+from .. import config as config_mod
+from .. import depgraph
 from .. import dispatcher
-from ..config import Config
-from ..dispatcher import list_keys, schedule_status, spec_runner
-from ..sessions import list_sessions
-from .detail import render as _render_detail, render_pending as _render_pending
-from .events import (CATEGORY_NAMES, EventTail, _TAIL_N, category_of, event_row, event_summary, fmt_duration, phase_dwell,
-                     render_dwell, render_inbox, render_log_line, render_opencode_log_line, render_pi_log_line)
-from .modals import (_ACCEPT_ALL, _AcceptedRecommendation, _AnswerModal, _AcEvidenceModal, _AddAcModal, _ConfirmModal, _EventPayloadModal, _DirectionModal, _InboxModal, _IntervalModal,
-                     _ScheduleModal, _TextViewModal)
+from .. import event_log
+from .. import fleet as fleet_mod
+from .. import health
+from .. import inbox
+from .. import ops
+from .. import projection
+from .. import ratelimit
+from .. import repos
 from .. import repos as repos_mod
+from .. import snapshot as snap_mod
+from .. import store
+from ..config import Config
+from ..dispatcher import list_keys
+from ..dispatcher import schedule_status
+from ..dispatcher import spec_runner
+from ..sessions import list_sessions
 from . import why as why_mod
-from .render import _fmt_duration, _dep_label, _fmt_epoch, _nudge_toast, _render_dep_header, _render_env, _render_fleet
+from .detail import render as _render_detail
+from .detail import render_pending as _render_pending
+from .events import _TAIL_N
+from .events import CATEGORY_NAMES
+from .events import EventTail
+from .events import category_of
+from .events import event_row
+from .events import event_summary
+from .events import fmt_duration
+from .events import phase_dwell
+from .events import render_dwell
+from .events import render_inbox
+from .events import render_log_line
+from .events import render_opencode_log_line
+from .events import render_pi_log_line
+from .modals import _ACCEPT_ALL
+from .modals import _AcceptedRecommendation
+from .modals import _AcEvidenceModal
+from .modals import _AddAcModal
+from .modals import _AnswerModal
+from .modals import _ConfirmModal
+from .modals import _DirectionModal
+from .modals import _EventPayloadModal
+from .modals import _InboxModal
+from .modals import _IntervalModal
+from .modals import _ScheduleModal
+from .modals import _TextViewModal
+from .render import _dep_label
+from .render import _fmt_duration
+from .render import _fmt_epoch
+from .render import _nudge_toast
+from .render import _render_dep_header
+from .render import _render_env
+from .render import _render_fleet
 
 
 def editor_argv(path: Path, line: int | None = None) -> list[str]:
@@ -511,6 +565,7 @@ class LogsScreen(Screen):
 def _session_header(sess: dict, outcome: str, info: dict) -> str:
     """One-line per-session banner: id, start ts, format, outcome, runner, model (markup-escaped)."""
     from rich.markup import escape
+
     from .. import steplog
     return escape(steplog.format_session_header(sess, outcome, info))
 
