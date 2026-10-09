@@ -29,6 +29,7 @@ from .modals import (
     _ScheduleModal,
     _StopModal,
     _SuggestAcsModal,
+    _TicketPickModal,
 )
 from .render import (
     _PHASE_STYLE,
@@ -93,6 +94,7 @@ __all__ = [
     "_ScheduleModal",
     "_StopModal",
     "_SuggestAcsModal",
+    "_TicketPickModal",
     "_DEFAULT_COMMANDS",
     "_EventPayloadModal",
     "_PHASE_COMMANDS",
