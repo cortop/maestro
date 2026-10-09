@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
+import sys
 import time
 from collections import deque
 from datetime import datetime
@@ -73,9 +76,11 @@ from .modals import _AcEvidenceModal
 from .modals import _AddAcModal
 from .modals import _AnswerModal
 from .modals import _ConfirmModal
+from .modals import _DirectionModal
 from .modals import _EventPayloadModal
 from .modals import _InboxModal
 from .modals import _IntervalModal
+from .modals import _PauseModal
 from .modals import _ScheduleModal
 from .modals import _TextViewModal
 from .render import _dep_label
@@ -568,6 +573,46 @@ def _session_header(sess: dict, outcome: str, info: dict) -> str:
     return escape(steplog.format_session_header(sess, outcome, info))
 
 
+def toggle_fleet_pause(app, home: Path, run, *, top_keys=None) -> None:
+    """One pause/resume flow for the board's and FleetScreen's `P`.
+
+    Reads the on-disk pause state at the keypress (never a cached copy): paused ->
+    default-No resume confirm; else `_PauseModal`. `run(name, fn)` executes the
+    mutation (`fleet.pause`/`fleet.resume`) -- the caller decides how and reports.
+    """
+    now = store.now_epoch()
+    state = fleet_mod.pause_state(home, now)
+    if state is not None:
+        since = state.get("since")
+        age = _fmt_duration(now - float(since)) if since else "?"
+        until = state.get("until")
+        until_s = _fmt_epoch(until) if until else "resumed"
+        msg = (f"Resume? (paused {age} ago, reason: {state.get('reason') or '—'}, "
+               f"until {until_s})")
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                run("fleet-resume", lambda: fleet_mod.resume(home))
+
+        app.push_screen(_ConfirmModal(msg), _on_confirm)
+        return
+
+    def _on_pause(result) -> None:
+        if result is None:
+            return
+        seconds, reason = result
+        until = store.now_epoch() + seconds if seconds is not None else None
+        run("fleet-pause", lambda: fleet_mod.pause(home, until=until, reason=reason))
+
+    app.push_screen(_PauseModal(top_keys), _on_pause)
+
+
+def _sweep_argv(home: Path, *args: str) -> list[str]:
+    exe = shutil.which("maestro")
+    base = [exe] if exe else [sys.executable, "-m", "maestro.cli"]
+    return [*base, "--home", str(home), *args]
+
+
 class FleetScreen(Screen):
     """Full-screen fleet & health panel."""
 
@@ -581,8 +626,11 @@ class FleetScreen(Screen):
         ("S", "dispatch_real", "Real sweep"),
         ("p", "project_rebuild", "Project"),
         ("P", "toggle_pause", "Pause/Resume"),
+        ("R", "clear_rate_limit", "Clear rate limit"),
         ("r", "refresh_status", "Refresh"),
     ]
+
+    _MUTATIONS = ("fleet-up", "fleet-down", "fleet-pause", "fleet-resume", "clear-rate-limit")
 
     CSS = """
     FleetScreen #fleet-status { padding: 1 2; height: 1fr; }
@@ -594,12 +642,11 @@ class FleetScreen(Screen):
         self._home = home
         self._status: dict = {}
         self._doctor: dict = {}
-        self._log_lines: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("[dim]Loading…[/dim]", id="fleet-status")
-        yield Static("", id="fleet-log")
+        yield RichLog(id="fleet-log", markup=True, wrap=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -629,10 +676,44 @@ class FleetScreen(Screen):
                 self.query_one("#fleet-status", Static).update(
                     _render_fleet(self._status, self._doctor)
                 )
+                self.refresh_bindings()
+            elif event.worker.name in self._MUTATIONS:
+                self._log(f"{event.worker.name}: {rich_escape(str(event.worker.result))}")
+                self._after_mutation()
             elif event.worker.name in ("dispatch-sweep", "dispatch-sweep-real", "project-rebuild"):
-                self._log(str(event.worker.result))
+                self._log(rich_escape(str(event.worker.result)))
         elif event.state == WorkerState.ERROR:
-            self._log(f"[red]{event.worker.name} failed: {event.worker.error}[/red]")
+            self._log(f"[red]{event.worker.name} failed: {rich_escape(str(event.worker.error))}[/red]")
+            if event.worker.name in self._MUTATIONS:
+                self._after_mutation()
+
+    def _after_mutation(self) -> None:
+        """Refresh only once the mutation has landed, so the read never races it."""
+        self._refresh_worker()
+        refresh = getattr(self.app, "_refresh_badge", None)
+        if refresh is not None:
+            refresh()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "clear_rate_limit":
+            return bool((self._doctor.get("rate_limit") or {}).get("paused"))
+        return True
+
+    def action_clear_rate_limit(self) -> None:
+        if not ratelimit.status(self._home, store.now_epoch()).get("paused"):
+            self._log("no rate-limit pause to clear")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self.run_worker(
+                    lambda: {"cleared": ratelimit.clear(self._home)},
+                    thread=True, name="clear-rate-limit", exit_on_error=False)
+
+        self.app.push_screen(
+            _ConfirmModal("Clear the [bold]rate-limit pause[/bold]? Spawns resume immediately."),
+            _on_confirm,
+        )
 
     # --- key actions ---------------------------------------------------------
 
@@ -646,10 +727,9 @@ class FleetScreen(Screen):
             self.run_worker(
                 lambda: fleet_mod.up(self._home, interval=interval,
                                      cfg=config_mod.load(str(self._home))),
-                thread=True, name="fleet-up",
+                thread=True, name="fleet-up", exit_on_error=False,
             )
             self._log(f"fleet up --interval {interval} … ")
-            self._refresh_worker()
 
         self.app.push_screen(_IntervalModal(), _on_interval)
 
@@ -657,9 +737,9 @@ class FleetScreen(Screen):
         def _on_confirm(ok: bool | None) -> None:
             if not ok:
                 return
-            self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down")
+            self.run_worker(lambda: fleet_mod.down(self._home), thread=True, name="fleet-down",
+                            exit_on_error=False)
             self._log("fleet down … ")
-            self._refresh_worker()
 
         self.app.push_screen(
             _ConfirmModal("Take the [bold]fleet down[/bold]? Dispatch stops until you bring it up."),
@@ -667,33 +747,23 @@ class FleetScreen(Screen):
         )
 
     def action_toggle_pause(self) -> None:
-        paused = self._status.get("paused", False)
-        if paused:
-            self.run_worker(lambda: fleet_mod.resume(self._home), thread=True, name="fleet-resume")
-            self._log("fleet resume … ")
-            self._refresh_worker()
-            return
+        top = sorted(((self._doctor.get("spawns_last_hour") or {}).get("by_key") or {}).items(),
+                     key=lambda kv: -kv[1])[:3]
 
-        def _on_confirm(ok: bool | None) -> None:
-            if not ok:
-                return
-            self.run_worker(lambda: fleet_mod.pause(self._home), thread=True, name="fleet-pause")
-            self._log("fleet pause … ")
-            self._refresh_worker()
+        def _run(name: str, fn) -> None:
+            self._log(f"{name} … ")
+            self.run_worker(fn, thread=True, name=name, exit_on_error=False)
 
-        self.app.push_screen(
-            _ConfirmModal("[bold]Pause[/bold] the fleet? No new sessions spawn until resumed."),
-            _on_confirm,
-        )
+        toggle_fleet_pause(self.app, self._home, _run, top_keys=top or None)
 
     def action_dispatch_sweep(self) -> None:
         self._log("dispatching (dry-run) … ")
-        self.run_worker(self._run_dispatch, thread=True, name="dispatch-sweep")
+        self.run_worker(self._run_dispatch, thread=True, name="dispatch-sweep", exit_on_error=False)
 
     def _run_dispatch(self) -> str:
         try:
             p = subprocess.run(
-                ["maestro", "--home", str(self._home), "dispatch", "--dry-run"],
+                _sweep_argv(self._home, "dispatch", "--dry-run"),
                 capture_output=True, text=True, timeout=30,
             )
             return (p.stdout or p.stderr or "done").strip()
@@ -705,7 +775,7 @@ class FleetScreen(Screen):
             if not confirmed:
                 return
             self._log("dispatching (real sweep) … ")
-            self.run_worker(self._run_dispatch_real, thread=True, name="dispatch-sweep-real")
+            self.run_worker(self._run_dispatch_real, thread=True, name="dispatch-sweep-real", exit_on_error=False)
 
         self.app.push_screen(
             _ConfirmModal("Run a [bold]real[/bold] dispatch sweep? This may mint and spawn sessions."),
@@ -715,8 +785,8 @@ class FleetScreen(Screen):
     def _run_dispatch_real(self) -> str:
         try:
             p = subprocess.run(
-                ["maestro", "--home", str(self._home), "dispatch"],
-                capture_output=True, text=True, timeout=30,
+                _sweep_argv(self._home, "dispatch"),
+                capture_output=True, text=True,
             )
             return (p.stdout or p.stderr or "done").strip()
         except Exception as exc:
@@ -724,7 +794,7 @@ class FleetScreen(Screen):
 
     def action_project_rebuild(self) -> None:
         self._log("rebuilding projection … ")
-        self.run_worker(self._run_project, thread=True, name="project-rebuild")
+        self.run_worker(self._run_project, thread=True, name="project-rebuild", exit_on_error=False)
 
     def _run_project(self) -> str:
         try:
@@ -735,9 +805,7 @@ class FleetScreen(Screen):
             return str(exc)
 
     def _log(self, msg: str) -> None:
-        self._log_lines.append(msg)
-        del self._log_lines[:-6]
-        self.query_one("#fleet-log", Static).update("\n".join(self._log_lines))
+        self.query_one("#fleet-log", RichLog).write(msg)
 
 
 class DepsScreen(Screen):
@@ -902,27 +970,70 @@ class SpecScreen(Screen):
         self._refresh()
 
 
-class ProposalScreen(Screen):
-    """Read-only viewer for a ticket's proposal.md."""
+# Phrases the ProposalScreen decision bar sends; the awaiting-human skill routes on them
+# (pinned by tests/test_reconcile_skill.py).
+ANSWER_ALTERNATIVE = "alternative"
+ANSWER_NEEDS_MORE = "needs more"
 
-    HELP = 'Proposal document for one ticket. escape goes back.'
+_ALT_HEADING_RE = re.compile(r"^##\s+Alternative\s+(\d+)\b", re.IGNORECASE)
+
+
+def parse_proposal_options(text: str) -> list[tuple[str, str]]:
+    """`[(label, title)]` for `## Recommended` and every `## Alternative N` in proposal.md.
+    Label is `Recommended` or `N`; title is the section's first non-empty line."""
+    out: list[tuple[str, str]] = []
+    label: str | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            m = _ALT_HEADING_RE.match(line)
+            if m:
+                label = m.group(1)
+            elif line[3:].strip().lower().startswith("recommended"):
+                label = "Recommended"
+            else:
+                label = None
+            if label is not None:
+                out.append((label, ""))
+        elif label is not None and line.strip() and not out[-1][1]:
+            out[-1] = (label, line.strip().lstrip("#").strip())
+    return out
+
+
+class ProposalScreen(Screen):
+    """Viewer for a ticket's proposal.md, with a decision bar while a research approval is open."""
+
+    HELP = ('Proposal document for one ticket. escape goes back. While approval is pending: '
+            'y accepts the recommendation, 1-9 picks an alternative (confirms), m asks for more research; '
+            'j/k jump between sections.')
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("r", "refresh_proposal", "Refresh"),
-    ]
+        ("y", "accept_recommendation", "Accept"),
+        ("m", "needs_more", "Needs more"),
+        ("j", "next_section", "Next section"),
+        ("k", "prev_section", "Prev section"),
+    ] + [(str(n), f"pick_alternative({n})", "") for n in range(1, 10)]
 
-    CSS = "ProposalScreen #proposal-body { height: 1fr; }"
+    CSS = """
+    ProposalScreen #proposal-body { height: 1fr; }
+    ProposalScreen #proposal-bar { dock: bottom; height: auto; padding: 0 1; background: $panel; }
+    """
 
     def __init__(self, home: Path, key: str) -> None:
         super().__init__()
         self._home = home
         self._key = key
+        self._qid = f"research-approval-{key}"
+        self._open = False
+        self._recommend: str | None = None
+        self._options: list[tuple[str, str]] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll(id="proposal-body"):
             yield Markdown("", id="proposal-md")
+        yield Static("", id="proposal-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -936,6 +1047,78 @@ class ProposalScreen(Screen):
         path = self._home / "tickets" / self._key / "proposal.md"
         text = path.read_text() if path.exists() else "(no proposal.md)"
         self.query_one("#proposal-md", Markdown).update(text)
+        self._options = parse_proposal_options(text)
+        snap = snap_mod.load(self._home, self._key)
+        q = snap.open_questions.get(self._qid)
+        self._open = q is not None
+        self._recommend = ops.parse_round_question(q)[3] if q is not None else None
+        bar = self.query_one("#proposal-bar", Static)
+        bar.display = self._open
+        if self._open:
+            rows = [f"[bold]{'y' if label == 'Recommended' else label}[/bold] "
+                    f"{'Recommended' if label == 'Recommended' else 'Alternative ' + label}: {rich_escape(title)}"
+                    for label, title in self._options]
+            rows.append("[bold]m[/bold] needs more research")
+            bar.update("  ".join(rows))
+        self.refresh_bindings()
+
+    def _answer_pending(self) -> bool:
+        return any(c.get("command") == "ans" and (c.get("args") or {}).get("qid") == self._qid
+                   for c in inbox.pending(self._home, self._key))
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in ("accept_recommendation", "pick_alternative", "needs_more"):
+            if not self._open or self._answer_pending():
+                return False
+            if action == "accept_recommendation" and not self._recommend:
+                return False
+        return True
+
+    def _send(self, args: dict) -> None:
+        inbox.append_command(self._home, self._key, "ans", {"qid": self._qid, **args})
+        self.notify(f"Answer queued for {self._key}")
+        self.refresh_bindings()
+
+    def action_accept_recommendation(self) -> None:
+        if self._recommend:
+            self._send({"text": self._recommend, "accepted_recommendation": True})
+
+    def action_pick_alternative(self, n: int) -> None:
+        title = next((t for label, t in self._options if label == str(n)), None)
+        if title is None:
+            self.notify(f"No ## Alternative {n} in this proposal", severity="warning")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self._send({"text": f"{ANSWER_ALTERNATIVE} {n}"})
+
+        self.app.push_screen(
+            _ConfirmModal(f"Approve [bold]Alternative {n}[/bold]: {rich_escape(title)}?"), _on_confirm)
+
+    def action_needs_more(self) -> None:
+        def _on_direction(text: str | None) -> None:
+            if text:
+                self._send({"text": f"{ANSWER_NEEDS_MORE}: {text}"})
+
+        self.app.push_screen(_DirectionModal(self._key), _on_direction)
+
+    def _jump(self, step: int) -> None:
+        body = self.query_one("#proposal-body", VerticalScroll)
+        ys = sorted(w.virtual_region.y for w in self.query_one("#proposal-md", Markdown).query("MarkdownH2"))
+        cur = body.scroll_y
+        if step > 0:
+            target = next((y for y in ys if y > cur), None)
+        else:
+            target = next((y for y in reversed(ys) if y < cur), 0 if cur > 0 else None)
+        if target is not None:
+            body.scroll_to(y=target, animate=False)
+
+    def action_next_section(self) -> None:
+        self._jump(1)
+
+    def action_prev_section(self) -> None:
+        self._jump(-1)
 
 
 class DetailScreen(Screen):

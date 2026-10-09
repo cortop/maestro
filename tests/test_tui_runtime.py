@@ -77,8 +77,10 @@ from maestro.tui import (  # noqa: E402
     _FILTERS,
     HoldModal,
     _ImportLinearModal,
+    _DirectionModal,
     _InboxModal,
     _IntervalModal,
+    _PauseModal,
     _RunnerModal,
     _ScheduleModal,
     _StopModal,
@@ -359,9 +361,9 @@ def test_quit_binding_exits_clean(seeded_home):
 
 _BINDING_CLASSES = [
     MaestroTUI, ReviewScreen, _TextViewModal, DepsScreen, DetailScreen, EventsScreen, InboxScreen, LogsScreen, FleetScreen, ProposalScreen,
-    ScheduleScreen, ActivityScreen, AcScreen, DecisionsScreen, WhyScreen, _AcEvidenceModal, _ActionMenu, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal,
+    ScheduleScreen, ActivityScreen, AcScreen, DecisionsScreen, WhyScreen, _AcEvidenceModal, _ActionMenu, _AnswerModal, _CmdModal, _IntervalModal, _CreateModal, _InboxModal, _DirectionModal,
     _ScheduleModal, _RunnerModal, _ImportLinearModal, _AddAcModal, _SuggestAcsModal, _SpecFieldsModal, _TicketPickModal,
-    _ConfirmModal, _StopModal, HoldModal, SpecScreen, EnvScreen, _EventPayloadModal,
+    _ConfirmModal, _StopModal, HoldModal, _PauseModal, SpecScreen, EnvScreen, _EventPayloadModal,
 ]
 
 
@@ -1596,7 +1598,9 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
             status_widget = app.screen.query_one("#fleet-status", Static)
             assert "Paused" in str(status_widget.content)
 
-            await pilot.press("P")  # toggle_pause -> resume (was paused)
+            await pilot.press("P")  # toggle_pause -> resume confirm (was paused)
+            await pilot.pause(0.1)
+            await pilot.press("y")
             for _ in range(50):  # threaded worker: poll, don't race a fixed pause
                 await pilot.pause(0.1)
                 if fleet.pause_state(seeded_home, store.now_epoch()) is None:
@@ -1604,14 +1608,14 @@ def test_fleet_screen_shows_paused_and_toggle_resumes(seeded_home):
             assert fleet.pause_state(seeded_home, store.now_epoch()) is None
             assert app._exception is None
 
-            await pilot.press("P")  # toggle_pause -> pause (now unpaused)
-            for _ in range(50):  # wait for the confirm modal before answering it
+            await pilot.press("P")  # toggle_pause -> _PauseModal (now unpaused)
+            for _ in range(50):
                 await pilot.pause(0.1)
-                if not isinstance(app.screen_stack[-1], FleetScreen):
+                if isinstance(app.screen_stack[-1], _PauseModal):
                     break
-            assert not isinstance(app.screen_stack[-1], FleetScreen)
-            await pilot.pause(0.1)  # let the confirm modal take focus before answering
-            await pilot.press("y")
+            assert isinstance(app.screen_stack[-1], _PauseModal)
+            await pilot.pause(0.1)  # let the modal take focus before answering
+            await pilot.press("enter")  # both fields empty -> pause at once
             for _ in range(50):
                 await pilot.pause(0.1)
                 if fleet.pause_state(seeded_home, store.now_epoch()) is not None:
@@ -4388,9 +4392,10 @@ def test_fleet_down_and_pause_confirm(seeded_home, monkeypatch):
             assert len(calls) == 1
 
             assert fleet.pause_state(seeded_home, store.now_epoch()) is None
-            await pilot.press("P")
+            await pilot.press("P")  # _PauseModal replaced the plain pause confirm
             await pilot.pause()
-            await pilot.press("enter")
+            assert isinstance(app.screen_stack[-1], _PauseModal)
+            await pilot.press("escape")
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert fleet.pause_state(seeded_home, store.now_epoch()) is None
@@ -6516,6 +6521,161 @@ def test_decisions_footer_and_resize_bindings():
     assert len(visible) <= 10
 
 
+# --- T-159: ProposalScreen decision bar --------------------------------------
+
+_PROPOSAL_MD = "# Research\n\n## Recommended\nUse the event log\n\n## Alternative 1\nUse sqlite\n\n## Alternative 2\nUse files\n"
+
+
+def _proposal_home(home, *, open_q=True, body=_PROPOSAL_MD):
+    qs = {"research-approval-T-6": "Approve?" + ops_mod._RECOMMEND_SEP + "Approve the recommended approach"} if open_q else None
+    seed_ticket(home, "T-6", "research", phase="awaiting-human", questions=qs)
+    (home / "tickets" / "T-6" / "proposal.md").write_text(body)
+    return home
+
+
+async def _open_proposal(app, pilot):
+    await pilot.pause()
+    app.push_screen(ProposalScreen(app._home, "T-6"))
+    await pilot.pause()
+    return app.screen_stack[-1]
+
+
+def _proposal_ans(home):
+    return [c for c in inbox.pending(home, "T-6") if c["command"] == "ans"]
+
+
+def test_proposal_bar_selects_alternative(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_proposal(app, pilot)
+            bar = str(screen.query_one("#proposal-bar", Static).render())
+            assert screen.query_one("#proposal-bar").display
+            for want in ("Recommended", "Use sqlite", "Use files"):
+                assert want in bar
+            await pilot.press("2")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _ConfirmModal)
+            await pilot.press("y")
+            await pilot.pause()
+            assert [c["args"] for c in _proposal_ans(home)] == [{"qid": "research-approval-T-6", "text": "alternative 2"}]
+            await pilot.press("2")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ProposalScreen)
+            assert len(_proposal_ans(home)) == 1
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_alternative_needs_confirm(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_proposal(app, pilot)
+            await pilot.press("2")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ProposalScreen)
+            await pilot.press("7")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], ProposalScreen)
+            assert _proposal_ans(home) == []
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_accepts_recommendation(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_proposal(app, pilot)
+            await pilot.press("y")
+            await pilot.pause()
+            assert [c["args"] for c in _proposal_ans(home)] == [{
+                "qid": "research-approval-T-6", "text": "Approve the recommended approach",
+                "accepted_recommendation": True}]
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_needs_more(home):
+    _proposal_home(home)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_proposal(app, pilot)
+            await pilot.press("m")
+            await pilot.pause()
+            assert isinstance(app.screen_stack[-1], _DirectionModal)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert _proposal_ans(home) == []
+            await pilot.press("m")
+            await pilot.pause()
+            await pilot.press(*"compare with sqlite", "enter")
+            await pilot.pause()
+            assert [c["args"] for c in _proposal_ans(home)] == [
+                {"qid": "research-approval-T-6", "text": "needs more: compare with sqlite"}]
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_bar_hidden_without_approval_question(home):
+    _proposal_home(home, open_q=False)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_proposal(app, pilot)
+            assert not screen.query_one("#proposal-bar").display
+            for action in ("accept_recommendation", "pick_alternative", "needs_more"):
+                assert screen.check_action(action, ()) is False
+            await pilot.press("y", "2", "m")  # disabled here; `m` falls through to the app's menu
+            await pilot.pause()
+            assert not any(isinstance(s, (_ConfirmModal, _DirectionModal)) for s in app.screen_stack)
+            assert _proposal_ans(home) == []
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_proposal_section_jumps(home):
+    body = "# Research\n\n" + "".join(f"## Section {i}\n" + "line\n\n" * 30 for i in range(4))
+    _proposal_home(home, open_q=False, body=body)
+
+    async def _inner():
+        app = _make_app(home)
+        async with app.run_test(size=(120, 20)) as pilot:
+            screen = await _open_proposal(app, pilot)
+            scroll = screen.query_one("#proposal-body")
+            assert scroll.scroll_y == 0
+            await pilot.press("j")
+            await pilot.pause()
+            first = scroll.scroll_y
+            assert first > 0
+            await pilot.press("j")
+            await pilot.pause()
+            assert scroll.scroll_y > first
+            await pilot.press("k")
+            await pilot.pause()
+            assert scroll.scroll_y == first
+        assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # --------------------------------------------------------------------------- #
 # T-158: b hops to blockers/dependents, O opens the PR                         #
 # --------------------------------------------------------------------------- #
@@ -6664,6 +6824,241 @@ def test_webbrowser_open_is_guarded(opened_urls):
     webbrowser.open("https://example.invalid")
     assert opened_urls == ["https://example.invalid"]
 
+
+
+
+# --------------------------------------------------------------------------- #
+# T-168: app-level P pause/resume + FleetScreen hardening                      #
+# --------------------------------------------------------------------------- #
+
+async def _await_cond(pilot, pred, n=50):
+    for _ in range(n):
+        await pilot.pause(0.1)
+        if pred():
+            return
+    assert pred()
+
+
+async def _open_fleet(app, pilot):
+    await pilot.pause()
+    await app.run_action("fleet_panel")
+    await pilot.pause()
+    assert isinstance(app.screen, FleetScreen)
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def _type(pilot, text):
+    for ch in text:
+        await pilot.press("space" if ch == " " else ch)
+
+
+def test_app_pause_key_pauses_with_duration_and_reason(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            before = time.time()
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _PauseModal))
+            await _type(pilot, "1h")
+            await pilot.press("enter")
+            await _type(pilot, "runaway")
+            await pilot.press("enter")
+            await _await_cond(pilot, lambda: fleet_mod.pause_state(seeded_home, store.now_epoch()))
+            st = fleet_mod.pause_state(seeded_home, store.now_epoch())
+            assert abs(st["until"] - (before + 3600)) < 5
+            assert st["reason"] == "runaway"
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            badge = app.screen_stack[0].query_one("#fleet-badge", Static).content
+            assert "PAUSED" in str(badge)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_app_pause_key_escape_writes_nothing(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _PauseModal))
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not fleet_mod.pause_path(seeded_home).exists()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_pause_modal_rejects_bad_duration(seeded_home):
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _PauseModal))
+            await _type(pilot, "soon")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, _PauseModal)
+            assert str(app.screen.query_one("#pause-error").content).strip()
+            assert not fleet_mod.pause_path(seeded_home).exists()
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not fleet_mod.pause_path(seeded_home).exists()
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_pause_key_offers_resume_from_disk_state(seeded_home):
+    fleet_mod.pause(seeded_home, reason="x")
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            app.screen._status = {}  # state before the first status load
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            assert not isinstance(app.screen, _PauseModal)
+            await pilot.pause(0.1)
+            await pilot.press("enter")  # default-No: Cancel focused
+            await _await_cond(pilot, lambda: isinstance(app.screen, FleetScreen))
+            assert fleet_mod.pause_state(seeded_home, store.now_epoch()) is not None
+            await pilot.press("P")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await _await_cond(pilot, lambda: fleet_mod.pause_state(seeded_home, store.now_epoch()) is None)
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_up_rejects_non_integer_interval(seeded_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(fleet_mod, "up", lambda home, **kw: calls.append(kw) or {"ok": True})
+
+    async def _inner():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            await pilot.press("u")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _IntervalModal))
+            await _type(pilot, "abc")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, _IntervalModal)
+            assert "not an integer" in str(app.screen.query_one("#interval-error").content)
+            assert calls == []
+            app.screen.query_one("#interval-input", Input).value = ""
+            await _type(pilot, "120")
+            await pilot.press("enter")
+            await _await_cond(pilot, lambda: len(calls) == 1)
+            assert calls[0]["interval"] == 120
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
+def test_fleet_clear_rate_limit_key(seeded_home):
+    from maestro import ratelimit
+
+    def _has(app):
+        return any(getattr(x.binding, "action", None) == "clear_rate_limit"
+                   for x in app.screen.active_bindings.values())
+
+    async def _plain():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            assert not _has(app)
+
+    asyncio.run(_plain())
+
+    until_ts = time.time() + 3600
+    store.write_json(seeded_home / "derived" / ".ratelimit.json", {
+        "paused_until": until_ts, "resets_at": until_ts - 60,
+        "rate_limit_type": "five_hour", "source_key": "T-1",
+        "source_log": "x", "ts": store.iso_now(),
+    })
+
+    async def _limited():
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            assert _has(app)
+            await pilot.press("R")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await _await_cond(pilot, lambda: not ratelimit.status(seeded_home, time.time())["paused"])
+            assert app._exception is None
+
+    asyncio.run(_limited())
+
+
+def test_fleet_mutations_log_result_and_error(seeded_home, monkeypatch):
+    async def _log_text(app):
+        return "\n".join(line.text for line in app.screen.query_one("#fleet-log").lines)
+
+    async def _inner(fn, needle):
+        monkeypatch.setattr(fleet_mod, "down", fn)
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            await pilot.press("d")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.2)
+            assert needle in await _log_text(app)
+            assert app._exception is None
+
+    asyncio.run(_inner(lambda home: {"stopped": "marker-ok"}, "marker-ok"))
+
+    def _boom(home):
+        raise RuntimeError("marker-boom")
+
+    asyncio.run(_inner(_boom, "marker-boom"))
+
+
+def test_fleet_real_sweep_resolves_executable_without_timeout(seeded_home, monkeypatch):
+    import shutil as shutil_mod
+
+    calls = []
+
+    def _rec(argv, **kw):
+        calls.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    async def _inner(which, first):
+        calls.clear()
+        monkeypatch.setattr(shutil_mod, "which", lambda name: which)
+        monkeypatch.setattr(subprocess, "run", _rec)
+        app = _make_app(seeded_home)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_fleet(app, pilot)
+            await pilot.press("S")
+            await _await_cond(pilot, lambda: isinstance(app.screen, _ConfirmModal))
+            await pilot.pause(0.1)
+            await pilot.press("y")
+            await _await_cond(pilot, lambda: len(calls) >= 1)
+            await app.workers.wait_for_complete()
+            sweeps = [c for c in calls if "dispatch" in c[0]]
+            assert len(sweeps) == 1
+            argv, kw = sweeps[0]
+            assert argv[:len(first)] == first
+            assert argv[len(first):len(first) + 3] == ["--home", str(seeded_home), "dispatch"]
+            assert "timeout" not in kw
+
+    asyncio.run(_inner(None, [sys.executable, "-m", "maestro.cli"]))
+    asyncio.run(_inner("/x/maestro", ["/x/maestro"]))
 
 # --------------------------------------------------------------------------- #
 # T-176: K -> _StopModal (Cancel default) -> ops.stop_session in a worker      #
