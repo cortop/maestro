@@ -58,6 +58,8 @@ from ..dispatcher import list_keys
 from ..dispatcher import schedule_status
 from ..dispatcher import spec_runner
 from ..sessions import list_sessions
+from ..statemachine import Phase
+from . import checks as checks_mod
 from . import why as why_mod
 from .detail import render as _render_detail
 from .detail import render_pending as _render_pending
@@ -79,6 +81,7 @@ from .modals import _AcceptedRecommendation
 from .modals import _AcEvidenceModal
 from .modals import _AddAcModal
 from .modals import _AnswerModal
+from .modals import _CheckModal
 from .modals import _ConfirmModal
 from .modals import _DirectionModal
 from .modals import _EventPayloadModal
@@ -633,12 +636,16 @@ class FleetScreen(Screen):
         ("R", "clear_rate_limit", "Clear rate limit"),
         ("r", "refresh_status", "Refresh"),
         ("b", "backups", "Backups"),
+        ("o", "toggle_ok", "Show ok"),
+        ("g", "check_jump", "Jump to ticket"),
     ]
 
     _MUTATIONS = ("fleet-up", "fleet-down", "fleet-pause", "fleet-resume", "clear-rate-limit")
 
     CSS = """
     FleetScreen #fleet-status { padding: 1 2; height: 1fr; }
+    FleetScreen #fleet-checks-header { padding: 0 2; }
+    FleetScreen #fleet-checks { height: 10; }
     FleetScreen #fleet-log    { height: 8; border-top: solid $primary; padding: 0 1; }
     """
 
@@ -647,14 +654,21 @@ class FleetScreen(Screen):
         self._home = home
         self._status: dict = {}
         self._doctor: dict = {}
+        self._show_ok = False
+        self._rows: dict[str, dict] = {}  # check name -> check, as last rendered
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("[dim]Loading…[/dim]", id="fleet-status")
+        yield Static("", id="fleet-checks-header", markup=False)
+        yield DataTable(id="fleet-checks", cursor_type="row")
         yield RichLog(id="fleet-log", markup=True, wrap=True)
         yield Footer()
 
     def on_mount(self) -> None:
+        table = self.query_one("#fleet-checks", DataTable)
+        table.add_columns("Status", "Check", "Detail")
+        table.focus()
         self._refresh_worker()
         # health.report() shells out to gh/launchctl/worktree probes and can run past
         # 10s; a shorter interval than that keeps cancelling it via exclusive=True
@@ -681,16 +695,176 @@ class FleetScreen(Screen):
                 self.query_one("#fleet-status", Static).update(
                     _render_fleet(self._status, self._doctor)
                 )
+                self._populate_checks()
                 self.refresh_bindings()
             elif event.worker.name in self._MUTATIONS:
                 self._log(f"{event.worker.name}: {rich_escape(str(event.worker.result))}")
                 self._after_mutation()
             elif event.worker.name in ("dispatch-sweep", "dispatch-sweep-real", "project-rebuild"):
                 self._log(rich_escape(str(event.worker.result)))
+            elif event.worker.name == "check-release-probe":
+                self._on_release_probed(self._release_key, event.worker.result)
+            elif event.worker.name == "check-backup-now":
+                self._log(f"backup written: {rich_escape(str(event.worker.result))}")
+                self._refresh_worker()
         elif event.state == WorkerState.ERROR:
             self._log(f"[red]{event.worker.name} failed: {rich_escape(str(event.worker.error))}[/red]")
             if event.worker.name in self._MUTATIONS:
                 self._after_mutation()
+
+    # --- T-170: doctor checks table + remedies -------------------------------
+
+    _STATUS_STYLE = {"fail": "bold red", "warn": "yellow", "ok": "green"}
+
+    def _populate_checks(self) -> None:
+        """Rebuild #fleet-checks from the already-loaded doctor payload, keeping the cursor row."""
+        checks = checks_mod.sort_checks(list(self._doctor.get("checks") or []))
+        shown = [c for c in checks if self._show_ok or c.get("status") != "ok"]
+        self._rows = {str(c["name"]): c for c in shown}
+        table = self.query_one("#fleet-checks", DataTable)
+        keep = None
+        if table.row_count and table.cursor_row < table.row_count:
+            keep = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        table.clear()
+        for c in shown:
+            status = str(c.get("status"))
+            table.add_row(Text(status, style=self._STATUS_STYLE.get(status, "")),
+                          Text(str(c["name"])), Text(str(c.get("detail", ""))), key=str(c["name"]))
+        if keep in self._rows:
+            table.move_cursor(row=list(self._rows).index(keep))
+        self.query_one("#fleet-checks-header", Static).update(
+            "Doctor checks: " + checks_mod.counts_line(checks)
+            + ("" if self._show_ok else "  (o: show ok)"))
+
+    def action_toggle_ok(self) -> None:
+        self._show_ok = not self._show_ok
+        self._populate_checks()
+
+    def _selected_check(self) -> dict | None:
+        table = self.query_one("#fleet-checks", DataTable)
+        if not table.row_count:
+            return None
+        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        return self._rows.get(row_key)
+
+    def action_check_jump(self) -> None:
+        check = self._selected_check()
+        keys = checks_mod.culprit_keys(check) if check else []
+        if not keys:
+            self.notify("no ticket for this check", severity="warning")
+            return
+        self.app.push_screen(DetailScreen(self._home, keys[0]))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        check = self._selected_check()
+        if check is None:
+            return
+        remedies: list[tuple[str, str | None, str]] = []
+        notes: list[str] = []
+        for remedy, label in checks_mod.keyless_remedies(check):
+            remedies.append((remedy, None, label))
+        for key in checks_mod.culprit_keys(check):
+            for remedy, label in checks_mod.key_remedies(check):
+                if remedy in checks_mod.DEGRADED_ONLY:
+                    phase = snap_mod.load(self._home, key).phase
+                    if phase != "degraded":
+                        if not any(n.startswith(f"{key}: ") for n in notes):
+                            notes.append(f"{key}: not degraded (phase {phase})")
+                        continue
+                remedies.append((remedy, key, f"{label} {key}"))
+        self.app.push_screen(_CheckModal(check, remedies, notes), self._on_remedy)
+
+    def _on_remedy(self, choice: tuple[str, str | None] | None) -> None:
+        if not choice:
+            return
+        remedy, key = choice
+        if remedy in (checks_mod.RETRY, checks_mod.DISCARD) and key:
+            self._queue_degraded(key, remedy)
+        elif remedy == checks_mod.LOGS and key:
+            self.app.push_screen(LogsScreen(self._home, key))
+        elif remedy == checks_mod.SPEC and key:
+            self.app.push_screen(SpecScreen(self._home, key))
+        elif remedy == checks_mod.RELEASE and key:
+            self._release_claim(key)
+        elif remedy == checks_mod.BACKUP_NOW:
+            self._backup_now()
+        elif remedy == checks_mod.ADD_AC and key:
+            self._add_ac(key)
+        elif remedy == checks_mod.SUGGEST_ACS and key:
+            self._suggest_acs(key)
+
+    def _queue_degraded(self, key: str, command: str) -> None:
+        """Key-explicit retry / discard: an inbox command only, never a phase write."""
+        if snap_mod.load(self._home, key).phase != Phase.DEGRADED.value:
+            self.notify(f"{key}: '{command}' only applies to degraded tickets", severity="warning")
+            return
+
+        def _queue() -> None:
+            inbox.append_command(self._home, key, command, {})
+            self.notify(f"'{command}' queued for {key}")
+            self.app._nudge(key)
+
+        if command == "discard":
+            self.app._confirm_discard(key, _queue)
+        else:
+            _queue()
+
+    def _release_claim(self, key: str) -> None:
+        cfg = config_mod.load(str(self._home))
+        # describe_claims shells out to `ps`; never active_keys/is_claimed (they release as a side effect).
+        self._release_key = key
+        self.run_worker(
+            lambda: claims.describe_claims(self._home, max_age=cfg.unverified_claim_max_age),
+            thread=True, name="check-release-probe", exit_on_error=False)
+
+    def _on_release_probed(self, key: str, rows: list[dict]) -> None:
+        row = next((r for r in rows if r["key"] == key), None)
+        if row is None:
+            self.notify(f"{key}: no claim to release")
+            return
+        if row["claimed"]:
+            self.notify(f"{key}: claim is live (pid {row['pid']}, {row['verdict']})",
+                        severity="warning")
+            return
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                claims.release(self._home, key)
+                self.notify(f"Claim released for {key}")
+
+        self.app.push_screen(_ConfirmModal(f"Release claim for [bold]{key}[/bold]?"), _on_confirm)
+
+    def _backup_now(self) -> None:
+        cfg = config_mod.load(str(self._home))
+        self._log("backing up … ")
+        self.run_worker(lambda: backup_mod.create_backup(cfg, store.now_epoch()),
+                        thread=True, name="check-backup-now", exit_on_error=False)
+
+    def _add_ac(self, key: str) -> None:
+        def _on_dismiss(text: str | None) -> None:
+            if text is None:
+                return
+            try:
+                ops.add_ac(Config(home=self._home), key, text)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
+            self.notify(f"AC added to {key}")
+            self._refresh_worker()
+
+        self.app.push_screen(_AddAcModal(key), _on_dismiss)
+
+    def _suggest_acs(self, key: str) -> None:
+        spec_file = store.spec_path(self._home, key)
+        if snap_mod.has_acs(spec_file.read_text(encoding="utf-8") if spec_file.exists() else ""):
+            self.notify(f"{key} already has acceptance criteria", severity="warning")
+            return
+        cfg = Config(home=self._home)
+        # Run on the app so its own "suggest-acs" handler opens the review modal.
+        self.app._suggest_acs_key = key
+        self.app.run_worker(lambda: ops.suggest_acs(cfg, key), thread=True, name="suggest-acs",
+                            exit_on_error=False)
 
     def _after_mutation(self) -> None:
         """Refresh only once the mutation has landed, so the read never races it."""

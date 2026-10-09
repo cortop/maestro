@@ -195,3 +195,20 @@ def test_dotted_references_in_agent_docs_resolve():
                 if not hasattr(importlib.import_module(f"maestro.{mod}"), name):
                     stale.append(f"{rel}:{n}: `{mod}.{name}` does not exist")
     assert not stale, "stale code reference(s) in agent-facing docs:\n" + "\n".join(stale)
+
+
+def test_where_to_add_section_covers_extension_points():
+    import importlib
+    text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "## Where to add X" in text
+    section = text.split("## Where to add X", 1)[1].split("\n## ", 1)[0]
+    for row in ("Dispatch gate", "Event type", "Doctor check", "Config knob",
+                "Agent verb", "TUI key", "Tests"):
+        assert f"| {row}" in section, f"missing row {row!r}"
+    refs = _DOTTED_REF_RE.findall(section)
+    assert refs
+    for mod, name in refs:
+        if name in _FILE_EXTENSIONS:
+            continue
+        assert mod in _maestro_modules(), f"`{mod}.{name}`: unknown module"
+        assert hasattr(importlib.import_module(f"maestro.{mod}"), name), f"`{mod}.{name}`"

@@ -1277,3 +1277,17 @@ def test_awaiting_human_skill_matches_proposal_bar_phrases():
         assert "case-insensitively" in body
         assert ('maestro set-phase "$KEY" researching --reason '
                 '"needs more research per human: <direction verbatim>"') in body
+
+
+def test_skill_points_new_tests_at_feature_files():
+    claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    skill = (REPO_ROOT / ".claude" / "commands"
+             / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
+    task = (REPO_ROOT / ".claude" / "commands" / "maestro-task.md").read_text(encoding="utf-8")
+    for text in (claude, skill):
+        assert "test_tui_<feature>.py" in text
+        assert "binding sweep" in text
+        assert "test_every_binding_action_resolves" in text
+        assert "extend `tests/test_tui_runtime.py`" not in text
+    assert "tests/test_<feature>.py" in claude and "feature-file rule" in skill.lower()
+    assert "feature-named" in task
