@@ -10,7 +10,7 @@ help:
 	@echo "make test        run the test suite in parallel (pytest-xdist, -n auto)"
 	@echo "make test-serial run the test suite in one process (easier to debug)"
 	@echo "make t F=tests/test_x.py K=expr   run a targeted subset, stop at first failure"
-	@echo "make lint        ruff (pyflakes rules) over maestro/ + tests/"
+	@echo "make lint        ruff (pyflakes + hot-file import order) over maestro/ + tests/"
 	@echo "make diagram     regenerate docs/state-machine.md + docs/dispatch-gates.md"
 	@echo "make dry         one dispatcher sweep, read-only preview (would_mint + would_spawn)"
 	@echo "make dispatch    one REAL sweep (spawns claude reconcilers for due tickets)"
