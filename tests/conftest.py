@@ -147,6 +147,16 @@ def _guard_user_scope_installs(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def opened_urls(monkeypatch):
+    """Replace `webbrowser.open` (the external boundary Textual's `App.open_url` hits)
+    with a recorder, so no test launches a real browser; tests read the returned list."""
+    import webbrowser
+    urls: list[str] = []
+    monkeypatch.setattr(webbrowser, "open", lambda url, *a, **kw: urls.append(url) or True)
+    return urls
+
+
 def seed_ticket(home, key, title, *, phase=None, questions=None, pr=None, tier=1):
     """Append events for one ticket and fold its snapshot, mimicking the real flow.
 
