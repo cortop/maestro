@@ -7506,7 +7506,6 @@ def test_stop_note_and_nudge(seeded_home, checked):
 
 
 # --------------------------------------------------------------------------- #
-<<<<<<< HEAD
 # T-169: SessionsScreen (B) -- Burners + Claims tabs                           #
 # --------------------------------------------------------------------------- #
 
@@ -7535,7 +7534,11 @@ def test_sessions_screen_lists_per_key_spend(seeded_home):
             assert isinstance(app.screen, SessionsScreen)
             table = await _sessions_table(app, pilot, "#burners-table")
             assert "$0.50" in _row_cells(table, "T-3")
-=======
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 # T-170: FleetScreen doctor checks table + remedies                           #
 # --------------------------------------------------------------------------- #
 
@@ -7587,13 +7590,11 @@ def test_fleet_checks_table_sorted_worst_first(seeded_home):
             assert len(rows) == total == len(__import__("maestro.health").health.CHECKS)
             order = [s for s, _ in rows]
             assert order == sorted(order, key=["fail", "warn", "ok"].index)
->>>>>>> origin/main
             assert app._exception is None
 
     asyncio.run(_inner())
 
 
-<<<<<<< HEAD
 def test_sessions_screen_flags_burning_key(seeded_home):
     for _ in range(5):
         event_log.append(seeded_home, "T-3", "Failed", {"error": "boom"}, actor="r")
@@ -7651,7 +7652,11 @@ def test_sessions_claims_tab_shows_verdicts(seeded_home, child_process):
             await pilot.press("enter")
             await pilot.pause()
             assert isinstance(app.screen, LogsScreen) and app.screen._key == "T-3"
-=======
+            assert app._exception is None
+
+    asyncio.run(_inner())
+
+
 def test_fleet_check_dead_letter_retry(seeded_home):
     cfg = config_mod.load(str(seeded_home))
     ops_mod.fail(cfg, "T-2", "boom", dead_letter=True)
@@ -7696,13 +7701,11 @@ def test_fleet_check_dead_letter_discard_typed_confirm(seeded_home):
             app.screen.query_one("#confirm-ok").press()
             await pilot.pause()
             assert [c["command"] for c in inbox.pending(seeded_home, "T-2")] == ["discard"]
->>>>>>> origin/main
             assert app._exception is None
 
     asyncio.run(_inner())
 
 
-<<<<<<< HEAD
 def test_sessions_purge_releases_only_stale_claims(seeded_home, child_process):
     _claim_setup(seeded_home, child_process)
 
@@ -7734,7 +7737,8 @@ def test_sessions_purge_releases_only_stale_claims(seeded_home, child_process):
             assert app._exception is None
 
     asyncio.run(_inner())
-=======
+
+
 def test_fleet_check_g_opens_culprit_detail(seeded_home):
     cfg = config_mod.load(str(seeded_home))
     ops_mod.fail(cfg, "T-2", "boom", dead_letter=True)
@@ -7805,4 +7809,3 @@ def test_fleet_check_backup_now_never_restores(seeded_home):
     for path in sorted((Path(__file__).parent.parent / "maestro" / "tui").rglob("*.py")):
         assert "restore_backup" not in path.read_text(encoding="utf-8"), path.name
     assert _CheckModal in _BINDING_CLASSES
->>>>>>> origin/main
