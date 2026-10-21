@@ -50,6 +50,7 @@ from ..sessions import build_routing_sessions
 from ..sessions import reap_children
 from ..statemachine import ACTIVE_PHASES
 from ..statemachine import Phase
+from . import worktree_open
 from .commands import ActionProvider
 from .commands import TicketProvider
 from .detail import render as _render_detail
@@ -274,6 +275,7 @@ class MaestroTUI(App):
         Binding("D", "deps_panel", "Deps", show=False),
         Binding("E", "edit_spec", "Edit spec", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
+        Binding("G", "open_worktree", "Open worktree", show=False),
         Binding("I", "view_inbox", "Inbox log", show=False),
         Binding("K", "stop_session", "Stop session", show=False),
         Binding("L", "import_linear", "Linear", show=False),
@@ -343,6 +345,7 @@ class MaestroTUI(App):
         "hold",
         "inbox_message",
         "open_pr",
+        "open_worktree",
         "release",
         "retry",
         "runner",
@@ -1188,6 +1191,13 @@ class MaestroTUI(App):
             self.notify(f"No PR for {key}", severity="warning")
             return
         self.open_url(url)
+
+    def action_open_worktree(self) -> None:
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        worktree_open.open_worktree(self, self._home, key)
 
     def action_show_spec(self) -> None:
         key = self._target_key()

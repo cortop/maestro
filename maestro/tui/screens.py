@@ -61,6 +61,7 @@ from ..sessions import list_sessions
 from ..statemachine import Phase
 from . import checks as checks_mod
 from . import why as why_mod
+from . import worktree_open
 from .detail import render as _render_detail
 from .detail import render_pending as _render_pending
 from .events import _TAIL_N
@@ -1981,8 +1982,8 @@ class ReviewScreen(Screen):
     needs to decide on a merge. Read-only apart from `i`; `y` only copies the merge command."""
 
     HELP = ("Review queue. o opens the PR, t review threads, f CI timeline, d diff, "
-            "i messages the implementer, y copies the merge command, enter opens detail, "
-            "r refreshes, escape goes back.")
+            "i messages the implementer, y copies the merge command, G opens the worktree, "
+            "enter opens detail, r refreshes, escape goes back.")
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
@@ -1990,6 +1991,7 @@ class ReviewScreen(Screen):
         ("t", "threads", "Threads"),
         ("f", "ci_timeline", "CI"),
         ("d", "diff", "Diff"),
+        ("G", "open_worktree", "Worktree"),
         ("i", "message", "Message"),
         ("y", "copy_merge", "Copy merge"),
         ("enter", "open_detail", "Detail"),
@@ -2129,6 +2131,11 @@ class ReviewScreen(Screen):
             blocks.append(line)
         self.app.push_screen(_TextViewModal(f"{snap.key}: CI timeline",
                                             "\n\n".join(blocks) or "(no CI observations)"))
+
+    def action_open_worktree(self) -> None:
+        snap = self._snap()
+        if snap is not None:
+            worktree_open.open_worktree(self, self._home, snap.key)
 
     def action_diff(self) -> None:
         snap = self._snap()
