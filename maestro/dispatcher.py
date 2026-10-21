@@ -2407,7 +2407,8 @@ def _post_qa_skill_runner(cfg: Config, binding) -> tuple[str, str | None]:
 
 def _spawn_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, skill: str,
                          runner: str, runner_model: str | None, binding,
-                         pr_number: int | None = None, pr_url: str | None = None) -> int | None:
+                         pr_number: int | None = None, pr_url: str | None = None,
+                         pr_branch: str | None = None, pr_base: str | None = None) -> int | None:
     """T-117: the one `sessions.spawn` call for `post_qa_skill`, shared by
     `sync_post_qa_skill` (automatic, gated on a fresh QA pass) and
     `trigger_post_qa_skill` (manual, ungated) -- "exactly one definition" of
@@ -2436,6 +2437,11 @@ def _spawn_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, skill:
     stacked ticket tracks only whichever entry is CURRENTLY the active poll
     target. Omitted (both None, the pre-T-133 call shape) leaves the env
     byte-identical to before this ticket.
+
+    *pr_branch*/*pr_base* (`MAESTRO_POST_QA_BRANCH`/`MAESTRO_POST_QA_BASE`)
+    are that stack entry's own head and base branches: the worktree sits on
+    whichever entry was last checked out, so the skill must switch to
+    *pr_branch* and scope its diff to `pr_base...HEAD` before touching the PR.
     """
     cwd = _worker_cwd(cfg, key)
     model, effort = _resolve_model_effort(cfg, key)
@@ -2446,6 +2452,10 @@ def _spawn_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, skill:
         env_overlay["MAESTRO_POST_QA_PR_NUMBER"] = str(pr_number)
     if pr_url is not None:
         env_overlay["MAESTRO_POST_QA_PR_URL"] = pr_url
+    if pr_branch is not None:
+        env_overlay["MAESTRO_POST_QA_BRANCH"] = pr_branch
+    if pr_base is not None:
+        env_overlay["MAESTRO_POST_QA_BASE"] = pr_base
     return sessions.spawn(key, skill, cwd, model=model, effort=effort,
                           allowed_tools=allowed_tools, disallowed_tools=MERGE_DENYLIST,
                           env_overlay=env_overlay or None,
@@ -2579,7 +2589,8 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
                 if ev is None:
                     continue  # already fired for this entry's exact QA-pass fingerprint
                 _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding,
-                                     pr_number=pr_number, pr_url=entry.get("url"))
+                                     pr_number=pr_number, pr_url=entry.get("url"),
+                                     pr_branch=entry.get("branch"), pr_base=entry.get("base"))
                 active = sessions.list_active()
                 fired.append(key)
                 break
@@ -2655,24 +2666,22 @@ def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, *,
         if outcome != "ok":
             raise store.MaestroError(f"{key}: runner {runner!r} preflight failed ({outcome}): {reason}")
     snap = snap_mod.load(home, key)
-    target_pr_number = snap.pr_number
-    target_pr_url = snap.pr_url
-    if pr_number is not None:
-        target_pr_number = pr_number
-        entry = next((e for e in snap.pr_stack if e.get("number") == pr_number), None)
-        if entry is not None:
-            target_pr_url = entry.get("url")
-        elif snap.pr_stack:
-            raise store.MaestroError(f"{key}: PR #{pr_number} is not in this ticket's stack")
-        else:
-            target_pr_url = snap.pr_url if pr_number == snap.pr_number else None
+    target_pr_number = snap.pr_number if pr_number is None else pr_number
+    target_pr_url = snap.pr_url if target_pr_number == snap.pr_number else None
+    entry = next((e for e in snap.pr_stack if e.get("number") == target_pr_number), None)
+    if entry is not None:
+        target_pr_url = entry.get("url")
+    elif pr_number is not None and snap.pr_stack:
+        raise store.MaestroError(f"{key}: PR #{pr_number} is not in this ticket's stack")
     step_id = f"postqa-manual-{key}-{store.now_epoch()}"
     payload: dict = {"skill": skill, "tree_key": "manual"}
     if target_pr_number is not None:
         payload["pr_number"] = target_pr_number
     event_log.append(home, key, E.POST_QA_SKILL_SPAWNED, payload, actor="human", step_id=step_id)
     pid = _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding,
-                               pr_number=target_pr_number, pr_url=target_pr_url)
+                               pr_number=target_pr_number, pr_url=target_pr_url,
+                               pr_branch=entry.get("branch") if entry else None,
+                               pr_base=entry.get("base") if entry else None)
     return {"key": key, "skill": skill, "runner": runner, "pid": pid}
 
 

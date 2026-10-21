@@ -360,6 +360,7 @@ def test_stacked_ticket_spawns_once_per_entry_across_three_sweeps(home, cfg):
 
     fired_prs = []
     fired_urls = []
+    fired_branches = {}
     for now in (1000, 2000, 3000):
         sessions = DryRunSessions()
         disp.dispatch(cfg, sessions, now=now)
@@ -368,9 +369,17 @@ def test_stacked_ticket_spawns_once_per_entry_across_three_sweeps(home, cfg):
         _, _, _, _, _, _, _, env_overlay, *_ = spawns[0]
         fired_prs.append(env_overlay["MAESTRO_POST_QA_PR_NUMBER"])
         fired_urls.append(env_overlay["MAESTRO_POST_QA_PR_URL"])
+        fired_branches[env_overlay["MAESTRO_POST_QA_PR_NUMBER"]] = (
+            env_overlay["MAESTRO_POST_QA_BRANCH"], env_overlay["MAESTRO_POST_QA_BASE"])
 
     assert sorted(fired_prs) == ["100", "101", "102"]
     assert sorted(fired_urls) == [f"https://example.com/pull/{n}" for n in (100, 101, 102)]
+    # Each spawn targets its own entry's branch, not whatever the worktree has checked out.
+    assert fired_branches == {
+        "100": ("maestro/T-1-1", "main"),
+        "101": ("maestro/T-1-2", "maestro/T-1-1"),
+        "102": ("maestro/T-1-3", "maestro/T-1-2"),
+    }
 
     spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
     assert len(spawned_events) == 3
@@ -601,6 +610,8 @@ def test_trigger_post_qa_skill_pr_number_targets_stack_entry(home, cfg):
     _, _, _, _, _, _, _, env_overlay, *_ = spawned[0]
     assert env_overlay["MAESTRO_POST_QA_PR_NUMBER"] == "101"
     assert env_overlay["MAESTRO_POST_QA_PR_URL"] == "https://example.com/pull/101"
+    assert env_overlay["MAESTRO_POST_QA_BRANCH"] == "maestro/T-1-2"
+    assert env_overlay["MAESTRO_POST_QA_BASE"] == "maestro/T-1-1"
     spawned_events = [e for e in event_log.read(home, "T-1") if e["type"] == "PostQaSkillSpawned"]
     assert spawned_events[0]["payload"]["pr_number"] == 101
 
@@ -615,6 +626,7 @@ def test_trigger_post_qa_skill_pr_number_omitted_uses_currently_tracked_pr(home,
     spawned = sessions.delegates["claude"].spawned
     _, _, _, _, _, _, _, env_overlay, *_ = spawned[0]
     assert env_overlay["MAESTRO_POST_QA_PR_NUMBER"] == "100"
+    assert env_overlay["MAESTRO_POST_QA_BRANCH"] == "maestro/T-1-1"
 
 
 def test_trigger_post_qa_skill_unknown_pr_number_raises(home, cfg):
