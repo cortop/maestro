@@ -329,10 +329,11 @@ Otherwise implement the spec's Acceptance criteria:
    **Otherwise (a fresh implementation, with no PR yet)** — this is the only case where the gate
    applies: measure the diff and act on `exceeds` before opening the first PR:
    ```bash
-   maestro pr-size "$KEY"   # -> {lines_changed, threshold, exceeds, tree}
+   maestro pr-size "$KEY"   # -> {lines_changed, threshold, exceeds, split_viable, tree}
    ```
-   **`exceeds: false`** (including threshold `0`, which disables the check entirely — byte-identical
-   to before this ticket) — push and open (or update) the PR exactly as today, with an
+   **`exceeds: false`, or `exceeds: true` with `split_viable: false`** (no balanced file-level
+   split exists, so a proposal would only cost a human round-trip — open the single PR without a
+   `maestro ask`; threshold `0` disables the check entirely) — push and open (or update) the PR exactly as today, with an
    AC-to-evidence table sourced from the `verify-ac` calls above (or `maestro snapshot "$KEY"` ->
    `ac_verified`):
    ```bash
@@ -361,10 +362,11 @@ Otherwise implement the spec's Acceptance criteria:
    maestro set-phase "$KEY" qa
    ```
 
-   **`exceeds: true`** — do not push or open/grow the PR yet. Split the diff into an ordered stack
+   **`exceeds: true` and `split_viable: true`** — do not push or open/grow the PR yet. Split the diff into an ordered stack
    of smaller PRs instead, by file: each entry names which files it touches, which spec ACs it
    covers, and which entry it's based on (entry 1 depends on nothing beyond `<BASE>`; entry *n*
-   depends on entry *n-1*). Propose it — `--qid` binds the proposal to this exact tree state, so an
+   depends on entry *n-1*). Every entry's line count must be at least ⅓ of the largest entry's --
+   never propose a lopsided stack. Propose it — `--qid` binds the proposal to this exact tree state, so an
    already-answered proposal for it passes straight through on a later pass and any new tree (a
    further commit) re-evaluates from scratch, same idiom as the H4 test-deletion gate:
    ```bash
