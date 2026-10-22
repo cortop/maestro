@@ -1353,6 +1353,37 @@ def check_pi_models(cfg: Config, now: float, *, run=None) -> dict:
     return {"name": "pi_models", "status": status, "detail": detail, "tickets": tickets}
 
 
+def check_pi_unpriced_models(cfg: Config, now: float) -> dict:
+    """WARN when a model routed through ``[runner.pi].phases`` has no ``cost``
+    table in ``[runner.pi.models]``: pi then reports ``usage.cost.total`` of 0
+    for every session, so the daily spend ceiling and ``burn.per_key_spend``
+    cannot see that phase's spend. Silent (``ok``) when pi routes no phase or
+    every routed model carries a positive rate."""
+    pi_cfg = (cfg.provider_config.get("runner") or {}).get("pi") or {}
+    if not dispatcher.runner_eligible_phases(cfg, "pi"):
+        return {"name": "pi_unpriced_models", "status": "ok",
+                "detail": "no phase is routed through pi", "models": []}
+    models_cfg = pi_cfg.get("models") or {}
+    routed = list(models_cfg)
+    if cfg.runner == "pi" and cfg.runner_model and cfg.runner_model not in routed:
+        routed.append(cfg.runner_model)
+
+    def priced(model: str) -> bool:
+        cost = (models_cfg.get(model) or {}).get("cost")
+        return isinstance(cost, dict) and any(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+            for v in cost.values())
+
+    unpriced = sorted(m for m in routed if not priced(m))
+    if unpriced:
+        return {"name": "pi_unpriced_models", "status": "warn",
+                "detail": (f"pi model(s) {', '.join(unpriced)} have no [runner.pi.models.<id>.cost] "
+                           f"table; their sessions report $0 and are invisible to the spend ceiling"),
+                "models": unpriced}
+    return {"name": "pi_unpriced_models", "status": "ok",
+            "detail": "every routed pi model has a cost table", "models": []}
+
+
 # MTO-8: consecutive non-429 error outcomes across the fleet's most recent
 # terminal sessions before check_provider_availability treats it as a
 # provider problem OBSERVED (not a guess off one flaky session).
@@ -1815,6 +1846,7 @@ CHECKS = (
     check_ollama_models,
     check_phantom_keys,
     check_pi_models,
+    check_pi_unpriced_models,
     check_pi_version,
     check_provider_availability,
     check_reconciler_permissions,

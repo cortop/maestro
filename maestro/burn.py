@@ -48,18 +48,36 @@ from . import dispatcher, event_log, events as E, sessions as sessions_mod, snap
 from . import health as health_mod
 
 
+def _pi_session_cost(path: Path) -> float:
+    """Sum of every assistant ``message_end``'s ``usage.cost.total`` in a pi log."""
+    total = 0.0
+    for _, record in steplog.iter_records(path):
+        if record.get("type") != "message_end":
+            continue
+        msg = record.get("message") or {}
+        if msg.get("role") != "assistant":
+            continue
+        cost = ((msg.get("usage") or {}).get("cost") or {}).get("total")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            total += float(cost)
+    return total
+
+
 def per_key_spend(home: Path, now: float, window: int = health_mod.WINDOW_SECONDS) -> dict[str, float]:
     """USD spent per key in the trailing *window* seconds, off each key's own
     stream-json session logs' terminal ``total_cost_usd`` -- a windowed
     sibling of ``spend.py``'s cumulative day-bucket meter, keyed per-ticket
-    instead of board-wide. A pi/opencode session (no parseable Claude-shaped
-    cost record, or a genuinely free ``cost: 0`` run) simply contributes
+    instead of board-wide. A pi session adds the sum of its ``message_end``
+    costs; an opencode session (no parseable cost record) simply contributes
     nothing here -- never the sole burn signal, see the module docstring."""
     out: dict[str, float] = {}
     for key in dispatcher.list_keys(home):
         total = 0.0
         for entry in sessions_mod.list_sessions(home, key):
-            if entry["format"] != "stream-json" or now - entry["epoch"] > window:
+            if entry["format"] not in ("stream-json", "pi") or now - entry["epoch"] > window:
+                continue
+            if entry["format"] == "pi":
+                total += _pi_session_cost(Path(entry["path"]))
                 continue
             result = steplog.session_outcome(Path(entry["path"])).get("result") or {}
             cost = result.get("total_cost_usd")
