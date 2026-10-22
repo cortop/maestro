@@ -311,6 +311,45 @@ def check_launchctl(cfg: Config, now: float | None = None, *, run=None) -> dict:
     }
 
 
+def check_dark_gates(cfg: Config, now: float) -> dict:
+    """WARN when a diff gate is configured but can never run: the
+    `allowed_paths` diff check and the annotated-AC captures run only in
+    `verifying`, which only a binding with a resolved `test_command` reaches.
+    Flags every binding with `allowed_paths` and no `test_command`, and every
+    non-terminal ticket with a `(test: ...)`/`(check: ...)` AC whose binding
+    has no `test_command`. Report-only."""
+    from . import repos as repos_mod
+
+    home = cfg.home
+    keys = dispatcher.list_keys(home)
+    bindings = dispatcher.referenced_repo_bindings(cfg, home, keys)
+    allowed = [{"repo": name, "allowed_paths": list(b.allowed_paths)}
+               for name, b in bindings.items() if b.allowed_paths and not b.test_command]
+    annotated = []
+    for key in keys:
+        if Phase(snap_mod.load(home, key).phase) in TERMINAL_PHASES:
+            continue
+        spec_file = store.spec_path(home, key)
+        if not spec_file.exists():
+            continue
+        binding = repos_mod.resolve(cfg, home, key)
+        if binding.test_command:
+            continue
+        acs = snap_mod.parse_acs(spec_file.read_text(encoding="utf-8"))
+        if any(snap_mod.parse_ac_annotation(ac) for ac in acs):
+            annotated.append({"key": key, "repo": binding.name})
+    parts = []
+    if allowed:
+        parts.append("allowed_paths is set but never checked (no test_command): "
+                     + ", ".join(a["repo"] for a in allowed))
+    if annotated:
+        parts.append("annotated ACs are never captured (no test_command): "
+                     + ", ".join(f"{a['key']} [{a['repo']}]" for a in annotated))
+    return {"name": "dark_gates", "status": "warn" if parts else "ok",
+            "detail": "; ".join(parts) + (" -- set [repos.<name>] test_command" if parts else "none"),
+            "allowed_paths": allowed, "annotated_acs": annotated}
+
+
 def check_dead_letters(cfg: Config, now: float) -> dict:
     dl_dir = cfg.home / "tickets" / "_deadletter"
     ages = {}
@@ -1929,6 +1968,7 @@ CHECKS = (
     check_claim_age,
     check_claim_no_output,
     check_daily_spend,
+    check_dark_gates,
     check_dead_letters,
     check_depends_on,
     check_gh_credential_reachability,
