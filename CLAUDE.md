@@ -106,6 +106,8 @@ Supporting:
   `decisions[...]["outcome"] = "..."` assignments and a few exact source lines in
   `dispatcher.py` — keep them literal when refactoring.
 - `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).
+- `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, why, fleet)
+  shared by the TUI and the web UI; the TUI wraps them in Rich, the web UI in HTML.
 - `tui/` — Textual TUI (`maestro tui`, `tui` extra). Import only via `maestro.tui`; new
   screens go in `screens.py`, new modals in `modals.py`.
 
