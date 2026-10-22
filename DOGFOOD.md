@@ -152,6 +152,29 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
 6. Confirm MR-1 .. MR-6 are all merged (per-repo dispatcher plumbing, repo-scoped VCS, and this
    ticket's hardcode removal all need to be in place first).
 
+## Serving the fleet from a separate clone
+
+`~/.local/bin/maestro` points into a checkout's `.venv`, and the user-scope
+`maestro-reconcile-*.md` commands symlink back into its `.claude/commands/`. Whatever branch
+that checkout is on is what the live fleet runs, so developing in it (checking out a feature
+branch) changes the fleet's code and prompts immediately. Serve the fleet from a dedicated,
+main-only clone instead, and develop elsewhere. Use a clone, not a worktree: a worktree on
+`main` would lock `main` out of your dev checkout.
+
+```bash
+git clone <origin> ~/maestro-serving && cd ~/maestro-serving
+make install                         # symlinks `maestro` onto PATH from this clone's .venv
+maestro install-commands --user      # re-point the user-scope reconcile commands here
+
+git -C ~/maestro-serving pull --ff-only      # promote: pick up what merged to main
+git -C ~/maestro-serving checkout <sha>      # roll back to a known-good commit
+git -C ~/maestro-serving checkout main       # ...and return to main afterwards
+```
+
+`maestro doctor` (`serving_checkout`) WARNs when the checkout holding the running package is
+dirty, detached or off its default branch, or when a user-scope command symlink resolves
+outside it. A deliberate rollback via `checkout <sha>` trips the detached warning on purpose.
+
 ## Backups (the event logs are the sole source of truth — protect them)
 
 The dispatcher auto-snapshots the irreplaceable state (`events/` + `tickets/` + `inbox/` +

@@ -160,6 +160,17 @@ def _guard_user_scope_installs(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_serving_checkout(tmp_path, monkeypatch):
+    """T-196: `health.check_serving_checkout` inspects the git checkout holding the running
+    package; point it at a non-git dir so doctor tests don't depend on the host checkout's
+    branch/dirty state. Tests of the check itself re-patch `health._maestro_self_root`."""
+    from maestro import health
+    plain = tmp_path / "guard-serving-root"
+    plain.mkdir()
+    monkeypatch.setattr(health, "_maestro_self_root", lambda: plain)
+
+
+@pytest.fixture(autouse=True)
 def opened_urls(monkeypatch):
     """Replace `webbrowser.open` (the external boundary Textual's `App.open_url` hits)
     with a recorder, so no test launches a real browser; tests read the returned list."""

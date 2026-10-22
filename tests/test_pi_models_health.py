@@ -112,7 +112,11 @@ def test_real_doctor_json_warns_when_pi_model_is_absent(home, monkeypatch):
 def test_real_doctor_json_ok_when_no_pi_ticket_exists(home, monkeypatch):
     _seed_spec(home, "T-1", _claude_spec("T-1"))
 
-    def boom(*a, **k):
+    real_run = subprocess.run
+
+    def boom(cmd, *a, **k):
+        if cmd[0] == "git":  # other doctor checks shell git; only pi is forbidden
+            return real_run(cmd, *a, **k)
         raise AssertionError("must not shell pi when nothing needs checking")
     monkeypatch.setattr("maestro.providers.pi.subprocess.run", boom)
     code, out = run_doctor(home)
