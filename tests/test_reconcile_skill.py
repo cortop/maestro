@@ -1199,7 +1199,9 @@ def test_phase_skill_fold_step_keys_off_inbox_pending():
     for phase in ("triaging", "researching", "awaiting-human", "ready", "implementing", "qa"):
         for path in (_commands_path(phase), _skills_path(phase)):
             text = path.read_text()
-            assert "If the snapshot's `inbox_pending` is non-zero" in text, \
+            marker = ("If the qa-brief packet's `inbox_pending`" if phase == "qa"
+                      else "If the snapshot's `inbox_pending` is non-zero")
+            assert marker in text, \
                 f"{path}: the fold-inbox step must key off a field `maestro snapshot` emits"
 
 

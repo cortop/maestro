@@ -6,6 +6,7 @@ the real CLI (never a mocked `git diff`).
 """
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -205,7 +206,8 @@ def test_qa_brief_via_real_cli(tmp_path, home, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["key"] == "T-1"
     assert len(out["acs"]) == 2
-    assert "widget.py" in out["diff"]
+    assert "diff" not in out  # the CLI prints a bounded index; the diff lives in diff_path
+    assert "widget.py" in Path(out["diff_path"]).read_text(encoding="utf-8")
     assert out["diff_empty"] is False
 
 

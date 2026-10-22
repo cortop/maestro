@@ -1030,10 +1030,11 @@ def cmd_capture_tests(args) -> int:
 def cmd_qa_brief(args) -> int:
     """[agent] mint the Implementer->QA hand-off packet (AC list + diff) for one ticket.
 
-    Read-only. The QA sub-agent is briefed from this result instead of from
-    diff text the implementer re-types into the prompt -- see ops.qa_brief.
+    Writes the packet under derived/qa-brief/<KEY>/ and prints a bounded index
+    naming the files; the QA sub-agent reads them in full instead of diff text
+    the implementer re-types into the prompt -- see ops.write_qa_packet.
     """
-    _print(ops.qa_brief(_cfg(args), args.key))
+    _print(ops.write_qa_packet(_cfg(args), args.key))
     return 0
 
 

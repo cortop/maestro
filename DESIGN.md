@@ -85,7 +85,7 @@ text, rather than silently matching by index. Three gates stand between an AC an
 `awaiting-ci`: two per-AC evidence tiers, plus a QA verdict gate spanning all of them.
 
 - **Self-attestation** (`maestro verify-ac`) — the implementer's own structured claim
-  (what/where/result), independently re-checked by the `qa` phase's verdict. This is
+  (what/where/result). The `qa` phase never sees it: QA judges from its own packet (`ops.qa_brief`), which withholds attestations and prior verdicts. This is
   the default for prose ACs, and stays the only tier for a repo binding whose resolved
   `test_command` (the board-wide default, or a `[repos.<name>]` override that arms the
   gate even when the board-wide key is unset — T-83) is unset.

@@ -35,7 +35,6 @@ KEY="$1"
 maestro env --key "$KEY"   # -> repo_path/slug/base_branch/branch_prefix/mode/reconcile_command
 maestro env                # -> home/qa_standards_axis (board-wide; keyless)
 maestro observe-spec "$KEY"
-maestro snapshot "$KEY"                     # -> phase, pr, ci, failure_count, open_questions
 ```
 Read the two JSON outputs above and hold their fields as literals for the rest of this file: REPO
 (`repo_path`), SLUG (`slug`), BASE (`base_branch`), PREFIX (`branch_prefix`), MODE (`mode`) from
@@ -47,7 +46,7 @@ with the **Read** tool — never `cat`/`sed`, this preamble reads no file via th
   context from raw events. It may not exist yet for a brand-new ticket; a Read error there just
   means no context has been folded yet, not a failure.
 
-If the snapshot's `inbox_pending` is non-zero, fold those commands before deciding:
+If the qa-brief packet's `inbox_pending` (step 1 below) is non-zero, fold those commands before deciding:
 `maestro fold-inbox "$KEY"`. Finish every exit path with `maestro release "$KEY"` (drop your claim).
 
 ## `qa`: judge the diff, never edit it
@@ -61,7 +60,12 @@ does anywhere else. If the run can't finish inside that budget, don't exit to wa
 
 1. `maestro qa-brief "$KEY"` — the deterministic hand-off packet: every spec AC (content-hash
    keyed, the same key `verify-ac`/`qa-verdict` use) plus a diff anchored on the merge-base with
-   `<BASE>`, untracked files included via `git diff --no-index`. Read-only; safe to call again.
+   `<BASE>`, untracked files included via `git diff --no-index`, and `phase`/`pr_number`/
+   `inbox_pending`. It writes `<MHOME>/derived/qa-brief/<KEY>/packet.json` and `diff.patch` and
+   prints a bounded index (the packet minus the diff, with both paths and the diff's size).
+   **Read both files in full with the Read tool** (page with `offset`/`limit` until
+   `diff_lines` is covered) -- never judge from a truncated or self-built diff. Safe to call again.
+   You never load the implementer's attestations or prior verdicts; judge from this packet alone.
 2. For each AC in the packet, judge PASS or FAIL strictly against what the diff actually does —
    not against your own idea of the right implementation, and without editing anything to check:
    `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --evidence "<what you checked, what
