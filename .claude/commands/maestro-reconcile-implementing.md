@@ -101,11 +101,11 @@ a drifted-behind-base worktree was auto-rerouted here (snapshot `reason` says
 moved trunk in one step — gt tracks each branch's parent directly, so there is no separate
 `git fetch`/`--ff-only` merge to run first:
 ```bash
-gt -C <WT> sync
-gt -C <WT> restack
+gt --cwd <WT> sync
+gt --cwd <WT> restack
 ```
 A conflicting restack exits non-zero and leaves conflict markers in the tree — resolve them, then
-continue with `gt -C <WT> continue` (its own, single invocation; never `gt -C <WT> abort`). Never
+continue with `gt --cwd <WT> continue` (its own, single invocation; never `gt --cwd <WT> abort`). Never
 fall back to `git rebase`/`git merge` on a gt-managed branch (`<PREFIX>$KEY-*`/`<PREFIX>$KEY`) --
 gt's own parent-tracking would then disagree with the tree.
 
@@ -384,16 +384,16 @@ Otherwise implement the spec's Acceptance criteria:
    ```bash
    git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
    git -C <WT> checkout -q <sha of entry 1's last commit>
-   gt -C <WT> create "<PREFIX>$KEY-1" -m "$KEY: <subject> (1/<N>)"
+   gt --cwd <WT> create "<PREFIX>$KEY-1" -m "$KEY: <subject> (1/<N>)"
    git -C <WT> checkout -q <sha of entry 2's last commit>
-   gt -C <WT> create "<PREFIX>$KEY-2" -m "$KEY: <subject> (2/<N>)"
+   gt --cwd <WT> create "<PREFIX>$KEY-2" -m "$KEY: <subject> (2/<N>)"
    ```
    repeat for entries `2..N` (the last entry may just be `<PREFIX>$KEY` at `HEAD` itself — no extra
    branch needed), then submit and open every PR in the stack in one call — this is the ONLY path
    allowed to push a gt-managed branch (`<PREFIX>$KEY-*`/`<PREFIX>$KEY`) with history rewritten,
    and the only case in this whole file where that's true:
    ```bash
-   gt -C <WT> submit --stack --no-interactive --publish
+   gt --cwd <WT> submit --stack --no-interactive --publish
    ```
    Record entry 0 and every later entry exactly as the `git` path does below (same
    `PrOpened`/`stack`-sub-payload shape, same root-first ordering, same
