@@ -1099,6 +1099,10 @@ def cmd_scorecard(args) -> int:
             cutoff = cutoff.replace(tzinfo=timezone.utc)
         _print(outcomes.scorecard(cfg, cutoff=cutoff))
         return 0
+    if args.kind == "friction":
+        from . import friction
+        _print(friction.scorecard(cfg))
+        return 0
     rows = decision_labels.regenerate(cfg.home)
     out = {"rows": len(rows), "by_label": decision_labels.label_counts(rows),
            "path": str(decision_labels.answers_path(cfg.home))}
@@ -1635,9 +1639,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=int, default=20, help="how many recent sweep decisions to show")
 
     sp = add("scorecard", cmd_scorecard,
-             "print the answer->route label scorecard, or `tickets` outcomes per repo and month")
-    sp.add_argument("kind", choices=["answers", "tickets"], nargs="?", default="answers",
-                    help="'answers' (label scorecard) or 'tickets' (per-repo/month outcomes)")
+             "print the answer->route label scorecard, or `tickets` outcomes per repo and month, or `friction` tool failures")
+    sp.add_argument("kind", choices=["answers", "tickets", "friction"], nargs="?", default="answers",
+                    help="'answers' (label scorecard), 'tickets' (per-repo/month outcomes) or "
+                         "'friction' (tool-failure signatures, writes derived/FRICTION.md)")
     sp.add_argument("--cutoff", default=None,
                     help="tickets only: fold the logs as of this ISO timestamp (UTC if naive)")
 

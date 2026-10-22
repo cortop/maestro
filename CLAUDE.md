@@ -98,6 +98,7 @@ Supporting:
 - `projection.py` — snapshots → `derived/*.md` dashboards. `notify.py` — push notifications.
 - `schedule.py` — interval/cron scheduled tasks. `decision_labels.py` — answer → route fold.
 - `outcomes.py` — read-only per-repo/month ticket outcome fold (`maestro scorecard tickets`).
+- `friction.py` — read-only fold of session-log tool-failure signatures (`maestro scorecard friction`).
 - `testlang.py` — per-language test-name extraction and selector formatting.
 - `skills_install.py` — `maestro install-commands` (payload in `maestro/_skill_commands/`).
 - `fleet.py` — launchd LaunchAgent management + pause switch.
