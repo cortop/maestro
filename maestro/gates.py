@@ -158,6 +158,22 @@ def runner_editable(home: Path, key: str, snap: snap_mod.Snapshot) -> bool:
 BYPASS_RESISTANT_IMPLEMENTERS = {"claude_skill", "pi"}
 
 
+def runner_interlock_reason(cfg: Config, runner: str) -> str | None:
+    """None if *runner* -- the backend that will actually spawn this phase --
+    has its destructive-command guard in place; otherwise the human-facing
+    refusal. ``claude`` is checked live (``claude_guard.require`` installs and
+    verifies the ``--settings`` file every claude spawn passes); other runners
+    carry their guard in their own spawn argv/permission block and are
+    admitted or refused by the dispatcher's runner preflight."""
+    if runner == "claude":
+        from . import claude_guard  # lazy: keeps gates import-light
+        try:
+            claude_guard.require(cfg.home)
+        except claude_guard.ClaudeGuardError as e:
+            return f"claude destructive-command guard unavailable -- refusing to spawn: {e}"
+    return None
+
+
 def backend_interlock_reason(cfg: Config) -> str | None:
     """None if ``cfg.providers["implementer"]`` already has a bypass-resistant
     destructive-command guard wired in (see ``BYPASS_RESISTANT_IMPLEMENTERS``);

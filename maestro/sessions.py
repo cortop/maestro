@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import claims, config, pi_guard, store
+from . import claims, claude_guard, config, pi_guard, store
 from .store import generate_pi_models_json
 
 
@@ -371,6 +371,9 @@ class ClaudeCliSessions(_ClaimBackedSessions):
             cmd += ["--allowedTools", ",".join(merged_allowed)]
         if self.strict_mcp:
             cmd.append("--strict-mcp-config")
+        # T-207: the maestro-owned PreToolUse guard rides every spawn; a missing
+        # or unwired settings file raises here rather than launching unguarded.
+        cmd += ["--settings", str(claude_guard.require(self.home))]
         cmd += self.extra_args
         assert cmd.count("--allowedTools") <= 1, "spawn argv must carry at most one --allowedTools flag"
         # GA-17: this key's resolved gh credential (carried in env_overlay) wins

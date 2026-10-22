@@ -1,0 +1,1 @@
+../../../.claude/hooks/block-home-deletion.py
