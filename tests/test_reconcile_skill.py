@@ -331,7 +331,6 @@ def test_implementing_venv_bootstrap_is_gone_pytest_invocation_stays():
             f"{path}: venv bootstrap should be gone -- that's now `prime`'s job"
         assert "pip install" not in text, \
             f"{path}: pip install should be gone -- that's now `prime`'s job"
-        assert ".venv/bin/python -m pytest -q" in text
         assert " cd " not in text and not text.startswith("cd "), \
             f"{path}: bootstrap still `cd`s instead of relying on the session cwd"
         for banned in (">/dev/null", "2>/dev/null", "2>&1"):
@@ -345,12 +344,14 @@ def test_implementing_pytest_permission_story_is_decided_and_relative():
     matches while the shell's cwd is the worktree. OC-1: phrased runner-agnostically
     (no literal `.claude/settings.json`/`Bash(...)` allowedTools syntax -- that's
     Claude Code-specific and this file also runs under a non-claude runner)."""
-    for path in (_commands_path("implementing"), _skills_path("implementing")):
+    for path in (_commands_path("implementing"), _skills_path("implementing"),
+                 REPO_ROOT / "CLAUDE.md"):
         text = path.read_text()
-        assert "cwd-anchored" in text
-        assert "relative* prefix `.venv/bin/`" in text
-        assert "_worker_cwd" in text
         assert ".claude/settings.json" not in text
+        if path.name == "CLAUDE.md":
+            assert "cwd-anchored" in text
+            assert "relative* prefix `.venv/bin/`" in text
+            assert "_worker_cwd" in text
         assert not re.search(r"\S/\.venv/bin/", text), \
             f"{path}: an absolute .venv/bin/ path snuck back in"
 
@@ -1264,8 +1265,9 @@ def test_generated_doc_conflict_rule():
         text = path.read_text()
         assert "Conflicted generated file" in text, path
         assert "resolve every other conflicted file first" in text, path
-        assert ".venv/bin/python -m maestro.diagram" in text, path
-        assert "docs/dispatch-gates.md" in text and "docs/state-machine.md" in text, path
+    claude = (REPO_ROOT / "CLAUDE.md").read_text()
+    assert ".venv/bin/python -m maestro.diagram" in claude
+    assert "docs/dispatch-gates.md" in claude and "docs/state-machine.md" in claude
 
 
 def test_triage_checks_inflight_overlap():
@@ -1295,18 +1297,16 @@ def test_skill_points_new_tests_at_feature_files():
     skill = (REPO_ROOT / ".claude" / "commands"
              / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
     task = (REPO_ROOT / ".claude" / "commands" / "maestro-task.md").read_text(encoding="utf-8")
-    for text in (claude, skill):
-        assert "test_tui_<feature>.py" in text
-        assert "binding sweep" in text
-        assert "test_every_binding_action_resolves" in text
-        assert "extend `tests/test_tui_runtime.py`" not in text
-    assert "tests/test_<feature>.py" in claude and "feature-file rule" in skill.lower()
+    assert "test_tui_<feature>.py" in claude
+    assert "binding sweep" in claude or "binding-sweep" in claude
+    assert "test_every_binding_action_resolves" in claude
+    assert "extend `tests/test_tui_runtime.py`" not in claude + skill
+    assert "tests/test_<feature>.py" in claude
     assert "feature-named" in task
 
 
 def test_skill_states_present_tense_docstring_rule():
-    for path in (_commands_path("implementing"), _skills_path("implementing"),
-                 Path(__file__).resolve().parent.parent / "CLAUDE.md"):
+    for path in (Path(__file__).resolve().parent.parent / "CLAUDE.md",):
         text = " ".join(path.read_text().split())
         assert "present tense" in text, f"{path}: missing the present-tense docstring rule"
         assert "growing set" in text, f"{path}: missing the no-prose-count rule"

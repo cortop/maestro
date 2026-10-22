@@ -153,13 +153,9 @@ continue with `git -C <WT> rebase --continue` (its own, single invocation; never
 `git rebase --abort`).
 
 **Conflicted generated file:** take either side of it, resolve every other conflicted file first,
-then run the repo's generator and `git add` its output — never hand-merge generated text. In this
-repo, `docs/dispatch-gates.md` and `docs/state-machine.md` are generated:
-```bash
-.venv/bin/python -m maestro.diagram
-git -C <WT> add docs/dispatch-gates.md docs/state-machine.md
-```
-Do not run the generator through `make`: `make` is not granted to reconcilers, and a denied call
+then run the repo's generator (the repo's CLAUDE.md/AGENTS.md names it and the generated files)
+and `git add` its output — never hand-merge generated text. Do not run the generator through
+`make`: `make` is not granted to reconcilers, and a denied call
 leaves the worktree mid-merge, which trips the dispatcher's repo_preflight merge-in-progress check.
 
 Before resolving a conflicting hunk, recover the intent on **both** sides — read the commit(s)
@@ -185,7 +181,10 @@ override the QA gates. If you truly cannot reconcile the two intents yourself, e
 and exit.
 
 Otherwise implement the spec's Acceptance criteria:
-1. Read the spec's Intent + AC and the relevant code.
+1. Read the spec's Intent + AC and the relevant code. **Before editing a file, read the
+   `AGENTS.md`/`CLAUDE.md` nearest each directory you edit** (walk up from that directory to the
+   repo root, reading each one you find): not every runner loads a nested one on its own, so a
+   rule that sits next to the code only reaches you if you read it.
    **Scope check (T-149):** `maestro env --key "$KEY"` also reports `allowed_paths` — a glob list
    (`**` crosses directories) of where this repo's diff may go; empty means no restriction. If it
    is non-empty and the change needs a file outside it, `maestro ask "$KEY" "<files> are outside
@@ -236,33 +235,18 @@ Otherwise implement the spec's Acceptance criteria:
 2. **Tests are the proof — QA against the real app, not mocks.** Every change ships with a test
    that exercises the actual surface and shows the feature working end-to-end: drive the real
    `maestro` CLI / a real dispatcher sweep (`dispatch(cfg, DryRunSessions(), ...)`) over a temp
-   home and assert the resulting events/snapshot/output. For the TUI (`tui*.py`) the proof must
-   **mount the real app** (`async with app.run_test() as pilot:`) in a NEW
-   `tests/test_tui_<feature>.py`; only binding-sweep entries (the binding sweep /
-   `test_every_binding_action_resolves`) go in `tests/test_tui_runtime.py`. Feature-file rule:
-   put every new test in a NEW `tests/test_<feature>.py`, never at the end of a big shared
-   test file (`test_dispatcher.py`, `test_repos.py`, `test_health.py`) — unless a spec AC's
-   `test:` annotation already names that path. Mock only the external
+   home and assert the resulting events/snapshot/output. Follow the repo's CLAUDE.md/AGENTS.md
+   for where new tests live and how UI surfaces are exercised. Mock only the external
    `claude -p` / network / `launchctl` boundary — test the real thing under review everywhere
-   else. The Bash tool's cwd is already `<WT>` (the dispatcher spawns this session there), so the
-   test invocation below needs no `cd`. Its dependency tree (including the `tui` extra, so TUI
-   runtime tests run instead of skipping) is already installed — `maestro worktree ensure` (GA-20,
-   the `ready` phase file) ran the repo's declared `prime` once when this worktree was first
-   created, so this step only runs the tests. Run the suite as a single **foreground** Bash call
-   with an explicit timeout of 1800000ms (30 min — the dispatcher exports `BASH_MAX_TIMEOUT_MS`
-   from `[maestro] bash_max_timeout` so the Bash tool accepts it; the stock 600000ms ceiling
-   is too short for this suite) — never `run_in_background`, never
-   `ScheduleWakeup`/`Monitor`, and never a sleep/tail poll loop on a test log:
-   ```bash
-   .venv/bin/python -m pytest -q
-   ```
-   **Pytest's permission story, decided:** `.venv/bin/python` stays cwd-anchored above, never
-   absolutized to an absolute path rooted at `<WT>` — the reconciler's own Bash permission grant
-   matches only the *relative* prefix `.venv/bin/`, which matches the command string solely while the
-   shell's cwd is the worktree, and `dispatcher._worker_cwd`
-   (`maestro/dispatcher.py:1369`) already runs this session with `<WT>` as cwd — so the relative
-   form is both correct and the only one that avoids a permission prompt. Do not "fix" this back
-   to an absolute path.
+   else. The Bash tool's cwd is already `<WT>` (the dispatcher spawns this session there), and
+   the repo's declared `prime` already ran once (`maestro worktree ensure`, GA-20, the `ready`
+   phase file), so this step only runs the tests. Run them exactly as the repo's
+   CLAUDE.md/AGENTS.md says (its test command and any scoping it prescribes), using the relative
+   command it names -- no `cd`, no absolute path rooted at `<WT>`. Run the suite as a single
+   **foreground** Bash call with an explicit timeout of 1800000ms (30 min — the dispatcher
+   exports `BASH_MAX_TIMEOUT_MS` from `[maestro] bash_max_timeout` so the Bash tool accepts it;
+   the stock 600000ms ceiling is too short for a long suite) — never `run_in_background`, never
+   `ScheduleWakeup`/`Monitor`, and never a sleep/tail poll loop on a test log.
    In a Bazel repo (`bzl test`), scope the run to the packages you changed — `//<pkg>/...` or
    the exact `:target`, plus `--test_filter` when you know the test names. Never test the whole
    app tree (`//<app>/...:all`) and never pass `--cache_test_results=no`: both throw away
@@ -273,11 +257,7 @@ Otherwise implement the spec's Acceptance criteria:
    `verifying` stage (once `test_command` is armed) is the place for long runs, not this
    session. If you exceed ~`max_impl_turns` edit/test cycles without converging: `maestro fail
    "$KEY" "non-converging: <why>"` and exit.
-   **Docstrings and comments (house rule):** write them in the present tense, describing what
-   the code does now -- history belongs in the commit or PR body, never appended to a docstring
-   line. Never count or list a growing set in prose ("N ops-owned types"); point at its source
-   of truth instead (e.g. "every name in `health.CHECKS`"). A short `# T-NNN:` tag is fine; don't
-   mass-strip existing tags or reword lines you aren't changing.
+   Follow the repo's CLAUDE.md/AGENTS.md for docstring and comment conventions.
 3. **If step 1 was a fix round, record it now** — the counterpart to the QA fail that sent you
    back, and the thing that bounds the implementing↔qa ping-pong:
    ```bash
