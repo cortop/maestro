@@ -235,7 +235,8 @@ def test_spawn_installs_a_phase_narrowed_guard_data(home):
                  / "extensions" / "pi_guard_data.json")
     data = json.loads(data_path.read_text())
     assert "finalize" not in data["allowed_verbs"]
-    assert "snapshot" in data["allowed_verbs"]
+    assert "snapshot" not in data["allowed_verbs"]
+    assert "qa-brief" in data["allowed_verbs"]
 
 
 def test_spawn_with_no_allowed_tools_falls_back_to_the_full_ceiling(home):
