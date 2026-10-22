@@ -230,6 +230,7 @@ def test_spawn_argv_byte_identical_to_pre_rf1_baseline(home):
         "--permission-mode", "acceptEdits",
         "--disallowedTools", "Bash(gh pr merge:*)",
         "--allowedTools", "Read",
+        "--settings", str(home / ".claude-agent" / "settings.json"),
     ]
 
 

@@ -272,6 +272,13 @@ def pi_agent_dir(home: Path) -> Path:
     return home / ".pi-agent"
 
 
+def claude_agent_dir(home: Path) -> Path:
+    """The maestro-owned dir holding the claude guard's ``--settings`` file and
+    hook scripts (``claude_guard.install``). Regenerated on every claude spawn,
+    so it is excluded from ``maestro backup``."""
+    return home / ".claude-agent"
+
+
 def pi_agent_key_dir(pi_agent_dir: Path, key: str) -> Path:
     """RB-16 fix round: per-KEY isolation for the pi guard's OWN installed
     files (``pi_guard.install``'s ``extensions/`` dir), so a phase-narrowed

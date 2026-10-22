@@ -88,6 +88,7 @@ Guards and budgets:
 - `health.py` — `maestro doctor` checks. `alarm.py` — fleet-wide detection alarm.
 - `burn.py` — per-key burn detection. `spend.py` — daily USD meter + ceiling gate.
 - `ratelimit.py` — account-wide spawn gate from `rate_limit_event`s.
+- `claude_guard.py` — installs/verifies the `--settings` file wiring the PreToolUse guard into every claude spawn.
 - `backup.py` — tarball snapshots/restore. `credentials.py` — per-repo `gh` credentials.
 - `runner_permissions.py` / `pi_guard.py` — destructive-command guard for non-Claude runners.
 

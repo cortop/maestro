@@ -47,6 +47,7 @@ from . import store
 from .config import Config
 from .gates import backend_interlock_reason  # noqa: F401 (re-export)
 from .gates import parse_spec_overrides  # noqa: F401 (re-export)
+from .gates import runner_interlock_reason
 from .gates import spec_priority  # noqa: F401 (re-export)
 from .gates import spec_runner  # noqa: F401 (re-export)
 from .idempotency import content_hash
@@ -4306,6 +4307,14 @@ def _admit_for_spawn(sweep: _Sweep, key: str, binding, active: set[str],
                  actor="dispatcher")
         return None
     runner, runner_model = resolve_runner(cfg, key, sweep.phase.get(key, ""))
+    # T-207: the interlock above reads the configured provider; this one reads
+    # the runner that will actually spawn this phase.
+    runner_reason = runner_interlock_reason(cfg, runner)
+    if runner_reason is not None:
+        _ask_park(cfg, key, runner_reason, qid=f"backend-interlock-{key}",
+                  actor="dispatcher", hook_errors=hook_errors,
+                  decisions=decisions, outcome="backend_interlocked")
+        return None
     if runner != "claude" and not _runner_admits(
             sweep, key, runner, runner_model, active, memo["runners"],
             runner_probe=runner_probe, runner_verdict=runner_verdict):
