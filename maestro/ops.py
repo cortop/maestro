@@ -2557,6 +2557,10 @@ def checked(cfg: Config, key: str, *, actor: str = "reconciler") -> dict | None:
     respawned at all. `Checked` carries no QA/AC/PR state, so it costs
     `fold`/`compact`/`archive` nothing beyond that same linear read+write --
     unlike `Note`, nothing downstream branches on it.
+
+    Dispatcher-owned phases (awaiting-ci, in-review, verifying) are never
+    spawned on an elapsed requeue timer, so a streak of `Checked` events on one
+    key is a bug that `maestro doctor` flags (`health.check_checked_streak`).
     """
     snap = snap_mod.load(cfg.home, key)
     return _append(cfg, key, E.CHECKED, {}, actor=actor,
