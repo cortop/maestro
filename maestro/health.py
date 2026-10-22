@@ -1704,6 +1704,68 @@ def check_worktree_branch(cfg: Config, now: float) -> dict:
             "detached": detached}
 
 
+def _git_out(root: Path, *args: str, timeout: float = 10) -> str | None:
+    """stdout of ``git -C root args`` (stripped), or None when git fails."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _default_branch(root: Path) -> str | None:
+    """The checkout's default branch: ``origin/HEAD`` when set, else ``main`` /
+    ``master`` whichever exists locally."""
+    ref = _git_out(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if ref:
+        return ref.split("/", 1)[-1]
+    for name in ("main", "master"):
+        if _git_out(root, "rev-parse", "--verify", "-q", f"refs/heads/{name}"):
+            return name
+    return None
+
+
+def check_serving_checkout(cfg: Config, now: float) -> dict:
+    """WARN when the git checkout serving the fleet (the one holding the running
+    ``maestro`` package) is dirty, detached or off its default branch, or when a
+    user-scope ``maestro-reconcile-*.md`` command symlink resolves outside it.
+    ``~/.local/bin/maestro`` and those symlinks point into one checkout, so
+    switching its branch changes the live fleet's code and prompts at once.
+    Skipped (ok) when the package is not inside a git checkout."""
+    root = _maestro_self_root()
+    top = _git_out(root, "rev-parse", "--show-toplevel")
+    if top is None or Path(top).resolve() != root.resolve():
+        return {"name": "serving_checkout", "status": "ok",
+                "detail": "maestro package is not in a git checkout; skipped"}
+    root = root.resolve()
+    problems = []
+    branch = _git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
+    default = _default_branch(root)
+    if branch is None:
+        problems.append("HEAD is detached")
+    elif default and branch != default:
+        problems.append(f"on branch {branch!r}, not the default {default!r}")
+    if _git_out(root, "status", "--porcelain"):
+        problems.append("working tree is dirty")
+    cmds = skills_install.user_commands_dir(cfg)
+    outside = []
+    if cmds.is_dir():
+        for link in sorted(cmds.glob("maestro-reconcile-*.md")):
+            if not link.is_symlink():
+                continue
+            target = link.resolve()
+            if root not in target.parents:
+                outside.append(f"{link.name} -> {target}")
+    if outside:
+        problems.append("command symlinks resolve outside the checkout: " + ", ".join(outside))
+    status = "warn" if problems else "ok"
+    detail = (f"{root}: " + "; ".join(problems) if problems
+              else f"{root} is clean on its default branch; command symlinks match")
+    return {"name": "serving_checkout", "status": status, "detail": detail,
+            "problems": problems}
+
+
 def check_home_structure(cfg: Config, now: float) -> dict:
     """FIRST entry in ``CHECKS`` (T-99): ``fail`` when *home* is
     missing/uninitialized (nothing else here can mean anything -- ``report``
@@ -1820,6 +1882,7 @@ CHECKS = (
     check_reconciler_permissions,
     check_repo_preflight,
     check_runner_binary,
+    check_serving_checkout,
     check_spawn_floor,
     check_unknown_repo_bindings,
     check_unresolvable_spec_hints,
