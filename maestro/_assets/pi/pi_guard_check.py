@@ -62,7 +62,10 @@ _DATA_PATH = _HERE / "pi_guard_data.json"
 # `(?:^|[\s;&|])` -- a verb invocation starts a clause or follows a control
 # operator, matching `destructive_command_guard`'s own clause-boundary idiom.
 # `(?:\S*/)?maestro` -- bare or path-qualified (`.venv/bin/maestro foo`).
-_MAESTRO_VERB_RE = re.compile(r"(?:^|[\s;&|])(?:\S*/)?maestro\s+([\w-]+)")
+_MAESTRO_RE = re.compile(r"(?:^|[\s;&|])(?:\S*/)?maestro(?=\s|$)")
+_VERB_TOKEN_RE = re.compile(r"[A-Za-z][\w-]*$")
+# Global flags that consume the following token as their value.
+_VALUE_FLAGS = frozenset({"--home"})
 _GIT_WORKTREE_REMOVE_RE = re.compile(r"\bgit\s+worktree\s+remove\b")
 
 
@@ -76,11 +79,24 @@ def _load_data() -> dict:
 def _verb_reason(command: str, allowed_verbs) -> str | None:
     allowed = set(allowed_verbs)
     for clause in core._CLAUSE_SPLIT_RE.split(command):
-        for m in _MAESTRO_VERB_RE.finditer(clause):
-            verb = m.group(1)
-            if verb not in allowed:
+        for m in _MAESTRO_RE.finditer(clause):
+            verb = _verb_after(clause[m.end():])
+            if verb is not None and verb not in allowed:
                 return (f"{clause.strip()!r} invokes maestro verb {verb!r}, which is not in "
-                        "the reconciler's allowed verb set (dispatcher.AGENT_TOOL_VERBS)")
+                        "the reconciler's allowed verb set (dispatcher.AGENT_TOOL_VERBS). "
+                        f"Allowed verbs: {', '.join(sorted(allowed))}")
+    return None
+
+
+def _verb_after(rest: str) -> str | None:
+    """The verb token following `maestro`, skipping flags (and a value-taking
+    flag's value); None when there is no verb-shaped token (`--help`, `2>/dev/null`)."""
+    tokens = rest.split()
+    i = 0
+    while i < len(tokens) and tokens[i].startswith("-"):
+        i += 2 if tokens[i] in _VALUE_FLAGS else 1
+    if i < len(tokens) and _VERB_TOKEN_RE.match(tokens[i]):
+        return tokens[i]
     return None
 
 
