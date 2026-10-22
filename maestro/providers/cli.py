@@ -65,6 +65,26 @@ _TRANSIENT_MARKERS = (
 _RUN_ID_RE = re.compile(r"/actions/runs/(\d+)")
 
 
+_FAILING_CONCLUSIONS = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"}
+
+
+def _check_name(c: dict) -> str:
+    return c.get("name") or c.get("context") or "check"
+
+
+def _check_conclusion(c: dict) -> str:
+    return (c.get("conclusion") or c.get("state") or "").upper()
+
+
+def _failing_rollup_checks(checks: list[dict]) -> list[dict]:
+    """The rollup entries that read as failing: a CANCELLED run is dropped when a
+    same-named run in the same rollup (one head) concluded SUCCESS."""
+    succeeded = {_check_name(c) for c in checks if _check_conclusion(c) == "SUCCESS"}
+    return [c for c in checks
+            if _check_conclusion(c) in _FAILING_CONCLUSIONS
+            and not (_check_conclusion(c) == "CANCELLED" and _check_name(c) in succeeded)]
+
+
 def classify_gh_failure(rc: int, stdout: str, stderr: str) -> str:
     """Classify a failed `gh` invocation into "auth" | "not_found" | "transient"
     | "unknown", from stderr TEXT -- real `gh` exits 1 for auth failures,
@@ -146,12 +166,15 @@ class GitHubCliVCS:
         data = json.loads(out)
         checks = data.get("statusCheckRollup") or []
         failing, pending = [], False
+        failing_ids = {id(c) for c in _failing_rollup_checks(checks)}
         for c in checks:
-            name = c.get("name") or c.get("context") or "check"
-            conclusion = (c.get("conclusion") or c.get("state") or "").upper()
+            name = _check_name(c)
+            conclusion = _check_conclusion(c)
             status = (c.get("status") or "").upper()
-            if conclusion in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"}:
+            if id(c) in failing_ids:
                 failing.append(name)
+            elif conclusion in _FAILING_CONCLUSIONS:
+                continue  # a cancelled twin of a passing run
             elif not conclusion and status in {"IN_PROGRESS", "QUEUED", "PENDING"}:
                 pending = True
             elif conclusion == "PENDING":
@@ -298,10 +321,7 @@ class GitHubCliVCS:
             # CiRerunRequested for a SHA nothing actually reran.
             return {"ok": False}
         run_ids: list[str] = []
-        for c in data.get("statusCheckRollup") or []:
-            conclusion = (c.get("conclusion") or c.get("state") or "").upper()
-            if conclusion not in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"}:
-                continue
+        for c in _failing_rollup_checks(data.get("statusCheckRollup") or []):
             m = _RUN_ID_RE.search(c.get("detailsUrl") or "")
             if m and m.group(1) not in run_ids:
                 run_ids.append(m.group(1))
