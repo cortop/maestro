@@ -196,9 +196,12 @@ def _throttle_from_plist(plist=None, *, home=None) -> int | None:
 
 def config_runner_dirs(cfg) -> list[str]:
     """The runner bin dirs `install.sh` needs, read through config so fleet
-    stays the only module that knows plist shape."""
+    stays the only module that knows plist shape. Includes
+    ``[maestro] launchd_extra_path`` so `install.sh` bakes it too."""
     from . import config as config_mod
-    return config_mod.runner_path_entries(cfg)
+    out = list(config_mod.runner_path_entries(cfg))
+    out += [e for e in config_mod.launchd_extra_path_entries(cfg) if e not in out]
+    return out
 
 
 def plist_env_path(plist=None, *, home=None) -> str | None:
@@ -237,8 +240,7 @@ def launchd_path(cfg=None, *, maestro_bin: str | None = None,
             if parent not in entries:
                 entries.append(parent)
     if cfg is not None:
-        from . import config as config_mod
-        for entry in config_mod.runner_path_entries(cfg):
+        for entry in config_runner_dirs(cfg):
             if entry not in entries:
                 entries.append(entry)
     for system in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"):

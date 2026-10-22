@@ -348,6 +348,7 @@ def test_claude_cli_sessions_spawn_env_byte_identical_when_no_overlay(home):
     ceiling_ms = str(config_mod.load(home).bash_max_timeout * 1000)
     expected["BASH_MAX_TIMEOUT_MS"] = ceiling_ms
     expected["BASH_DEFAULT_TIMEOUT_MS"] = ceiling_ms
+    expected["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     assert env == expected
 
     # T-144: `config.scrubbed_env` builds the child env from a COPY of

@@ -12,6 +12,7 @@ import json
 import sys
 import time
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 from . import backup
@@ -25,6 +26,7 @@ from . import fleet
 from . import health
 from . import inbox
 from . import ops
+from . import outcomes
 from . import projection
 from . import ratelimit
 from . import repos as repos_mod
@@ -1091,6 +1093,12 @@ def cmd_scorecard(args) -> int:
     consecutive-agreement streak against them. Read-only: never appends an
     event."""
     cfg = _cfg(args)
+    if args.kind == "tickets":
+        cutoff = datetime.fromisoformat(args.cutoff) if args.cutoff else None
+        if cutoff is not None and cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        _print(outcomes.scorecard(cfg, cutoff=cutoff))
+        return 0
     rows = decision_labels.regenerate(cfg.home)
     out = {"rows": len(rows), "by_label": decision_labels.label_counts(rows),
            "path": str(decision_labels.answers_path(cfg.home))}
@@ -1627,9 +1635,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=int, default=20, help="how many recent sweep decisions to show")
 
     sp = add("scorecard", cmd_scorecard,
-             "regenerate + print the answer->route label scorecard (derived/labels/answers.jsonl)")
-    sp.add_argument("kind", choices=["answers"], nargs="?", default="answers",
-                    help="only 'answers' is supported today")
+             "print the answer->route label scorecard, or `tickets` outcomes per repo and month")
+    sp.add_argument("kind", choices=["answers", "tickets"], nargs="?", default="answers",
+                    help="'answers' (label scorecard) or 'tickets' (per-repo/month outcomes)")
+    sp.add_argument("--cutoff", default=None,
+                    help="tickets only: fold the logs as of this ISO timestamp (UTC if naive)")
 
     sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
     sp.add_argument("--clear", action="store_true", help="remove any active pause")
