@@ -1534,15 +1534,20 @@ def _recent_fleet_outcomes(home: Path, keys: list[str], scan: int) -> list[dict]
     return outcomes
 
 
-def _provider_probe_host(fmt: str | None, provider: str | None) -> str:
+def _provider_probe_host(fmt: str | None, provider: str | None,
+                         pi_probe_host: str | None = None) -> str | None:
     """Resolve the confirmation-probe host (AC7) for the runner/provider that
     produced the tripped error streak. A Claude ``stream-json`` session is
     always Anthropic; a pi session's own log records which provider it
     actually talked to (``_PI_PROVIDER_HOSTS``) -- anything unrecognized (no
-    streak yet, or a provider pi supports that this table doesn't) falls back
-    to the historical Anthropic default."""
-    if fmt == "pi" and provider in _PI_PROVIDER_HOSTS:
-        return _PI_PROVIDER_HOSTS[provider]
+    streak yet) falls back to the historical Anthropic default. A pi session
+    probes ``[runner.pi] probe_host`` when set, else its provider's table
+    entry; a pi provider with neither resolves to ``None`` (unprobed), never
+    to an unrelated host."""
+    if fmt == "pi":
+        if pi_probe_host:
+            return pi_probe_host
+        return _PI_PROVIDER_HOSTS.get(provider) if provider else None
     return _PROVIDER_PROBE_HOST
 
 
@@ -1674,7 +1679,16 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
                            f"({reason}) -- this machine appears offline"),
                 "error_streak": 0}
 
-    host = _provider_probe_host(streak_fmt, streak_provider)
+    pi_table = (cfg.raw or {}).get("runner", {}).get("pi", {})
+    host = _provider_probe_host(streak_fmt, streak_provider, pi_table.get("probe_host"))
+    if host is None:
+        return {
+            "name": "provider_availability", "status": "warn", "state": "unprobed",
+            "detail": (f"{streak} consecutive session(s) ended in a provider error; "
+                       f"pi provider {streak_provider or 'unknown'!r} has no known host -- "
+                       f"set [runner.pi] probe_host to enable the reachability probe"),
+            "error_streak": streak,
+        }
     reachable, reason = _cached_probe(
         home, host, now, cfg.provider_probe_interval_s, probe or _default_provider_probe)
     if reachable:

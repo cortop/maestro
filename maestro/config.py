@@ -593,6 +593,7 @@ _RUNNER_PI_KEYS = frozenset({
     "headers",
     "models",
     "phases",
+    "probe_host",
     "provider",
     "version",
 })
@@ -1195,6 +1196,11 @@ def load(home_arg: str | None = None) -> Config:
                     raise store.MaestroError(
                         "config.toml: [runner.pi.headers] must be a table of "
                         "string->string pairs")
+                raw_probe_host = raw_pi_table.get("probe_host")
+                if raw_probe_host is not None and (
+                        not isinstance(raw_probe_host, str) or not raw_probe_host.strip()):
+                    raise store.MaestroError(
+                        "config.toml: [runner.pi] probe_host must be a non-empty string")
             for _rname, _rtable in raw_runner_table.items():
                 if isinstance(_rtable, dict):
                     _validate_runner_bin(_rname, _rtable.get("bin"))
@@ -1762,6 +1768,9 @@ implementer = "claude_skill"
 # source = "maestro"
 # org-id = "your-org-id"
 #
+# probe_host = "llm-gateway.example.com"  # host `maestro doctor`'s provider-availability probe
+                                     # connects to for pi sessions; unset = the provider's built-in
+                                     # host, and an unmapped provider is reported unprobed
 # version = "0.79.2"                # pinned installed `pi --version`; health.check_pi_version
                                      # WARNs when the real binary drifts from this
 # concurrency = 1                   # PI-8: cap on concurrently-running pi reconcilers -- default
