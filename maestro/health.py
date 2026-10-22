@@ -1950,6 +1950,31 @@ def check_holds(cfg: Config, now: float) -> dict:
             "held": held}
 
 
+# Consecutive latest sweeps a hook must error on before `check_hook_errors` warns.
+_HOOK_ERROR_STREAK = 12
+
+
+def check_hook_errors(cfg: Config, now: float) -> dict:
+    """WARN, naming the hook and its error, when a dispatcher hook recorded an
+    error in each of the last ``_HOOK_ERROR_STREAK`` sweeps of
+    `derived/dispatch.jsonl`. Silent when the ledger is missing, holds fewer
+    sweeps than the streak, or the hook was clean in any of them."""
+    records = store.read_jsonl(dispatcher.dispatch_ledger_path(cfg.home))[-_HOOK_ERROR_STREAK:]
+    persistent = {}
+    if len(records) >= _HOOK_ERROR_STREAK:
+        errors = [rec.get("hook_errors") or {} for rec in records]
+        for hook in sorted(set.intersection(*(set(e) for e in errors))):
+            persistent[hook] = errors[-1][hook]
+    if not persistent:
+        return {"name": "hook_errors", "status": "ok",
+                "detail": "no dispatcher hook has errored on every recent sweep",
+                "hooks": {}}
+    return {"name": "hook_errors", "status": "warn",
+            "detail": (f"errored on each of the last {_HOOK_ERROR_STREAK} sweeps: "
+                       + "; ".join(f"{h}: {persistent[h]}" for h in persistent)),
+            "hooks": persistent}
+
+
 # The check registry: cmd_doctor/report() run every entry and surface the
 # results under "checks", in addition to the existing top-level fields kept
 # for backward compatibility with the TUI fleet view and prior doctor output.
@@ -1974,6 +1999,7 @@ CHECKS = (
     check_gh_credential_reachability,
     check_heartbeat,
     check_holds,
+    check_hook_errors,
     check_language_binding,
     check_launchctl,
     check_missing_acs,
