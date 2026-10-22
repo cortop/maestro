@@ -1855,8 +1855,11 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                        snap=snap, binding=binding, vcs=vcs, env=(cred.env if cred.ok else None),
                        now=now)
             if cred.ok:
-                _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env,
-                                 snap=snap)
+                # T-203: a key `_observe_ci` just routed away is not re-routed on review
+                # feedback in the same sweep; the feedback is observed once it is polled again.
+                if _still_polled(cfg, key):
+                    _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug,
+                                     env=cred.env, snap=snap)
                 _maybe_undraft(cfg, key, status, vcs, repo_slug=repo_slug,
                                pr_number=snap.pr_number, env=cred.env)
 
@@ -1884,8 +1887,9 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                     _observe_ci(cfg, key, other_status, phase, repo_slug=repo_slug,
                                pr_number=other_pr, snap=snap, binding=binding, vcs=vcs,
                                env=cred.env, now=now)
-                    _observe_reviews(cfg, key, other_pr, vcs, repo=repo_slug, env=cred.env,
-                                     snap=snap)
+                    if _still_polled(cfg, key):
+                        _observe_reviews(cfg, key, other_pr, vcs, repo=repo_slug,
+                                         env=cred.env, snap=snap)
                     _observe_stack_entry_draft(cfg, key, entry, other_status)
                     _maybe_undraft_stack_entry(cfg, key, entry, other_status, vcs,
                                                repo_slug=repo_slug, env=cred.env,
@@ -1904,6 +1908,11 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     cursor[vcs_name] = now
     store.write_json(cursor_path, cursor)
     return {"checked": checked, "worktree_removal_errors": worktree_removal_errors}
+
+
+def _still_polled(cfg: Config, key: str) -> bool:
+    """True iff *key* is still in a phase `sync_vcs` polls (nothing routed it this sweep)."""
+    return Phase(snap_mod.load(cfg.home, key).phase) in (Phase.AWAITING_CI, Phase.IN_REVIEW)
 
 
 def _route_if_merged(cfg: Config, key: str, status: dict,
