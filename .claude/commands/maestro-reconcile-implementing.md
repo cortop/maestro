@@ -97,6 +97,12 @@ here because `check-conflicts` found the PR `CONFLICTING` (snapshot `reason` say
 a drifted-behind-base worktree was auto-rerouted here (snapshot `reason` says
 `origin/<BASE> advanced (policy=...)`).
 
+**On a review-feedback round, sync with base only when needed.** A review reason alone
+(`changes requested:`, `review comment:`, `approved with comments:`) is not a reason to sync:
+every rebase or merge plus push restarts CI and invites another review round. Run this step only
+when the PR is `CONFLICTING` or the drift policy requires a sync (snapshot `reason` says
+`origin/<BASE> advanced (policy=...)`); otherwise skip it and go straight to the feedback.
+
 **If `STACK_TOOL == gt`:** `gt sync` incorporates both the PR branch's own remote state and any
 moved trunk in one step — gt tracks each branch's parent directly, so there is no separate
 `git fetch`/`--ff-only` merge to run first:
@@ -204,7 +210,12 @@ Otherwise implement the spec's Acceptance criteria:
    verbatim comment text is right there in the reason): this is
    a **review-feedback round**, a third case alongside the `qa` fix round and a fresh
    implementation. Evaluate the comment on its merits — address it with a real code change where
-   it's warranted, or, if no change is warranted, say why. Reply only to an **inline** comment
+   it's warranted, or, if no change is warranted, say why.
+   **Non-blocking AI-reviewer suggestions are optional.** When the comment comes from an automated
+   AI reviewer and is a non-blocking suggestion (a nit, a style preference, a lower-priority
+   idea), you may decline it: record the reason, push nothing, and go straight to
+   `set-phase awaiting-ci`. Never decline this way a `changes requested:` review or any comment
+   written by a human — act on those. Reply only to an **inline** comment
    (`comment_id` of the form `inline-<id>`) that asked for something, and only when you addressed
    it or explicitly declined it with a reason — in its own thread, through `maestro reply-review`
    (T-128, T-148), never an improvised new top-level `gh` comment:
