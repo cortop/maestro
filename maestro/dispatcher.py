@@ -2018,7 +2018,16 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
     ev = event_log.append(cfg.home, key, E.CI_OBSERVED, payload,
                           actor="dispatcher", step_id=sid)
     if ev is None:
-        return  # unchanged since the last poll — nothing to route
+        # T-202: a duplicate passing observation still routes a key that is
+        # back in awaiting-ci without a push; every other duplicate is a no-op.
+        if (ci_state == "passing" and not error and phase == Phase.AWAITING_CI
+                and (not stack or snap is None or pr_number == snap.pr_number)):
+            cur = snap_mod.load(cfg.home, key)
+            if cur.phase == Phase.AWAITING_CI.value:
+                from . import ops
+                ops.set_phase(cfg, key, Phase.IN_REVIEW, reason="CI passing", actor="dispatcher",
+                              expect=cur.observed_seq)
+        return
     fresh = snap_mod.rebuild(cfg.home, key)
     from . import ops
     if error in ("auth", "not_found"):
