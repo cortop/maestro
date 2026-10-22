@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}maestro{% endblock %}</title>
+<link rel="stylesheet" href="/static/maestro.css">
+<script src="/static/htmx.min.js"></script>
+<script src="/static/htmx-ext-sse.js"></script>
+</head>
+<body hx-ext="sse" sse-connect="/stream">
+<header>
+  <a href="/"><strong>maestro</strong></a>
+  <span id="home" class="dim">{{ home }}</span>
+</header>
+<main>{% block body %}{% endblock %}</main>
+</body>
+</html>

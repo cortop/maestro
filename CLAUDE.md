@@ -24,7 +24,7 @@ below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on 
 
 - Python ≥ 3.11, **stdlib-only core** (no runtime deps — `tomllib`, `fcntl`, `dataclasses`,
   `argparse`; `tests/test_import_graph.py` enforces it). Optional extras: `dev` (pytest,
-  pytest-xdist, hypothesis, ruff), `tui` (textual). Keep the core dependency-free.
+  pytest-xdist, hypothesis, ruff), `tui` (textual), `web` (fastapi, jinja2, uvicorn). Keep the core dependency-free.
 - `make install` — editable install of `.[dev,tui]` + symlink `maestro` onto PATH.
 - `make test` — full suite in parallel (~30s). **Run before finishing.**
   `make t F=tests/test_x.py K=expr` — targeted run, stops at first failure.
@@ -108,6 +108,8 @@ Supporting:
 - `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).
 - `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, why, fleet)
   shared by the TUI and the web UI; the TUI wraps them in Rich, the web UI in HTML.
+- `web/` — `maestro web`: FastAPI + Jinja2 + htmx server-rendered UI with `/stream` SSE
+  (`web` extra; core never imports it, `tests/test_import_graph.py` enforces it).
 - `tui/` — Textual TUI (`maestro tui`, `tui` extra). Import only via `maestro.tui`; new
   screens go in `screens.py`, new modals in `modals.py`.
 

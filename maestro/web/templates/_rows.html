@@ -1,0 +1,10 @@
+{% for r in view.rows %}
+<tr class="row" data-key="{{ r.key }}">
+  <td><a href="/t/{{ r.key }}">{% if r.held %}⏸ {% endif %}{{ r.key }}</a></td>
+  <td class="phase-{{ r.phase }}">{{ r.phase }}</td>
+  <td>{{ r.title }}</td>
+  <td>{{ r.pr }}</td>
+  <td>{{ r.ci }}</td>
+  <td>{{ r.fails }}</td>
+</tr>
+{% endfor %}
