@@ -81,6 +81,14 @@ def _cursor_path(home: Path) -> Path:
     return home / "derived" / ".spend_cursor.json"
 
 
+def _usage_tokens(usage) -> int:
+    """Total tokens in a pi ``message.usage`` block (input + output + cache)."""
+    if not isinstance(usage, dict):
+        return 0
+    return sum(int(v) for k in ("input", "output", "cacheRead", "cacheWrite")
+               if isinstance(v := usage.get(k), (int, float)) and not isinstance(v, bool))
+
+
 def probe(cfg: Config, now: float) -> dict:
     """One sweep's worth of spend folding. Reads only bytes appended since the
     last sweep from every spawn-ledger key's stream-json/pi session logs
@@ -102,26 +110,25 @@ def probe(cfg: Config, now: float) -> dict:
     state_path = _state_path(home)
 
     if cfg.session_log_format != "stream-json":
-        state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0,
-                 "unavailable": True}
+        state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0, "unavailable": True}
         store.write_json(state_path, state)
         return state
 
     raw = store.read_json(state_path, None)
     if raw is None:
-        state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0,
-                 "unavailable": False}
+        state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0, "unavailable": False}
     else:
         state = raw  # may raise below if this is garbage -- see docstring
         if state.get("date") != today:
             # Only the daily buckets reset here -- which logs are already
             # settled lives in the cursor file instead (see below), precisely
             # so a day change never re-flags an already-drained log.
-            state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0,
-                     "unavailable": False}
+            state = {"date": today, "total_usd": 0.0, "unattributed_sessions": 0, "unavailable": False}
 
     total = float(state.get("total_usd", 0.0) or 0.0)
     unattributed = int(state.get("unattributed_sessions", 0) or 0)
+    unpriced_sessions = int(state.get("unpriced_sessions", 0) or 0)
+    unpriced_tokens = int(state.get("unpriced_tokens", 0) or 0)
 
     # Lazy: dispatcher imports us at module load time, so importing dispatcher
     # back at our own module level would be a load-time cycle (mirrors
@@ -150,10 +157,14 @@ def probe(cfg: Config, now: float) -> dict:
                 continue
             entry = cursor.get(log_id)
             migrated_legacy = False
+            pi_cost, pi_tokens, unpriced_seen = 0.0, 0, 0
             if isinstance(entry, dict):
                 start = entry.get("pos", 0)
                 counted = float(entry.get("counted", 0.0) or 0.0)
                 log_settled = bool(entry.get("settled", False))
+                pi_cost = float(entry.get("pi_cost", 0.0) or 0.0)
+                pi_tokens = int(entry.get("pi_tokens", 0) or 0)
+                unpriced_seen = int(entry.get("unpriced_tokens", 0) or 0)
             elif entry is not None:
                 # Pre-upgrade cursor: a bare byte offset, no per-log memory of
                 # cost already counted or settledness yet.
@@ -168,6 +179,7 @@ def probe(cfg: Config, now: float) -> dict:
             if not isinstance(start, (int, float)) or start > size:
                 start = 0
                 counted = 0.0
+                pi_cost, pi_tokens, unpriced_seen = 0.0, 0, 0
                 log_settled = False
                 migrated_legacy = False
             if migrated_legacy and start >= size:
@@ -206,6 +218,17 @@ def probe(cfg: Config, now: float) -> dict:
                             cost = ((msg.get("usage") or {}).get("cost") or {}).get("total")
                             if isinstance(cost, (int, float)):
                                 total += float(cost)
+                                pi_cost += float(cost)
+                            pi_tokens += _usage_tokens(msg.get("usage"))
+            # T-194: a pi session that used tokens but reported no positive
+            # cost (a model with no `cost` table) is counted as unpriced, never
+            # folded in as $0 spend; only the tokens beyond what was already
+            # flagged are added so a re-probe of a growing log never double counts.
+            if fmt == "pi" and pi_cost <= 0 and pi_tokens > unpriced_seen:
+                if unpriced_seen == 0:
+                    unpriced_sessions += 1
+                unpriced_tokens += pi_tokens - unpriced_seen
+                unpriced_seen = pi_tokens
             # Trap: a session SIGTERM'd by run_watchdog mid-stream may never
             # write its terminal marker (`result` for stream-json, `agent_end`
             # for pi), so its cost would otherwise silently count as zero. Once
@@ -220,6 +243,9 @@ def probe(cfg: Config, now: float) -> dict:
                     unattributed += 1
                     log_settled = True
             new_entry = {"pos": pos, "counted": round(counted, 6), "settled": log_settled}
+            if fmt == "pi":
+                new_entry.update(pi_cost=round(pi_cost, 6), pi_tokens=pi_tokens,
+                                 unpriced_tokens=unpriced_seen)
             if new_entry != entry:
                 cursor[log_id] = new_entry
                 cursor_changed = True
@@ -241,6 +267,9 @@ def probe(cfg: Config, now: float) -> dict:
         "unattributed_sessions": unattributed,
         "unavailable": False,
     }
+    if unpriced_sessions or unpriced_tokens:  # absent when zero: stream-json-only state stays byte-identical
+        state["unpriced_sessions"] = unpriced_sessions
+        state["unpriced_tokens"] = unpriced_tokens
     store.write_json(state_path, state)
     return state
 
@@ -262,6 +291,8 @@ def status(cfg: Config, now: float) -> dict:
         "ceiling_usd": cfg.daily_spend_ceiling_usd,
         "unavailable": cfg.session_log_format != "stream-json",
         "unattributed_sessions": 0,
+        "unpriced_sessions": 0,
+        "unpriced_tokens": 0,
     }
     if result["unavailable"]:
         return result
@@ -271,6 +302,9 @@ def status(cfg: Config, now: float) -> dict:
         result["today_usd"] = round(float(total), 2) if isinstance(total, (int, float)) else 0.0
         unattributed = state.get("unattributed_sessions", 0)
         result["unattributed_sessions"] = unattributed if isinstance(unattributed, int) else 0
+        for field in ("unpriced_sessions", "unpriced_tokens"):
+            value = state.get(field, 0)
+            result[field] = value if isinstance(value, int) else 0
     else:
         result["today_usd"] = 0.0
     return result
