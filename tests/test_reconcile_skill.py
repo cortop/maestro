@@ -1220,13 +1220,13 @@ def test_implementing_qa_handoffs_carry_no_leftover_requeue():
     """T-136 AC3: the qa hand-off's `--requeue 300` was a leftover from RF-7's
     CI-poll delay (qa has nothing external to wait on) -- the spawn-floor
     hand-off exemption is what lets the next sweep spawn qa immediately
-    instead. The awaiting-ci CI-poll delays are real and must stay."""
+    instead. The awaiting-ci hand-offs carry none either: the dispatcher polls CI itself."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         assert "qa --requeue" not in text, \
             f'{path}: a set-phase ... qa hand-off still carries a leftover --requeue'
-        assert text.count("awaiting-ci --requeue 300") == 2, \
-            f'{path}: expected the two real CI-poll awaiting-ci --requeue 300 lines to remain'
+        assert "awaiting-ci --requeue" not in text, \
+            f'{path}: an awaiting-ci hand-off still arms a requeue timer'
 
 
 # ---------------------------------------------------------------------------

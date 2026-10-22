@@ -535,6 +535,11 @@ RECONCILER_LITERAL_COVERAGE: dict[str, tuple[str, ...]] = {
 }
 
 
+# Sleeping phases whose progress the dispatcher drives itself; an elapsed requeue timer
+# never wakes them (awaiting-human and degraded still wake on one).
+DISPATCHER_OWNED_PHASES = frozenset({Phase.AWAITING_CI, Phase.IN_REVIEW, Phase.VERIFYING})
+
+
 def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool,
            current_spec_hash: str | None, now: float,
            blocked_dep: bool = False) -> DueResult:
@@ -557,19 +562,19 @@ def is_due(home: Path, key: str, snap: snap_mod.Snapshot, *, inbox_pending: bool
     if phase == Phase.READY and blocked_dep:
         return DueResult(False, "blocked-dep")
     # A pending requeue timer holds the ticket in EVERY non-terminal phase, not only
-    # the sleeping ones. This check used to live inside the SLEEPING_PHASES branch,
-    # so a reconciler that asked to sleep from an *active* phase (`maestro requeue`,
-    # which is exactly what the in-review handler does) was ignored and the ticket
-    # came back due on the very next sweep — the 2026-07-19 runaway, 21,731 no-op
-    # sessions with 5,522 discarded RequeueScheduled events behind them.
+    # the sleeping ones: a reconciler that asked to sleep from an *active* phase
+    # (`maestro requeue`) must be obeyed, or it comes back due on the very next sweep
+    # (the 2026-07-19 runaway, 21,731 no-op sessions).
     if snap.next_requeue_at is not None:
         if snap.next_requeue_at > now:
             return DueResult(False, "backoff")
-        return DueResult(True, "timer")
-    # No timer pending. A sleeping phase waits for a signal; anything else has work.
-    # NOTE: in-review deliberately stays active-when-untimed — nothing else on main
-    # polls a PR, so a null timer must not strand the ticket forever. The spawn-rate
-    # floor in dispatch() is what bounds it.
+        # An elapsed timer wakes a phase only when a reconciler has work there. The
+        # dispatcher itself advances these three (`sync_vcs`, `sync_test_runs`), so a
+        # spawned reconciler would only run `checked` and exit.
+        if phase not in DISPATCHER_OWNED_PHASES:
+            return DueResult(True, "timer")
+    # No timer pending (or an elapsed one on a dispatcher-owned phase). A sleeping
+    # phase waits for a signal; anything else has work.
     if phase in SLEEPING_PHASES:
         return DueResult(False, "sleeping")
     # RB-9: this used to be an unconditional `return DueResult(True, "active")` --

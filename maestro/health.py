@@ -477,6 +477,38 @@ def check_watchdog_loops(cfg: Config, now: float) -> dict:
     return {"name": "watchdog_loops", "status": status, "detail": detail, "counts": counts}
 
 
+CHECKED_STREAK_THRESHOLD = 12
+CHECKED_STREAK_WINDOW_S = 24 * 3600
+
+
+def check_checked_streak(cfg: Config, now: float) -> dict:
+    """WARN when a key logged `CHECKED_STREAK_THRESHOLD` or more ``Checked``
+    events inside the last `CHECKED_STREAK_WINDOW_S` -- a reconciler is being
+    spawned only to find nothing to do, the no-op loop the dispatcher-owned
+    sleeping phases exist to prevent."""
+    from datetime import datetime
+
+    home = cfg.home
+    counts: dict[str, int] = {}
+    for key in dispatcher.list_keys(home):
+        n = 0
+        for e in event_log.read(home, key):
+            if e.get("type") != "Checked":
+                continue
+            try:
+                ts = datetime.fromisoformat(str(e.get("ts"))).timestamp()
+            except ValueError:
+                continue
+            if now - ts <= CHECKED_STREAK_WINDOW_S:
+                n += 1
+        if n >= CHECKED_STREAK_THRESHOLD:
+            counts[key] = n
+    status = "warn" if counts else "ok"
+    detail = (f"{len(counts)} ticket(s) with {CHECKED_STREAK_THRESHOLD}+ Checked events in 24h"
+              if counts else "none")
+    return {"name": "checked_streak", "status": status, "detail": detail, "counts": counts}
+
+
 def check_repo_preflight(cfg: Config, now: float) -> dict:
     """Live per-repo preflight (MR-5) across every repo referenced by any
     current ticket, plus the implicit default -- what a human sees in
@@ -1800,6 +1832,7 @@ CHECKS = (
     check_ac_annotation_parse,
     check_backup_age,
     check_burn,
+    check_checked_streak,
     check_claim_age,
     check_claim_no_output,
     check_daily_spend,

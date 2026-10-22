@@ -313,11 +313,11 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    - **Fix round**: `maestro set-phase "$KEY" qa` (a PR already open already has its
      `PrOpened` event — do not append another).
-   - **Review-feedback round**: `maestro set-phase "$KEY" awaiting-ci --requeue 300` instead of
+   - **Review-feedback round**: `maestro set-phase "$KEY" awaiting-ci` instead of
      `qa` — a human is already reviewing this PR directly on GitHub, so this hands back to
      CI/that review rather than an internal re-review; push the commit first if you made a code
      change, or skip the push entirely if this round only recorded a Note.
-   - **Conflict-only pass**: `maestro set-phase "$KEY" awaiting-ci --requeue 300` (see step 0).
+   - **Conflict-only pass**: `maestro set-phase "$KEY" awaiting-ci` (see step 0).
 
    **If this is a split-decision round** (step 1's fourth case): there is nothing new to commit —
    the commit above is a no-op — no PR exists yet at this point either, so act on the verbatim

@@ -110,13 +110,13 @@ def test_stranded_awaiting_human_is_due(home, cfg):
     assert "T-1" in report.spawned
 
 
-def test_requeue_timer_wakes_awaiting_ci(home, cfg):
+def test_requeue_timer_does_not_wake_awaiting_ci(home, cfg):
     seed_phase(home, "T-1", Phase.AWAITING_CI)
     ops.requeue(cfg, "T-1", 100)
     snap = snap_mod.load(home, "T-1")
     base = snap.next_requeue_at
     assert not disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base - 1).due
-    assert disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base + 1).due
+    assert not disp.is_due(home, "T-1", snap, inbox_pending=False, current_spec_hash=snap.spec_hash, now=base + 1).due
 
 
 # --- runaway regression (2026-07-19): a requeue must hold an ACTIVE phase too -----
@@ -156,7 +156,10 @@ def test_requeue_timer_holds_any_non_terminal_phase(home, cfg, phase):
 
     woke = disp.is_due(home, "T-1", snap, inbox_pending=False,
                        current_spec_hash=snap.spec_hash, now=base + 1)
-    assert woke.due and woke.reason == "timer"
+    if phase in disp.DISPATCHER_OWNED_PHASES:
+        assert not woke.due and woke.reason == "sleeping"
+    else:
+        assert woke.due and woke.reason == "timer"
 
 
 def test_dispatch_does_not_respawn_in_review_ticket_under_its_requeue(home, cfg):
@@ -173,7 +176,7 @@ def test_dispatch_does_not_respawn_in_review_ticket_under_its_requeue(home, cfg)
     assert sessions.spawned == []
 
     report = disp.dispatch(cfg, sessions, now=base + 1)
-    assert report.spawned == ["T-1"]
+    assert report.spawned == []
 
 
 # --- OC-7 (T-65): degraded is a sleeping phase, not an active one -----------------

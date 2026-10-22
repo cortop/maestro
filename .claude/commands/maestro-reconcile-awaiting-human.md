@@ -90,7 +90,7 @@ maestro finalize "$KEY"
 If `answered_questions` AND `open_questions` are **both empty**, you were woken as `stranded`
 (a phase set to `awaiting-human` with nothing to wait on — the dispatcher wakes these so they
 can't sleep forever). Recover by re-deriving the phase so this step still makes progress: if
-`pr_number` is set → `maestro set-phase "$KEY" awaiting-ci --requeue 60`, otherwise
+`pr_number` is set → `maestro set-phase "$KEY" awaiting-ci`, otherwise
 `maestro set-phase "$KEY" triaging --reason "stranded recovery"`.
 
 **Done when:** exactly one `set-phase`/`finalize` path above has appended its event (conflict
