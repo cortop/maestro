@@ -1372,6 +1372,19 @@ def cmd_tui(args) -> int:
     return tui_main(args)
 
 
+def cmd_web(args) -> int:
+    try:
+        from .web.app import main as web_main
+    except ImportError:
+        print(
+            "the web UI dependencies are not installed. Install them with:\n"
+            "  pip install 'maestro-orchestrator[web]'",
+            file=sys.stderr,
+        )
+        return 2
+    return web_main(args)
+
+
 def cmd_prune_logs(args) -> int:
     """[human] delete stale session logs per retention settings (--dry-run to preview)."""
     cfg = _cfg(args)
@@ -1875,6 +1888,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--log", default=None, help="path to a specific stream.jsonl (default: current claim log)")
 
     add("tui", cmd_tui, "launch the interactive TUI (requires [tui] extra)")
+
+    sp = add("web", cmd_web, "serve the read-only web UI (requires [web] extra)")
+    sp.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
+    sp.add_argument("--port", type=int, default=8765, help="bind port (default 8765)")
     return p
 
 
