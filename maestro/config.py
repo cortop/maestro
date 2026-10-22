@@ -426,6 +426,10 @@ class Config:
 
     # --- env & security ---
     branch_prefix: str = "maestro/"        # branch name prefix for ticket worktrees
+    # T-205: extra directories appended to the LaunchAgent PATH (`~` expands) -- where
+    # node, rg and other tools bound repos use live when they are not on the system dirs.
+    # Read by `fleet.launchd_path`, so every `maestro fleet up` regenerates them.
+    launchd_extra_path: list = field(default_factory=list)
     # GA-20: `prime` fallback for the implicit default binding (repos.implicit_default) --
     # lets a single-repo home with no [repos.*] table at all (e.g. this project's own
     # dogfood home) declare a dependency-install command without adopting the multi-repo
@@ -688,6 +692,16 @@ def runner_path_entries(cfg: "Config") -> list[str]:
         parent = str(Path(resolved).parent)
         if parent and parent not in out:
             out.append(parent)
+    return out
+
+
+def launchd_extra_path_entries(cfg: "Config") -> list[str]:
+    """``[maestro] launchd_extra_path`` with ``~`` expanded, blanks and duplicates dropped."""
+    out: list[str] = []
+    for raw in cfg.launchd_extra_path:
+        entry = str(Path(raw.strip()).expanduser()) if raw.strip() else ""
+        if entry and entry not in out:
+            out.append(entry)
     return out
 
 
@@ -1010,6 +1024,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("user_settings_path", _str),
     # --- env & security ---
     Knob("branch_prefix", _str),
+    Knob("launchd_extra_path", _string_list),
     Knob("prime", _opt_str),
     Knob("repo_path", _str),
     Knob("repo_preflight", _bool),
@@ -1520,6 +1535,8 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
 
 # --- env & security ---
 # branch_prefix = "maestro/"   # branch name prefix for ticket worktrees
+# launchd_extra_path = ["~/.volta/bin"]   # T-205: extra dirs on the LaunchAgent PATH (node, rg, ...);
+                                  # re-applied on every `maestro fleet up`
 # prime = "python3 -m venv .venv && .venv/bin/pip install -q -e '.[dev,tui]'"
                                   # dependency-install command for the implicit default binding
                                   # (no [repos.*] table at all -- see [repos.<name>] prime below
