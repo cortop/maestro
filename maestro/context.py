@@ -34,6 +34,9 @@ MAX_CI_OBSERVATIONS = 10
 MAX_IMPL_STEPS = 15
 MAX_LOCATE_HINTS = 15
 MAX_PRIOR_EDIT_FILES = 15
+# T-195: per-item cap on third-party free text (phase reasons, CI excerpts), well
+# above the observed p90 so ordinary items render whole.
+MAX_ITEM_CHARS = 8000
 
 
 def _tail(items: list, cap: int) -> tuple[list, int]:
@@ -41,6 +44,20 @@ def _tail(items: list, cap: int) -> tuple[list, int]:
     if len(items) <= cap:
         return items, 0
     return items[-cap:], len(items) - cap
+
+
+def _fence(text: str, key: str, indent: str = "  ") -> list[str]:
+    """Cap *text* at `MAX_ITEM_CHARS` and fence it with a backtick run longer than
+    any run inside it, so its markdown cannot become dossier structure."""
+    if len(text) > MAX_ITEM_CHARS:
+        text = (text[:MAX_ITEM_CHARS]
+                + f"\n[truncated {len(text) - MAX_ITEM_CHARS} chars; full text: maestro events {key}]")
+    longest = run = 0
+    for ch in text:
+        run = run + 1 if ch == "`" else 0
+        longest = max(longest, run)
+    fence = "`" * max(3, longest + 1)
+    return [f"{indent}{fence}", *(f"{indent}{ln}" for ln in text.split("\n")), f"{indent}{fence}"]
 
 
 def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str, str],
@@ -83,7 +100,9 @@ def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str
     if dropped:
         lines.append(f"_({dropped} earlier phase change(s) omitted)_")
     for ts, phase, reason in shown:
-        lines.append(f"- {ts} → **{phase}**" + (f": {reason}" if reason else ""))
+        lines.append(f"- {ts} → **{phase}**" + (":" if reason else ""))
+        if reason:
+            lines.extend(_fence(reason, key))
     if not phase_changes:
         lines.append("_none_")
     lines.append("")
@@ -117,7 +136,7 @@ def render(key: str, title: str | None, events: list[dict], dep_phases: dict[str
     for ts, state, excerpt in shown:
         lines.append(f"- {ts}: {state}")
         if excerpt:
-            lines.append(f"  ```\n  {excerpt}\n  ```")
+            lines.extend(_fence(excerpt, key))
     if not ci_observed:
         lines.append("_none_")
     lines.append("")
