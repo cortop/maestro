@@ -8,12 +8,15 @@ from tui_support import _make_app
 
 from maestro.tui.screens import ActivityScreen
 from maestro.tui.screens import AcScreen
+from maestro.tui.screens import BackupsScreen
 from maestro.tui.screens import DecisionsScreen
 from maestro.tui.screens import DepsScreen
 from maestro.tui.screens import EnvScreen
+from maestro.tui.screens import EventsScreen
 from maestro.tui.screens import FleetScreen
 from maestro.tui.screens import InboxScreen
 from maestro.tui.screens import LogsScreen
+from maestro.tui.screens import ProposalScreen
 from maestro.tui.screens import ReviewScreen
 from maestro.tui.screens import ScheduleScreen
 from maestro.tui.screens import SessionsScreen
@@ -87,3 +90,45 @@ def test_different_screens_still_stack_one_escape_each(seeded_home):
         await pilot.pause()
         assert app.screen is board
     _run(seeded_home, body)
+
+
+# (keys leading to the opener screen, key that opens screen_type from there, screen it opens)
+NESTED_KEYS = [
+    (["F"], "b", BackupsScreen),
+    (["enter"], "v", EventsScreen),
+    (["enter"], "p", ProposalScreen),
+]
+
+
+@pytest.mark.parametrize("path,key,screen_type", NESTED_KEYS)
+def test_repeat_nested_key_pushes_nothing(seeded_home, path, key, screen_type):
+    for d in (seeded_home / "tickets").iterdir():
+        (d / "proposal.md").write_text("# Proposal\n\n## Recommendation\nship it\n")
+
+    async def body(app, pilot):
+        board = app.screen
+        for k in path:
+            await pilot.press(k)
+            await pilot.pause()
+        opener = app.screen
+        base = len(app.screen_stack)
+        await pilot.press(key)
+        await pilot.pause()
+        assert isinstance(app.screen, screen_type)
+        assert len(app.screen_stack) == base + 1
+        # the opener's own action fires again on the top screen: still nothing pushed
+        app.push_screen(type(app.screen)(*_ctor_args(app.screen)))
+        await pilot.pause()
+        assert len(app.screen_stack) == base + 1
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is opener
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is board
+    _run(seeded_home, body)
+
+
+def _ctor_args(screen):
+    key = getattr(screen, "_key", None)
+    return (screen._home,) if key is None else (screen._home, key)
