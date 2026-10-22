@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from rich.text import Text
 
+from ..view.fleet import sparkline as _sparkline
 from .. import config as config_mod
 from ..statemachine import Phase
 
@@ -295,17 +296,6 @@ def _dep_label(graph, key: str, palette: dict, in_cycle: bool = False) -> Text:
     if node.missing:
         out.append(f" missing: {', '.join(node.missing)}", style="red")
     return out
-
-
-_SPARK = "▁▂▃▄▅▆▇█"
-
-
-def _sparkline(values: list[int]) -> str:
-    top = max(values, default=0)
-    if top <= 0:
-        return _SPARK[0] * len(values)
-    return "".join(_SPARK[min(len(_SPARK) - 1, round(v / top * (len(_SPARK) - 1)))]
-                   for v in values)
 
 
 def _render_pulse(p: dict) -> str:

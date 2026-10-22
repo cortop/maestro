@@ -39,6 +39,7 @@ Every `decisions[key]["outcome"]` a sweep can assign -- via either `decisions[ke
 | `repo_capped` | `dispatcher._admit_for_spawn` |
 | `backend_interlocked` | `dispatcher._admit_for_spawn` |
 | `credential_unresolvable` | `dispatcher._admit_for_spawn` |
+| `backend_interlocked` | `dispatcher._admit_for_spawn` |
 | `runner_unregistered` | `dispatcher._runner_admits` |
 | `runner_disabled` | `dispatcher._runner_admits` |
 | `runner_binary_missing` | `dispatcher._runner_admits` |

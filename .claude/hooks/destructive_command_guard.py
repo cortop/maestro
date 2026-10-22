@@ -240,6 +240,19 @@ def _is_protected(
     return False
 
 
+_QUOTED_RE = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+
+
+def _mask_quoted(clause: str) -> str:
+    """Blank every character inside a matched quote pair so a `>` in quoted text
+    (e.g. a `sed 's/=.*/=<set>/'` program) is not read as a redirect. A clause
+    with an unbalanced quote is returned unmasked (fail-closed)."""
+    masked = _QUOTED_RE.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], clause)
+    if "'" in _QUOTED_RE.sub("", clause).replace('"', "") or '"' in _QUOTED_RE.sub("", clause):
+        return clause
+    return masked
+
+
 def _redirect_targets(clause: str) -> list[str]:
     """Extract destination path(s) following a truncating redirect. A quoted
     target that strips down to nothing (e.g. a bare closing quote right after
@@ -250,7 +263,8 @@ def _redirect_targets(clause: str) -> list[str]:
     normalizes to the filesystem root, itself trivially an ancestor of every
     board root -- a false block on text with no redirect in it at all."""
     targets = []
-    for m in _REDIRECT_RE.finditer(clause):
+    masked = _mask_quoted(clause)
+    for m in _REDIRECT_RE.finditer(masked):
         rest = clause[m.end():].strip()
         if not rest:
             continue

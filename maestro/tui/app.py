@@ -37,21 +37,19 @@ from .. import gates
 from .. import health
 from .. import inbox
 from .. import ops as ops_mod
-from .. import ratelimit
 from .. import snapshot as snap_mod
-from .. import spend as spend_mod
 from .. import store
 from ..config import Config
 from ..dispatcher import existing_prefixes
 from ..dispatcher import spec_runner
 from ..projection import _PHASE_RANK
 from ..projection import parse_query
-from ..projection import phase_predicate
 from ..projection import ticket_rows
 from ..sessions import build_routing_sessions
 from ..sessions import reap_children
-from ..statemachine import ACTIVE_PHASES
 from ..statemachine import Phase
+from ..view import board as board_view
+from ..view import fleet as fleet_view
 from . import worktree_open
 from .commands import ActionProvider
 from .commands import TicketProvider
@@ -102,14 +100,11 @@ from .screens import WhyScreen
 from .screens import edit_in_editor
 from .screens import toggle_fleet_pause
 
-_NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
-_NEEDS_YOU_PHASE_VALUES = {p.value for p in _NEEDS_YOU_PHASES}
+_NEEDS_YOU_PHASES = board_view.NEEDS_YOU_PHASES
+_NEEDS_YOU_PHASE_VALUES = board_view.NEEDS_YOU_PHASE_VALUES
 
 
-def _needs_you_predicate(home: Path, s: snap_mod.Snapshot) -> bool:
-    """The needs-you filter: the two sleeping-and-stuck phases."""
-    del home
-    return s.phase in _NEEDS_YOU_PHASE_VALUES
+_needs_you_predicate = board_view.needs_you
 
 
 def _running_placeholder(home: Path, s: snap_mod.Snapshot) -> bool:
@@ -128,9 +123,9 @@ _SORT_COLUMNS = ("Key", "Phase", "Title", "PR", "CI", "Fails", "Deps", "Idle")
 _NUMERIC_SORT = frozenset({"Fails", "Deps", "PR", "Idle"})
 _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
     ("needs-you", _needs_you_predicate),
-    ("active", phase_predicate(ACTIVE_PHASES)),
-    ("review", phase_predicate(frozenset({Phase.AWAITING_CI, Phase.IN_REVIEW}))),
-    ("held", lambda home, s: fleet_mod.hold_state(home, s.key, store.now_epoch()) is not None),
+    ("active", dict(board_view.FILTERS)["active"]),
+    ("review", dict(board_view.FILTERS)["review"]),
+    ("held", board_view.held),
     ("running", _running_placeholder),
     ("all", None),
 ]
@@ -657,22 +652,7 @@ class MaestroTUI(App):
                 cfg = config_mod.load(str(self._home))
             except Exception:
                 return {"error": True}
-            now = store.now_epoch()
-            rate = health.spawn_rate(self._home, now)
-            budget = health.spawn_budget(cfg)
-            hb = store.read_json(store.heartbeat_path(self._home), {})
-            rl = ratelimit.status(self._home, now)
-            return {
-                "buckets": health.pulse_buckets(self._home, now),
-                "spawns": rate["total"],
-                "by_key": rate["by_key"],
-                "budget": budget,
-                "runaway": bool(budget) and rate["total"] > budget,
-                "spend": spend_mod.status(cfg, now),
-                "warn_fractions": list(cfg.alarm_spend_warn_fractions),
-                "heartbeat": hb if isinstance(hb, dict) else {},
-                "paused_until": rl.get("paused_until") if rl.get("paused") else None,
-            }
+            return fleet_view.pulse(self._home, cfg)
         self.run_worker(_load, thread=True, group="pulse", exclusive=True, name="pulse")
 
     def _refresh_badge(self) -> None:

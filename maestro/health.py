@@ -1278,6 +1278,26 @@ def check_runner_binary(cfg: Config, now: float, *, which=None, plist=None) -> d
     return {"name": "runner_binary", "status": status, "detail": detail, "tickets": tickets}
 
 
+def check_launchd_tools(cfg: Config, now: float, *, plist=None, tools=("node", "rg")) -> dict:
+    """WARN when ``node`` or ``rg`` does not resolve on the installed LaunchAgent's
+    PATH -- the environment runner sessions inherit, which can differ from the
+    shell that typed ``maestro doctor``. Silent (``ok``) when both resolve, or
+    when no plist is installed (no daemon to diverge from)."""
+    daemon_path = fleet.plist_env_path(plist, home=cfg.home)
+    if daemon_path is None:
+        return {"name": "launchd_tools", "status": "ok",
+                "detail": "no LaunchAgent PATH to check", "missing": []}
+    missing = [t for t in tools if shutil.which(t, path=daemon_path) is None]
+    if not missing:
+        return {"name": "launchd_tools", "status": "ok",
+                "detail": f"{', '.join(tools)} resolve on the LaunchAgent PATH", "missing": []}
+    return {"name": "launchd_tools", "status": "warn",
+            "detail": (f"{', '.join(missing)} not found on the LaunchAgent PATH; add their "
+                       f"dirs to `launchd_extra_path` in config.toml and re-run "
+                       f"`maestro fleet up`"),
+            "missing": missing}
+
+
 def check_pi_version(cfg: Config, now: float, *, run=None) -> dict:
     """WARN (never blocks a spawn) when the installed ``pi --version`` drifts
     from the pinned ``[runner.pi].version`` (T-56) -- pi has no equivalent of
@@ -1534,15 +1554,20 @@ def _recent_fleet_outcomes(home: Path, keys: list[str], scan: int) -> list[dict]
     return outcomes
 
 
-def _provider_probe_host(fmt: str | None, provider: str | None) -> str:
+def _provider_probe_host(fmt: str | None, provider: str | None,
+                         pi_probe_host: str | None = None) -> str | None:
     """Resolve the confirmation-probe host (AC7) for the runner/provider that
     produced the tripped error streak. A Claude ``stream-json`` session is
     always Anthropic; a pi session's own log records which provider it
     actually talked to (``_PI_PROVIDER_HOSTS``) -- anything unrecognized (no
-    streak yet, or a provider pi supports that this table doesn't) falls back
-    to the historical Anthropic default."""
-    if fmt == "pi" and provider in _PI_PROVIDER_HOSTS:
-        return _PI_PROVIDER_HOSTS[provider]
+    streak yet) falls back to the historical Anthropic default. A pi session
+    probes ``[runner.pi] probe_host`` when set, else its provider's table
+    entry; a pi provider with neither resolves to ``None`` (unprobed), never
+    to an unrelated host."""
+    if fmt == "pi":
+        if pi_probe_host:
+            return pi_probe_host
+        return _PI_PROVIDER_HOSTS.get(provider) if provider else None
     return _PROVIDER_PROBE_HOST
 
 
@@ -1674,7 +1699,16 @@ def check_provider_availability(cfg: Config, now: float, *, probe=None) -> dict:
                            f"({reason}) -- this machine appears offline"),
                 "error_streak": 0}
 
-    host = _provider_probe_host(streak_fmt, streak_provider)
+    pi_table = (cfg.raw or {}).get("runner", {}).get("pi", {})
+    host = _provider_probe_host(streak_fmt, streak_provider, pi_table.get("probe_host"))
+    if host is None:
+        return {
+            "name": "provider_availability", "status": "warn", "state": "unprobed",
+            "detail": (f"{streak} consecutive session(s) ended in a provider error; "
+                       f"pi provider {streak_provider or 'unknown'!r} has no known host -- "
+                       f"set [runner.pi] probe_host to enable the reachability probe"),
+            "error_streak": streak,
+        }
     reachable, reason = _cached_probe(
         home, host, now, cfg.provider_probe_interval_s, probe or _default_provider_probe)
     if reachable:
@@ -2002,6 +2036,7 @@ CHECKS = (
     check_hook_errors,
     check_language_binding,
     check_launchctl,
+    check_launchd_tools,
     check_missing_acs,
     check_missing_reconcile_skill,
     check_ollama_models,
@@ -2026,7 +2061,7 @@ CHECKS = (
 
 # The checks that take a `plist=` override: both need the INSTALLED LaunchAgent
 # rather than the invoking shell -- one for its sweep interval, one for its PATH.
-_PLIST_AWARE_CHECKS = (check_heartbeat, check_runner_binary)
+_PLIST_AWARE_CHECKS = (check_heartbeat, check_launchd_tools, check_runner_binary)
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:

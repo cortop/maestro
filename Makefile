@@ -31,7 +31,7 @@ help:
 
 .PHONY: install
 install:
-	$(PY) -m pip -q install -e ".[dev,tui]"
+	$(PY) -m pip -q install -e ".[dev,tui,web]"
 	mkdir -p $(HOME)/.local/bin && ln -sf $(PWD)/.venv/bin/maestro $(HOME)/.local/bin/maestro
 	@echo "maestro -> $$(command -v maestro)"
 

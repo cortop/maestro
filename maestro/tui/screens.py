@@ -59,6 +59,7 @@ from ..dispatcher import schedule_status
 from ..dispatcher import spec_runner
 from ..sessions import list_sessions
 from ..statemachine import Phase
+from ..view import ticket as ticket_view
 from . import checks as checks_mod
 from . import why as why_mod
 from . import worktree_open
@@ -2486,7 +2487,7 @@ class AcScreen(Screen):
         except Exception as exc:  # noqa: BLE001
             self.query_one("#ac-summary", Static).update(f"snapshot unavailable: {exc}")
             return
-        self._rows = ops.ac_evidence_rows(snap, spec, self._tree_key)
+        self._rows = ticket_view.ac_matrix(self._home, self._key, snap, spec, self._tree_key)
         npass = sum(1 for r in self._rows if (r["qa_spec"] or {}).get("verdict") == "pass")
         nfail = sum(1 for r in self._rows if (r["qa_spec"] or {}).get("verdict") == "fail")
         total = len(self._rows)

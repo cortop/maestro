@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}maestro board{% endblock %}
+{% block body %}
+<nav id="filters" hx-get="/?filter={{ view.filter }}" hx-trigger="sse:board" hx-select="#filters" hx-target="#filters" hx-swap="outerHTML">
+  {% for f in filters %}
+  <a href="/?filter={{ f }}"{% if f == view.filter %} class="active"{% endif %}>{{ f }}({{ view.counts[f] }})</a>
+  {% endfor %}
+  <span id="needs-you-count" class="needs-you">needs you: {{ view.needs_you }}</span>
+</nav>
+<table id="board">
+  <thead><tr><th>Key</th><th>Phase</th><th>Title</th><th>PR</th><th>CI</th><th>Fails</th></tr></thead>
+  <tbody id="rows" hx-get="/board/rows?filter={{ view.filter }}" hx-trigger="sse:board" hx-swap="innerHTML">
+    {% include "_rows.html" %}
+  </tbody>
+</table>
+{% endblock %}

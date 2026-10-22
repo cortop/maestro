@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ t.key }}{% endblock %}
+{% block body %}
+<section id="detail" hx-get="/t/{{ t.key }}" hx-trigger="sse:ticket:{{ t.key }}" hx-select="#detail" hx-target="#detail" hx-swap="outerHTML">
+  <h1>{{ t.key }} — {{ t.title }}</h1>
+  <p>Phase <strong>{{ t.phase }}</strong>{% if t.snap.pr_url %} · PR <a href="{{ t.snap.pr_url }}">#{{ t.snap.pr_number }}</a>{% endif %}
+     · CI {{ t.snap.ci_state or "—" }} · failures {{ t.snap.failure_count }}</p>
+  <h2>Phase dwell</h2>
+  <p id="dwell">{% for s in t.dwell %}{% if not loop.first %} ▸ {% endif %}<span class="{{ 'forced' if s.forced }}">{{ s.phase }} {{ s.seconds | dur }}{% if s.current %} (now){% endif %}</span>{% else %}—{% endfor %}</p>
+  <h2>Acceptance criteria</h2>
+  <table id="ac-matrix">
+    <thead><tr><th>#</th><th>AC</th><th>Self</th><th>QA-spec</th><th>QA-std</th></tr></thead>
+    <tbody>
+    {% for a in t.acs %}
+    <tr><td>{{ a.index }}</td><td>{{ a.text }}</td>
+      <td>{{ "yes" if a.self else "—" }}</td>
+      <td>{{ (a.qa_spec or {}).get("verdict", "—") }}</td>
+      <td>{{ (a.qa_std or {}).get("verdict", "—") }}</td></tr>
+    {% else %}<tr><td colspan="5">no acceptance criteria</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+<h2>Spec</h2>
+<pre id="spec">{{ t.spec }}</pre>
+{% if t.proposal %}<h2>Proposal</h2><pre id="proposal">{{ t.proposal }}</pre>{% endif %}
+<h2>Events</h2>
+<table id="events"><tbody id="event-rows" hx-get="/t/{{ t.key }}/events" hx-trigger="sse:ticket:{{ t.key }}" hx-swap="innerHTML">
+  {% include "_events.html" %}
+</tbody></table>
+{% endblock %}

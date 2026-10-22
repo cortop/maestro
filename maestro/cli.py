@@ -12,6 +12,7 @@ import json
 import sys
 import time
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 from . import backup
@@ -25,6 +26,7 @@ from . import fleet
 from . import health
 from . import inbox
 from . import ops
+from . import outcomes
 from . import projection
 from . import ratelimit
 from . import repos as repos_mod
@@ -1092,6 +1094,16 @@ def cmd_scorecard(args) -> int:
     consecutive-agreement streak against them. Read-only: never appends an
     event."""
     cfg = _cfg(args)
+    if args.kind == "tickets":
+        cutoff = datetime.fromisoformat(args.cutoff) if args.cutoff else None
+        if cutoff is not None and cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        _print(outcomes.scorecard(cfg, cutoff=cutoff))
+        return 0
+    if args.kind == "friction":
+        from . import friction
+        _print(friction.scorecard(cfg))
+        return 0
     rows = decision_labels.regenerate(cfg.home)
     out = {"rows": len(rows), "by_label": decision_labels.label_counts(rows),
            "path": str(decision_labels.answers_path(cfg.home))}
@@ -1365,6 +1377,19 @@ def cmd_tui(args) -> int:
     return tui_main(args)
 
 
+def cmd_web(args) -> int:
+    try:
+        from .web.app import main as web_main
+    except ImportError:
+        print(
+            "the web UI dependencies are not installed. Install them with:\n"
+            "  pip install 'maestro-orchestrator[web]'",
+            file=sys.stderr,
+        )
+        return 2
+    return web_main(args)
+
+
 def cmd_prune_logs(args) -> int:
     """[human] delete stale session logs per retention settings (--dry-run to preview)."""
     cfg = _cfg(args)
@@ -1615,9 +1640,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=int, default=20, help="how many recent sweep decisions to show")
 
     sp = add("scorecard", cmd_scorecard,
-             "regenerate + print the answer->route label scorecard (derived/labels/answers.jsonl)")
-    sp.add_argument("kind", choices=["answers"], nargs="?", default="answers",
-                    help="only 'answers' is supported today")
+             "print the answer->route label scorecard, or `tickets` outcomes per repo and month, or `friction` tool failures")
+    sp.add_argument("kind", choices=["answers", "tickets", "friction"], nargs="?", default="answers",
+                    help="'answers' (label scorecard), 'tickets' (per-repo/month outcomes) or "
+                         "'friction' (tool-failure signatures, writes derived/FRICTION.md)")
+    sp.add_argument("--cutoff", default=None,
+                    help="tickets only: fold the logs as of this ISO timestamp (UTC if naive)")
 
     sp = add("ratelimit", cmd_ratelimit, "show/clear the fleet-wide rate-limit pause")
     sp.add_argument("--clear", action="store_true", help="remove any active pause")
@@ -1866,6 +1894,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--log", default=None, help="path to a specific stream.jsonl (default: current claim log)")
 
     add("tui", cmd_tui, "launch the interactive TUI (requires [tui] extra)")
+
+    sp = add("web", cmd_web, "serve the read-only web UI (requires [web] extra)")
+    sp.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
+    sp.add_argument("--port", type=int, default=8765, help="bind port (default 8765)")
     return p
 
 

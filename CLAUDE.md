@@ -24,7 +24,7 @@ below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on 
 
 - Python ≥ 3.11, **stdlib-only core** (no runtime deps — `tomllib`, `fcntl`, `dataclasses`,
   `argparse`; `tests/test_import_graph.py` enforces it). Optional extras: `dev` (pytest,
-  pytest-xdist, hypothesis, ruff), `tui` (textual). Keep the core dependency-free.
+  pytest-xdist, hypothesis, ruff), `tui` (textual), `web` (fastapi, jinja2, uvicorn). Keep the core dependency-free.
 - `make install` — editable install of `.[dev,tui]` + symlink `maestro` onto PATH.
 - `make test` — full suite in parallel (~30s). **Run before finishing.**
   `make t F=tests/test_x.py K=expr` — targeted run, stops at first failure.
@@ -88,6 +88,7 @@ Guards and budgets:
 - `health.py` — `maestro doctor` checks. `alarm.py` — fleet-wide detection alarm.
 - `burn.py` — per-key burn detection. `spend.py` — daily USD meter + ceiling gate.
 - `ratelimit.py` — account-wide spawn gate from `rate_limit_event`s.
+- `claude_guard.py` — installs/verifies the `--settings` file wiring the PreToolUse guard into every claude spawn.
 - `backup.py` — tarball snapshots/restore. `credentials.py` — per-repo `gh` credentials.
 - `runner_permissions.py` / `pi_guard.py` — destructive-command guard for non-Claude runners.
 
@@ -97,6 +98,8 @@ Supporting:
 - `steplog.py` — reads session logs (Claude/opencode/pi) into steps.
 - `projection.py` — snapshots → `derived/*.md` dashboards. `notify.py` — push notifications.
 - `schedule.py` — interval/cron scheduled tasks. `decision_labels.py` — answer → route fold.
+- `outcomes.py` — read-only per-repo/month ticket outcome fold (`maestro scorecard tickets`).
+- `friction.py` — read-only fold of session-log tool-failure signatures (`maestro scorecard friction`).
 - `testlang.py` — per-language test-name extraction and selector formatting.
 - `skills_install.py` — `maestro install-commands` (payload in `maestro/_skill_commands/`).
 - `fleet.py` — launchd LaunchAgent management + pause switch.
@@ -106,6 +109,10 @@ Supporting:
   `decisions[...]["outcome"] = "..."` assignments and a few exact source lines in
   `dispatcher.py` — keep them literal when refactoring.
 - `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).
+- `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, why, fleet)
+  shared by the TUI and the web UI; the TUI wraps them in Rich, the web UI in HTML.
+- `web/` — `maestro web`: FastAPI + Jinja2 + htmx server-rendered UI with `/stream` SSE
+  (`web` extra; core never imports it, `tests/test_import_graph.py` enforces it).
 - `tui/` — Textual TUI (`maestro tui`, `tui` extra). Import only via `maestro.tui`; new
   screens go in `screens.py`, new modals in `modals.py`.
 
@@ -164,6 +171,32 @@ A change isn't done until a test exercises the real surface end-to-end:
 
 Two concurrent tickets that each append a sentence to the same docstring line, or bump the
 same prose count, conflict on that line.
+
+## Reconciler test run and house rules
+
+The implementing skill is repo-neutral and defers to this section for maestro self-dev.
+
+- **Run the suite** as one **foreground** Bash call with an explicit timeout of 1800000ms
+  (30 min; the dispatcher exports `BASH_MAX_TIMEOUT_MS` from `[maestro] bash_max_timeout` so
+  the Bash tool accepts it; the stock 600000ms ceiling is too short for this suite). Never
+  `run_in_background`, never `ScheduleWakeup`/`Monitor`, never a sleep/tail poll loop on a test
+  log. The command, run from the worktree with no `cd`:
+  `.venv/bin/python -m pytest -q`
+- **Permission story:** `.venv/bin/python` stays cwd-anchored, never absolutized to a path
+  rooted at the worktree. The reconciler's Bash grant (`Bash(.venv/bin/:*)`) matches only the
+  *relative* prefix `.venv/bin/`, which matches the command string solely while the shell's cwd
+  is the worktree, and `dispatcher._worker_cwd` already runs the session there. Do not "fix"
+  this to an absolute path.
+- **TUI tests:** the proof must mount the real app (`async with app.run_test() as pilot:`) in a
+  NEW `tests/test_tui_<feature>.py`; only binding-sweep entries
+  (`test_every_binding_action_resolves`) go in `tests/test_tui_runtime.py`. The `tui` extra is
+  already installed by `prime`, so those tests run instead of skipping.
+- **Generated docs in a merge conflict:** `docs/dispatch-gates.md` and `docs/state-machine.md`
+  are generated. Resolve every other file first, then run `.venv/bin/python -m maestro.diagram`
+  and `git add docs/dispatch-gates.md docs/state-machine.md`. Never run it through `make`
+  (not granted to reconcilers; a denied call leaves the worktree mid-merge).
+- **`# T-NNN:` tags:** a short tag is fine; don't mass-strip existing tags or reword lines you
+  aren't changing.
 
 ## Reconciler skills
 

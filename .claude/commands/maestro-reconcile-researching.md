@@ -76,7 +76,7 @@ code.
 2. **Follow every claim back to the source that owns it.** A claim about how a library, API, or
    protocol behaves is only as credible as the primary source that defines that behavior — its
    own docs, source code, RFC/spec, or changelog — not a blog post's secondhand summary of it.
-   Use WebSearch/WebFetch or the `/deep-research` skill to locate those primary sources for
+   Use WebSearch/WebFetch to locate those primary sources for
    state-of-the-art approaches and prior art; the proposal's Sources section (below) cites each
    one with a URL or `file:line`, not a summary of a summary. If web tools are unavailable in
    this session, say so explicitly and fall back to codebase-only research — a `file:line`

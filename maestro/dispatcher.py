@@ -47,6 +47,7 @@ from . import store
 from .config import Config
 from .gates import backend_interlock_reason  # noqa: F401 (re-export)
 from .gates import parse_spec_overrides  # noqa: F401 (re-export)
+from .gates import runner_interlock_reason
 from .gates import spec_priority  # noqa: F401 (re-export)
 from .gates import spec_runner  # noqa: F401 (re-export)
 from .idempotency import content_hash
@@ -1855,8 +1856,11 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                        snap=snap, binding=binding, vcs=vcs, env=(cred.env if cred.ok else None),
                        now=now)
             if cred.ok:
-                _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug, env=cred.env,
-                                 snap=snap)
+                # T-203: a key `_observe_ci` just routed away is not re-routed on review
+                # feedback in the same sweep; the feedback is observed once it is polled again.
+                if _still_polled(cfg, key):
+                    _observe_reviews(cfg, key, snap.pr_number, vcs, repo=repo_slug,
+                                     env=cred.env, snap=snap)
                 _maybe_undraft(cfg, key, status, vcs, repo_slug=repo_slug,
                                pr_number=snap.pr_number, env=cred.env)
 
@@ -1884,8 +1888,9 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                     _observe_ci(cfg, key, other_status, phase, repo_slug=repo_slug,
                                pr_number=other_pr, snap=snap, binding=binding, vcs=vcs,
                                env=cred.env, now=now)
-                    _observe_reviews(cfg, key, other_pr, vcs, repo=repo_slug, env=cred.env,
-                                     snap=snap)
+                    if _still_polled(cfg, key):
+                        _observe_reviews(cfg, key, other_pr, vcs, repo=repo_slug,
+                                         env=cred.env, snap=snap)
                     _observe_stack_entry_draft(cfg, key, entry, other_status)
                     _maybe_undraft_stack_entry(cfg, key, entry, other_status, vcs,
                                                repo_slug=repo_slug, env=cred.env,
@@ -1904,6 +1909,11 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     cursor[vcs_name] = now
     store.write_json(cursor_path, cursor)
     return {"checked": checked, "worktree_removal_errors": worktree_removal_errors}
+
+
+def _still_polled(cfg: Config, key: str) -> bool:
+    """True iff *key* is still in a phase `sync_vcs` polls (nothing routed it this sweep)."""
+    return Phase(snap_mod.load(cfg.home, key).phase) in (Phase.AWAITING_CI, Phase.IN_REVIEW)
 
 
 def _route_if_merged(cfg: Config, key: str, status: dict,
@@ -3382,10 +3392,15 @@ def _allow_spawn(cfg: Config, key: str, observed_seq: int, attempts: dict) -> bo
     if not entry or entry.get("seq") != observed_seq:
         entry = {"seq": observed_seq, "count": 0}
     if entry["count"] >= max_attempts:
+        from . import health
         from . import ops
-        ops.fail(cfg, key,
-                 f"watchdog: {entry['count']} spawns with no progress at seq {observed_seq}",
-                 actor="dispatcher")
+        provider = health.check_provider_availability(cfg, store.now_epoch())
+        reasons = steplog.terminal_reasons(cfg.home, key, entry["count"])
+        text = f"watchdog: {entry['count']} spawns with no progress at seq {observed_seq}"
+        if reasons:
+            text += f" ({reasons})"
+        ops.fail(cfg, key, text, actor="dispatcher",
+                 provider_state=provider["state"] if provider["status"] != "ok" else None)
         attempts.pop(key, None)
         return False
     entry["count"] += 1
@@ -4292,6 +4307,14 @@ def _admit_for_spawn(sweep: _Sweep, key: str, binding, active: set[str],
                  actor="dispatcher")
         return None
     runner, runner_model = resolve_runner(cfg, key, sweep.phase.get(key, ""))
+    # T-207: the interlock above reads the configured provider; this one reads
+    # the runner that will actually spawn this phase.
+    runner_reason = runner_interlock_reason(cfg, runner)
+    if runner_reason is not None:
+        _ask_park(cfg, key, runner_reason, qid=f"backend-interlock-{key}",
+                  actor="dispatcher", hook_errors=hook_errors,
+                  decisions=decisions, outcome="backend_interlocked")
+        return None
     if runner != "claude" and not _runner_admits(
             sweep, key, runner, runner_model, active, memo["runners"],
             runner_probe=runner_probe, runner_verdict=runner_verdict):

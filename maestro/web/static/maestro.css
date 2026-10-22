@@ -1,0 +1,10 @@
+body { font: 14px/1.4 ui-monospace, Menlo, monospace; margin: 0; background: #fafafa; color: #222; }
+header { padding: .5rem 1rem; background: #222; color: #eee; display: flex; gap: 1rem; }
+header a { color: #eee; text-decoration: none; }
+main { padding: 1rem; }
+.dim { opacity: .6; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .2rem .6rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+nav a { margin-right: 1rem; } nav a.active { font-weight: bold; text-decoration: none; }
+.needs-you { color: #b45309; font-weight: bold; }
+.forced { color: #b91c1c; } pre { white-space: pre-wrap; background: #fff; padding: .5rem; }

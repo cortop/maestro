@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import claims, config, pi_guard, store
+from . import claims, claude_guard, config, pi_guard, store
 from .store import generate_pi_models_json
 
 
@@ -295,6 +295,7 @@ class ClaudeCliSessions(_ClaimBackedSessions):
                  capture_session_logs: bool = True,
                  session_log_format: str = "stream-json",
                  max_session_turns: int = 0,
+                 strict_mcp: bool = False,
                  clock: Callable[[], float] | None = None,
                  unverified_claim_max_age: float = claims.DEFAULT_UNVERIFIED_CLAIM_MAX_AGE,
                  claims_run=subprocess.run):
@@ -316,6 +317,7 @@ class ClaudeCliSessions(_ClaimBackedSessions):
         # --allowedTools flag.
         self.base_allowed_tools = base_allowed_tools or []
         self.session_log_format = session_log_format
+        self.strict_mcp = strict_mcp
 
     def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
@@ -367,6 +369,11 @@ class ClaudeCliSessions(_ClaimBackedSessions):
             "extra_args must never carry --allowedTools -- use base_allowed_tools instead"
         if merged_allowed:
             cmd += ["--allowedTools", ",".join(merged_allowed)]
+        if self.strict_mcp:
+            cmd.append("--strict-mcp-config")
+        # T-207: the maestro-owned PreToolUse guard rides every spawn; a missing
+        # or unwired settings file raises here rather than launching unguarded.
+        cmd += ["--settings", str(claude_guard.require(self.home))]
         cmd += self.extra_args
         assert cmd.count("--allowedTools") <= 1, "spawn argv must carry at most one --allowedTools flag"
         # GA-17: this key's resolved gh credential (carried in env_overlay) wins
@@ -375,6 +382,9 @@ class ClaudeCliSessions(_ClaimBackedSessions):
         # RoutingSessions prepared it) rides in -- see that class's spawn()
         # docstring for why it belongs there and not duplicated in each backend.
         env = _spawn_env(self.home, env_overlay)
+        # A reconciler never reads the operator's per-repo auto-memory (an uncurated
+        # cross-ticket channel).
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
 
         log_file: Path | None = None
         if self.capture_session_logs:
@@ -857,6 +867,7 @@ def build_routing_sessions(cfg: config.Config, *, model: str | None = None) -> R
             capture_session_logs=cfg.capture_session_logs,
             session_log_format=cfg.session_log_format,
             max_session_turns=cfg.max_session_turns,
+            strict_mcp=cfg.reconcile_strict_mcp,
             unverified_claim_max_age=cfg.unverified_claim_max_age,
         ),
         "opencode": OpencodeCliSessions(

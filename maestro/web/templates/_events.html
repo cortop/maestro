@@ -1,0 +1,6 @@
+{% for e in page.events %}
+<tr class="event" data-seq="{{ e.seq }}"><td>{{ e.seq }}</td><td>{{ (e.ts or "")[:19] }}</td><td>{{ e.type }}</td><td>{{ e.actor }}</td><td>{{ summary(e) if summary else "" }}</td></tr>
+{% endfor %}
+{% if page.next_before %}
+<tr id="older"><td colspan="5"><a href="#" hx-get="/t/{{ key }}/events?before={{ page.next_before }}" hx-target="#older" hx-swap="outerHTML">older events</a></td></tr>
+{% endif %}
