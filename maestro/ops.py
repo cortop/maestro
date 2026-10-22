@@ -1441,8 +1441,8 @@ def _path_diff(cwd: Path, base: str, rel_path: str) -> str:
     return d.stdout if d.returncode <= 1 else ""
 
 
-def _diff_numstat_total(cwd: Path, base: str) -> int:
-    """Lines changed (additions + deletions) in *cwd*'s committed diff against
+def _diff_numstat_files(cwd: Path, base: str) -> list[int]:
+    """Per-file lines changed (additions + deletions) in *cwd*'s committed diff against
     *base* -- ``git diff --numstat <ref>...HEAD`` (the spec's own literal
     recommendation; the ``...`` form already diffs from the merge-base, same
     anchor `_qa_diff`/`_path_diff` compute by hand). Prefers ``origin/<base>``,
@@ -1463,15 +1463,34 @@ def _diff_numstat_total(cwd: Path, base: str) -> int:
         if proc is not None and proc.returncode == 0:
             break
     if proc is None or proc.returncode != 0:
-        return 0
-    total = 0
+        return []
+    counts: list[int] = []
     for line in proc.stdout.splitlines():
         added, removed = (line.split("\t", 2) + ["", ""])[:2]
         try:
-            total += int(added) + int(removed)
+            counts.append(int(added) + int(removed))
         except ValueError:
             continue  # a binary file renders "-\t-\t<path>" -- not a line count
-    return total
+    return counts
+
+
+# A proposed split entry must be at least this fraction of the largest entry.
+_SPLIT_MIN_RATIO = 3
+
+
+def _split_viable(file_counts: list[int]) -> bool:
+    """True when the files can be grouped into >=2 entries whose smallest is
+    >= 1/`_SPLIT_MIN_RATIO` of the largest. Greedy: for each entry count k,
+    assign files largest-first to the lightest entry and check the ratio. A
+    single file is never viable."""
+    files = sorted((c for c in file_counts if c > 0), reverse=True)
+    for k in range(2, len(files) + 1):
+        bins = [0] * k
+        for c in files:
+            bins[bins.index(min(bins))] += c
+        if min(bins) * _SPLIT_MIN_RATIO >= max(bins):
+            return True
+    return False
 
 
 def pr_size(cfg: Config, key: str) -> dict:
@@ -1490,11 +1509,14 @@ def pr_size(cfg: Config, key: str) -> dict:
     `exceeds` is forced False and `skipped: "pr_open"` is added -- since the
     split-vs-single-PR decision only makes sense before the first PR exists;
     a fix/review/conflict round on an already-open PR must never trigger a
-    split proposal against a PR reviewers are already working."""
+    split proposal against a PR reviewers are already working.
+    `split_viable` is True only when `exceeds` and a balanced file-level
+    split exists (see `_split_viable`)."""
     from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle, mirrors qa_brief
     binding = repos_mod.resolve(cfg, cfg.home, key)
     cwd = _worker_cwd(cfg, key)
-    lines_changed = _diff_numstat_total(cwd, binding.base_branch or "main")
+    file_counts = _diff_numstat_files(cwd, binding.base_branch or "main")
+    lines_changed = sum(file_counts)
     threshold = binding.pr_split_threshold
     tree_key = _tree_state_key(cwd, timeout=binding.worktree_timeout)
     # T-129: once a PR is open (or a split stack has its first entry open),
@@ -1507,13 +1529,16 @@ def pr_size(cfg: Config, key: str) -> dict:
             "lines_changed": lines_changed,
             "threshold": threshold,
             "exceeds": False,
+            "split_viable": False,
             "tree": content_hash(tree_key)[:8],
             "skipped": "pr_open",
         }
+    exceeds = bool(threshold) and lines_changed > threshold
     return {
         "lines_changed": lines_changed,
         "threshold": threshold,
-        "exceeds": bool(threshold) and lines_changed > threshold,
+        "exceeds": exceeds,
+        "split_viable": exceeds and _split_viable(file_counts),
         "tree": content_hash(tree_key)[:8],
     }
 
