@@ -207,12 +207,12 @@ def test_implementing_skill_branches_approved_split_and_conflict_round_on_stack_
     for text in _implementing_skill_texts():
         assert "STACK_TOOL" in text
         # gt path -- conflict round
-        assert "gt -C <WT> sync" in text
-        assert "gt -C <WT> restack" in text
-        assert "gt -C <WT> continue" in text
+        assert "gt --cwd <WT> sync" in text
+        assert "gt --cwd <WT> restack" in text
+        assert "gt --cwd <WT> continue" in text
         # gt path -- approved split
-        assert 'gt -C <WT> create "<PREFIX>$KEY-1"' in text
-        assert "gt -C <WT> submit --stack" in text
+        assert 'gt --cwd <WT> create "<PREFIX>$KEY-1"' in text
+        assert "gt --cwd <WT> submit --stack" in text
         # the git path's own literal commands are still present, word for word
         assert 'git -C <WT> fetch -q origin "<PREFIX>$KEY"' in text
         assert 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"' in text
