@@ -16,6 +16,8 @@ from textual.containers import Horizontal
 from textual.containers import Vertical
 from textual.content import Content
 from textual.css.query import NoMatches
+from textual.screen import ModalScreen
+from textual.screen import Screen
 from textual.widgets import DataTable
 from textual.widgets import Footer
 from textual.widgets import Header
@@ -502,7 +504,19 @@ class MaestroTUI(App):
         except ScreenStackError:
             pass
 
+    def _is_duplicate_screen(self, screen) -> bool:
+        """True when `screen` is a full screen identical (type + ticket) to the top one."""
+        if not isinstance(screen, Screen) or isinstance(screen, ModalScreen):
+            return False
+        try:
+            top = self.screen
+        except ScreenStackError:
+            return False
+        return type(top) is type(screen) and getattr(top, "_key", None) == getattr(screen, "_key", None)
+
     def push_screen(self, *args, **kwargs):
+        if args and self._is_duplicate_screen(args[0]):
+            return None
         result = super().push_screen(*args, **kwargs)
         self.call_after_refresh(self._refresh_bindings)
         return result
