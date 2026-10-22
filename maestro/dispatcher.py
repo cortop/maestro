@@ -3391,10 +3391,15 @@ def _allow_spawn(cfg: Config, key: str, observed_seq: int, attempts: dict) -> bo
     if not entry or entry.get("seq") != observed_seq:
         entry = {"seq": observed_seq, "count": 0}
     if entry["count"] >= max_attempts:
+        from . import health
         from . import ops
-        ops.fail(cfg, key,
-                 f"watchdog: {entry['count']} spawns with no progress at seq {observed_seq}",
-                 actor="dispatcher")
+        provider = health.check_provider_availability(cfg, store.now_epoch())
+        reasons = steplog.terminal_reasons(cfg.home, key, entry["count"])
+        text = f"watchdog: {entry['count']} spawns with no progress at seq {observed_seq}"
+        if reasons:
+            text += f" ({reasons})"
+        ops.fail(cfg, key, text, actor="dispatcher",
+                 provider_state=provider["state"] if provider["status"] != "ok" else None)
         attempts.pop(key, None)
         return False
     entry["count"] += 1

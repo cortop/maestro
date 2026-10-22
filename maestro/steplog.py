@@ -449,6 +449,74 @@ def classify_result(obj: dict) -> dict:
     }
 
 
+# Closed vocabulary of `outcome_class` labels; unmatched error text is
+# `error:unclassified`, never an infra label.
+OUTCOME_CLASSES = (
+    "success", "rate_limited", "running", "crashed", "unknown",
+    "error:econnrefused", "error:enotfound", "error:timeout",
+    "error:auth", "error:server", "error:unclassified",
+)
+
+# (needle in lower-cased text, label): first match wins.
+_ERROR_TEXT_RULES = (
+    ("econnrefused", "error:econnrefused"),
+    ("enotfound", "error:enotfound"),
+    ("etimedout", "error:timeout"),
+    ("timed out", "error:timeout"),
+    ("timeout", "error:timeout"),
+    ("unauthorized", "error:auth"),
+    ("authentication", "error:auth"),
+    ("invalid api key", "error:auth"),
+    ("overloaded", "error:server"),
+    ("internal server error", "error:server"),
+)
+
+
+def outcome_class(outcome: dict) -> str:
+    """Map a ``session_outcome`` dict (Claude or pi log) to one `OUTCOME_CLASSES` label.
+
+    Pure: reads only the dict. A non-error outcome keeps its own name; an error is
+    labelled from its ``api_error_status`` (401/403 auth, 5xx server) or, failing that,
+    the error text; anything unmatched is ``error:unclassified``.
+    """
+    name = outcome.get("outcome")
+    if name in ("success", "rate_limited", "running", "crashed", "unknown"):
+        return name
+    if name != "error":
+        return "error:unclassified"
+    result = outcome.get("result") or {}
+    status = result.get("api_error_status")
+    if isinstance(status, int):
+        if status in (401, 403):
+            return "error:auth"
+        if status >= 500:
+            return "error:server"
+    text = result.get("result") or result.get("tail") or ""
+    if not isinstance(text, str):
+        text = str(text)
+    text = text.lower()
+    for needle, label in _ERROR_TEXT_RULES:
+        if needle in text:
+            return label
+    return "error:unclassified"
+
+
+def terminal_reasons(home: Path, key: str, count: int) -> str:
+    """Summarise the newest *count* terminal sessions of *key* as e.g. ``ECONNREFUSED x5``.
+
+    Sessions still running are skipped; returns ``""`` when none are terminal.
+    """
+    from . import sessions
+    tally: dict[str, int] = {}
+    for sess in sessions.list_sessions(home, key)[:max(0, count)]:
+        label = outcome_class(session_outcome(Path(sess["path"])))
+        if label == "running":
+            continue
+        label = label.rsplit(":", 1)[-1].upper()
+        tally[label] = tally.get(label, 0) + 1
+    return ", ".join(f"{label} x{n}" for label, n in tally.items())
+
+
 def result_summary(records) -> dict:
     """Fold Claude stream-json *records* into the console header's numbers.
 
