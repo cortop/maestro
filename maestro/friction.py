@@ -1,0 +1,163 @@
+"""Read-only fold of session logs into a per-runner/phase tool-failure scorecard (`maestro scorecard friction`).
+
+Counts hand-curated failure signatures in tool result text, so a failure masked
+by a zero exit (`cmd | tail`) still counts. Never imported by the sweep; the only
+write is the rebuildable `derived/FRICTION.md`.
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+from . import event_log, store
+from . import events as E
+from .config import Config
+from .steplog import iter_records
+
+TOOL_END_TYPE = "tool_execution_end"
+_SESSION_RE = re.compile(r"^reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+)\.pi\.jsonl$")
+EXCERPT_MAX = 160
+
+# (id, pattern) -- add a row only for a failure seen repeatedly in real logs.
+SIGNATURES: tuple[tuple[str, re.Pattern], ...] = tuple((sid, re.compile(rx)) for sid, rx in (
+    ("gt-invalid-dash-C", r"(?i)(?:unknown|unrecognized|invalid) (?:option|argument|flag)s?[^\n]{0,20}['\"]?-C\b"),
+    ("command-not-found", r"(?i)command not found"),
+    ("permission-denied", r"(?i)permission denied"),
+    ("no-such-file", r"No such file or directory"),
+    ("edit-text-not-found", r"(?i)could not find the exact text|no match found"),
+))
+
+_SECRET_RES = tuple(re.compile(rx) for rx in (
+    r"gh[pousr]_[A-Za-z0-9]{20,}",
+    r"github_pat_[A-Za-z0-9_]{20,}",
+    r"sk-[A-Za-z0-9_-]{16,}",
+    r"AKIA[0-9A-Z]{16}",
+    r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}",
+    r"(?i)(?:token|secret|password|passwd|api[_-]?key)\s*[=:]\s*\S+",
+))
+
+
+def redact(text: str) -> str:
+    """Replace every secret-looking span in *text* with ``[redacted]``."""
+    for rx in _SECRET_RES:
+        text = rx.sub("[redacted]", text)
+    return text
+
+
+def match_signatures(text: str) -> list[str]:
+    """Ids of every signature found in *text*."""
+    return [sid for sid, rx in SIGNATURES if rx.search(text)]
+
+
+def _result_text(obj: dict) -> str:
+    content = (obj.get("result") or {}).get("content") or []
+    return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+
+
+def _phase_timeline(home: Path, key: str) -> list[tuple[float, str]]:
+    out = []
+    for ev in event_log.read(home, key):
+        if ev.get("type") == E.PHASE_CHANGED:
+            ts = datetime.fromisoformat(ev["ts"]).astimezone(timezone.utc).timestamp()
+            out.append((ts, (ev.get("payload") or {}).get("phase", "")))
+    return sorted(out)
+
+
+def _phase_at(timeline: list[tuple[float, str]], epoch: float) -> str | None:
+    phase = None
+    for ts, ph in timeline:
+        if ts > epoch:
+            break
+        phase = ph
+    return phase
+
+
+def _fold_session(path: Path) -> tuple[int, dict[str, dict]]:
+    calls = 0
+    hits: dict[str, dict] = {}
+    for _off, obj in iter_records(path):
+        if obj.get("type") != TOOL_END_TYPE:
+            continue
+        calls += 1
+        text = _result_text(obj)
+        for sid in match_signatures(text):
+            h = hits.setdefault(sid, {"count": 0, "excerpt": redact(text.strip())[:EXCERPT_MAX]})
+            h["count"] += 1
+    return calls, hits
+
+
+def fold(cfg: Config) -> dict:
+    """Per (runner, phase) sessions, tool calls and signature hits, plus exclusions."""
+    logs = cfg.home / "agent-logs"
+    rows: dict[tuple[str, str], dict] = {}
+    excluded: dict[str, int] = {}
+    timelines: dict[str, list] = {}
+
+    def skip(reason: str) -> None:
+        excluded[reason] = excluded.get(reason, 0) + 1
+
+    for d in sorted(logs.iterdir()) if logs.is_dir() else []:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.iterdir()):
+            m = _SESSION_RE.match(f.name)
+            if not m:
+                if f.name.startswith("reconcile-"):
+                    skip("runner not supported (pi only)")
+                continue
+            key = m.group("key")
+            if key not in timelines:
+                try:
+                    timelines[key] = _phase_timeline(cfg.home, key)
+                except (OSError, ValueError):
+                    timelines[key] = []
+            phase = _phase_at(timelines[key], float(m.group("epoch")))
+            if phase is None:
+                skip("no phase at spawn")
+                continue
+            try:
+                calls, hits = _fold_session(f)
+            except (OSError, ValueError):
+                skip("unreadable log")
+                continue
+            row = rows.setdefault(("pi", phase), {"sessions": 0, "tool_calls": 0, "signatures": {}})
+            row["sessions"] += 1
+            row["tool_calls"] += calls
+            for sid, h in hits.items():
+                s = row["signatures"].setdefault(sid, {"count": 0, "sessions": 0, "excerpt": h["excerpt"]})
+                s["count"] += h["count"]
+                s["sessions"] += 1
+    return {"rows": [{"runner": r, "phase": p, **v} for (r, p), v in sorted(rows.items())],
+            "excluded": dict(sorted(excluded.items()))}
+
+
+def render(data: dict) -> str:
+    lines = ["<!-- GENERATED by maestro scorecard friction -- DO NOT EDIT. -->", "",
+             "# Tool friction", "",
+             "| runner | phase | sessions (n) | tool calls | matched signatures | sessions with a match |",
+             "|---|---|---|---|---|---|"]
+    for r in data["rows"]:
+        matched = sum(s["count"] for s in r["signatures"].values())
+        hit_sessions = max((s["sessions"] for s in r["signatures"].values()), default=0)
+        lines.append(f"| {r['runner']} | {r['phase']} | {r['sessions']} | {r['tool_calls']} | {matched} | {hit_sessions} |")
+    lines += ["", "## Signatures", ""]
+    any_sig = False
+    for r in data["rows"]:
+        for sid, s in sorted(r["signatures"].items()):
+            any_sig = True
+            ex = s["excerpt"].replace("\n", " ").replace("`", "'")
+            lines.append(f"- {r['runner']}/{r['phase']} `{sid}`: {s['count']} in {s['sessions']} sessions -- `{ex}`")
+    if not any_sig:
+        lines.append("_none_")
+    lines += ["", "## Excluded sessions", ""]
+    lines += [f"- {reason}: {n}" for reason, n in data["excluded"].items()] or ["_none_"]
+    return "\n".join(lines) + "\n"
+
+
+def scorecard(cfg: Config) -> dict:
+    """Fold the logs and rewrite `derived/FRICTION.md`; returns the figures plus the path."""
+    data = fold(cfg)
+    path = cfg.home / "derived" / "FRICTION.md"
+    store.atomic_write(path, render(data))
+    return {**data, "path": str(path)}
