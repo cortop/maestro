@@ -375,6 +375,16 @@ def skill_grant(command: str) -> list[str]:
     return [f"Skill({name})"] if name else []
 
 
+def qa_skill_grant(phase: str, binding) -> list[str]:
+    """The ``Skill(<name>)`` ALLOW rule for *binding*'s ``qa_skill``, on a
+    ``qa`` spawn only -- the QA reconcile command invokes it in-session, and
+    an ungranted Skill call is auto-declined in headless ``-p`` (see
+    ``skill_grant``). Every other phase gets nothing."""
+    if phase != Phase.QA.value or binding is None or not binding.qa_skill:
+        return []
+    return skill_grant(binding.qa_skill)
+
+
 def phase_verb_denylist(phase: str) -> list[str]:
     """The ``Bash(maestro <verb>:*)`` DENY rules for every verb `phase_verb_grant`
     does NOT grant *phase* -- the enforcement half of RB-16's narrowing.
@@ -4407,6 +4417,7 @@ def _spawn_due(sweep: _Sweep, sessions: SessionManager, to_spawn: list, active: 
         # narrowed grant -- an allowedTools omission alone is not enough.
         disallowed_tools = MERGE_DENYLIST + phase_denylist(phase) + phase_verb_denylist(phase)
         allowed_tools = (phase_verb_grant(phase) + skill_grant(command)
+                         + qa_skill_grant(phase, binding)
                          + resolved_allowed_tools(cfg, binding))
         # RF-1: command and key go separately; each backend composes its own
         # invocation from them.

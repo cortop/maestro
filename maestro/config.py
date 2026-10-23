@@ -287,6 +287,11 @@ class Config:
     # it anyway). Default ON; OFF reverts to HEAD's behavior (a verdict is honored from any
     # phase) -- see ops.record_qa_verdict.
     qa_phase_gate: bool = True
+    # A slash-command review skill the `qa` reconcile step runs on the diff before judging
+    # the ACs; its blocking findings fail ACs (see skills/maestro-reconcile-qa.md). A
+    # `[repos.<name>] qa_skill` override wins, same precedence as `post_qa_skill`. None
+    # (default) runs nothing. Validated like `post_qa_skill` (`_validate_skill_name`).
+    qa_skill: str | None = None
     # T-23: gate a second, parallel QA sub-agent in the `qa` reconcile step that checks
     # CLAUDE.md conventions + a Fowler-smell baseline (the "standards" axis) alongside the
     # existing AD-4 "spec" axis (does the diff satisfy the AC?) -- RF-7 moved this axis here
@@ -774,13 +779,14 @@ def scrubbed_env(cfg: "Config", base_env: dict | None = None) -> dict:
     return env
 
 
-# T-115: the shape a `post_qa_skill` value must have -- a leading `/`, then a
-# letter, then letters/digits/hyphens/underscores, e.g. "/my-pr-polish". Same
+# T-115: the shape a `post_qa_skill`/`qa_skill` value must have -- a leading `/`,
+# then a letter, then letters/digits/hyphens/underscores, e.g. "/my-pr-polish",
+# optionally namespaced by a plugin, e.g. "/my-plugin:my-review". Same
 # family of name every `.claude/commands/<name>.md` / `.opencode/command/
 # <name>.md` skill file resolves from (`dispatcher.resolve_reconcile_command`/
 # `skills_install`'s own `maestro-reconcile-<phase>` filenames), just not
 # restricted to that one reserved prefix -- this is a human's own skill.
-_SKILL_NAME_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*$")
+_SKILL_NAME_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(:[A-Za-z][A-Za-z0-9_-]*)?$")
 
 
 SUGGEST_ACS_PLACEHOLDERS = frozenset({"spec"})
@@ -838,8 +844,8 @@ def _validate_skill_name(value, *, where: str) -> None:
     if not isinstance(value, str) or not _SKILL_NAME_RE.match(value):
         raise store.MaestroError(
             f"config.toml: {where} must be a slash-command name like "
-            f"\"/my-pr-polish\" (a leading '/', then a letter, then letters/"
-            f"digits/hyphens/underscores), got {value!r}")
+            f"\"/my-pr-polish\" or \"/my-plugin:my-pr-polish\" (a leading '/', then "
+            f"a letter, then letters/digits/hyphens/underscores), got {value!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -986,6 +992,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("post_qa_skill_runner", _opt_str, per_repo=True),
     Knob("post_qa_skill_runner_model", _opt_str, per_repo=True),
     Knob("qa_phase_gate", _bool),
+    Knob("qa_skill", _skill_name, per_repo=True),
     Knob("qa_standards_axis", _bool),
     Knob("test_command", _opt_str, per_repo=True),
     Knob("test_deletion_gate", _bool),
@@ -1425,6 +1432,11 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
                                   # (no event appended) unless the ticket's folded phase is `qa`
                                   # -- set false to revert to pre-T-85 behavior (a verdict
                                   # honored from any phase)
+# qa_skill = "/my-review"          # review skill the `qa` step runs on the diff before judging
+                                  # the ACs (claude runner only): a blocking finding fails the AC
+                                  # it touches, or routes back to implementing if it touches none;
+                                  # the rest land as a Note. [repos.<name>] qa_skill overrides
+                                  # this per repo. Default unset -- runs nothing.
 # qa_standards_axis = true         # spawn a second, parallel QA sub-agent in `qa` that
                                   # checks CLAUDE.md conventions + a Fowler-smell baseline; advisory
                                   # only (does not block awaiting-ci), roughly doubles QA spend
@@ -1683,7 +1695,9 @@ implementer = "claude_skill"
                                      # post_qa_skill_runner -- unset inherits the board-wide default.
 # post_qa_skill_runner_model = "baseten/zai-org/GLM-5.3"  # T-117: ditto, for
                                      # post_qa_skill_runner_model.
-# ci_auto_rerun = true               # T-123: this repo's override of [maestro]
+# qa_skill = "/my-review"            # this repo's override of [maestro] qa_skill above --
+                                     # unset inherits the board-wide default.
+# ci_auto_rerun = true              # T-123: this repo's override of [maestro]
                                      # ci_auto_rerun above -- unset inherits the
                                      # board-wide default.
 # ci_rerun_grace = 900               # T-123: this repo's override of [maestro]

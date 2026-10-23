@@ -1533,6 +1533,7 @@ def cmd_env(args) -> int:
                 # against without reading config.toml directly.
                 "language": binding.language, "test_command": binding.test_command,
                 "allowed_paths": binding.allowed_paths,
+                "qa_skill": binding.qa_skill,
                 "stack_tool": stack_tool})
         return 0
     _print({"home": str(cfg.home), "board": store.board_state(cfg.home),
