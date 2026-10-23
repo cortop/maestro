@@ -303,7 +303,7 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
                       "impl-turn", "local-backup", "locate", "observe-spec", "pr-size", "release",
                       "reply-review", "set-phase", "snapshot", "verify-ac", "worktree"),
     "qa": ("append", "ask", "env", "fail", "fold-inbox", "locate", "observe-spec", "qa-brief",
-           "qa-verdict", "release", "set-phase", "snapshot"),
+           "qa-verdict", "release", "set-phase"),
     "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",
                 "observe-spec", "release", "set-phase", "show", "snapshot"),
 }

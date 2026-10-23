@@ -1183,6 +1183,9 @@ def qa_brief(cfg: Config, key: str) -> dict:
         # words? -- instead of re-deriving that from the raw diff every time.
         # An unannotated AC carries neither key, unchanged from before.
         "acs": [_qa_brief_ac_entry(i, t, tree_key, snap) for i, t in enumerate(acs, start=1)],
+        "phase": snap.phase,
+        "pr_number": snap.pr_number,
+        "inbox_pending": len(inbox.pending(cfg.home, key)),
         "base_ref": base_ref,
         "cwd": str(cwd),
         "diff": diff,
@@ -1194,6 +1197,21 @@ def qa_brief(cfg: Config, key: str) -> dict:
         "commits_ahead": ahead,
         "warning": stderr or None,
     }
+
+
+def write_qa_packet(cfg: Config, key: str) -> dict:
+    """Persist `qa_brief` to ``derived/qa-brief/<KEY>/{packet.json,diff.patch}``
+    and return a bounded index: the packet minus its diff, plus both paths and
+    the diff's size. QA reads those files in full instead of an ad-hoc diff."""
+    packet = qa_brief(cfg, key)
+    out_dir = cfg.home / "derived" / "qa-brief" / store.validate_key(key)
+    diff = packet["diff"]
+    store.atomic_write(out_dir / "diff.patch", diff)
+    store.atomic_write(out_dir / "packet.json", json.dumps(packet, indent=2) + "\n")
+    index = {k: v for k, v in packet.items() if k != "diff"}
+    index.update(packet_path=str(out_dir / "packet.json"), diff_path=str(out_dir / "diff.patch"),
+                 diff_lines=len(diff.splitlines()), diff_bytes=len(diff.encode("utf-8")))
+    return index
 
 
 def _qa_diff(cwd, base: str) -> tuple[str, str, int, str]:

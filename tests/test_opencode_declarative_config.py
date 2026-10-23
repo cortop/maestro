@@ -152,7 +152,8 @@ def test_agent_stub_permission_bash_is_phase_narrowed_not_the_flat_ceiling(home,
     agent_dir = repo / ".opencode" / "agent"
     qa_stub = (agent_dir / "maestro-reconcile-qa.md").read_text()
     assert '"maestro finalize *": allow' not in qa_stub
-    assert '"maestro snapshot *": allow' in qa_stub
+    assert '"maestro snapshot *": allow' not in qa_stub
+    assert '"maestro qa-brief *": allow' in qa_stub
 
     impl_stub = (agent_dir / "maestro-reconcile-implementing.md").read_text()
     assert '"maestro finalize *": allow' in impl_stub

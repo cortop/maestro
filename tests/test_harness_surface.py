@@ -21,7 +21,7 @@ SKILL_BYTE_CEILINGS = {
     "awaiting-human": 7000,
     "implementing": 33400,
     "passive": 6600,
-    "qa": 7300,
+    "qa": 7400,
     "ready": 5800,
     "researching": 7500,
     "triaging": 7100,
