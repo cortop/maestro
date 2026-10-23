@@ -130,6 +130,9 @@ class RepoBinding:
     # spawn with no spec override.
     post_qa_skill_runner: str | None = None
     post_qa_skill_runner_model: str | None = None
+    # This repo's qa_skill override, already resolved against the board-wide
+    # [maestro] qa_skill default. None means the `qa` step runs no review skill.
+    qa_skill: str | None = None
     # T-83: this repo's test_command override, already resolved against the
     # board-wide [maestro] test_command default -- see resolve(),
     # the sole reader every RB-12/RB-14/T-79 test-verification gate goes

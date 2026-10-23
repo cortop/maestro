@@ -99,6 +99,7 @@ _OVERRIDE_SAMPLES = {
     "post_qa_skill_runner_model": "m",
     "pr_split_threshold": 0,
     "prime_timeout": 6,
+    "qa_skill": "/review",
     "test_command": "make check",
     "worktree_timeout": 5,
 }
