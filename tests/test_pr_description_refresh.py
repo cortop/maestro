@@ -21,14 +21,14 @@ def test_refresh_step_compares_and_edits_after_push():
 
 def test_refresh_keeps_human_text_and_rebuilds_ac_table_from_ac_verified():
     sec = _section()
-    assert "keep every human-written line verbatim" in sec
-    assert "AC-to-evidence table" in sec and "`ac_verified`" in sec
+    assert "keep human-written lines verbatim" in sec
+    assert "AC-to-evidence rows from `ac_verified`" in sec
     assert "only what the new commits made wrong" in sec
 
 
 def test_refresh_skips_conflict_only_and_note_only_rounds():
     sec = _section()
-    assert "conflict-only pass" in sec and "Note-only round" in sec and "skip" in sec
+    assert "skip conflict-only and Note-only rounds" in sec
 
 
 def test_refresh_on_stack_is_per_entry():
