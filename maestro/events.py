@@ -134,6 +134,11 @@ LINEAR_SYNCED = "LinearSynced"          # {linear_updated_ts, status, last_comme
 # (or a different phase mapped to the same status) doesn't re-mutate.
 LINEAR_STATUS_PUSHED = "LinearStatusPushed"  # {phase, status}
 
+# T-218: a human's `allow` / `allow: <glob>` answer to an out-of-scope-paths
+# question, applied to config.toml by the dispatcher (`ops.add_allowed_paths`).
+# Folds to nothing (see snapshot._UNFOLDED).
+ALLOWED_PATHS_ADDED = "AllowedPathsAdded"   # {qid, table, paths}
+
 # T-139: durable record of one T-122 answer_fast_path decision (shadow OR on),
 # appended by the dispatcher itself (dispatcher._record_fast_path_decision) so
 # `decision_labels.agreement()` can join a route's guess against the answer's

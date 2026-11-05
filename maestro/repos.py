@@ -180,6 +180,52 @@ def outside_allowed_paths(paths, allowed) -> list[str]:
     return [p for p in paths if not any(r.match(p) for r in regexes)]
 
 
+_FILES_MARKER_RE = re.compile(r"\[files: ([^\]]*)\]")
+_MATCH_ALL_GLOBS = frozenset({"*", "**", "**/*", "./**", "./*"})
+
+
+def files_marker(paths) -> str:
+    """The machine-readable ``[files: a, b]`` tail an out-of-scope question
+    carries, which `question_files` reads back when the human answers `allow`."""
+    return "[files: " + ", ".join(paths) + "]"
+
+
+def question_files(text: str) -> list[str]:
+    """The paths listed in a question's `files_marker`, or [] if it has none."""
+    m = _FILES_MARKER_RE.search(text or "")
+    return [p.strip() for p in m.group(1).split(",") if p.strip()] if m else []
+
+
+def glob_problem(glob: str) -> str | None:
+    """Why *glob* is not a usable ``allowed_paths`` entry, or None if it is."""
+    if not glob:
+        return "empty"
+    if re.search(r"[\s\\\x00-\x1f]", glob):
+        return "contains whitespace, a backslash or a control character"
+    if glob.startswith(("/", "~")):
+        return "must be relative to the repo root"
+    if ".." in glob.split("/"):
+        return "must not contain a '..' segment"
+    if "***" in glob:
+        return "contains '***'"
+    if glob in _MATCH_ALL_GLOBS:
+        return "matches every file, which would disable the allowlist"
+    return None
+
+
+def parse_allow_answer(answer: str) -> tuple[str, str | None] | None:
+    """Classify a human answer to an out-of-scope-paths question: ``("files",
+    None)`` for `allow`, ``("glob", <glob>)`` for `allow: <glob>`, or None for
+    any other answer (a plain approval or a revert request)."""
+    text = (answer or "").strip()
+    if re.fullmatch(r"allow[\s.!]*", text, re.IGNORECASE):
+        return "files", None
+    m = re.match(r"allow:(.*)\Z", text, re.IGNORECASE | re.DOTALL)
+    if m:
+        return "glob", m.group(1).strip()
+    return None
+
+
 def _inherited(cfg: Config, table: dict) -> dict:
     """Every `config.REPO_OVERRIDE_KEYS` field: the table's own value wins, an
     unset one (absent, None, or "") inherits the board-wide [maestro] knob. A

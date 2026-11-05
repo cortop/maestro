@@ -2078,6 +2078,29 @@ def route_stale(cfg: Config, key: str, *, base_branch: str = "main",
     return True
 
 
+def add_allowed_paths(cfg: Config, key: str, qid: str, paths: list[str], *,
+                      actor: str = "dispatcher") -> list[str]:
+    """Add *paths* to the allowlist *key*'s repo binding resolves (T-218):
+    `[repos.<name>] allowed_paths`, or `[maestro]` when the ticket has no
+    configured binding. Not a CLI verb -- only the dispatcher calls it, on a
+    human's `allow` answer to the question *qid*. Idempotent: entries already
+    present are skipped and the `AllowedPathsAdded` event's step-id is keyed on
+    (key, qid), so a re-sweep or crash retry neither duplicates an entry nor
+    the event. Returns the entries this call added to config.toml."""
+    bad = [f"{p!r} ({why})" for p in paths if (why := repos_mod.glob_problem(p))]
+    if bad or not paths:
+        raise store.MaestroError(f"{key}: refusing to add to allowed_paths -- "
+                                 + ("; ".join(bad) if bad else "no paths given"))
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    name = binding.name if binding.name in cfg.repos else None
+    base = list(binding.allowed_paths if name else cfg.allowed_paths)
+    added = config_mod.add_allowed_paths(cfg.home, name, paths, base)
+    _append(cfg, key, E.ALLOWED_PATHS_ADDED,
+            {"qid": qid, "table": f"repos.{name}" if name else "maestro", "paths": list(paths)},
+            actor=actor, sid=f"allowed-paths-add-{key}-{qid}")
+    return added
+
+
 def ask_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:
     """Escalate an unresolvable PR merge conflict to the human (idempotent — skips
     if already open). Used only when the agent's own rebase in `implementing`

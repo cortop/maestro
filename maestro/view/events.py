@@ -87,6 +87,7 @@ CATEGORY_OF = {
                      ev_types.FINALIZED, ev_types.FAILED, ev_types.STALLED), 1),
     **dict.fromkeys((ev_types.QUESTION_ASKED, ev_types.QUESTION_ANSWERED,
                      ev_types.COMMAND_RECEIVED, ev_types.FAST_PATH_DECIDED,
+                     ev_types.ALLOWED_PATHS_ADDED,
                      ev_types.APPROVED), 2),
     **dict.fromkeys((ev_types.PR_OPENED, ev_types.PR_UPDATED, ev_types.CI_OBSERVED,
                      ev_types.CI_RERUN_REQUESTED, ev_types.REVIEW_FEEDBACK_RECEIVED,

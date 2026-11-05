@@ -789,6 +789,9 @@ def _answer_fast_path_eligible(
     if not all(_FAST_PATH_QID_RE.match(qid) for qid in answers):
         return None
     qids = list(answers)
+    # T-218: an `allow` answer to an out-of-scope-paths question is never a plain approval.
+    if any(qid.startswith(SCOPE_QID_PREFIXES) for qid in qids):
+        return None
     rules: dict[str, str] = {}
     for qid in qids:
         rule = _fast_path_pair_eligible(
@@ -2971,6 +2974,22 @@ def _question_answered(home: Path, key: str, qid: str) -> bool:
                for e in event_log.read(home, key))
 
 
+SCOPE_QID_PREFIXES = ("allowed-paths-", "scope-")
+
+
+def scope_question_text(key: str, outside: list[str], allowed: list[str]) -> str:
+    """The out-of-scope-paths question (T-218): approve once, add to the
+    allowlist (`allow` / `allow: <glob>`), or revert. The `[files: ...]` tail
+    is what an `allow` answer adds."""
+    from . import repos as repos_mod
+    return (f"{key}: this diff touches {len(outside)} file(s) outside the repo's "
+            f"allowed_paths ({', '.join(allowed)}): {', '.join(outside)}. Answer "
+            "`approve` to allow it for this ticket only, `allow` to also add "
+            "these files to allowed_paths in config.toml, `allow: <glob>` to add "
+            "a glob instead, or say what must be reverted. "
+            + repos_mod.files_marker(outside))
+
+
 def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Path) -> None:
     """Advance *key* off `verifying` per a captured test-run record -- the
     routing half both the freshly-folded and the tree-cache-reuse paths in
@@ -3061,10 +3080,7 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
             qid = f"allowed-paths-{key}-{content_hash(tree_key)[:8]}"
             if not _question_answered(cfg.home, key, qid):
                 ops.ask(cfg, key,
-                        f"{key}: this diff touches {len(outside)} file(s) outside the "
-                        f"repo's allowed_paths ({', '.join(binding.allowed_paths)}): "
-                        f"{', '.join(outside)}. Answer to approve touching them, or "
-                        "say what must be reverted.",
+                        scope_question_text(key, outside, binding.allowed_paths),
                         qid=qid, actor=actor)
                 return
 
@@ -4164,6 +4180,98 @@ def _route_ready_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bo
     return True
 
 
+def _question_text(home: Path, key: str, qid: str) -> str:
+    for e in event_log.read(home, key):
+        p = e.get("payload") or {}
+        if e.get("type") == E.QUESTION_ASKED and p.get("qid") == qid:
+            return p.get("text") or ""
+    return ""
+
+
+def _apply_allowlist_answer(cfg: Config, key: str, qids: list[str],
+                            answers: dict[str, "_AnswerInfo"]) -> str:
+    """Apply a human's `allow` / `allow: <glob>` answers (T-218): fold the
+    inbox, add the entries via `ops.add_allowed_paths`, route back, then ack.
+    A malformed glob (or an `allow` whose question lists no files) writes
+    nothing and re-asks with a fresh qid. Returns the PhaseChanged reason."""
+    from . import ops
+    from . import repos as repos_mod
+    ops.fold_inbox(cfg, key)
+    to_phase, notes = Phase.VERIFYING, []
+    refused: list[tuple[str, str]] = []
+    for qid in qids:
+        kind, glob = repos_mod.parse_allow_answer(answers[qid].text)
+        paths = [glob] if kind == "glob" else repos_mod.question_files(
+            _question_text(cfg.home, key, qid))
+        problem = ("the question lists no files" if not paths else
+                   next((f"{p!r}: {why}" for p in paths
+                         if (why := repos_mod.glob_problem(p))), None))
+        if problem:
+            refused.append((qid, problem))
+            continue
+        ops.add_allowed_paths(cfg, key, qid, paths, actor="dispatcher")
+        notes.append(", ".join(paths))
+        if qid.startswith("scope-"):
+            to_phase = Phase.IMPLEMENTING
+    if refused:
+        qid, problem = refused[0]
+        n = sum(1 for e in event_log.read(cfg.home, key)
+                if e.get("type") == E.QUESTION_ASKED
+                and str((e.get("payload") or {}).get("qid", "")).startswith(f"{qid}-r")) + 1
+        base = _question_text(cfg.home, key, qid)
+        ops.ask(cfg, key, f"Refused, nothing was written to config.toml ({problem}). {base}",
+                qid=f"{qid}-r{n}", actor="dispatcher")
+        inbox.ack(cfg.home, key)
+        return f"allowlist answer refused: {problem}"
+    fresh = snap_mod.load(cfg.home, key)
+    reason = f"allowlist extended: {'; '.join(notes)}"
+    ops.set_phase(cfg, key, to_phase, reason=reason, actor="dispatcher",
+                  expect=fresh.observed_seq)
+    inbox.ack(cfg.home, key)
+    return reason
+
+
+def _route_allowlist_answer(sweep: _Sweep, key: str, snap, due_reason: str) -> bool:
+    """T-218: a human's `allow` / `allow: <glob>` answer to an out-of-scope-paths
+    question (`SCOPE_QID_PREFIXES`) extends `allowed_paths` in this sweep, with
+    no agent session -- the dispatcher does the config write. Any other answer
+    (a plain approval, a revert request) returns False and keeps today's
+    spawn. Returns True once it has fully decided *key*'s outcome."""
+    from . import repos as repos_mod
+    cfg, home = sweep.cfg, sweep.home
+    if snap.phase != Phase.AWAITING_HUMAN.value or due_reason not in ("inbox", "answered-pending"):
+        return False
+    answers = _fast_path_answer_source(home, key, snap)
+    if not answers or set(snap.open_questions) - set(answers):
+        return False
+    qids = list(answers)
+    if not all(q.startswith(SCOPE_QID_PREFIXES) for q in qids):
+        return False
+    if any(repos_mod.parse_allow_answer(answers[q].text) is None for q in qids):
+        return False
+    summary = "; ".join(answers[q].text for q in qids)
+    if sweep.dry_run:
+        decisions = sweep.decisions
+        decisions[key] = {"outcome": "would_extend_allowlist",
+                          "reason": f"would apply: {summary}", "qid": qids}
+        sweep.due.append((key, due_reason))
+        return True
+    try:
+        reason = _apply_allowlist_answer(cfg, key, qids, answers)
+    except Exception as e:  # noqa: BLE001 -- a lost race must not abort the sweep
+        sweep.hook_errors[f"allowlist_answer:{key}"] = f"{type(e).__name__}: {e}"
+        return False
+    refreshed = snap_mod.load(home, key)
+    sweep.observed_seq[key] = refreshed.observed_seq
+    sweep.phase[key] = refreshed.phase
+    decisions = sweep.decisions
+    decisions[key] = {"outcome": "allowlist_answered", "reason": reason, "qid": qids}
+    res = _due_check(home, key, refreshed, sweep.now)
+    if res.due:
+        sweep.due.append((key, res.reason))
+    return True
+
+
 def _classify_key(sweep: _Sweep, key: str, active: set[str]) -> None:
     """Decide whether *key* is due this sweep, recording its outcome. Due keys
     are appended to `sweep.due`; every other outcome is final for this sweep."""
@@ -4171,6 +4279,8 @@ def _classify_key(sweep: _Sweep, key: str, active: set[str]) -> None:
     if candidate is None:
         return
     snap, due_reason = candidate
+    if _route_allowlist_answer(sweep, key, snap, due_reason):
+        return
     if _route_answer_fast_path(sweep, key, snap, due_reason):
         return
     if _route_ready_fast_path(sweep, key, snap, due_reason):
