@@ -28,6 +28,8 @@ Every `decisions[key]["outcome"]` a sweep can assign -- via either `decisions[ke
 | `would_route_implementing` | `dispatcher._route_ready_fast_path` |
 | `worktree_refused` | `dispatcher._route_ready_fast_path` |
 | `route_implementing` | `dispatcher._route_ready_fast_path` |
+| `would_extend_allowlist` | `dispatcher._route_allowlist_answer` |
+| `allowlist_answered` | `dispatcher._route_allowlist_answer` |
 | `due` | `dispatcher._classify_key` |
 | `throttled` | `dispatcher._gate_due` |
 | `repo_blocked` | `dispatcher._gate_due` |

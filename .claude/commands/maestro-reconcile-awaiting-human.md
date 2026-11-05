@@ -55,6 +55,10 @@ Inspect each qid key in `answered_questions`:
   deferred instead of opening/growing the PR; route back with the verbatim answer so it can decide
   between the approved stack and the single PR:
   `maestro set-phase "$KEY" implementing --reason "pr split decision: <verbatim>"`
+- **any qid starts with `allowed-paths-` or `scope-`** → an out-of-scope-paths question. The
+  dispatcher itself applies an `allow` / `allow: <glob>` answer — leave it alone and exit. Otherwise
+  `maestro set-phase "$KEY" verifying --reason "scope approved: <verbatim>"` (`allowed-paths-`) or
+  `implementing` (`scope-`, and any request to revert or avoid files, reason `scope: <verbatim>`)
 
 **If `KIND == research`** (research approval question — qid starts with `research-approval-`):
 Read the proposal at `$MHOME/tickets/$KEY/proposal.md`. Inspect the answer:

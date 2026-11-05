@@ -191,11 +191,11 @@ Otherwise implement the spec's Acceptance criteria:
    `AGENTS.md`/`CLAUDE.md` nearest each directory you edit** (walk up from that directory to the
    repo root, reading each one you find): not every runner loads a nested one on its own, so a
    rule that sits next to the code only reaches you if you read it.
-   **Scope check (T-149):** `maestro env --key "$KEY"` also reports `allowed_paths` — a glob list
-   (`**` crosses directories) of where this repo's diff may go; empty means no restriction. If it
-   is non-empty and the change needs a file outside it, `maestro ask "$KEY" "<files> are outside
-   allowed_paths (<list>) — approve editing them?" --qid "scope-$KEY-<n>"` and exit **before**
-   editing there. The dispatcher re-checks the final diff only when this repo's binding has a `test_command` (the check runs in `verifying`), so stay inside `allowed_paths` yourself.
+   **Scope check (T-149):** `maestro env --key "$KEY"` reports `allowed_paths` — globs (`**`
+   crosses directories) this diff may touch; empty means no restriction. If non-empty and the change needs a file outside it, `maestro ask "$KEY" "<files> are outside allowed_paths
+   (<list>) — answer `approve`, `allow`, `allow: <glob>`, or
+   say what to avoid. [files: <f1>, <f2>]" --qid "scope-$KEY-<n>"` and exit **before** editing
+   there. The dispatcher re-checks the diff only with a `test_command` (in `verifying`); stay inside `allowed_paths` yourself.
    **If `qa` sent you back here** (the context file's phase history shows the most recent
    transition is `qa -> implementing`, citing a failing AC + evidence — cross-check
    `maestro snapshot "$KEY"` -> `qa_verdicts` for the same ac_hash if you want the raw record):

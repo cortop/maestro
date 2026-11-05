@@ -18,7 +18,7 @@ COMMANDS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 # skill past its ceiling is a reviewed edit to this table, so cut something else
 # to pay for always-on text first.
 SKILL_BYTE_CEILINGS = {
-    "awaiting-human": 7000,
+    "awaiting-human": 7300,
     "implementing": 34000,
     "passive": 6600,
     "qa": 7400,

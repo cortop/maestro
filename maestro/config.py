@@ -7,6 +7,7 @@ or a pure-local todo list.
 """
 from __future__ import annotations
 
+import json
 import re
 import string
 import tomllib
@@ -1973,3 +1974,90 @@ def write_scheduled(home: Path, tasks: list[dict]) -> None:
         text += "\n" + "\n".join(_serialize_task(t) for t in tasks)
     store.atomic_write(path, text if text.endswith("\n") else text + "\n",
                         follow_symlinks=True)
+
+
+_TABLE_HEADER_RE = re.compile(
+    r'^\s*\[\[?\s*[A-Za-z0-9_-]+(?:\.(?:[A-Za-z0-9_-]+|"[^"]*"))*\s*\]\]?\s*(?:#.*)?$')
+
+
+def _toml_list(items: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(i) for i in items) + "]"
+
+
+def _section_bounds(lines: list[str], repo: str | None) -> tuple[int, int] | None:
+    """``(header_index, end_index)`` of the ``[maestro]`` / ``[repos.<repo>]``
+    table in *lines*, or None when it is absent."""
+    names = {"maestro"} if repo is None else {f"repos.{repo}", f'repos."{repo}"'}
+    start = None
+    for i, line in enumerate(lines):
+        if _TABLE_HEADER_RE.match(line):
+            if start is not None:
+                return start, i
+            inner = line.split("#", 1)[0].strip().strip("[]").strip()
+            if inner in names and not line.lstrip().startswith("[["):
+                start = i
+    return (start, len(lines)) if start is not None else None
+
+
+def add_allowed_paths(home: Path, repo: str | None, new: list[str], base: list[str]) -> list[str]:
+    """Add *new* to the ``allowed_paths`` of ``[repos.<repo>]`` (or ``[maestro]``
+    when *repo* is None) in config.toml and return the entries actually added.
+
+    *base* is the list currently in force for that scope; an absent key is
+    created holding *base* plus *new*, so a ``[repos.<name>]`` list (which
+    overrides the board-wide one) starts with the inherited entries. Only the
+    ``allowed_paths`` line(s) change -- every other byte, comments included,
+    stays. Writes via ``store.atomic_write(..., follow_symlinks=True)`` like
+    `write_scheduled`, and refuses (writing nothing) if the result would not
+    parse back to the expected list.
+    """
+    path = config_path(home)
+    text = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_CONFIG_TOML
+    present = list(base)
+    added = [p for p in dict.fromkeys(new) if p not in present]
+    if not added:
+        return []
+    final = present + added
+    lines = text.splitlines(keepends=True)
+    bounds = _section_bounds(lines, repo)
+    new_line = f"allowed_paths = {_toml_list(final)}\n"
+    if bounds is None:
+        header = "[maestro]" if repo is None else f"[repos.{repo}]"
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines += ["\n", header + "\n", new_line]
+    else:
+        start, end = bounds
+        for i in range(start + 1, end):
+            if re.match(r"\s*allowed_paths\s*=", lines[i]):
+                last = i
+                value = lines[i].split("=", 1)[1]
+                while True:
+                    try:
+                        tomllib.loads("x = " + value)
+                        break
+                    except tomllib.TOMLDecodeError:
+                        last += 1
+                        if last >= end:
+                            raise store.MaestroError("config.toml: unterminated allowed_paths array")
+                        value += lines[last]
+                tail = lines[last]
+                comment = ""
+                if "]" in tail and "#" in tail.rsplit("]", 1)[1]:
+                    comment = "  " + tail.rsplit("]", 1)[1].strip()
+                lines[i:last + 1] = [new_line.rstrip("\n") + comment + "\n"]
+                break
+        else:
+            if not lines[start].endswith("\n"):
+                lines[start] += "\n"
+            lines.insert(start + 1, new_line)
+    out = "".join(lines)
+    parsed = tomllib.loads(out)
+    got = (parsed.get("maestro", {}) if repo is None
+           else parsed.get("repos", {}).get(repo, {})).get("allowed_paths")
+    if got != final:
+        raise store.MaestroError(
+            f"config.toml: cannot safely edit allowed_paths for {repo or '[maestro]'}; "
+            f"add {added} by hand")
+    store.atomic_write(path, out, follow_symlinks=True)
+    return added
