@@ -307,6 +307,9 @@ Otherwise implement the spec's Acceptance criteria:
    ```
    - **Fix round**: `maestro set-phase "$KEY" qa` (a PR already open already has its
      `PrOpened` event — do not append another).
+   - **`CI failing:` round on a still-draft PR** (reason starts `CI failing:`, snapshot
+     `pr_draft` true): `maestro set-phase "$KEY" qa`, not awaiting-ci — the fix is a new diff
+     nobody has judged yet.
    - **Review-feedback round**: `maestro set-phase "$KEY" awaiting-ci` instead of
      `qa` — a human is already reviewing this PR directly on GitHub, so this hands back to
      CI/that review rather than an internal re-review; push the commit first if you made a code

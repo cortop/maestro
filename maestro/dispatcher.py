@@ -2014,7 +2014,8 @@ def _observe_ci(cfg: Config, key: str, status: dict, phase: Phase, *,
     stack_index = next((e.get("index") for e in stack if e.get("number") == pr_number), None)
     sid = f"ci-{key}-{pr_number}-{head_sha}-{check_key}" if stack else f"ci-{key}-{head_sha}-{check_key}"
     detail = f"{len(failing)} check(s) failing: {', '.join(failing)}" if failing else ""
-    payload = {"state": ci_state, "failing_checks": failing, "detail": detail}
+    payload = {"state": ci_state, "failing_checks": failing, "detail": detail,
+               "head_sha": head_sha}
     if error:
         payload["error"] = error
     if stack:
