@@ -267,3 +267,13 @@ def _write_stream_log(home, key, epoch, records):
 def _result_record(cost):
     return {"type": "result", "total_cost_usd": cost, "num_turns": 3, "duration_ms": 1000,
             "usage": {"input_tokens": 100, "output_tokens": 50}}
+
+
+def skill_text(path) -> str:
+    """A reconcile skill's text; the implementing skill is followed by every round file `maestro brief` prints from."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    if path.name == "maestro-reconcile-implementing.md":
+        rounds = Path(__file__).resolve().parents[1] / "maestro" / "_implementing_rounds"
+        text += "\n" + "\n".join(f.read_text(encoding="utf-8") for f in sorted(rounds.glob("*.md")))
+    return text

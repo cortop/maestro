@@ -58,6 +58,22 @@ def _round_cause(reason: str, prev_phase: str | None) -> str:
     return "other"
 
 
+def implementing_round(reason: str, prev_phase: str | None) -> str:
+    """The implementing round a `PhaseChanged -> implementing` transition opens.
+
+    One of `implementing_brief.ROUNDS`, or "unknown" for a reason matching no known shape
+    (a human answer, a failed-test reroute). Shares `_round_cause` with the scorecard.
+    """
+    if prev_phase == "awaiting-human" and reason.startswith("pr split decision:"):
+        return "split-decision"
+    cause = _round_cause(reason, prev_phase)
+    if cause == "conflict":
+        return "base-drift" if "advanced" in reason and "conflict" not in reason.lower() else "conflict"
+    if prev_phase == "ready" and cause == "other":
+        return "fresh"
+    return {"review": "review-feedback", "qa": "qa-fix", "ci": "ci-fix"}.get(cause, "unknown")
+
+
 def is_bot(cfg: Config | None, author: str | None) -> bool | None:
     """True/False for a classifiable review author; None when there is no author."""
     if not author:

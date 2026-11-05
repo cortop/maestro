@@ -154,6 +154,7 @@ def test_agent_tool_verbs_named_exactly():
     expected = {
         "append",
         "ask",
+        "brief",
         "capture-tests",
         "check-conflicts",
         "check-merged",

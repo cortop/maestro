@@ -30,6 +30,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from conftest import skill_text
 from maestro import config as config_mod
 from maestro import inbox, snapshot as snap_mod, store
 from maestro.cli import main as cli_main
@@ -122,13 +123,13 @@ def test_dispatcher_resolves_every_live_phase_to_an_existing_command_file():
 
 def test_no_hardcoded_repo_slug():
     for path in ALL_PHASE_PATHS:
-        text = path.read_text()
+        text = skill_text(path)
         assert "cortop/maestro" not in text, f"{path} still hardcodes the repo slug"
 
 
 def test_no_bare_origin_main():
     for path in ALL_PHASE_PATHS:
-        assert "origin/main" not in path.read_text(), f"{path} still hardcodes origin/main"
+        assert "origin/main" not in skill_text(path), f"{path} still hardcodes origin/main"
     # GA-20: the whole `MODE == git` bash fence -- including the `fetch -q origin "$BASE"` /
     # `worktree add ... "origin/$BASE"` create-or-adopt pair -- collapsed into a single
     # `maestro worktree ensure "$KEY"` call, so both counts go to 0. The rewritten form must
@@ -140,7 +141,7 @@ def test_no_bare_origin_main():
     # calls `maestro qa-brief "$KEY"`, which resolves <BASE> internally via `maestro env --key`,
     # so the literal "origin/<BASE>" count drops from 2 (rebase + diff) to 1 (rebase only).
     for path in (_commands_path("ready"), _skills_path("ready")):
-        text = path.read_text()
+        text = skill_text(path)
         assert '"origin/$BASE"' not in text, \
             f'{path} should no longer target "origin/$BASE" directly -- that moved into ' \
             f'`maestro worktree ensure`'
@@ -150,7 +151,7 @@ def test_no_bare_origin_main():
         assert text.count('maestro worktree ensure "$KEY"') == 1, \
             f'{path} should call `maestro worktree ensure "$KEY"` exactly once'
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert '$BASE' not in text, f'{path} should hold BASE as the literal <BASE>, not $BASE'
         assert text.count('"origin/<BASE>"') == 2, \
             f'{path} should target "origin/<BASE>" exactly 2 time(s) (step 0\'s merge + rebase)'
@@ -170,7 +171,7 @@ def test_no_bare_origin_main():
 
 def test_implementing_skill_fetches_and_ff_only_merges_pr_branch_before_rebasing_onto_base():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         fetch_line = 'git -C <WT> fetch -q origin "<PREFIX>$KEY"'
         merge_line = 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"'
         rebase_line = 'git -C <WT> rebase "origin/<BASE>"'
@@ -195,10 +196,10 @@ def test_gh_pr_calls_use_repo_slug_and_base():
     # approved split has no dependency beyond it, same as the single-PR case), so the counts grew
     # by one create's worth of both flags versus before this ticket.
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert '$SLUG' not in text, f'{path} should hold SLUG as the literal <SLUG>, not $SLUG'
-        assert text.count('--repo "<SLUG>"') == 6, \
-            f'{path}: expected exactly 6 gh calls (2 create + 2 view + 2 refresh view/edit) carrying --repo "<SLUG>"'
+        assert text.count('--repo "<SLUG>"') == 10, \
+            f'{path}: expected exactly 10 gh calls (2 create + 2 view + 6 refresh view/edit across the qa-fix, ci-fix and review-feedback rounds) carrying --repo "<SLUG>"'
         assert text.count('--base "<BASE>"') == 2, \
             f'{path}: expected exactly 2 --base "<BASE>" (the single-PR create and stack entry 1)'
         create_line = next(l for l in text.splitlines() if "gh pr create" in l)
@@ -270,7 +271,7 @@ def test_implementing_fenced_commands_are_single_invocations():
     invocation, or it matches no Bash(<binary>:*) permission rule at all and stalls an
     unattended reconciler on a prompt."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         for fence in _downstream_fences(text):
             assert "&&" not in fence, f"{path}: a fence still chains with &&:\n{fence}"
             assert "||" not in fence, f"{path}: a fence still chains with ||:\n{fence}"
@@ -290,7 +291,7 @@ def test_implementing_fenced_commands_use_allowed_first_token():
     Bash(<binary>:*) allow rule. `gt` (T-132) is the Graphite CLI, only ever
     reached on the `stack_tool == "gt"` branch."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         for fence in _downstream_fences(text):
             for lineno, command in _logical_commands(fence):
                 token = _first_token(command)
@@ -306,7 +307,7 @@ def test_implementing_fenced_commands_never_expand_env_vars():
     (`<MHOME>`/`<KEY>` in the preamble's file-loading bullets), extended here to REPO/
     WT/BASE/PREFIX/SLUG, and the prose says so explicitly."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         for fence in _downstream_fences(text):
             for banned in _BANNED_FENCE_VARS:
                 assert banned not in fence, \
@@ -326,7 +327,7 @@ def test_implementing_venv_bootstrap_is_gone_pytest_invocation_stays():
     gone, and the pytest invocation that follows them stands exactly as GA-12 left
     it -- no `cd …`, no `;` chain, no `>/dev/null` redirect."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "python3 -m venv" not in text, \
             f"{path}: venv bootstrap should be gone -- that's now `prime`'s job"
         assert "pip install" not in text, \
@@ -346,7 +347,7 @@ def test_implementing_pytest_permission_story_is_decided_and_relative():
     Claude Code-specific and this file also runs under a non-claude runner)."""
     for path in (_commands_path("implementing"), _skills_path("implementing"),
                  REPO_ROOT / "CLAUDE.md"):
-        text = path.read_text()
+        text = skill_text(path)
         assert ".claude/settings.json" not in text
         if path.name == "CLAUDE.md":
             assert "cwd-anchored" in text
@@ -363,10 +364,10 @@ def test_implementing_skill_has_no_agent_tool_instruction_after_rf7():
     either copy (both the '`Agent`-tool sub-agent' aside and, more generally,
     any bare `Agent` tool mention), and the two copies stay byte-identical."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "Agent" not in text, f"{path}: still references the Agent tool"
-    commands_body = _strip_frontmatter(_commands_path("implementing").read_text())
-    skills_body = _strip_frontmatter(_skills_path("implementing").read_text())
+    commands_body = _strip_frontmatter(skill_text(_commands_path("implementing")))
+    skills_body = _strip_frontmatter(skill_text(_skills_path("implementing")))
     assert commands_body == skills_body
 
 
@@ -386,7 +387,7 @@ def test_every_maestro_verb_named_in_implementing_resolves():
     sub_action = next(a for a in parser._subparsers._group_actions if a.dest == "cmd")
     valid_verbs = set(sub_action.choices.keys())
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        verbs = _maestro_verbs_named(path.read_text())
+        verbs = _maestro_verbs_named(skill_text(path))
         assert verbs, f"{path}: verb scan found nothing -- the regex is broken"
         unknown = verbs - valid_verbs
         assert not unknown, f"{path}: `maestro {unknown}` is not a real subcommand"
@@ -465,7 +466,7 @@ def test_every_maestro_invocation_in_every_phase_skill_parses():
     checked = 0
     for phase in PHASE_FILES:
         for path in (_commands_path(phase), _skills_path(phase)):
-            for command in _maestro_invocations(path.read_text()):
+            for command in _maestro_invocations(skill_text(path)):
                 try:
                     tokens = shlex.split(command)
                 except ValueError as exc:
@@ -515,7 +516,7 @@ def test_no_phase_skill_bash_fence_shells_out_to_a_banned_interpreter():
     every fence, so it never trips this check."""
     checked = 0
     for path in ALL_PHASE_PATHS:
-        text = _strip_frontmatter(path.read_text())
+        text = _strip_frontmatter(skill_text(path))
         for fence in _bash_fences(text):
             checked += 1
             for banned in _BANNED_INTERPRETERS:
@@ -532,10 +533,13 @@ def test_preamble_resolves_via_env_key_for_repo_aware_phases():
     tool and holds as literals, not variables a preamble line binds."""
     for phase in REPO_AWARE_PHASE_FILES:
         for path in (_commands_path(phase), _skills_path(phase)):
-            text = path.read_text()
+            text = skill_text(path)
             preamble = _preamble_block(_strip_frontmatter(text))
-            assert "maestro env --key" in preamble
-            assert "maestro env" in preamble  # the key-less, board-wide call
+            if phase == "implementing":
+                assert 'maestro brief "$KEY"' in preamble  # one call returns both env payloads
+            else:
+                assert "maestro env --key" in preamble
+                assert "maestro env" in preamble  # the key-less, board-wide call
             for banned in ("eval", "python3", "sed", "cat"):
                 assert banned not in preamble, f"{path}: preamble still shells out to {banned}"
             for var in ("REPO=", "SLUG=", "BASE=", "PREFIX=", "MHOME="):
@@ -557,12 +561,12 @@ def test_preamble_never_shadows_the_real_home():
     shadow_re = re.compile(r"(?<![A-Z_])HOME=")
     for phase in PHASE_FILES:
         for path in (_commands_path(phase), _skills_path(phase)):
-            preamble = _preamble_block(_strip_frontmatter(path.read_text()))
+            preamble = _preamble_block(_strip_frontmatter(skill_text(path)))
             assert not shadow_re.search(preamble), f"{path}: preamble still shadows HOME"
 
     body_re = re.compile(r"(?<![A-Z_])HOME")
     for path in ALL_PHASE_PATHS:
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert not body_re.search(body), f"{path}: still references the real $HOME"
 
 
@@ -573,7 +577,7 @@ def test_passive_phase_preamble_skips_unused_repo_vars():
     REPO/SLUG/BASE/PREFIX -- lines that would never change what the file does. GA-10:
     also no `eval`/`python3`/`sed`/`cat`, and no `VAR=` shell assignment."""
     for path in (_commands_path("passive"), _skills_path("passive")):
-        text = path.read_text()
+        text = skill_text(path)
         preamble = _preamble_block(_strip_frontmatter(text))
         assert "maestro env" in preamble
         assert "maestro env --key" not in preamble
@@ -593,7 +597,7 @@ def test_passive_phase_preamble_skips_unused_repo_vars():
 def test_every_phase_file_states_a_done_when_criterion():
     for phase in PHASE_FILES:
         for path in (_commands_path(phase), _skills_path(phase)):
-            text = path.read_text()
+            text = skill_text(path)
             assert "**Done when:**" in text, f"{path} has no checkable completion criterion"
 
 
@@ -603,7 +607,7 @@ def test_every_phase_file_states_a_done_when_criterion():
 
 def test_implementing_restates_bans_positively():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         # The old bare-negative framing is gone...
         assert "do NOT poll CI in-session" not in text
         assert "Rules: never force-push, never skip hooks, never mock real behavior" not in text
@@ -618,7 +622,7 @@ def test_implementing_restates_bans_positively():
 
 def test_implementing_restates_never_abort_positively():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "always resolve" in text.lower()
         assert "git rebase --abort" in text
         assert "never" in text.lower()
@@ -634,14 +638,14 @@ def test_implementing_records_turns_via_impl_turn_verb():
     `maestro append --type ImplTurnRecorded` bypasses that check entirely (and, on the
     hand-rolled step-id the old text used, undercounts turns after a crash/respawn)."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "ImplTurnRecorded" not in text
         assert "maestro impl-turn" in text
 
 
 def test_researching_requires_primary_sources():
     for path in (_commands_path("researching"), _skills_path("researching")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "primary source" in text.lower()
         assert "source that owns it" in text.lower()
         assert "search the web" not in text.lower()  # the old, weaker framing is gone
@@ -653,7 +657,7 @@ def test_researching_requires_primary_sources():
 
 def test_implementing_conflict_resolution_recovers_intent_first():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "recover the intent on" in text.lower()
         assert "git log -1" in text  # reads the originating commit
         assert "gh pr view" in text  # and the originating PR, when named
@@ -674,7 +678,7 @@ def test_every_phase_file_folds_the_inbox():
     input and (in a phase where nothing else changes) spins."""
     for phase in PHASE_FILES:
         for path in (_commands_path(phase), _skills_path(phase)):
-            assert 'maestro fold-inbox "$KEY"' in path.read_text(), \
+            assert 'maestro fold-inbox "$KEY"' in skill_text(path), \
                 f"{path} never folds the inbox -- human commands are swallowed here"
 
 
@@ -683,7 +687,7 @@ def test_passive_file_acks_the_inbox_on_every_consuming_path():
     command is an unbounded spawn loop (nothing else about the ticket changes
     between sweeps). It must both fold and ack, and say why."""
     for path in (_commands_path("passive"), _skills_path("passive")):
-        text = path.read_text()
+        text = skill_text(path)
         assert 'maestro inbox-ack "$KEY"' in text, f"{path} folds but never acks"
         # Ack-last ordering is what makes a mid-step crash safe (re-read, not lose).
         assert "Ack last" in text or "ack last" in text.lower(), \
@@ -809,7 +813,7 @@ def test_skill_copies_are_byte_identical_including_frontmatter():
 
 def test_qa_skill_briefs_from_qa_brief_verb():
     for path in (_commands_path("qa"), _skills_path("qa"), _skill_commands_path("qa")):
-        text = path.read_text()
+        text = skill_text(path)
         assert 'maestro qa-brief "$KEY"' in text, f"{path}: qa phase no longer calls qa-brief"
         assert "never write it to a file" not in text, \
             f"{path}: the old re-type-the-diff instruction is still present"
@@ -822,7 +826,7 @@ def test_implementing_skill_no_longer_briefs_qa_itself():
     hands off via `set-phase qa` instead of running the adversarial check
     in-session."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "qa-brief" not in text
         assert 'set-phase "$KEY" qa' in text
 
@@ -1057,7 +1061,7 @@ def test_implementing_skill_test_step_timeout_matches_exported_bash_ceiling():
     (`[maestro] bash_max_timeout` -> BASH_MAX_TIMEOUT_MS), not the runner's
     stock 600000ms ceiling the suite can't finish inside."""
     from maestro.config import Config
-    body = _strip_frontmatter(_commands_path("implementing").read_text())
+    body = _strip_frontmatter(skill_text(_commands_path("implementing")))
     ceiling_ms = Config(home=Path("/nonexistent")).bash_max_timeout * 1000
     assert f"{ceiling_ms}ms" in body
     assert "BASH_MAX_TIMEOUT_MS" in body
@@ -1075,7 +1079,7 @@ def test_qa_skill_test_step_timeout_matches_exported_bash_ceiling():
     from maestro.config import Config
     ceiling_ms = Config(home=Path("/nonexistent")).bash_max_timeout * 1000
     for path in (_commands_path("qa"), _skills_path("qa"), _skill_commands_path("qa")):
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert f"{ceiling_ms}ms" in body
         assert "run_in_background" in body
         assert "ScheduleWakeup" in body
@@ -1089,7 +1093,7 @@ def test_qa_skill_test_step_timeout_matches_exported_bash_ceiling():
 
 def test_implementing_checks_pr_size_before_every_gh_pr_create():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert "maestro pr-size" in body
         size_idx = body.index("maestro pr-size")
         create_indices = [m.start() for m in re.finditer(r"gh pr create", body)]
@@ -1100,7 +1104,7 @@ def test_implementing_checks_pr_size_before_every_gh_pr_create():
 
 def test_implementing_proposes_a_split_under_qid_on_exceed():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert "exceeds: true" in body.lower() or "`exceeds: true`" in body
         assert 'maestro ask "$KEY"' in body
         assert '--qid "split-$KEY-<tree>"' in body
@@ -1108,7 +1112,7 @@ def test_implementing_proposes_a_split_under_qid_on_exceed():
 
 def test_implementing_records_stack_entries_via_pr_opened_with_stack_metadata():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert '\\"stack\\":{\\"index\\":0' in body
         assert '\\"stack\\":{\\"index\\":1' in body
         assert "ops.check_merged" in body
@@ -1116,7 +1120,7 @@ def test_implementing_records_stack_entries_via_pr_opened_with_stack_metadata():
 
 def test_awaiting_human_routes_split_qid_back_to_implementing():
     for path in (_commands_path("awaiting-human"), _skills_path("awaiting-human")):
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert "qid starts with `split-`" in body
         assert 'maestro set-phase "$KEY" implementing --reason "pr split decision:' in body
 
@@ -1199,7 +1203,7 @@ def test_snapshot_reports_inbox_pending_until_acked(home, cfg, capsys):
 def test_phase_skill_fold_step_keys_off_inbox_pending():
     for phase in ("triaging", "researching", "awaiting-human", "ready", "implementing", "qa"):
         for path in (_commands_path(phase), _skills_path(phase)):
-            text = path.read_text()
+            text = skill_text(path)
             marker = ("If the qa-brief's `inbox_pending`" if phase == "qa"
                       else "If the snapshot's `inbox_pending` is non-zero")
             assert marker in text, \
@@ -1211,7 +1215,7 @@ def test_implementing_skill_pr_titles_use_display_key_not_key():
     both the single-PR and every stacked-entry title are built from
     `<DISPLAY_KEY>` instead."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert '--title "$KEY' not in text, \
             f'{path}: a gh pr create --title still starts from $KEY, not display_key'
         assert text.count('--title "<DISPLAY_KEY>:') == 2, \
@@ -1225,7 +1229,7 @@ def test_implementing_qa_handoffs_carry_no_leftover_requeue():
     hand-off exemption is what lets the next sweep spawn qa immediately
     instead. The awaiting-ci hand-offs carry none either: the dispatcher polls CI itself."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "qa --requeue" not in text, \
             f'{path}: a set-phase ... qa hand-off still carries a leftover --requeue'
         assert "awaiting-ci --requeue" not in text, \
@@ -1239,7 +1243,7 @@ def test_implementing_qa_handoffs_carry_no_leftover_requeue():
 
 def test_base_sync_merges_pushed_branch():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         fetch_line = 'git -C <WT> fetch -q origin "<PREFIX>$KEY"'
         ff_line = 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"'
         merge_line = 'git -C <WT> merge -q "origin/<BASE>"'
@@ -1255,7 +1259,7 @@ def test_base_sync_merges_pushed_branch():
 def test_base_sync_never_aborts_and_never_calls_make():
     import re
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "git merge --abort" in text, f"{path}: must forbid git merge --abort"
         assert "git rebase --abort" in text, f"{path}: must forbid git rebase --abort"
         assert not re.search(r"(`|^\s*|\$ )make\s", text, re.M), \
@@ -1264,7 +1268,7 @@ def test_base_sync_never_aborts_and_never_calls_make():
 
 def test_generated_doc_conflict_rule():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "Conflicted generated file" in text, path
         assert "resolve every other conflicted file first" in text, path
     claude = (REPO_ROOT / "CLAUDE.md").read_text()
@@ -1274,7 +1278,7 @@ def test_generated_doc_conflict_rule():
 
 def test_triage_checks_inflight_overlap():
     for path in (_commands_path("triaging"), _skills_path("triaging")):
-        text = path.read_text()
+        text = skill_text(path)
         assert "Overlap check" in text, path
         assert "derived/WORKSTATE.md" in text, path
         for phase in ("implementing", "qa", "awaiting-ci", "in-review"):
@@ -1286,7 +1290,7 @@ def test_triage_checks_inflight_overlap():
 def test_awaiting_human_skill_matches_proposal_bar_phrases():
     from maestro.tui.screens import ANSWER_ALTERNATIVE, ANSWER_NEEDS_MORE
     for path in (_commands_path("awaiting-human"), _skills_path("awaiting-human")):
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert f'**"{ANSWER_NEEDS_MORE}"**' in body
         assert f'**"{ANSWER_ALTERNATIVE} N"**' in body
         assert "case-insensitively" in body
@@ -1309,6 +1313,6 @@ def test_skill_points_new_tests_at_feature_files():
 
 def test_skill_states_present_tense_docstring_rule():
     for path in (Path(__file__).resolve().parent.parent / "CLAUDE.md",):
-        text = " ".join(path.read_text().split())
+        text = " ".join(skill_text(path).split())
         assert "present tense" in text, f"{path}: missing the present-tense docstring rule"
         assert "growing set" in text, f"{path}: missing the no-prose-count rule"

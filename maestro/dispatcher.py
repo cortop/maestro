@@ -210,6 +210,7 @@ AGENT_TOOL_VERBS = (
     # env/show/create, which skills genuinely invoke but build_parser() doesn't tag.
     "append",
     "ask",
+    "brief",
     "capture-tests",
     "check-conflicts",
     "check-merged",
@@ -299,7 +300,7 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
     "ready": ("ask", "env", "fold-inbox", "inbox-ack", "observe-spec", "release", "requeue",
               "set-phase", "snapshot", "worktree"),
     "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
-    "implementing": ("append", "ask", "env", "events", "fail", "finalize", "fold-inbox",
+    "implementing": ("append", "ask", "brief", "env", "events", "fail", "finalize", "fold-inbox",
                       "impl-turn", "local-backup", "locate", "observe-spec", "pr-size", "release",
                       "reply-review", "set-phase", "snapshot", "verify-ac", "worktree"),
     "qa": ("append", "ask", "env", "fail", "fold-inbox", "locate", "observe-spec", "qa-brief",
