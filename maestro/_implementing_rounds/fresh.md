@@ -22,29 +22,18 @@ No PR exists yet. Implement the spec's Acceptance criteria:
    ```
    **`exceeds: false`, or `exceeds: true` with `split_viable: false`** (no balanced file-level
    split exists, so a proposal would only cost a human round-trip; threshold `0` disables the
-   check) — open one PR without a `maestro ask`, pushed and opened (or updated) with an
-   AC-to-evidence table from the `verify-ac` calls (or `maestro snapshot "$KEY"` -> `ac_verified`):
+   check) — open one PR without a `maestro ask`. You write the title and body (motivation and
+   changes, then an AC-to-evidence table from the `verify-ac` calls or `maestro snapshot "$KEY"` ->
+   `ac_verified`); the verb pushes, creates the draft PR or adopts the one that already exists,
+   and records it once, so a re-run opens nothing twice:
    ```bash
-   git -C <WT> push -q -u origin "<PREFIX>$KEY"
-   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY" --draft --title "<DISPLAY_KEY>: <subject>" --body "<motivation/changes> ## AC-to-evidence
+   maestro open-pr "$KEY" --title "<DISPLAY_KEY>: <subject>" --body "<motivation/changes> ## AC-to-evidence
 
 | AC | Evidence |
 |----|----------|
 | <ac 1 text> | <what/where/result 1> |
 | <ac 2 text> | <what/where/result 2> |"
-   ```
-   If that fails because a PR already exists for this branch, fetch its URL instead:
-   ```bash
-   gh pr view "<PREFIX>$KEY" --repo "<SLUG>" --json url -q .url
-   ```
-   Either way, read the PR number next:
-   ```bash
-   gh pr view "<PREFIX>$KEY" --repo "<SLUG>" --json number -q .number
-   ```
-   Type the URL and number you read directly into the payload (no shell variable):
-   ```bash
-   maestro append "$KEY" --type PrOpened --payload "{\"number\":<pr-number>,\"url\":\"<pr-url>\",\"draft\":true}" --step-id "pr-$KEY"
-   maestro set-phase "$KEY" qa
+   maestro handoff "$KEY"
    ```
    **`exceeds: true` and `split_viable: true`** — do not push or open the PR yet. Split the diff
    into an ordered stack of smaller PRs by file: each entry names its files, the spec ACs it

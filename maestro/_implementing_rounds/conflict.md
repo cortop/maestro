@@ -7,9 +7,9 @@ as-is (the spec, and so their content hashes, didn't change) — do not re-imple
 re-run `verify-ac`, or route the ticket through `qa`.
 ```bash
 git -C <WT> push -q -u origin "<PREFIX>$KEY"
-maestro set-phase "$KEY" awaiting-ci
+maestro handoff "$KEY"
 ```
-If `set-phase awaiting-ci` refuses, fix that per its error; `--force` does not override the QA
+`handoff` picks `awaiting-ci` for this round. If it refuses, fix that per its error; `--force` does not override the QA
 gates. If you truly cannot reconcile the two intents yourself, escalate and exit:
 `maestro ask "$KEY" "PR #<n> conflict I couldn't auto-resolve: <detail>" --qid "conflict-$KEY-<n>"`.
 No PR yet (`pr_number` unset): after the sync continue with `maestro brief "$KEY" --round fresh`.

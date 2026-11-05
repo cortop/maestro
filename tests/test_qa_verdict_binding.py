@@ -57,9 +57,9 @@ def test_ci_observed_has_head(cfg):
 
 def test_skill_draft_ci_round_goes_to_qa():
     text = " ".join(implementing_brief.instructions("ci-fix").split())
-    assert "**Still-draft PR** (`pr_draft` true)" in text
-    seg = text.split("**Still-draft PR** (`pr_draft` true)", 1)[1].split("- **", 1)[0]
-    assert 'set-phase "$KEY" qa' in seg and "not awaiting-ci" in seg
+    assert 'maestro handoff "$KEY"' in text
+    assert "sends a still-draft PR to `qa`" in text
+    # the routing itself is pinned in tests/test_handoff_verb.py
 
 
 def test_test_run_step_id_keys_command(cfg):

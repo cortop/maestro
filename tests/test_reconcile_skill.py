@@ -153,10 +153,9 @@ def test_no_bare_origin_main():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = skill_text(path)
         assert '$BASE' not in text, f'{path} should hold BASE as the literal <BASE>, not $BASE'
-        assert text.count('"origin/<BASE>"') == 2, \
-            f'{path} should target "origin/<BASE>" exactly 2 time(s) (step 0\'s merge + rebase)'
-        assert text.count('fetch -q origin "<BASE>"') == 1, \
-            f'{path} should fetch "<BASE>" exactly 1 time(s)'
+        assert '"origin/<BASE>"' not in text, \
+            f'{path} should leave the base sync to `maestro sync-base`'
+        assert 'fetch -q origin "<BASE>"' not in text
 
 
 # ---------------------------------------------------------------------------
@@ -169,41 +168,26 @@ def test_no_bare_origin_main():
 # test_skill_copies_are_byte_identical_including_frontmatter.
 # ---------------------------------------------------------------------------
 
-def test_implementing_skill_fetches_and_ff_only_merges_pr_branch_before_rebasing_onto_base():
+def test_implementing_skill_syncs_through_the_verb():
+    # the PR-branch-first, merge-vs-rebase mechanics live in `pr_flow.sync_base`
+    # (tests/test_sync_base_verb.py); the skill must call it and not hand-type them
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = skill_text(path)
-        fetch_line = 'git -C <WT> fetch -q origin "<PREFIX>$KEY"'
-        merge_line = 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"'
-        rebase_line = 'git -C <WT> rebase "origin/<BASE>"'
-        assert fetch_line in text, \
-            f"{path}: missing the data-loss fix's fetch of origin/<PREFIX>$KEY"
-        assert merge_line in text, \
-            f"{path}: missing the data-loss fix's --ff-only merge of origin/<PREFIX>$KEY"
-        assert rebase_line in text, f"{path}: missing step 0's rebase onto origin/<BASE>"
-        fetch_pos = text.index(fetch_line)
-        merge_pos = text.index(merge_line)
-        rebase_pos = text.index(rebase_line)
-        assert fetch_pos < merge_pos < rebase_pos, \
-            (f"{path}: the PR-branch fetch + ff-only merge must both come BEFORE the "
-             f"rebase onto origin/<BASE> -- reordering silently reintroduces the data loss "
-             f"the fix exists to prevent")
+        assert 'maestro sync-base "$KEY"' in text, path
+        assert "incorporates `origin/<PREFIX>$KEY` first" in " ".join(text.split()), path
+        assert 'git -C <WT> rebase' not in text and 'git -C <WT> merge' not in text, path
 
 
 def test_gh_pr_calls_use_repo_slug_and_base():
-    # gh calls only live in the implementing file (PR create/view) now. GA-12: SLUG/BASE are
-    # substituted as the literal <SLUG>/<BASE> tokens the agent types, never $SLUG/$BASE. T-126
-    # adds a second `gh pr create` for stack entry 1 (also based on <BASE> -- entry 1 of an
-    # approved split has no dependency beyond it, same as the single-PR case), so the counts grew
-    # by one create's worth of both flags versus before this ticket.
+    # PR creation moved into `maestro open-pr`; only the description-refresh `gh` calls remain
+    # in the skill (view + edit across the qa-fix, ci-fix and review-feedback rounds).
+    # GA-12: SLUG is substituted as the literal <SLUG> token the agent types, never $SLUG.
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = skill_text(path)
         assert '$SLUG' not in text, f'{path} should hold SLUG as the literal <SLUG>, not $SLUG'
-        assert text.count('--repo "<SLUG>"') == 10, \
-            f'{path}: expected exactly 10 gh calls (2 create + 2 view + 6 refresh view/edit across the qa-fix, ci-fix and review-feedback rounds) carrying --repo "<SLUG>"'
-        assert text.count('--base "<BASE>"') == 2, \
-            f'{path}: expected exactly 2 --base "<BASE>" (the single-PR create and stack entry 1)'
-        create_line = next(l for l in text.splitlines() if "gh pr create" in l)
-        assert '--repo "<SLUG>"' in create_line and '--base "<BASE>"' in create_line
+        assert text.count('--repo "<SLUG>"') == 6, \
+            f'{path}: expected exactly 6 gh refresh calls carrying --repo "<SLUG>"'
+        assert 'gh pr create' not in text
 
 
 # ---------------------------------------------------------------------------
@@ -828,7 +812,7 @@ def test_implementing_skill_no_longer_briefs_qa_itself():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = skill_text(path)
         assert "qa-brief" not in text
-        assert 'set-phase "$KEY" qa' in text
+        assert 'maestro handoff "$KEY"' in text
 
 
 # ---------------------------------------------------------------------------
@@ -1091,15 +1075,15 @@ def test_qa_skill_test_step_timeout_matches_exported_bash_ceiling():
 # growing a PR, proposing a stack under a split-<KEY>-<tree> qid on exceed.
 # ---------------------------------------------------------------------------
 
-def test_implementing_checks_pr_size_before_every_gh_pr_create():
+def test_implementing_checks_pr_size_before_every_open_pr():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         body = _strip_frontmatter(skill_text(path))
         assert "maestro pr-size" in body
         size_idx = body.index("maestro pr-size")
-        create_indices = [m.start() for m in re.finditer(r"gh pr create", body)]
-        assert create_indices, f"{path}: expected at least one gh pr create"
-        assert all(i > size_idx for i in create_indices), \
-            f"{path}: a gh pr create appears before the pr-size threshold check"
+        create_indices = [m.start() for m in re.finditer(r"maestro open-pr", body)]
+        assert create_indices, f"{path}: expected at least one maestro open-pr"
+        assert body.index("maestro open-pr") > size_idx, \
+            f"{path}: the first maestro open-pr appears before the pr-size threshold check"
 
 
 def test_implementing_proposes_a_split_under_qid_on_exceed():
@@ -1110,12 +1094,13 @@ def test_implementing_proposes_a_split_under_qid_on_exceed():
         assert '--qid "split-$KEY-<tree>"' in body
 
 
-def test_implementing_records_stack_entries_via_pr_opened_with_stack_metadata():
+def test_implementing_opens_stacks_through_open_pr_with_entry_metadata():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         body = _strip_frontmatter(skill_text(path))
-        assert '\\"stack\\":{\\"index\\":0' in body
-        assert '\\"stack\\":{\\"index\\":1' in body
-        assert "ops.check_merged" in body
+        assert "maestro open-pr \"$KEY\" --stack" in body
+        assert '"title":"<DISPLAY_KEY>: <entry 1 subject> (1/<N>)"' in body
+        assert '"body":"<entry 1 body>"' in body
+        assert "root-first" in body
 
 
 def test_awaiting_human_routes_split_qid_back_to_implementing():
@@ -1211,16 +1196,14 @@ def test_phase_skill_fold_step_keys_off_inbox_pending():
 
 
 def test_implementing_skill_pr_titles_use_display_key_not_key():
-    """AC2: neither copy builds a `gh pr create --title` from `$KEY` any more --
-    both the single-PR and every stacked-entry title are built from
-    `<DISPLAY_KEY>` instead."""
+    """AC2: no PR title is built from `$KEY` -- the single-PR `open-pr --title` and every
+    stacked entry's title are built from `<DISPLAY_KEY>` instead."""
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = skill_text(path)
-        assert '--title "$KEY' not in text, \
-            f'{path}: a gh pr create --title still starts from $KEY, not display_key'
-        assert text.count('--title "<DISPLAY_KEY>:') == 2, \
-            f'{path}: expected exactly 2 gh pr create titles built from <DISPLAY_KEY> ' \
-            f'(the single-PR create and the stack entry 1 create)'
+        assert '--title "$KEY' not in text and '"title":"$KEY' not in text, \
+            f'{path}: an open-pr title still starts from $KEY, not display_key'
+        assert text.count('--title "<DISPLAY_KEY>:') == 1
+        assert text.count('"title":"<DISPLAY_KEY>:') == 2
 
 
 def test_implementing_qa_handoffs_carry_no_leftover_requeue():
@@ -1241,18 +1224,10 @@ def test_implementing_qa_handoffs_carry_no_leftover_requeue():
 # any branch that exists on origin and rebases only a never-pushed one.
 # ---------------------------------------------------------------------------
 
-def test_base_sync_merges_pushed_branch():
+def test_base_sync_reports_conflicts_for_the_agent_to_resolve():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        text = skill_text(path)
-        fetch_line = 'git -C <WT> fetch -q origin "<PREFIX>$KEY"'
-        ff_line = 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"'
-        merge_line = 'git -C <WT> merge -q "origin/<BASE>"'
-        rebase_line = 'git -C <WT> rebase "origin/<BASE>"'
-        for line in (fetch_line, ff_line, merge_line, rebase_line):
-            assert line in text, f"{path}: missing {line!r}"
-        assert text.index(fetch_line) < text.index(ff_line) < text.index(merge_line), path
-        assert text.index(fetch_line) < text.index(ff_line) < text.index(rebase_line), path
-        assert "git -C <WT> commit --no-edit" in text, path
+        text = " ".join(skill_text(path).split())
+        assert "`conflicted_files` and a `continue_command`" in text, path
         assert "never-pushed" in text.lower(), path
 
 
