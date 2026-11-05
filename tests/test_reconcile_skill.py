@@ -197,8 +197,8 @@ def test_gh_pr_calls_use_repo_slug_and_base():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
         text = path.read_text()
         assert '$SLUG' not in text, f'{path} should hold SLUG as the literal <SLUG>, not $SLUG'
-        assert text.count('--repo "<SLUG>"') == 4, \
-            f'{path}: expected exactly 4 gh calls (2 create + 2 view) carrying --repo "<SLUG>"'
+        assert text.count('--repo "<SLUG>"') == 6, \
+            f'{path}: expected exactly 6 gh calls (2 create + 2 view + 2 refresh view/edit) carrying --repo "<SLUG>"'
         assert text.count('--base "<BASE>"') == 2, \
             f'{path}: expected exactly 2 --base "<BASE>" (the single-PR create and stack entry 1)'
         create_line = next(l for l in text.splitlines() if "gh pr create" in l)
