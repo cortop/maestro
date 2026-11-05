@@ -281,10 +281,12 @@ def maestro_verb_grant(verbs=AGENT_TOOL_VERBS) -> list[str]:
 # `PHASE_CLASS`/`_PHASE_COMMAND_SUFFIX` themselves -- runtime-parsing the
 # skill markdown would tie this to one specific install layout (maestro is
 # project-agnostic; a bound repo's skills may not even live at this path), so
-# the sanctioned fallback (RB-16 spec Notes) is a hand table plus a test that
-# fails on drift: `tests/test_phase_verb_grant.py` greps every skill file for
-# `maestro <verb>` invocations and fails if one names a verb its phase isn't
-# granted here.
+# the sanctioned fallback (RB-16 spec Notes) is a hand table plus a test
+# that fails on drift: `tests/test_phase_verb_grant.py` greps every skill
+# file -- and, for `implementing`, the maestro/_implementing_rounds/*.md
+# round files `maestro brief` renders into the round instructions a spawned
+# reconciler actually follows -- for `maestro <verb>` invocations and fails
+# if one names a verb its phase isn't granted here.
 #
 # `capture-tests`/`check-conflicts`/`check-merged`/`fold-steps` are granted to
 # NO phase: all four are dispatcher-owned (`ops.route_conflict`/`ops.
@@ -304,8 +306,9 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
               "set-phase", "snapshot", "worktree"),
     "researching": ("append", "ask", "env", "fold-inbox", "observe-spec", "release", "snapshot"),
     "implementing": ("append", "ask", "brief", "env", "events", "fail", "finalize", "fold-inbox",
-                      "impl-turn", "local-backup", "locate", "observe-spec", "pr-size", "release",
-                      "reply-review", "set-phase", "snapshot", "verify-ac", "worktree"),
+                      "handoff", "impl-turn", "local-backup", "locate", "observe-spec",
+                      "open-pr", "pr-size", "release", "reply-review", "set-phase", "snapshot",
+                      "sync-base", "verify-ac", "worktree"),
     "qa": ("append", "ask", "env", "fail", "fold-inbox", "locate", "observe-spec", "qa-brief",
            "qa-verdict", "release", "set-phase"),
     "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",
