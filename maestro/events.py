@@ -25,7 +25,7 @@ COMMAND_RECEIVED = "CommandReceived"    # {command, args}  folded from the inbox
 # Implementation / VCS
 PR_OPENED = "PrOpened"                  # {number, url, draft}
 PR_UPDATED = "PrUpdated"                # {number, draft, merged}
-CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, error?, failure_excerpt?}  state:
+CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, head_sha, error?, failure_excerpt?}  state:
                                          # "passing"|"failing"|"pending"|"unknown"
                                          # error (optional): "auth"|"not_found"|"unknown" -- WHY a poll couldn't read
                                          # the PR (state stays "unknown"); a "transient" classification is a free
@@ -104,7 +104,7 @@ AC_CHECK_CAPTURED = "AcCheckCaptured"   # {tree_key, ac_hash, ac_index, ac_text,
 APPROVED = "Approved"                   # {}
 
 # Independent QA (a separate agent that did not write the code re-checks the diff)
-AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, evidence, axis}
+AC_QA_VERDICT = "AcQaVerdict"           # {ac_hash, ac_index, ac_text, verdict, evidence, axis, head_sha?, tree_sha?}
                                          # verdict: "pass"|"fail"; axis: "spec"|"standards" (T-23),
                                          # default "spec" when omitted (pre-T-23 events). The two
                                          # axes are folded into separate snapshot buckets and never

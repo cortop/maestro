@@ -733,6 +733,9 @@ def _fold_ac_qa_verdict(s: Snapshot, p: dict, seq, t: str) -> None:
     h = p.get("ac_hash")
     if h:
         entry = {"verdict": p.get("verdict"), "evidence": p.get("evidence", "")}
+        for stamp in ("head_sha", "tree_sha"):  # absent on a legacy (unbound) verdict
+            if p.get(stamp):
+                entry[stamp] = p[stamp]
         if p.get("axis") == "standards":
             s.qa_verdicts_standards[h] = entry
         else:

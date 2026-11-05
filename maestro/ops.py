@@ -1351,7 +1351,7 @@ def _record_test_run(cfg: Config, key: str, *, tree_key: str, command: str,
     if not passed:
         payload["failure_excerpt"] = _bounded_excerpt(output)
     _append(cfg, key, E.TEST_RUN_CAPTURED, payload, actor=actor,
-            sid=f"testrun-{key}-{tree_key}")
+            sid=f"testrun-{key}-{tree_key}-{content_hash(command)}")
     return payload
 
 
@@ -1902,11 +1902,32 @@ def record_qa_verdict(cfg: Config, key: str, ac_index: int, verdict: str, eviden
     ac_text = acs[ac_index - 1]
     h = snap_mod.ac_hash(ac_text)
     sid = step_id(key, snap.phase, snap.observed_seq, f"qaverdict-{axis}-{h}-{verdict}")
-    _append(cfg, key, E.AC_QA_VERDICT,
-            {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "verdict": verdict,
-             "evidence": evidence, "axis": axis},
-            actor=actor, sid=sid)
+    payload = {"ac_hash": h, "ac_index": ac_index, "ac_text": ac_text, "verdict": verdict,
+               "evidence": evidence, "axis": axis}
+    payload.update(_head_and_tree(cfg, key))
+    _append(cfg, key, E.AC_QA_VERDICT, payload, actor=actor, sid=sid)
     return h
+
+
+def _head_and_tree(cfg: Config, key: str) -> dict:
+    """`{"head_sha", "tree_sha"}` of *key*'s worktree HEAD, or `{}` when it has
+    no resolvable git HEAD (local mode, no worktree), so such a verdict reads as
+    unbound, like a legacy one."""
+    from .dispatcher import _worker_cwd  # lazy: avoid a module-load cycle
+
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    if binding.mode == "local":
+        return {}
+    cwd = _worker_cwd(cfg, key)
+    try:
+        proc = subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD", "HEAD^{tree}"],
+                              capture_output=True, text=True, timeout=binding.worktree_timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    shas = proc.stdout.split()
+    if proc.returncode != 0 or len(shas) != 2:
+        return {}
+    return {"head_sha": shas[0], "tree_sha": shas[1]}
 
 
 def _resolved_qids(cfg: Config, key: str) -> set[str]:
