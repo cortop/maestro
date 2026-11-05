@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from conftest import skill_text
 import pytest
 
 from maestro import dispatcher as disp, event_log, ops, repos as repos_mod, snapshot as snap_mod, store
@@ -120,5 +121,5 @@ def test_unset_means_no_restriction(tmp_path, home):
 
 
 def test_implementing_skill_tells_reconciler_to_read_allowed_paths():
-    text = (Path(__file__).parent.parent / ".claude/commands/maestro-reconcile-implementing.md").read_text()
+    text = skill_text(Path(__file__).parent.parent / ".claude/commands/maestro-reconcile-implementing.md")
     assert "allowed_paths" in text and "maestro env --key" in text and "maestro ask" in text

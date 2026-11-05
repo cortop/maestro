@@ -1,13 +1,11 @@
 """T-209: QA verdicts carry the head/tree they judged; CiObserved carries its head."""
-from pathlib import Path
-
 from conftest import add_worktree, make_origin_and_repo
 
 from maestro import dispatcher as disp
+from maestro import implementing_brief
 from maestro import event_log, ops, snapshot as snap_mod, store
 from maestro.statemachine import Phase
 
-SKILL = Path(__file__).resolve().parent.parent / ".claude/commands/maestro-reconcile-implementing.md"
 
 
 def _ticket(cfg, key="T-1"):
@@ -58,9 +56,9 @@ def test_ci_observed_has_head(cfg):
 
 
 def test_skill_draft_ci_round_goes_to_qa():
-    text = SKILL.read_text(encoding="utf-8")
-    assert "`CI failing:` round on a still-draft PR" in text
-    seg = text.split("`CI failing:` round on a still-draft PR", 1)[1].split("- **", 1)[0]
+    text = " ".join(implementing_brief.instructions("ci-fix").split())
+    assert "**Still-draft PR** (`pr_draft` true)" in text
+    seg = text.split("**Still-draft PR** (`pr_draft` true)", 1)[1].split("- **", 1)[0]
     assert 'set-phase "$KEY" qa' in seg and "not awaiting-ci" in seg
 
 

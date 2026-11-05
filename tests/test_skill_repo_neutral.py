@@ -1,4 +1,5 @@
 """The implementing skill is repo-neutral; maestro-only rules live in CLAUDE.md."""
+from conftest import skill_text
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -6,7 +7,7 @@ SKILL = ROOT / ".claude" / "commands" / "maestro-reconcile-implementing.md"
 
 
 def _flat(path: Path) -> str:
-    return " ".join(path.read_text(encoding="utf-8").split())
+    return " ".join(skill_text(path).split())
 
 
 def test_nearest_agents_md_rule():

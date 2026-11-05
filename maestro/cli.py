@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import backup
 from . import claims
+from . import context as context_mod
 from . import credentials
 from . import decision_labels
 from . import dispatcher as disp
@@ -24,6 +25,7 @@ from . import event_log
 from . import events
 from . import fleet
 from . import health
+from . import implementing_brief
 from . import inbox
 from . import ops
 from . import outcomes
@@ -1029,6 +1031,41 @@ def cmd_capture_tests(args) -> int:
     return 0
 
 
+def cmd_brief(args) -> int:
+    """[agent] one call for an implementing reconcile: env, snapshot, spec, dossier and this round's instructions.
+
+    The round is classified from the last transition into implementing; `--round`
+    overrides it to print another round's instructions (`sync` prints the base-sync
+    steps alone). An unrecognised reason prints every round's instructions.
+    """
+    cfg = _cfg(args)
+    key = args.key
+    try:
+        env_key = _env_key_payload(cfg, key)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    spec_hash = ops.observe_spec(cfg, key, actor=args.actor)
+    snap = snap_mod.rebuild(cfg.home, key).to_dict()
+    snap["inbox_pending"] = len(inbox.pending(cfg.home, key))
+    round_name, reason = implementing_brief.current_round(cfg.home, key)
+    shown = args.round or round_name
+    spec_p = store.spec_path(cfg.home, key)
+    ctx_p = context_mod.context_path(cfg.home, key)
+    head = {"round": round_name, "reason": reason, "spec_hash": spec_hash,
+            "env": env_key, "home_env": _env_home_payload(cfg), "snapshot": snap}
+    if shown != round_name:
+        head["instructions_for"] = shown
+    spec_text = spec_p.read_text(encoding="utf-8") if spec_p.exists() else "(no spec.md)"
+    ctx_text = ctx_p.read_text(encoding="utf-8") if ctx_p.exists() else "(no context folded yet)"
+    print("\n".join([
+        "# Brief", "```json", json.dumps(head, indent=2, default=str), "```", "",
+        "# Spec", spec_text.rstrip(), "",
+        "# Context", ctx_text.rstrip(), "",
+        "# Instructions", implementing_brief.instructions(shown), ""]))
+    return 0
+
+
 def cmd_qa_brief(args) -> int:
     """[agent] mint the Implementer->QA hand-off packet (AC list + diff) for one ticket.
 
@@ -1492,51 +1529,49 @@ def cmd_restore(args) -> int:
     return 0
 
 
-def cmd_env(args) -> int:
-    """Resolved config essentials — used by the reconcile skill to find the repo."""
-    cfg = _cfg(args)
-    key = getattr(args, "key", None)
-    if key:
-        name = repos_mod.bound_repo_name(cfg.home, key)
-        if name and name not in cfg.repos:
-            print(f"error: {key} is bound to repo '{name}' but no [repos.{name}] "
-                  f"table is configured", file=sys.stderr)
-            return 1
-        binding = repos_mod.resolve(cfg, cfg.home, key)
-        snap = snap_mod.load(cfg.home, key)
-        # GA-17: name only -- never resolve() here (that shells `gh auth token` /
-        # reads the env var), just the identifier. This is a hot path (every
-        # reconciler phase preamble calls `maestro env --key`), so it must stay
-        # zero-cost and never touch the secret value.
-        gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
-        disallowed_tools = disp.MERGE_DENYLIST + disp.phase_denylist(snap.phase)
-        # RF-2: same per-key spawn-arg resolution `dispatch()` uses right before
-        # `sessions.spawn` -- surfaced here so `make reconcile` (and any human
-        # inspecting a ticket) sees exactly what a real spawn would resolve to.
-        model, effort = disp._resolve_model_effort(cfg, key)
-        runner, runner_model = disp.resolve_runner(cfg, key, snap.phase)
-        # T-132: deterministic, PATH-lookup + marker-file check -- no `gt`
-        # subprocess of its own, see repos.resolve_stack_tool's docstring.
-        stack_tool = repos_mod.resolve_stack_tool(binding)
-        _print({"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
-                "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
-                "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
-                "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase),
-                "disallowed_tools": disallowed_tools,
-                "model": model, "effort": effort,
-                "runner": runner, "runner_model": runner_model,
-                "kind": snap.kind,
-                "display_key": snap.display_key,
-                # T-96 AC4: surface the resolved test-verification knobs a
-                # `test:` annotation's presence gate actually uses, so a
-                # human/agent can see what the language guard is checking
-                # against without reading config.toml directly.
-                "language": binding.language, "test_command": binding.test_command,
-                "allowed_paths": binding.allowed_paths,
-                "qa_skill": binding.qa_skill,
-                "stack_tool": stack_tool})
-        return 0
-    _print({"home": str(cfg.home), "board": store.board_state(cfg.home),
+def _env_key_payload(cfg: Config, key: str) -> dict:
+    """The per-ticket `maestro env --key` fields; ValueError when the repo binding is unconfigured."""
+    name = repos_mod.bound_repo_name(cfg.home, key)
+    if name and name not in cfg.repos:
+        raise ValueError(f"{key} is bound to repo '{name}' but no [repos.{name}] table is configured")
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    snap = snap_mod.load(cfg.home, key)
+    # GA-17: name only -- never resolve() here (that shells `gh auth token` /
+    # reads the env var), just the identifier. This is a hot path (every
+    # reconciler phase preamble calls `maestro env --key`), so it must stay
+    # zero-cost and never touch the secret value.
+    gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
+    disallowed_tools = disp.MERGE_DENYLIST + disp.phase_denylist(snap.phase)
+    # RF-2: same per-key spawn-arg resolution `dispatch()` uses right before
+    # `sessions.spawn` -- surfaced here so `make reconcile` (and any human
+    # inspecting a ticket) sees exactly what a real spawn would resolve to.
+    model, effort = disp._resolve_model_effort(cfg, key)
+    runner, runner_model = disp.resolve_runner(cfg, key, snap.phase)
+    # T-132: deterministic, PATH-lookup + marker-file check -- no `gt`
+    # subprocess of its own, see repos.resolve_stack_tool's docstring.
+    stack_tool = repos_mod.resolve_stack_tool(binding)
+    return {"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
+            "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
+            "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
+            "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase),
+            "disallowed_tools": disallowed_tools,
+            "model": model, "effort": effort,
+            "runner": runner, "runner_model": runner_model,
+            "kind": snap.kind,
+            "display_key": snap.display_key,
+            # T-96 AC4: surface the resolved test-verification knobs a
+            # `test:` annotation's presence gate actually uses, so a
+            # human/agent can see what the language guard is checking
+            # against without reading config.toml directly.
+            "language": binding.language, "test_command": binding.test_command,
+            "allowed_paths": binding.allowed_paths,
+            "qa_skill": binding.qa_skill,
+            "stack_tool": stack_tool}
+
+
+def _env_home_payload(cfg: Config) -> dict:
+    """The board-wide key-less `maestro env` fields."""
+    return {"home": str(cfg.home), "board": store.board_state(cfg.home),
             "repo_path": cfg.repo_path,
             "branch_prefix": cfg.branch_prefix, "reconcile_command": cfg.reconcile_command,
             "max_concurrency": cfg.max_concurrency, "max_impl_turns": cfg.max_impl_turns,
@@ -1544,7 +1579,21 @@ def cmd_env(args) -> int:
             "spawn_floor_s": disp.spawn_floor(cfg),
             "no_output_timeout": cfg.no_output_timeout,
             "runner": cfg.runner, "runner_model": cfg.runner_model,
-            "runner_enabled": cfg.runner_enabled})
+            "runner_enabled": cfg.runner_enabled}
+
+
+def cmd_env(args) -> int:
+    """Resolved config essentials — used by the reconcile skill to find the repo."""
+    cfg = _cfg(args)
+    key = getattr(args, "key", None)
+    if not key:
+        _print(_env_home_payload(cfg))
+        return 0
+    try:
+        _print(_env_key_payload(cfg, key))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1850,6 +1899,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("capture-tests", cmd_capture_tests,
              "[agent] run test_command for real and record the result (RB-12 implementing->qa gate)")
     sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
+
+    sp = add("brief", cmd_brief,
+             "[agent] one-call implementing preamble: env, snapshot, spec, dossier and only this round's instructions")
+    sp.add_argument("key")
+    sp.add_argument("--round", choices=implementing_brief.OVERRIDES,
+                    help="print this round's instructions instead of the classified one")
+    sp.add_argument("--actor", default="reconciler")
 
     sp = add("qa-brief", cmd_qa_brief,
              "[agent] mint the QA hand-off packet (AC list + diff) for one ticket")

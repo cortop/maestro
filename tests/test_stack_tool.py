@@ -15,6 +15,7 @@ it never runs `gt` and never has anything here that could force-push.
 """
 from __future__ import annotations
 
+from conftest import skill_text
 import os
 from pathlib import Path
 
@@ -198,8 +199,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _implementing_skill_texts() -> list[str]:
     return [
-        (_REPO_ROOT / ".claude" / "commands" / "maestro-reconcile-implementing.md").read_text(),
-        (_REPO_ROOT / "skills" / "maestro-reconcile-implementing.md").read_text(),
+        skill_text(_REPO_ROOT / ".claude" / "commands" / "maestro-reconcile-implementing.md"),
+        skill_text(_REPO_ROOT / "skills" / "maestro-reconcile-implementing.md"),
     ]
 
 

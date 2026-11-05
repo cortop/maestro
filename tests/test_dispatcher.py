@@ -24,6 +24,7 @@ from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
 from conftest import seed_phase
+from conftest import skill_text
 
 
 def test_active_phase_is_due(home):
@@ -2714,7 +2715,7 @@ def test_reconciler_literal_coverage_matches_skills():
     git_re = re.compile(r"(?:^\s*|`)git (?:-C \S+ )?([a-z]+)", re.MULTILINE)
     gh_re = re.compile(r"(?:^\s*|`)gh (\w+)", re.MULTILINE)
     for path in sorted((repo_root / "skills").glob("maestro-reconcile-*.md")):
-        text = path.read_text()
+        text = skill_text(path)
         git_subcommands.update(m.group(1) for m in git_re.finditer(text))
         gh_subcommands.update(m.group(1) for m in gh_re.finditer(text))
 

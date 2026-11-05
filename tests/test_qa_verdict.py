@@ -1,6 +1,7 @@
 """AD-4: independent QA verdicts (AcQaVerdict events) and the enforced gate
 that a failing verdict blocks `implementing -> awaiting-ci`.
 """
+from conftest import skill_text
 import pytest
 
 from maestro import cli, event_log, ops, snapshot as snap_mod, store
@@ -194,8 +195,8 @@ def test_reconcile_skill_documents_the_qa_handoff():
     (see test_reconcile_skill.py's mirror-consistency checks)."""
     import pathlib
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    skill = (repo_root / "skills" / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
-    mirror = (repo_root / ".claude" / "commands" / "maestro-reconcile-implementing.md").read_text(encoding="utf-8")
+    skill = skill_text(repo_root / "skills" / "maestro-reconcile-implementing.md")
+    mirror = skill_text(repo_root / ".claude" / "commands" / "maestro-reconcile-implementing.md")
 
     for text in (skill, mirror):
         assert "QA" in text

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from conftest import skill_text
 import pytest
 
 from maestro import cli, config as config_mod, dispatcher as disp, event_log, ops
@@ -64,7 +65,7 @@ def test_both_questions_offer_approve_allow_or_revert(tmp_path, home):
     _cfg, _wt, q, _ = _to_question(tmp_path, home)
     for needle in ("approve", "`allow`", "`allow: <glob>`", "reverted", "[files: docs/one.md, ops/two.sh]"):
         assert needle in q["text"]
-    skill = (Path(__file__).parent.parent / ".claude/commands/maestro-reconcile-implementing.md").read_text()
+    skill = skill_text(Path(__file__).parent.parent / ".claude/commands/maestro-reconcile-implementing.md")
     for needle in ("`approve`", "`allow`", "`allow: <glob>`", "[files:", "scope-$KEY-<n>"):
         assert needle in skill
 

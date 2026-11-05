@@ -3,6 +3,7 @@ can be grouped into a balanced stack (smallest entry >= 1/3 of the largest).
 Driven through the real CLI over a real temp home and git repo."""
 from __future__ import annotations
 
+from conftest import skill_text
 import json
 
 from maestro import event_log, snapshot as snap_mod, store
@@ -72,7 +73,7 @@ def test_not_exceeding_not_viable(home, capsys):
 
 def test_skill_requires_balanced_split():
     for path in (_commands_path("implementing"), _skills_path("implementing")):
-        body = _strip_frontmatter(path.read_text())
+        body = _strip_frontmatter(skill_text(path))
         assert "split_viable: false" in body
         assert "without a\n   `maestro ask`" in body or "without a `maestro ask`" in body
         assert "⅓" in body
