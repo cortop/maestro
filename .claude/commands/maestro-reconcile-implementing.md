@@ -369,15 +369,20 @@ Otherwise implement the spec's Acceptance criteria:
    Then exit (`maestro release "$KEY"`) without pushing — the dispatcher wakes `awaiting-human` on
    the answer, which routes back here (see step 1's fourth case) to act on it.
 
+   **Each stack entry's PR is its own review unit:** its title subject and body describe only
+   that entry's diff (its base...its branch), never the ticket-wide subject reused under a new
+   `(n/N)`. Its Changes come from that diff alone, and its AC-to-evidence table lists only the ACs
+   the approved proposal gave that entry; one clause pointing at the neighbouring PRs is enough.
+
    **Approved split, if `STACK_TOOL == gt`:** build each stack entry as its own gt-tracked
    branch, oldest first, each created while checked out on the previous entry's branch so gt
    records the parent link itself — no manual `git branch`/`git push`/`gh pr create`:
    ```bash
    git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
    git -C <WT> checkout -q <sha of entry 1's last commit>
-   gt --cwd <WT> create "<PREFIX>$KEY-1" -m "$KEY: <subject> (1/<N>)"
+   gt --cwd <WT> create "<PREFIX>$KEY-1" -m "$KEY: <entry 1 subject> (1/<N>)"
    git -C <WT> checkout -q <sha of entry 2's last commit>
-   gt --cwd <WT> create "<PREFIX>$KEY-2" -m "$KEY: <subject> (2/<N>)"
+   gt --cwd <WT> create "<PREFIX>$KEY-2" -m "$KEY: <entry 2 subject> (2/<N>)"
    ```
    repeat for entries `2..N` (the last entry may just be `<PREFIX>$KEY` at `HEAD` itself — no extra
    branch needed), then submit and open every PR in the stack in one call — this is the ONLY path
@@ -390,7 +395,8 @@ Otherwise implement the spec's Acceptance criteria:
    `PrOpened`/`stack`-sub-payload shape, same root-first ordering, same
    `maestro set-phase "$KEY" qa`) — `gt submit` already supplied the push and the PR
    create/update, so skip straight to appending those events; never run `git push`/`gh pr create`
-   yourself on this path.
+   yourself on this path. `gt submit` names PRs from their commits, so before appending, `gh pr edit` each
+   entry's PR to its own `<DISPLAY_KEY>: <entry n subject> (<n>/<N>)` title and per-entry body.
 
    **Approved split, if `STACK_TOOL == git` (default):** label each stack entry on the branch's
    already-linear commit history (no rewrite) and open its PR oldest-first, each based on the
@@ -399,10 +405,10 @@ Otherwise implement the spec's Acceptance criteria:
    git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
    git -C <WT> branch "<PREFIX>$KEY-1" <sha of entry 1's last commit>
    git -C <WT> push -q -u origin "<PREFIX>$KEY-1"
-   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY-1" --draft --title "<DISPLAY_KEY>: <subject> (1/<N>)" --body "..."
+   gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY-1" --draft --title "<DISPLAY_KEY>: <entry 1 subject> (1/<N>)" --body "<entry 1 body>"
    ```
    repeat for entries `2..N`, each based on `<PREFIX>$KEY-<n-1>` instead of `<BASE>` (the title's
-   `<DISPLAY_KEY>: <subject> (<n>/<N>)` for every entry — never `$KEY`), and the last
+   `<DISPLAY_KEY>: <entry n subject> (<n>/<N>)` for every entry — never `$KEY`), and the last
    entry may just be `<PREFIX>$KEY` at `HEAD` itself — no extra branch needed). Record entry 0 —
    the first PR, the only one QA/CI/review ever poll directly — with the normal `PrOpened` call
    plus a `stack` sub-payload, and every later entry with the same event type (T-126 — see
