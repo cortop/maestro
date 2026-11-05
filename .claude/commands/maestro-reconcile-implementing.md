@@ -313,6 +313,14 @@ Otherwise implement the spec's Acceptance criteria:
      change, or skip the push entirely if this round only recorded a Note.
    - **Conflict-only pass**: `maestro set-phase "$KEY" awaiting-ci` (see step 0).
 
+   **Refresh the description after a code push (fix and review-feedback rounds only).** Right after
+   the push, `gh pr view <n> --repo "<SLUG>" --json title,body` and compare with the PR's own diff
+   (`git -C <WT> diff <base>...<head>`). Rewrite only what the new commits made wrong via
+   `gh pr edit <n> --repo "<SLUG>" --title ... --body ...`: keep every human-written line verbatim,
+   and replace the AC-to-evidence table rows from `ac_verified`. Edit nothing when it still
+   matches; a conflict-only pass or a Note-only round pushes no code, so skip. On a stack, refresh
+   only entries whose own diff changed, each from its own base...branch diff.
+
    **If this is a split-decision round** (step 1's fourth case): there is nothing new to commit —
    the commit above is a no-op — no PR exists yet at this point either, so act on the verbatim
    answer from the phase-history reason instead: an approving answer means open the approved stack
