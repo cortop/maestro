@@ -14,13 +14,12 @@ Stay inside `allowed_paths`.
    The verb numbers the turn and mints its own step-id — never hand-roll it with `maestro
    append`. If its response shows the ticket was parked (past `max_impl_turns`), stop here, do
    not push or hand off, and exit.
-3. Commit and push (the PR already has its `PrOpened` event — do not append another), then hand
-   off:
+3. Commit and push (the PR is already open — do not open another), then hand off:
    ```bash
    git -C <WT> add -A
    git -C <WT> commit -q -m "$KEY: <subject>"
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
-   maestro set-phase "$KEY" qa
+   maestro handoff "$KEY"
    ```
 4. Refresh the PR description: `gh pr view <n> --repo "<SLUG>" --json title,body` and compare with
    `git -C <WT> diff <base>...<head>`. Fix only what the new commits made wrong via `gh pr edit

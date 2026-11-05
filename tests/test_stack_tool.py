@@ -204,24 +204,16 @@ def _implementing_skill_texts() -> list[str]:
     ]
 
 
-def test_implementing_skill_branches_approved_split_and_conflict_round_on_stack_tool():
+def test_implementing_skill_leaves_stack_tool_branching_to_the_verbs():
     for text in _implementing_skill_texts():
         assert "STACK_TOOL" in text
-        # gt path -- conflict round
-        assert "gt --cwd <WT> sync" in text
-        assert "gt --cwd <WT> restack" in text
-        assert "gt --cwd <WT> continue" in text
-        # gt path -- approved split
-        assert 'gt --cwd <WT> create "<PREFIX>$KEY-1"' in text
-        assert "gt --cwd <WT> submit --stack" in text
-        # the git path's own literal commands are still present, word for word
-        assert 'git -C <WT> fetch -q origin "<PREFIX>$KEY"' in text
-        assert 'git -C <WT> merge -q --ff-only "origin/<PREFIX>$KEY"' in text
-        assert 'git -C <WT> rebase "origin/<BASE>"' in text
-        assert 'git -C <WT> rebase --continue' in text
-        assert 'git -C <WT> branch "<PREFIX>$KEY-1" <sha of entry 1' in text
-        assert 'git -C <WT> push -q -u origin "<PREFIX>$KEY-1"' in text
-        assert 'gh pr create --repo "<SLUG>" --base "<BASE>" --head "<PREFIX>$KEY-1"' in text
+        assert 'maestro sync-base "$KEY"' in text
+        assert "gt` and `gt\nrestack`" in text or "gt sync" in text
+        assert "maestro open-pr" in text
+        # no hand-typed gt or branch/PR plumbing left in the skill
+        for literal in ("gt --cwd <WT> create", "gt --cwd <WT> submit", "gh pr create",
+                        'git -C <WT> rebase "origin/<BASE>"', 'git -C <WT> branch "<PREFIX>$KEY-1"'):
+            assert literal not in text
 
 
 # ---------------------------------------------------------------------------

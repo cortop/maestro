@@ -11,7 +11,7 @@ it (`maestro brief "$KEY" --round sync` prints the steps).
 
 **Non-blocking AI-reviewer suggestions are optional.** When the comment comes from an automated AI
 reviewer and is a non-blocking suggestion (a nit, a style preference, a lower-priority idea), you
-may decline it: record the reason, push nothing, and go straight to `set-phase awaiting-ci`.
+may decline it: record the reason, push nothing, and go straight to `maestro handoff "$KEY"`.
 Never decline this way a `changes requested:` review or any comment written by a human.
 
 **`approved with comments:`** means the reviewer already APPROVED: the approval is NOT blocking,
@@ -31,12 +31,12 @@ internal jargon (a phase name, an AC-hash, a step id), and is idempotent per (co
 
 1. If you made a code change, run the tests (core, "Tests are the proof").
 2. Commit and push (skip the push entirely if this round only recorded a Note), then hand back to
-   CI and that review — a human is already reviewing the PR on GitHub, so not `qa`:
+   CI and that review (`handoff` picks `awaiting-ci`) — a human is already reviewing the PR on GitHub, so not `qa`:
    ```bash
    git -C <WT> add -A
    git -C <WT> commit -q -m "$KEY: <subject>"
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
-   maestro set-phase "$KEY" awaiting-ci
+   maestro handoff "$KEY"
    ```
 3. After a code push, refresh the PR description: `gh pr view <n> --repo "<SLUG>" --json
    title,body` and compare with `git -C <WT> diff <base>...<head>`. Fix only what the new commits

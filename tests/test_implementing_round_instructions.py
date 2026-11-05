@@ -26,7 +26,8 @@ def test_stale_reason_says_sync_not_rebase(cfg):
 
 def test_sync_keeps_merge_for_pushed_branches():
     text = _round("sync")
-    assert "merge base in; never rebase" in text
+    assert "merges base into a pushed branch or rebases a never-pushed one" in " ".join(text.split())
+    assert 'maestro sync-base "$KEY"' in text
     assert "`origin/<BASE> advanced (policy=...)`" in text
 
 
@@ -37,13 +38,12 @@ def test_ci_round_is_a_named_round():
 
 
 def test_ready_pr_ci_round_goes_to_awaiting_ci():
-    seg = _round("ci-fix").split("**Ready PR**", 1)[1].split("- **", 1)[0]
-    assert "`pr_draft` false" in seg
-    assert 'set-phase "$KEY" awaiting-ci' in seg
+    text = " ".join(_round("ci-fix").split())
+    assert 'maestro handoff "$KEY"' in text
+    assert "a ready PR to `awaiting-ci`" in text
 
 
 def test_draft_ci_round_goes_to_qa_and_counts_a_turn():
     text = _round("ci-fix")
-    seg = text.split("**Still-draft PR**", 1)[1].split("- **", 1)[0]
-    assert 'set-phase "$KEY" qa' in seg
+    assert "a still-draft PR to `qa`" in " ".join(text.split())
     assert "maestro impl-turn" in text and "On a still-draft PR" in text

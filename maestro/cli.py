@@ -29,6 +29,7 @@ from . import implementing_brief
 from . import inbox
 from . import ops
 from . import outcomes
+from . import pr_flow
 from . import projection
 from . import ratelimit
 from . import repos as repos_mod
@@ -1006,6 +1007,26 @@ def cmd_pr_size(args) -> int:
     return 0
 
 
+def cmd_sync_base(args) -> int:
+    """[agent] incorporate the remote PR branch, then base; report clean or conflicted."""
+    _print(pr_flow.sync_base(_cfg(args), args.key))
+    return 0
+
+
+def cmd_open_pr(args) -> int:
+    """[agent] push, create or adopt the draft PR (or approved stack), record PrOpened."""
+    stack = json.loads(args.stack) if args.stack else None
+    _print(pr_flow.open_pr(_cfg(args), args.key, title=args.title or "", body=args.body or "",
+                           stack=stack, actor=args.actor))
+    return 0
+
+
+def cmd_handoff(args) -> int:
+    """[agent] move to qa or awaiting-ci, chosen from the implementing round and pr_draft."""
+    _print(pr_flow.handoff(_cfg(args), args.key, actor=args.actor))
+    return 0
+
+
 def cmd_verify_ac(args) -> int:
     """[agent] attest AC #n with structured evidence — content-hash keyed, idempotent."""
     evidence = {"what": args.what, "where": args.where, "result": args.result}
@@ -1878,6 +1899,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("pr-size", cmd_pr_size,
              "[agent] report this ticket's lines-changed vs base and whether it exceeds pr_split_threshold")
     sp.add_argument("key")
+
+    sp = add("sync-base", cmd_sync_base,
+             "[agent] sync the worktree with the remote PR branch and base; reports clean or conflicted")
+    sp.add_argument("key")
+    sp = add("open-pr", cmd_open_pr,
+             "[agent] push and create or adopt the draft PR (or --stack), recording PrOpened")
+    sp.add_argument("key"); sp.add_argument("--title"); sp.add_argument("--body")
+    sp.add_argument("--stack", help="JSON list of {title, body, sha} entries, root first (sha omitted on the last)")
+    sp.add_argument("--actor", default="reconciler")
+    sp = add("handoff", cmd_handoff,
+             "[agent] set the next phase (qa or awaiting-ci) from the implementing round and pr_draft")
+    sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
 
     sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with structured evidence (content-hash keyed)")
     sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")

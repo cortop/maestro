@@ -222,11 +222,13 @@ AGENT_TOOL_VERBS = (
     "finalize",
     "fold-inbox",
     "fold-steps",
+    "handoff",
     "impl-turn",
     "inbox-ack",
     "local-backup",
     "locate",
     "observe-spec",
+    "open-pr",
     "pr-size",
     "qa-brief",
     "qa-verdict",
@@ -236,6 +238,7 @@ AGENT_TOOL_VERBS = (
     "set-phase",
     "show",  # maestro-reconcile-passive.md reads pending_inbox through it
     "snapshot",
+    "sync-base",
     "verify-ac",
     "worktree",
 )
@@ -538,9 +541,8 @@ MAESTRO_OWN_REPO_EXTRA_TOOLS = (
 RECONCILER_LITERAL_COVERAGE: dict[str, tuple[str, ...]] = {
     "Bash(gh:*)": ("Bash(gh pr:*)",),
     "Bash(git:*)": (
-        "Bash(git add:*)", "Bash(git branch:*)", "Bash(git checkout:*)", "Bash(git commit:*)",
-        "Bash(git diff:*)", "Bash(git fetch:*)", "Bash(git log:*)", "Bash(git merge:*)",
-        "Bash(git push:*)", "Bash(git rebase:*)",
+        "Bash(git add:*)", "Bash(git commit:*)", "Bash(git diff:*)", "Bash(git log:*)",
+        "Bash(git merge:*)", "Bash(git push:*)", "Bash(git rebase:*)",
     ),
     "Bash(python3:*)": ("Bash(python3 -m:*)",),
     "Bash(.venv/bin/:*)": ("Bash(.venv/bin/python:*)",),

@@ -202,7 +202,7 @@ def test_reconcile_skill_documents_the_qa_handoff():
         assert "QA" in text
         frontmatter = text.split("---")[1]  # allowed-tools grant (commands copy only)
         assert "Agent" not in frontmatter  # no in-session sub-agent spawn here anymore
-        assert 'set-phase "$KEY" qa' in text
+        assert 'maestro handoff "$KEY"' in text
         assert "independently" in text or "independent" in text
         # A failing verdict (recorded by `qa`) routes the ticket back to
         # implementing; a fresh hand-off routes onward via `qa`, not straight

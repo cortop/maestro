@@ -19,10 +19,11 @@ for the sync steps first.
    git -C <WT> commit -q -m "$KEY: <subject>"
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
    ```
-   - **Still-draft PR** (`pr_draft` true): `maestro set-phase "$KEY" qa`, not awaiting-ci — the
-     fix is a new diff nobody has judged yet.
-   - **Ready PR** (`pr_draft` false): `maestro set-phase "$KEY" awaiting-ci` — it is already out
-     for review, so hand back to CI and that review.
+   ```bash
+   maestro handoff "$KEY"
+   ```
+   `handoff` sends a still-draft PR to `qa` (the fix is a new diff nobody has judged yet) and a
+   ready PR to `awaiting-ci` (it is already out for review).
 4. Refresh the PR description: `gh pr view <n> --repo "<SLUG>" --json title,body` and compare with
    `git -C <WT> diff <base>...<head>`. Fix only what the new commits made wrong via `gh pr edit
    <n> --repo "<SLUG>" --title ... --body ...`: keep human-written lines verbatim, replace
