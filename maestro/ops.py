@@ -2062,7 +2062,7 @@ def parse_round_question(text: str) -> tuple[int | None, int | None, str, str | 
 
 
 def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "reconciler") -> bool:
-    """Route a CONFLICTING PR back into `implementing` so the agent rebases onto
+    """Route a CONFLICTING PR back into `implementing` so the agent syncs with
     the base branch, resolves the conflicts, and pushes — auto-resolution that
     actually updates the PR. Idempotent: a no-op if already implementing. Returns
     True if it moved the ticket. The agent escalates to a human (plain `maestro
@@ -2079,7 +2079,7 @@ def route_conflict(cfg: Config, key: str, pr_number: int, *, actor: str = "recon
 def route_stale(cfg: Config, key: str, *, base_branch: str = "main",
                 policy: str = "always", actor: str = "dispatcher") -> bool:
     """Route a ticket whose worktree has drifted behind its repo's base branch
-    back into `implementing` so the reconciler rebases (idempotent — a no-op if
+    back into `implementing` so the reconciler syncs (idempotent — a no-op if
     already implementing). Mirrors `route_conflict`'s auto-resolution path, but
     fires from the dispatcher's proactive drift check
     (`dispatcher.sync_worktrees`) rather than a GitHub-reported CONFLICTING PR.
@@ -2094,7 +2094,7 @@ def route_stale(cfg: Config, key: str, *, base_branch: str = "main",
         return False
     set_phase(cfg, key, Phase.IMPLEMENTING,
               reason=(f"origin/{base_branch} advanced (policy={policy}) — "
-                      f"rebase worktree onto latest {base_branch}"),
+                      f"sync worktree with latest {base_branch}"),
               actor=actor, expect=snap.observed_seq)
     return True
 
