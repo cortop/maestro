@@ -1,7 +1,6 @@
 ---
 description: Create a new maestro ticket with quality gates — asks clarifying questions before writing anything.
 allowed-tools: Bash, Read, Write
-allowed-tools: Bash, Read, Write
 argument-hint: <raw description of what you want to build>
 ---
 

@@ -23,12 +23,11 @@ below), `README.md` for the quickstart, and `DOGFOOD.md` for running maestro on 
 ## Build / test / run
 
 - Python ≥ 3.11, **stdlib-only core** (no runtime deps — `tomllib`, `fcntl`, `dataclasses`,
-  `argparse`; `tests/test_import_graph.py` enforces it). Optional extras: `dev` (pytest,
-  pytest-xdist, hypothesis, ruff), `tui` (textual), `web` (fastapi, jinja2, uvicorn). Keep the core dependency-free.
+  `argparse`; `tests/test_import_graph.py` enforces it). Keep the core dependency-free.
 - `make install` — editable install of `.[dev,tui]` + symlink `maestro` onto PATH.
 - `make test` — full suite in parallel (~30s). **Run before finishing.**
   `make t F=tests/test_x.py K=expr` — targeted run, stops at first failure.
-  `make test-serial` — one process (for pdb). `make lint` — ruff: pyflakes plus single-line sorted imports (isort I001) in the hot files listed under `[tool.ruff.lint.per-file-ignores]` in `pyproject.toml` (dispatcher, cli, tui/app, tui/screens, tests/test_dispatcher).
+  `make test-serial` — one process (for pdb). `make lint` — ruff.
 - `make status` / `make doctor` — board state / fleet health.
 - `make reconcile KEY=<KEY>` — run ONE reconcile step in the foreground, skipping the sweep.
 - `make dry` — one dispatcher sweep, read-only preview (`would_mint` + `would_spawn`, no
@@ -189,16 +188,12 @@ The implementing skill is repo-neutral and defers to this section for maestro se
   *relative* prefix `.venv/bin/`, which matches the command string solely while the shell's cwd
   is the worktree, and `dispatcher._worker_cwd` already runs the session there. Do not "fix"
   this to an absolute path.
-- **TUI tests:** the proof must mount the real app (`async with app.run_test() as pilot:`) in a
-  NEW `tests/test_tui_<feature>.py`; only binding-sweep entries
-  (`test_every_binding_action_resolves`) go in `tests/test_tui_runtime.py`. The `tui` extra is
-  already installed by `prime`, so those tests run instead of skipping.
+- **TUI tests:** the `tui` extra is already installed by `prime`, so those tests run instead of
+  skipping.
 - **Generated docs in a merge conflict:** `docs/dispatch-gates.md` and `docs/state-machine.md`
   are generated. Resolve every other file first, then run `.venv/bin/python -m maestro.diagram`
   and `git add docs/dispatch-gates.md docs/state-machine.md`. Never run it through `make`
   (not granted to reconcilers; a denied call leaves the worktree mid-merge).
-- **`# T-NNN:` tags:** a short tag is fine; don't mass-strip existing tags or reword lines you
-  aren't changing.
 
 ## Reconciler skills
 
