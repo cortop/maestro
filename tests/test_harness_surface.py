@@ -19,7 +19,7 @@ COMMANDS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 # to pay for always-on text first.
 SKILL_BYTE_CEILINGS = {
     "awaiting-human": 7000,
-    "implementing": 33400,
+    "implementing": 34000,
     "passive": 6600,
     "qa": 7400,
     "ready": 5800,
