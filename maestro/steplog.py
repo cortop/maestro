@@ -196,6 +196,12 @@ PI_TOOL_START_TYPE = "tool_execution_start"
 PI_TURN_START_TYPE = "turn_start"
 PI_MESSAGE_END_TYPE = "message_end"
 PI_AGENT_END_TYPE = "agent_end"
+PI_AUTO_RETRY_START_TYPE = "auto_retry_start"
+PI_AGENT_SETTLED_TYPE = "agent_settled"
+PI_TOOL_UPDATE_TYPE = "tool_execution_update"
+# Raw line prefixes of the high-volume pi records no reader needs; a skip-list, so a
+# key reorder in pi only makes parsing slower, never wrong.
+PI_NOISE_PREFIXES = (b'{"type":"message_update"', b'{"type":"tool_execution_update"')
 
 # Built-in pi tools (`pi --help`: "read, bash, edit, write, grep, find, ls") mapped
 # onto the SAME kind vocabulary Claude's `_kind`/opencode's `_oc_kind` use, plus a
@@ -245,7 +251,7 @@ def _iter_pi_steps(
     increments on each ``turn_start`` record (pi's own turn boundary)."""
     session_id = ""
     turn = 0
-    for _offset, obj in iter_records(path):
+    for _offset, obj in iter_records(path, skip_prefixes=PI_NOISE_PREFIXES):
         t = obj.get("type")
         if t == PI_SESSION_TYPE and not session_id:
             session_id = obj.get("id", "")
@@ -294,12 +300,15 @@ def _pi_session_outcome(path: Path) -> dict:
     last_assistant_stop: str | None = None
     last_assistant_error: str | None = None
     last_assistant_provider: str | None = None
-    for _offset, obj in iter_records(path):
+    for _offset, obj in iter_records(path, skip_prefixes=PI_NOISE_PREFIXES):
         t = obj.get("type")
         if t == PI_TURN_START_TYPE:
             turns += 1
-        elif t == PI_AGENT_END_TYPE:
+        elif t == PI_AGENT_END_TYPE or t == PI_AGENT_SETTLED_TYPE:
             saw_agent_end = True
+        elif t == PI_AUTO_RETRY_START_TYPE:
+            # the preceding agent_end was not final: the retry decides the outcome
+            saw_agent_end = False
         elif t == PI_MESSAGE_END_TYPE:
             msg = obj.get("message") or {}
             if msg.get("role") == "assistant":
@@ -319,12 +328,16 @@ def _pi_session_outcome(path: Path) -> dict:
             "rate_limit_info": None, "provider": last_assistant_provider}
 
 
-def iter_records(path: Path, *, start: int = 0) -> Iterator[tuple[int, dict]]:
+def iter_records(
+    path: Path, *, start: int = 0, skip_prefixes: tuple[bytes, ...] = ()
+) -> Iterator[tuple[int, dict]]:
     """Yield ``(offset, record)`` for each complete JSON line in *path* from byte
     *start* onward. ``offset`` is the byte position immediately after the line,
     so callers (e.g. :mod:`maestro.ratelimit`) can persist it as a resume cursor.
     A trailing line with no newline yet (the writer is mid-append) is left
-    unconsumed — the next call picks it up once it is complete.
+    unconsumed — the next call picks it up once it is complete. A complete line that
+    starts with any of *skip_prefixes* (raw bytes) is dropped without being decoded;
+    offsets still advance over it.
     """
     with path.open("rb") as fh:
         fh.seek(start)
@@ -333,6 +346,8 @@ def iter_records(path: Path, *, start: int = 0) -> Iterator[tuple[int, dict]]:
             pos += len(raw)
             if not raw.endswith(b"\n"):
                 break
+            if skip_prefixes and raw.startswith(skip_prefixes):
+                continue
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -629,7 +644,8 @@ def session_model(path: Path) -> dict:
     model = None
     if runner != "unknown":
         try:
-            for _offset, obj in iter_records(path):
+            skip = PI_NOISE_PREFIXES if runner == "pi" else ()
+            for _offset, obj in iter_records(path, skip_prefixes=skip):
                 model = _record_model(obj) if isinstance(obj, dict) else None
                 if model:
                     break
