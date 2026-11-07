@@ -74,6 +74,7 @@ _maestro() {
             '--session=[specific session ID]:session:' \
             '(-f --follow)--follow[tail the live session log]' \
             '--json[emit raw stream-jsonl lines]' \
+            '--summary[per-round history from events only]' \
             '1:key:_maestro_keys'
           ;;
         tui)

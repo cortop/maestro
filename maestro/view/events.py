@@ -20,19 +20,19 @@ class DwellSegment:
     current: bool = False
 
 
-def phase_dwell(events: list[dict], now: float) -> list[DwellSegment]:
-    """Fold the phase-moving events into per-phase dwell segments (oldest first).
+def _phase_moves(events: list[dict]) -> list[dict]:
+    """The phase-moving events as ``{phase, ts, forced, seq, reason}`` moves (oldest first).
 
     Mirrors the fold arms in ``snapshot``: TicketCreated -> triaging, PhaseChanged
     (valid ``phase``) -> that phase, Stalled -> degraded, Finalized -> done. An unknown
     phase and a move to the phase already current are no-ops, and ``done`` absorbs.
-    The last segment is ``current`` and runs up to *now*.
     """
-    moves: list[tuple[str, float, bool]] = []
+    moves: list[dict] = []
     for ev in events:
         t = ev.get("type")
         payload = ev.get("payload") or {}
         forced = False
+        reason = ""
         if t == "TicketCreated":
             phase = Phase.TRIAGING.value
         elif t == "PhaseChanged":
@@ -41,8 +41,10 @@ def phase_dwell(events: list[dict], now: float) -> list[DwellSegment]:
             except ValueError:
                 continue
             forced = bool(payload.get("forced_by"))
+            reason = payload.get("reason") or ""
         elif t == "Stalled":
             phase = Phase.DEGRADED.value
+            reason = payload.get("reason") or ""
         elif t == "Finalized":
             phase = Phase.DONE.value
         else:
@@ -50,15 +52,24 @@ def phase_dwell(events: list[dict], now: float) -> list[DwellSegment]:
         ts = store.iso_to_epoch(ev.get("ts"))
         if ts is None:
             continue
-        if moves:
-            if moves[-1][0] == Phase.DONE.value or moves[-1][0] == phase:
-                continue
-        moves.append((phase, ts, forced))
+        if moves and (moves[-1]["phase"] == Phase.DONE.value or moves[-1]["phase"] == phase):
+            continue
+        moves.append({"phase": phase, "ts": ts, "forced": forced,
+                      "seq": ev.get("seq"), "reason": reason})
+    return moves
+
+
+def phase_dwell(events: list[dict], now: float) -> list[DwellSegment]:
+    """Fold the phase moves into per-phase dwell segments (oldest first).
+
+    The last segment is ``current`` and runs up to *now*.
+    """
+    moves = _phase_moves(events)
     segs: list[DwellSegment] = []
-    for i, (phase, ts, forced) in enumerate(moves):
+    for i, m in enumerate(moves):
         last = i == len(moves) - 1
-        end = now if last else moves[i + 1][1]
-        segs.append(DwellSegment(phase, max(0.0, end - ts), forced, last))
+        end = now if last else moves[i + 1]["ts"]
+        segs.append(DwellSegment(m["phase"], max(0.0, end - m["ts"]), m["forced"], last))
     return segs
 
 
