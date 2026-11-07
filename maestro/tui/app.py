@@ -94,10 +94,10 @@ from .screens import InboxScreen
 from .screens import LogsScreen
 from .screens import ProposalScreen
 from .screens import ReviewScreen
+from .screens import RoundsScreen
 from .screens import ScheduleScreen
 from .screens import SessionsScreen
 from .screens import SpecScreen
-from .screens import RoundsScreen
 from .screens import WhyScreen
 from .screens import edit_in_editor
 from .screens import toggle_fleet_pause
