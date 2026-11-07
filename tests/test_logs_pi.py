@@ -2,8 +2,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from maestro import steplog
 from maestro.cli import main
 
