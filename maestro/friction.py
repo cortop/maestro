@@ -13,7 +13,7 @@ from pathlib import Path
 from . import event_log, store
 from . import events as E
 from .config import Config
-from .steplog import iter_records
+from .steplog import iter_records, result_text
 
 TOOL_END_TYPE = "tool_execution_end"
 _SESSION_RE = re.compile(r"^reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+)\.pi\.jsonl$")
@@ -50,11 +50,6 @@ def match_signatures(text: str) -> list[str]:
     return [sid for sid, rx in SIGNATURES if rx.search(text)]
 
 
-def _result_text(obj: dict) -> str:
-    content = (obj.get("result") or {}).get("content") or []
-    return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
-
-
 def _phase_timeline(home: Path, key: str) -> list[tuple[float, str]]:
     out = []
     for ev in event_log.read(home, key):
@@ -80,7 +75,7 @@ def _fold_session(path: Path) -> tuple[int, dict[str, dict]]:
         if obj.get("type") != TOOL_END_TYPE:
             continue
         calls += 1
-        text = _result_text(obj)
+        text = result_text(obj)
         for sid in match_signatures(text):
             h = hits.setdefault(sid, {"count": 0, "excerpt": redact(text.strip())[:EXCERPT_MAX]})
             h["count"] += 1

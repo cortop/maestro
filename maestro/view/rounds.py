@@ -1,13 +1,14 @@
 """Round view-models: the live round label and a ticket's per-round history from events only."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .. import config as config_mod, event_log, implementing_brief, outcomes, repos, snapshot as snap_mod, store
+from .. import config as config_mod, event_log, implementing_brief, outcomes, repos, snapshot as snap_mod, steplog, store
 from .. import events as E
 from ..sessions import list_sessions
 from . import events as ev_view
@@ -114,6 +115,7 @@ class Round:
     warn: bool = False
     count: int = 1
     first_session: str = ""  # path of the earliest session log in the round, "" when none
+    sessions: tuple[str, ...] = ()  # every session log path in the round, oldest first
 
 
 @dataclass(frozen=True)
@@ -192,7 +194,8 @@ def _collapse(rows: list[Round]) -> list[Round]:
     for r in rows:
         if out and not r.warn and not out[-1].warn and (out[-1].label, out[-1].outcome) == (r.label, r.outcome):
             out[-1] = Round(out[-1].when, out[-1].label, out[-1].duration, out[-1].outcome,
-                            False, out[-1].count + 1, out[-1].first_session or r.first_session)
+                            False, out[-1].count + 1, out[-1].first_session or r.first_session,
+                            out[-1].sessions + r.sessions)
         else:
             out.append(r)
     return out
@@ -269,18 +272,21 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
             continue
         duration = ""
         first_session = ""
+        in_round: list[dict] = []
         if phase != "awaiting-human":
             hi = end_ts if i + 1 < len(moves) else float("inf")
             inside = [x for x in sessions if m["ts"] <= x["epoch"] < hi]
             if inside:
-                first_session = min(inside, key=lambda x: x["epoch"])["path"]
+                in_round = sorted(inside, key=lambda x: x["epoch"])
+                first_session = in_round[0]["path"]
             n, busy = _sessions_in(sessions, m["ts"], end_ts if i + 1 < len(moves) else float("inf"))
             if n:
                 duration = _dur(busy)
             elif retention and now - m["ts"] > retention * 86400:
                 outcome = _join(outcome, "(session log pruned)")
         rows.append((m["ts"], Round(_when(m["ts"]), label, duration, outcome,
-                                     first_session=first_session)))
+                                     first_session=first_session,
+                                     sessions=tuple(x["path"] for x in in_round))))
 
     failed = stalled = 0
     for e in events:
@@ -348,16 +354,95 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
         rows=tuple(final))
 
 
-def format_lines(tr: TicketRounds) -> list[str]:
-    """The header and one line per row, shared by the CLI and the TUI."""
+def format_lines(tr: TicketRounds, nest=None) -> list[str]:
+    """The header and one line per row, shared by the CLI and the TUI. *nest* maps a
+    session path to the indented lines printed under its round."""
     lines = [f"{tr.key} · {tr.phase} · {tr.title}",
              f"Time     {tr.time}", f"Rounds   {tr.rounds}", f"QA       {tr.qa}",
              f"Review   {tr.review}", f"PR       {tr.pr}", f"Trouble  {tr.trouble}"]
     for r in tr.rows:
         label = f"{r.label} ×{r.count}" if r.count > 1 else r.label
         lines.append(f" {r.when}  {label:<18} {r.duration:>5}  {r.outcome}".rstrip())
+        if nest is not None:
+            for path in r.sessions:
+                lines.extend(nest(path))
     return lines
 
 
 def to_json(tr: TicketRounds) -> dict:
     return asdict(tr)
+
+
+# --- session digests ------------------------------------------------------------
+
+RUNAWAY_BYTES = 200 * 1024 * 1024
+_DIGEST_CACHE_MAX = 256
+_DIGEST_CACHE: dict[tuple[str, int, int], dict] = {}
+
+
+def cached_digest(path: Path) -> dict:
+    """``steplog.session_digest`` memoized by ``(path, st_size, st_mtime_ns)``; a log over
+    ``RUNAWAY_BYTES`` yields a note instead of being digested. Returns a fresh copy."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {"supported": False, "note": "session log no longer exists"}
+    if st.st_size > RUNAWAY_BYTES:
+        return {"supported": False,
+                "note": f"log is {st.st_size / 1024 ** 3:.1f} GB (runaway output?)"}
+    ck = (str(path), st.st_size, st.st_mtime_ns)
+    hit = _DIGEST_CACHE.get(ck)
+    if hit is None:
+        hit = steplog.session_digest(path)
+        if len(_DIGEST_CACHE) >= _DIGEST_CACHE_MAX:
+            _DIGEST_CACHE.pop(next(iter(_DIGEST_CACHE)))
+        _DIGEST_CACHE[ck] = hit
+    return {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+            for k, v in hit.items()}
+
+
+def session_events(events: list[dict], epoch: float, mtime: float) -> list[dict]:
+    """Reconciler-recorded events inside a session's ``[floor(epoch), ceil(mtime)]`` window."""
+    lo, hi = math.floor(epoch), math.ceil(mtime)
+    out = []
+    for e in events:
+        if not str(e.get("actor", "")).startswith("reconciler") or e.get("type") == E.IMPL_STEP:
+            continue
+        ts = store.iso_to_epoch(e.get("ts"))
+        if ts is not None and lo <= ts <= hi:
+            out.append(e)
+    return out
+
+
+def session_digest(home: Path, key: str, sess: dict, events: list[dict] | None = None,
+                   newest_path: str | None = None) -> dict:
+    """The digest of one ``list_sessions`` entry, plus its window's reconciler ``events``
+    (rendered lines) and trouble ``tags``: killed by watchdog (a Failed payload names the
+    log) and ended without summary (no terminal record, not the newest session)."""
+    path = Path(sess["path"])
+    d = cached_digest(path)
+    if d.get("note"):
+        return d
+    if events is None:
+        events = event_log.read(home, key)
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        mtime = sess["epoch"]
+    d["events"] = [steplog.sanitize(f"{e['type']} {ev_view.event_summary(e)}".strip())
+                   for e in session_events(events, sess["epoch"], mtime)]
+    tags = []
+    if any(e["type"] == E.FAILED and str(path) in str((e.get("payload") or {}).get("error", ""))
+           for e in events):
+        tags.append("killed by watchdog")
+    if d["supported"] and not d["terminal"] and newest_path not in (None, sess["path"]):
+        tags.append("ended without summary")
+    d["tags"] = tags
+    return d
+
+
+def session_lines(home: Path, key: str, sess: dict, events: list[dict] | None = None,
+                  newest_path: str | None = None) -> list[str]:
+    """Header line plus the digest lines of one session."""
+    d = session_digest(home, key, sess, events, newest_path)
+    return [steplog.format_session_oneliner(sess, d), *steplog.format_session_digest(d)]

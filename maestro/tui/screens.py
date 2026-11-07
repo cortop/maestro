@@ -403,17 +403,21 @@ class LogsScreen(Screen):
         self.run_worker(lambda: self._load_picker(), thread=True, name="pick-sessions", exclusive=True)
 
     def _load_picker(self) -> None:
-        """Worker thread: compute every outcome off the main thread, then hand back."""
+        """Worker thread: compute every outcome and digest off the main thread, then hand back."""
+        from .. import steplog
         sessions = list_sessions(self._home, self._key, with_outcome=True)
-        self.app.call_from_thread(self._show_picker, sessions)
+        events = event_log.read(self._home, self._key)
+        newest = sessions[0]["path"] if sessions else None
+        labels = [steplog.format_session_oneliner(
+            s, rounds_view.session_digest(self._home, self._key, s, events, newest))
+            for s in sessions]
+        self.app.call_from_thread(self._show_picker, sessions, labels)
 
-    def _show_picker(self, sessions: list[dict]) -> None:
+    def _show_picker(self, sessions: list[dict], labels: list[str]) -> None:
         from .modals import _SessionPickModal
         if not sessions:
             self.notify("No sessions", severity="warning")
             return
-        labels = [f"{s['ts']} {s['format']} {s.get('outcome', '?')} {s.get('model', '?')}"
-                  for s in sessions]
 
         def _picked(idx) -> None:
             if idx is None:
@@ -2181,10 +2185,11 @@ class ReviewScreen(Screen):
 
 class RoundsScreen(Screen):
     """One ticket's round history: the header summary on top, one row per round below.
-    Enter opens the round's first session log, `r` the PR review threads. Read-only."""
+    Enter expands a round into its sessions (digests computed in a worker); enter on a
+    session opens its log, `r` shows the PR review threads. Read-only."""
 
-    HELP = ("Round history for one ticket. enter opens the round's first session log, "
-            "r shows the PR review threads, escape goes back.")
+    HELP = ("Round history for one ticket. enter expands a round into its sessions' digests "
+            "and opens a session's log, r shows the PR review threads, escape goes back.")
 
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
@@ -2194,6 +2199,7 @@ class RoundsScreen(Screen):
     CSS = """
     RoundsScreen #rounds-header { height: auto; padding: 0 1; border-bottom: solid $primary; }
     RoundsScreen #rounds-table  { height: 1fr; }
+    RoundsScreen #rounds-detail { height: auto; max-height: 14; padding: 0 1; border-top: solid $primary; overflow-y: auto; }
     """
 
     def __init__(self, home: Path, key: str) -> None:
@@ -2201,11 +2207,16 @@ class RoundsScreen(Screen):
         self._home = home
         self._key = key
         self._rounds: rounds_view.TicketRounds | None = None
+        self._expanded: set[int] = set()
+        self._sessions: dict[str, dict] = {}   # session path -> list_sessions entry
+        self._lines: dict[str, list[str]] = {}  # session path -> digest lines
+        self._newest: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("", id="rounds-header", markup=False)
         yield DataTable(id="rounds-table", cursor_type="row")
+        yield Static("", id="rounds-detail", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -2214,27 +2225,93 @@ class RoundsScreen(Screen):
         for col in ("When", "Round", "Busy", "Outcome"):
             table.add_column(col)
         self._rounds = rounds_view.build(self._home, self._key)
+        listed = list_sessions(self._home, self._key)
+        self._sessions = {s["path"]: s for s in listed}
+        self._newest = listed[0]["path"] if listed else None
         lines = rounds_view.format_lines(self._rounds)
         self.query_one("#rounds-header", Static).update("\n".join(lines[:7]))
+        self._render_rows()
+        table.focus()
+
+    def _render_rows(self, cursor: str | None = None) -> None:
+        table = self.query_one("#rounds-table", DataTable)
+        table.clear()
         for i, r in enumerate(self._rounds.rows):
             label = f"{r.label} ×{r.count}" if r.count > 1 else r.label
-            table.add_row(r.when, label, r.duration, r.outcome, key=str(i))
-        table.focus()
+            table.add_row(r.when, ("▾ " if i in self._expanded else "") + label,
+                          r.duration, r.outcome, key=str(i))
+            if i in self._expanded:
+                for j, path in enumerate(r.sessions):
+                    one = self._lines.get(path, ["…"])[0]
+                    table.add_row("", "  " + one, "", "", key=f"{i}:{j}")
+        if cursor is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(cursor))
+            except Exception:
+                pass
+
+    def _digest_worker(self, i: int) -> None:
+        """Worker thread: digest the round's sessions (memoized), then hand the lines back."""
+        from .. import steplog
+        events = event_log.read(self._home, self._key)
+        out = {}
+        for path in self._rounds.rows[i].sessions:
+            sess = self._sessions.get(path)
+            if sess is None:
+                continue
+            sess = {**sess, **steplog.session_model(Path(path)),
+                    "outcome": steplog.session_outcome(Path(path))["outcome"]}
+            out[path] = rounds_view.session_lines(self._home, self._key, sess, events, self._newest)
+        self.app.call_from_thread(self._expand_done, i, out)
+
+    def _expand_done(self, i: int, lines: dict[str, list[str]]) -> None:
+        self._lines.update(lines)
+        self._expanded.add(i)
+        self._render_rows(cursor=str(i))
+        self._show_detail(i)
+
+    def _show_detail(self, i: int, path: str | None = None) -> None:
+        paths = [path] if path else list(self._rounds.rows[i].sessions)
+        blocks = []
+        for p in paths:
+            lines = self._lines.get(p)
+            if lines:
+                blocks.append("\n".join(lines))
+        self.query_one("#rounds-detail", Static).update("\n\n".join(blocks))
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        event.stop()  # the board's own highlight handler would read `i:j` as a ticket key
+        key = event.row_key.value if event.row_key is not None else None
+        if self._rounds is None or not key or ":" not in key:
+            return
+        i, j = (int(x) for x in key.split(":"))
+        self._show_detail(i, self._rounds.rows[i].sessions[j])
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         event.stop()  # the board's own row handler would open the detail screen too
-        if self._rounds is None or event.row_key.value is None:
+        key = event.row_key.value
+        if self._rounds is None or key is None:
             return
-        row = self._rounds.rows[int(event.row_key.value)]
-        if not row.first_session:
+        if ":" in key:
+            i, j = (int(x) for x in key.split(":"))
+            pick = self._sessions.get(self._rounds.rows[i].sessions[j])
+            if pick is None:
+                self.notify("Session log no longer exists", severity="warning")
+                return
+            self.app.push_screen(LogsScreen(self._home, self._key, pick=pick))
+            return
+        i = int(key)
+        row = self._rounds.rows[i]
+        if not row.sessions:
             self.notify("No session log for this round", severity="warning")
             return
-        sessions = list_sessions(self._home, self._key)
-        pick = next((s for s in sessions if s["path"] == row.first_session), None)
-        if pick is None:
-            self.notify("Session log no longer exists", severity="warning")
+        if i in self._expanded:
+            self._expanded.discard(i)
+            self._render_rows(cursor=str(i))
+            self.query_one("#rounds-detail", Static).update("")
             return
-        self.app.push_screen(LogsScreen(self._home, self._key, pick=pick))
+        self.run_worker(lambda: self._digest_worker(i), thread=True, name="rounds-digest",
+                        group="rounds-digest")
 
     def action_threads(self) -> None:
         blocks = rounds_view.review_threads(event_log.read(self._home, self._key))
