@@ -398,8 +398,15 @@ class LogsScreen(Screen):
         self._update_header()
 
     def action_pick_session(self) -> None:
-        from .modals import _SessionPickModal
+        self.run_worker(lambda: self._load_picker(), thread=True, name="pick-sessions", exclusive=True)
+
+    def _load_picker(self) -> None:
+        """Worker thread: compute every outcome off the main thread, then hand back."""
         sessions = list_sessions(self._home, self._key, with_outcome=True)
+        self.app.call_from_thread(self._show_picker, sessions)
+
+    def _show_picker(self, sessions: list[dict]) -> None:
+        from .modals import _SessionPickModal
         if not sessions:
             self.notify("No sessions", severity="warning")
             return
@@ -446,18 +453,23 @@ class LogsScreen(Screen):
                 self._emit(gen, f"(session {sess['session_id']}: log file missing, skipped)")
 
     def _render_file(self, gen: int, path: Path) -> None:
+        from .. import steplog
         is_pi = path.name.endswith(".pi.jsonl")
         is_opencode = path.name.endswith(".opencode.jsonl")
         structured = is_pi or is_opencode or path.name.endswith(".stream.jsonl")
         render_line = (render_pi_log_line if is_pi
                        else render_opencode_log_line if is_opencode
                        else render_log_line)
+        skip = tuple(p.decode() for p in steplog.PI_NOISE_PREFIXES) if is_pi else ()
+        names: dict = {}
         with path.open(encoding="utf-8", errors="replace") as f:
             for raw in f:
                 if not self._live(gen):
                     return
                 if not structured:
                     self._emit(gen, raw)
+                    continue
+                if skip and raw.startswith(skip):
                     continue
                 raw = raw.strip()
                 if not raw:
@@ -466,7 +478,8 @@ class LogsScreen(Screen):
                     obj = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                for rendered in render_line(obj):
+                for rendered in (render_line(obj, names) if render_line is render_log_line
+                                 else render_line(obj)):
                     self._emit(gen, rendered)
 
     def _tail(self, gen: int, pick: dict | None = None) -> None:
@@ -542,6 +555,7 @@ class LogsScreen(Screen):
                        else render_opencode_log_line if is_opencode
                        else render_log_line)
 
+        names: dict = {}
         with log_path.open(encoding="utf-8", errors="replace") as f:
             buf = ""
             while self._live(gen):
@@ -558,7 +572,8 @@ class LogsScreen(Screen):
                                 obj = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            for rendered in render_line(obj):
+                            for rendered in (render_line(obj, names) if render_line is render_log_line
+                                             else render_line(obj)):
                                 self._emit(gen, rendered)
                     else:
                         self._emit(gen, chunk)

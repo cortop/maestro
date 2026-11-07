@@ -193,6 +193,7 @@ def _iter_opencode_steps(
 # ---------------------------------------------------------------------------
 PI_SESSION_TYPE = "session"
 PI_TOOL_START_TYPE = "tool_execution_start"
+PI_TOOL_END_TYPE = "tool_execution_end"
 PI_TURN_START_TYPE = "turn_start"
 PI_MESSAGE_END_TYPE = "message_end"
 PI_AGENT_END_TYPE = "agent_end"
@@ -238,6 +239,12 @@ def pi_summary(tool_name: str, args: dict) -> str:
         text = args.get("path") or args.get("file_path") or args.get("filePath")
     elif name in _PI_SUBAGENT_TOOLS:
         text = args.get("description") or args.get("prompt")
+    elif name == "read":
+        text = args.get("path") or args.get("file_path") or args.get("filePath")
+    elif name in ("grep", "find"):
+        pattern = args.get("pattern") or args.get("query") or args.get("name")
+        where = args.get("path")
+        text = " ".join(str(x) for x in (pattern, where) if x) or None
     else:
         text = None
     return (text or tool_name)[:120]
