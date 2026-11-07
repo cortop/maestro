@@ -18,6 +18,7 @@ from maestro.tui.screens import InboxScreen
 from maestro.tui.screens import LogsScreen
 from maestro.tui.screens import ProposalScreen
 from maestro.tui.screens import ReviewScreen
+from maestro.tui.screens import RoundsScreen
 from maestro.tui.screens import ScheduleScreen
 from maestro.tui.screens import SessionsScreen
 from maestro.tui.screens import SpecScreen
@@ -28,7 +29,7 @@ SCREEN_KEYS = [
     ("s", SpecScreen), ("l", LogsScreen), ("v", AcScreen), ("w", WhyScreen),
     ("I", InboxScreen), ("D", DepsScreen), ("F", FleetScreen), ("B", SessionsScreen),
     ("R", ReviewScreen), ("T", ActivityScreen), ("S", ScheduleScreen), ("e", EnvScreen),
-    ("W", DecisionsScreen),
+    ("W", DecisionsScreen), ("d", RoundsScreen),
 ]
 
 

@@ -277,10 +277,11 @@ class LogsScreen(Screen):
     LogsScreen #logs-summary { dock: top; height: 1; padding: 0 1; background: $boost; }
     """
 
-    def __init__(self, home: Path, key: str) -> None:
+    def __init__(self, home: Path, key: str, pick: dict | None = None) -> None:
         super().__init__()
         self._home = home
         self._key = key
+        self._pick = pick
         self._stop = False
         self._gen = 0
         self._cur_path: Path | None = None
@@ -298,7 +299,7 @@ class LogsScreen(Screen):
         self.title = f"Logs: {self._key}"
         self._update_header()
         self.set_interval(1.0, self._update_header)
-        self._start_tail()
+        self._start_tail(self._pick)
 
     def on_unmount(self) -> None:
         self._stop = True
@@ -2176,6 +2177,69 @@ class ReviewScreen(Screen):
                 self.notify(f"diff failed: {text}", severity="warning")
         elif event.state == WorkerState.ERROR:
             self.notify(f"diff failed: {event.worker.error}", severity="warning")
+
+
+class RoundsScreen(Screen):
+    """One ticket's round history: the header summary on top, one row per round below.
+    Enter opens the round's first session log, `r` the PR review threads. Read-only."""
+
+    HELP = ("Round history for one ticket. enter opens the round's first session log, "
+            "r shows the PR review threads, escape goes back.")
+
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("r", "threads", "Review threads"),
+    ]
+
+    CSS = """
+    RoundsScreen #rounds-header { height: auto; padding: 0 1; border-bottom: solid $primary; }
+    RoundsScreen #rounds-table  { height: 1fr; }
+    """
+
+    def __init__(self, home: Path, key: str) -> None:
+        super().__init__()
+        self._home = home
+        self._key = key
+        self._rounds: rounds_view.TicketRounds | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("", id="rounds-header", markup=False)
+        yield DataTable(id="rounds-table", cursor_type="row")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Rounds: {self._key}"
+        table = self.query_one("#rounds-table", DataTable)
+        for col in ("When", "Round", "Busy", "Outcome"):
+            table.add_column(col)
+        self._rounds = rounds_view.build(self._home, self._key)
+        lines = rounds_view.format_lines(self._rounds)
+        self.query_one("#rounds-header", Static).update("\n".join(lines[:7]))
+        for i, r in enumerate(self._rounds.rows):
+            label = f"{r.label} ×{r.count}" if r.count > 1 else r.label
+            table.add_row(r.when, label, r.duration, r.outcome, key=str(i))
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()  # the board's own row handler would open the detail screen too
+        if self._rounds is None or event.row_key.value is None:
+            return
+        row = self._rounds.rows[int(event.row_key.value)]
+        if not row.first_session:
+            self.notify("No session log for this round", severity="warning")
+            return
+        sessions = list_sessions(self._home, self._key)
+        pick = next((s for s in sessions if s["path"] == row.first_session), None)
+        if pick is None:
+            self.notify("Session log no longer exists", severity="warning")
+            return
+        self.app.push_screen(LogsScreen(self._home, self._key, pick=pick))
+
+    def action_threads(self) -> None:
+        blocks = rounds_view.review_threads(event_log.read(self._home, self._key))
+        self.app.push_screen(_TextViewModal(f"{self._key}: review threads",
+                                            "\n\n".join(blocks) or "(no review feedback)"))
 
 
 class ActivityScreen(Screen):
