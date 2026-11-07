@@ -37,15 +37,25 @@ _VERB_RE = re.compile(r"\bmaestro (" + "|".join(re.escape(v) for v in _ALL_VERBS
 # (phase_verb_grant/phase_verb_denylist) rather than by suffix directly.
 _PHASE_BY_SUFFIX = {suffix: phase for phase, suffix in disp._PHASE_COMMAND_SUFFIX.items()}
 
+_ROUND_DIRS_BY_SUFFIX = {
+    "implementing": REPO_ROOT / "maestro" / "_implementing_rounds",
+}
+
 
 def _verbs_invoked_by_skill(suffix: str) -> set[str]:
-    """Verbs the phase's skill file calls, plus -- for `implementing` -- every
-    round file `maestro brief` splices into that session's instructions."""
+    # The implementing skill file is only its dispatcher-facing preamble:
+    # the per-round git/PR procedures live in maestro/_implementing_rounds/
+    # and reach the spawned reconciler through `maestro brief`'s rendered
+    # round instructions, so their invocations count as the skill's own.
     paths = [REPO_ROOT / "skills" / f"maestro-reconcile-{suffix}.md"]
-    if suffix == "implementing":
-        paths += sorted((REPO_ROOT / "maestro" / "_implementing_rounds").glob("*.md"))
-    text = "\n".join(p.read_text(encoding="utf-8") for p in paths)
-    return {m.group(1) for m in _VERB_RE.finditer(text)}
+    round_dir = _ROUND_DIRS_BY_SUFFIX.get(suffix)
+    if round_dir is not None:
+        paths += sorted(round_dir.glob("*.md"))
+    verbs: set[str] = set()
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        verbs |= {m.group(1) for m in _VERB_RE.finditer(text)}
+    return verbs
 
 
 def _granted_verbs(suffix: str) -> set[str]:
@@ -62,6 +72,14 @@ def _granted_verbs(suffix: str) -> set[str]:
 # skills may not live at this path -- so this is the sanctioned fallback
 # (RB-16 spec Notes): a hand table plus a test that fails the instant it
 # drifts from what the skill files actually call.
+#
+# "Its own skill file" for `implementing` means the maestro-reconcile
+# preamble PLUS the per-round files in maestro/_implementing_rounds/ that
+# `maestro brief` renders into the round instructions -- T-219/T-220 moved
+# the git/PR procedures there, and a round file calling a verb the grant row
+# lacks silently blocked every implementing spawn from opening its PR
+# (found on a production board: a split-decision round could not run
+# open-pr/handoff at all).
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("suffix", sorted(disp._PHASE_VERB_GRANT_BY_SUFFIX))
