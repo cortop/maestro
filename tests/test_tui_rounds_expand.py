@@ -8,7 +8,7 @@ import time
 from textual.widgets import DataTable, Static
 
 from conftest import seed_phase
-from maestro import event_log, snapshot as snap_mod
+from maestro import snapshot as snap_mod
 from maestro.statemachine import Phase
 from maestro.tui import LogsScreen, RoundsScreen
 from maestro.tui.modals import _SessionPickModal
