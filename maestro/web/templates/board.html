@@ -8,7 +8,7 @@
   <span id="needs-you-count" class="needs-you">needs you: {{ view.needs_you }}</span>
 </nav>
 <table id="board">
-  <thead><tr><th>Key</th><th>Phase</th><th>Title</th><th>PR</th><th>CI</th><th>Fails</th></tr></thead>
+  <thead><tr><th>Key</th><th>Phase</th><th>Title</th><th>PR</th><th>CI</th><th>Fails</th><th>Doing</th></tr></thead>
   <tbody id="rows" hx-get="/board/rows?filter={{ view.filter }}" hx-trigger="sse:board" hx-swap="innerHTML">
     {% include "_rows.html" %}
   </tbody>

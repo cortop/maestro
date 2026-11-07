@@ -14,6 +14,7 @@ Also the one place that classifies a session's terminal outcome (``classify_resu
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Iterator
 
@@ -320,6 +321,135 @@ def record_steps(obj: dict) -> list[str]:
         if isinstance(block, dict) and block.get("type") == "text":
             out.extend(step_lines(block.get("text") or ""))
     return out
+
+
+_NARRATION_LEAD = re.compile(r"^(let me|let's|now,?|i'll|i will|i'm going to)\s+", re.IGNORECASE)
+_CLAUSE_MAX_CHARS = 80
+QUIET_AFTER_S = 60
+_LIVE_CACHE: dict[str, tuple[tuple[int, int], dict, dict]] = {}
+
+
+def narration_clause(text: str) -> str:
+    """The final clause of the last non-``Step:`` line of *text*: lead-ins such as "Let me"
+    or "Now" and a trailing colon are stripped; empty when nothing is left."""
+    lines = [ln.strip() for ln in (text or "").splitlines()
+             if ln.strip() and not ln.startswith(STEP_PREFIX)]
+    if not lines:
+        return ""
+    sentence = re.split(r"(?<=[.!?])\s+", lines[-1])[-1].strip().rstrip(":.!").strip()
+    while True:
+        stripped = _NARRATION_LEAD.sub("", sentence)
+        if stripped == sentence:
+            break
+        sentence = stripped
+    return sentence[:_CLAUSE_MAX_CHARS].rstrip()
+
+
+def _record_epoch(obj: dict) -> float | None:
+    raw = obj.get("timestamp")
+    return store.iso_to_epoch(raw) if isinstance(raw, str) else None
+
+
+def _assistant_text_and_tools(obj: dict) -> tuple[str, list[tuple[str, str, str]]]:
+    """(text, [(tool_id, tool_name, summary)]) of one assistant record in either log shape."""
+    t = obj.get("type")
+    if t not in ("assistant", PI_MESSAGE_END_TYPE):
+        return "", []
+    msg = obj.get("message") or {}
+    if msg.get("role") != "assistant":
+        return "", []
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content, []
+    texts: list[str] = []
+    tools: list[tuple[str, str, str]] = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            texts.append(block.get("text") or "")
+        elif t == "assistant" and block.get("type") == "tool_use" and block.get("id"):
+            name = block.get("name", "")
+            tools.append((block["id"], name, _summary(name, block.get("input") or {})))
+    return "\n".join(texts), tools
+
+
+def live_status(path: Path, state: dict | None = None) -> tuple[dict, dict]:
+    """Incremental live read of a running session log -> ``(status, state)``.
+
+    *state* (``None`` on the first call) carries the byte offset and what has been seen
+    so far, so a later call parses only appended bytes; an unchanged ``(size, mtime)``
+    returns the memoized status without opening the file. ``status`` keys: ``step`` (latest
+    ``Step:`` label), ``clause`` (last narration clause), ``tool`` (``{"name", "summary",
+    "started"}`` for the call still in flight, else ``None``) and ``last_ts`` (epoch of the
+    newest record, falling back to the file mtime). Handles Claude and pi logs; a missing
+    file yields an empty status.
+    """
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return {"step": "", "clause": "", "tool": None, "last_ts": None}, state or {}
+    sig = (st.st_size, st.st_mtime_ns)
+    cached = _LIVE_CACHE.get(key)
+    if state and cached and cached[0] == sig and state.get("offset") == st.st_size:
+        return dict(cached[1]), state
+    if not state or state.get("offset", 0) > st.st_size:
+        state = {"offset": 0, "step": "", "clause": "", "tools": {}, "last_ts": None}
+    tools: dict = state["tools"]
+    offset = state["offset"]
+    for offset, obj in iter_records(path, start=state["offset"], skip_prefixes=PI_NOISE_PREFIXES):
+        ts = _record_epoch(obj) or st.st_mtime
+        state["last_ts"] = ts
+        t = obj.get("type")
+        text, started = _assistant_text_and_tools(obj)
+        steps = step_lines(text)
+        if steps:
+            state["step"] = steps[-1]
+        clause = narration_clause(text)
+        if clause:
+            state["clause"] = clause
+        for tool_id, name, summary in started:
+            tools[tool_id] = {"name": name, "summary": summary, "started": ts}
+        if t == PI_TOOL_START_TYPE and obj.get("toolCallId"):
+            name = obj.get("toolName", "")
+            tools[obj["toolCallId"]] = {"name": name, "started": ts,
+                                        "summary": pi_summary(name, obj.get("args") or {})}
+        elif t == "tool_execution_end":
+            tools.pop(obj.get("toolCallId"), None)
+        elif t == "user":
+            for block in (obj.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tools.pop(block.get("tool_use_id"), None)
+    state["offset"] = offset
+    if state["last_ts"] is None:
+        state["last_ts"] = st.st_mtime
+    flight = max(tools.values(), key=lambda v: v["started"], default=None)
+    status = {"step": state["step"], "clause": state["clause"],
+              "tool": dict(flight) if flight else None, "last_ts": state["last_ts"]}
+    _LIVE_CACHE[key] = (sig, status, state)
+    return dict(status), state
+
+
+def live_texts(status: dict, now: float) -> tuple[str, str]:
+    """``(doing, now_text)`` for a live status: doing is the Step label or, failing that,
+    the narration clause; now is the in-flight tool with elapsed time, else ``quiet Nm``
+    once the newest record is old, else the narration clause."""
+    tool = status.get("tool")
+    last = status.get("last_ts")
+    if tool:
+        label = tool.get("summary") or tool.get("name") or "tool"
+        now_text = f"{label} · {_elapsed(now - tool['started'])}"
+    elif last is not None and now - last >= QUIET_AFTER_S:
+        now_text = f"quiet {int((now - last) // 60)}m"
+    else:
+        now_text = status.get("clause") or ""
+    return status.get("step") or status.get("clause") or now_text, now_text
+
+
+def _elapsed(seconds: float) -> str:
+    s = max(0, int(seconds))
+    return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
 def _pi_session_outcome(path: Path) -> dict:
