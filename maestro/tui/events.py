@@ -45,21 +45,20 @@ def render_event(ev: dict) -> str:
     seq = ev.get("seq", "?")
     type_ = ev.get("type", _EM)
     actor = ev.get("actor", _EM)
-    payload = ev.get("payload") or {}
+    payload = ev.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
 
     if type_ == _IMPL_STEP:
         kind = payload.get("kind", "note")
-        summary = payload.get("summary", "")[:80]
-        badge = _KIND_BADGE.get(kind, f"[dim]{kind}[/dim]")
+        summary = _esc_log(str(payload.get("summary", ""))[:80])
+        badge = _KIND_BADGE.get(kind, f"[dim]{_esc_log(str(kind))}[/dim]")
         return (
             f"[dim]{seq:>4}[/dim] [cyan]{ts}[/cyan] "
             f"  {badge} [dim]{summary}[/dim]"
         )
 
-    if payload:
-        summary = ", ".join(f"{k}={v}" for k, v in list(payload.items())[:3])
-    else:
-        summary = ""
+    summary = _esc_log(event_summary(ev))
 
     color = _MILESTONE_COLOR.get(type_)
     type_markup = (
