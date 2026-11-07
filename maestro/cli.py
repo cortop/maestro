@@ -1339,6 +1339,15 @@ def cmd_logs(args) -> int:
         _print(list_sessions(cfg.home, key, with_outcome=True))
         return 0
 
+    if getattr(args, "summary", False):
+        from .view import rounds as rounds_view
+        tr = rounds_view.build(cfg.home, key)
+        if args.json:
+            _print(rounds_view.to_json(tr))
+        else:
+            print("\n".join(rounds_view.format_lines(tr)))
+        return 0
+
     sessions = list_sessions(cfg.home, key)
     if not sessions:
         print(f"No session logs found for {key}.", file=sys.stderr)
@@ -1727,7 +1736,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--list", action="store_true", help="list sessions newest-first")
     sp.add_argument("--session", help="select a specific session_id")
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
-    sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines")
+    sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines (with --summary: the view-model)")
+    sp.add_argument("--summary", action="store_true", help="per-round history from events only (works after logs are pruned)")
     add("runners", cmd_runners, "which local models can drive an agent (claude + tool-capable ollama + pi)")
     sp = add("runner", cmd_runner,
              "[human] change a ticket's runner/runner-model before implementation begins")

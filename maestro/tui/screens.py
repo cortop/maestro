@@ -59,6 +59,7 @@ from ..dispatcher import schedule_status
 from ..dispatcher import spec_runner
 from ..sessions import list_sessions
 from ..statemachine import Phase
+from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
 from . import checks as checks_mod
 from . import why as why_mod
@@ -2112,21 +2113,7 @@ class ReviewScreen(Screen):
         if snap is None:
             return
         events = event_log.read(self._home, snap.key)
-        replies: dict[str, list[dict]] = {}
-        for e in events:
-            if e["type"] == "ReviewReplyPosted":
-                replies.setdefault(e["payload"].get("comment_id"), []).append(e["payload"])
-        blocks = []
-        for e in events:
-            if e["type"] != "ReviewFeedbackReceived":
-                continue
-            p = e["payload"]
-            where = f" {p['path']}:{p['line']}" if p.get("path") and p.get("line") else \
-                (f" {p['path']}" if p.get("path") else "")
-            lines = [f"{p.get('author', '?')} [{p.get('state', '?')}]{where}", (p.get("body") or "").strip()]
-            for r in replies.get(p.get("comment_id"), []):
-                lines.append("  ↳ reply: " + (r.get("body") or "").strip())
-            blocks.append("\n".join(lines))
+        blocks = rounds_view.review_threads(events)
         self.app.push_screen(_TextViewModal(f"{snap.key}: review threads",
                                             "\n\n".join(blocks) or "(no review feedback)"))
 
