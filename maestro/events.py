@@ -165,7 +165,9 @@ STALLED = "Stalled"                     # {reason, kind?, state?}  -> DEGRADED /
                                          # kind="provider" + state=<check state> (T-89): the fleet's
                                          # provider_availability check was non-ok when this fired --
                                          # see snapshot.Snapshot.last_error_kind/last_error_state
-NOTE = "Note"                           # {text}  free-form audit breadcrumb
+NOTE = "Note"                           # {text, review_skill?, status?}  free-form audit breadcrumb;
+                                         # review_skill+status (ran|skipped|error) mark the QA
+                                         # review-skill result, text = one finding per line
 CHECKED = "Checked"                     # {}  reconciler ran to completion, correctly found
                                          # nothing due -- advances observed_seq so the
                                          # no-progress watchdog (`_allow_spawn`) can tell this

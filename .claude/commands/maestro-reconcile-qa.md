@@ -65,10 +65,12 @@ never a sleep/tail/pid poll loop on a test log — a backgrounded run dead-ends 
    prints a bounded index with both paths and `diff_lines`. **Read both files in full with
    Read** (page by `offset`/`limit`) -- never judge from a truncated or self-built diff;
    attestations and prior verdicts are withheld.
-   **Review skill.** If QA_SKILL is set and RUNNER is `claude`, run it via `Skill` (no leading
-   `/`, args `base: <BASE>`); keep findings on diff files. A blocking one (P1, critical) fails the
-   AC whose code it touches; note the rest in one `maestro append "$KEY" --type Note --payload
-   '{"text":"..."}'`. Under another runner, skip it and say so in that Note.
+   **Review skill.** If QA_SKILL is set, write exactly ONE Note in every case, never a second:
+   `maestro append "$KEY" --type Note --payload '{"text":"...","review_skill":"<QA_SKILL>","status":"ran|skipped|error"}'`.
+   RUNNER `claude`: run it via `Skill` (no leading `/`, args `base: <BASE>`), keep findings on diff
+   files; status `ran`, `text` one line per finding (empty for zero), blocking first, each starting
+   `blocking:`. A blocking one (P1, critical) fails the AC whose code it touches. Another runner:
+   skip, status `skipped`, `text` the reason. Skill call fails: status `error`, `text` the cause.
 2. For each AC in the packet, judge PASS or FAIL strictly against what the diff actually does —
    not against your own idea of the right implementation, and without editing anything to check:
    `maestro qa-verdict "$KEY" --ac <n> --verdict pass|fail --evidence "<what you checked, what

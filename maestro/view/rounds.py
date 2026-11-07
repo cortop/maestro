@@ -164,7 +164,7 @@ def _qa_outcome(window: list[dict]) -> tuple[str, str]:
     for e in window:
         if e["type"] == E.AC_QA_VERDICT:
             latest[e["payload"].get("ac_hash")] = e["payload"]
-        elif e["type"] == E.NOTE:
+        elif e["type"] == E.NOTE and not e["payload"].get("review_skill"):
             notes.append(_first_line(e["payload"].get("text", "")))
     fails = [v for v in latest.values() if v.get("verdict") == "fail"]
     token, text = "", ""
@@ -175,6 +175,46 @@ def _qa_outcome(window: list[dict]) -> tuple[str, str]:
         token = text = f"✓ {len(latest)}/{len(latest)}"
     note = next((n for n in notes if n), "")
     return token, _join(text, f"note: {note}" if note else "")
+
+
+_STATUSES = ("ran", "skipped", "error")
+
+
+def _review_note(window: list[dict]) -> dict | None:
+    """The last Note in *window* carrying a ``review_skill`` (the QA review-skill contract)."""
+    notes = [e["payload"] for e in window if e["type"] == E.NOTE
+             and e.get("payload", {}).get("review_skill")]
+    return notes[-1] if notes else None
+
+
+def _review_phrase(note: dict, window: list[dict], mismatch: bool = False) -> str:
+    """`ran `x` · 3 findings (1 blocking → AC 4 failed)`, `skipped: why` or `error: why`."""
+    name = note.get("review_skill")
+    status = note.get("status")
+    lines = [ln.strip() for ln in str(note.get("text") or "").splitlines() if ln.strip()]
+    if status == "skipped":
+        return f"review: skipped: {_first_line(note.get('text', '')) or name}"
+    if status == "error":
+        return f"review: error: {_first_line(note.get('text', '')) or name}"
+    if status != "ran":
+        return f"review: unknown status `{status}` for `{name}`"
+    blocking = sum(1 for ln in lines if ln.lower().startswith("blocking"))
+    out = f"review: ran `{name}` · {len(lines)} finding{'' if len(lines) == 1 else 's'}"
+    if blocking:
+        failed = sorted({e["payload"].get("ac_index") for e in window if e["type"] == E.AC_QA_VERDICT
+                         and e["payload"].get("verdict") == "fail"})
+        arrow = f" → AC {', '.join(str(i) for i in failed)} failed" if failed else ""
+        out += f" ({blocking} blocking{arrow})"
+    if mismatch:
+        out += " · reported ran; no Skill call in log"
+    return out
+
+
+def _lacks_skill_call(paths: tuple[str, ...] | list[str]) -> bool:
+    """True when every digestible Claude log among *paths* shows no Skill tool_use."""
+    digests = [cached_digest(Path(p)) for p in paths]
+    digests = [d for d in digests if d.get("supported") and d.get("runner") == "claude"]
+    return bool(digests) and not any(d.get("skills") for d in digests)
 
 
 def _sessions_in(sessions: list[dict], start: float, end: float) -> tuple[int, float]:
@@ -201,7 +241,10 @@ def _collapse(rows: list[Round]) -> list[Round]:
     return out
 
 
-def _review_skill(cfg, home: Path, key: str) -> str:
+def _review_skill(cfg, home: Path, key: str, events: list[dict] | None = None) -> str:
+    note = _review_note(events or [])
+    if note is not None:
+        return _review_phrase(note, events or []).removeprefix("review: ")
     if cfg is None:
         return "unknown (config unreadable)"
     from .. import dispatcher
@@ -231,6 +274,7 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
     dwell: dict[str, float] = {}
     qa_chain: list[str] = []
     for i, m in enumerate(moves):
+        review_note = None
         end_ts = moves[i + 1]["ts"] if i + 1 < len(moves) else now
         end_seq = moves[i + 1]["seq"] if i + 1 < len(moves) else float("inf")
         prev_seq = moves[i - 1]["seq"] if i else 0
@@ -256,6 +300,7 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
             token, outcome = _qa_outcome(window)
             if token:
                 qa_chain.append(token)
+            review_note = _review_note(window)
         elif phase == "awaiting-human":
             label = "asked you"
             asked = next((e for e in window if e["type"] == E.QUESTION_ASKED), None)
@@ -273,6 +318,7 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
         duration = ""
         first_session = ""
         in_round: list[dict] = []
+
         if phase != "awaiting-human":
             hi = end_ts if i + 1 < len(moves) else float("inf")
             inside = [x for x in sessions if m["ts"] <= x["epoch"] < hi]
@@ -280,6 +326,11 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
                 in_round = sorted(inside, key=lambda x: x["epoch"])
                 first_session = in_round[0]["path"]
             n, busy = _sessions_in(sessions, m["ts"], end_ts if i + 1 < len(moves) else float("inf"))
+            if review_note is not None:
+                phrase = _review_phrase(
+                    review_note, window,
+                    review_note.get("status") == "ran" and _lacks_skill_call([x["path"] for x in in_round]))
+                outcome = _join(outcome, phrase)
             if n:
                 duration = _dur(busy)
             elif retention and now - m["ts"] > retention * 86400:
@@ -303,6 +354,8 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
     rows.sort(key=lambda t: t[0])
     final = _collapse([r for _, r in rows])
 
+    last_qa = max((m["seq"] or 0 for m in moves if m["phase"] == "qa"), default=None)
+    review_events = [e for e in events if last_qa is not None and e["seq"] >= last_qa]
     asked_q = {e["payload"].get("qid") for e in events if e["type"] == E.QUESTION_ASKED}
     answered_q = {e["payload"].get("qid") for e in events if e["type"] == E.QUESTION_ANSWERED}
     unanswered = len(asked_q - answered_q)
@@ -347,7 +400,7 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
         key=key, phase=snap.phase, title=snap.title or "", time=time_line,
         rounds=" · ".join(f"{n} {label}" for label, n in counts.items()) or "none",
         qa=" → ".join(chain) or "no QA verdicts",
-        review=_review_skill(cfg, home, key),
+        review=_review_skill(cfg, home, key, review_events),
         pr=" · ".join([f"{human} comments", f"{nreplied} replied", f"{unreplied} without reply",
                        f"{bot} bot/system"]),
         trouble=" · ".join(trouble) or "none",
