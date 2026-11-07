@@ -40,11 +40,13 @@ _MILESTONE_COLOR = {
 
 
 def render_event(ev: dict) -> str:
-    """Format one event as a Rich markup line: seq ts type actor payload-summary."""
-    ts = (ev.get("ts") or "")[:19]
-    seq = ev.get("seq", "?")
+    """Format one event as a Rich markup line: seq ts type actor payload-summary.
+    Every field read from the event is markup-escaped, so a ``[/x]`` in a payload
+    renders literally instead of raising ``MarkupError``."""
+    ts = _esc_log(str(ev.get("ts") or "")[:19])
+    seq = _esc_log(str(ev.get("seq", "?")))
     type_ = ev.get("type", _EM)
-    actor = ev.get("actor", _EM)
+    actor = _esc_log(str(ev.get("actor", _EM)))
     payload = ev.get("payload")
     if not isinstance(payload, dict):
         payload = {}
@@ -62,7 +64,8 @@ def render_event(ev: dict) -> str:
 
     color = _MILESTONE_COLOR.get(type_)
     type_markup = (
-        f"[{color}]{type_}[/{color}]" if color else f"[bold yellow]{type_}[/bold yellow]"
+        f"[{color}]{type_}[/{color}]" if color
+        else f"[bold yellow]{_esc_log(str(type_))}[/bold yellow]"
     )
     return (
         f"[dim]{seq:>4}[/dim] [cyan]{ts}[/cyan] "
