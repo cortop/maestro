@@ -7,6 +7,6 @@ The drift policy rerouted a worktree that fell behind base. Sync as above, then:
   QA gates.
   ```bash
   git -C <WT> push -q -u origin "<PREFIX>$KEY"
-  maestro handoff "$KEY"
+  maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
   ```
 - **No PR yet**: after the sync continue with `maestro brief "$KEY" --round fresh`.

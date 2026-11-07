@@ -19,7 +19,7 @@ Stay inside `allowed_paths`.
    git -C <WT> add -A
    git -C <WT> commit -q -m "$KEY: <subject>"
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
-   maestro handoff "$KEY"
+   maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
    ```
 4. Refresh the PR description: `gh pr view <n> --repo "<SLUG>" --json title,body` and compare with
    `git -C <WT> diff <base>...<head>`. Fix only what the new commits made wrong via `gh pr edit

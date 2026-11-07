@@ -20,7 +20,7 @@ for the sync steps first.
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
    ```
    ```bash
-   maestro handoff "$KEY"
+   maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
    ```
    `handoff` sends a still-draft PR to `qa` (the fix is a new diff nobody has judged yet) and a
    ready PR to `awaiting-ci` (it is already out for review).

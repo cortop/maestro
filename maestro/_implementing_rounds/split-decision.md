@@ -17,7 +17,7 @@ entry sits at HEAD, so it takes no `sha`):
 ```bash
 git -C <WT> log --oneline "origin/<BASE>..HEAD"   # find each entry's last commit
 maestro open-pr "$KEY" --stack '[{"title":"<DISPLAY_KEY>: <entry 1 subject> (1/<N>)","body":"<entry 1 body>","sha":"<sha of entry 1 last commit>"},{"title":"<DISPLAY_KEY>: <entry 2 subject> (2/<N>)","body":"<entry 2 body>"}]'
-maestro handoff "$KEY"
+maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
 ```
 The verb labels branches `<PREFIX>$KEY-1`.. with the last entry at `<PREFIX>$KEY`, pushes and
 opens them oldest-first (each based on the previous entry, `gt` doing the same on a gt-managed

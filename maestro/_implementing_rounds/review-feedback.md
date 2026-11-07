@@ -11,7 +11,7 @@ it (`maestro brief "$KEY" --round sync` prints the steps).
 
 **Non-blocking AI-reviewer suggestions are optional.** When the comment comes from an automated AI
 reviewer and is a non-blocking suggestion (a nit, a style preference, a lower-priority idea), you
-may decline it: record the reason, push nothing, and go straight to `maestro handoff "$KEY"`.
+may decline it: record the reason, push nothing, and go straight to `maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"`.
 Never decline this way a `changes requested:` review or any comment written by a human.
 
 **`approved with comments:`** means the reviewer already APPROVED: the approval is NOT blocking,
@@ -36,7 +36,7 @@ internal jargon (a phase name, an AC-hash, a step id), and is idempotent per (co
    git -C <WT> add -A
    git -C <WT> commit -q -m "$KEY: <subject>"
    git -C <WT> push -q -u origin "<PREFIX>$KEY"
-   maestro handoff "$KEY"
+   maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
    ```
 3. After a code push, refresh the PR description: `gh pr view <n> --repo "<SLUG>" --json
    title,body` and compare with `git -C <WT> diff <base>...<head>`. Fix only what the new commits
