@@ -39,8 +39,12 @@ _PHASE_BY_SUFFIX = {suffix: phase for phase, suffix in disp._PHASE_COMMAND_SUFFI
 
 
 def _verbs_invoked_by_skill(suffix: str) -> set[str]:
-    path = REPO_ROOT / "skills" / f"maestro-reconcile-{suffix}.md"
-    text = path.read_text(encoding="utf-8")
+    """Verbs the phase's skill file calls, plus -- for `implementing` -- every
+    round file `maestro brief` splices into that session's instructions."""
+    paths = [REPO_ROOT / "skills" / f"maestro-reconcile-{suffix}.md"]
+    if suffix == "implementing":
+        paths += sorted((REPO_ROOT / "maestro" / "_implementing_rounds").glob("*.md"))
+    text = "\n".join(p.read_text(encoding="utf-8") for p in paths)
     return {m.group(1) for m in _VERB_RE.finditer(text)}
 
 
