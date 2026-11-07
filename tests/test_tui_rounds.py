@@ -53,7 +53,7 @@ def test_d_opens_rounds_with_header_and_rows(home):
     _run(home, body)
 
 
-def test_enter_opens_logs_on_first_session_then_r_opens_threads(home):
+def test_enter_expands_round_then_opens_session_log_then_r_opens_threads(home):
     path = _seed(home)
 
     async def body(app, pilot):
@@ -62,6 +62,9 @@ def test_enter_opens_logs_on_first_session_then_r_opens_threads(home):
         table = app.screen.query_one("#rounds-table", DataTable)
         rows = app.screen._rounds.rows
         table.move_cursor(row=next(i for i, r in enumerate(rows) if r.first_session))
+        await pilot.press("enter")  # expands the round into its sessions
+        await pilot.pause(0.5)
+        await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, LogsScreen)
