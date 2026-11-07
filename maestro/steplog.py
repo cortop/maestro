@@ -270,6 +270,45 @@ def _iter_pi_steps(
             )
 
 
+STEP_PREFIX = "Step:"
+STEP_MAX_CHARS = 80
+
+
+def step_lines(text: str) -> list[str]:
+    """Declared ``Step:`` lines in ``text``, in order. A line counts only when it
+    starts with ``Step:``; the label is trimmed, capped at ``STEP_MAX_CHARS``, and an
+    empty one is skipped."""
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        if not line.startswith(STEP_PREFIX):
+            continue
+        label = line[len(STEP_PREFIX):].strip()
+        if label:
+            out.append(label[:STEP_MAX_CHARS].rstrip())
+    return out
+
+
+def record_steps(obj: dict) -> list[str]:
+    """``step_lines`` over the assistant text of one session-log record: a Claude
+    ``assistant`` record's text blocks or a pi assistant ``message_end``'s text blocks."""
+    if obj.get("type") == PI_MESSAGE_END_TYPE:
+        msg = obj.get("message") or {}
+    elif obj.get("type") == "assistant":
+        msg = obj.get("message") or {}
+    else:
+        return []
+    if msg.get("role") != "assistant":
+        return []
+    content = msg.get("content")
+    if isinstance(content, str):
+        return step_lines(content)
+    out: list[str] = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            out.extend(step_lines(block.get("text") or ""))
+    return out
+
+
 def _pi_session_outcome(path: Path) -> dict:
     """Tail-scan a pi ``.pi.jsonl`` log for its terminal outcome (T-58). No
     "agent_end" record seen yet -> ``running`` (matches the truncated-final-line

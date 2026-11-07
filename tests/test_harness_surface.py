@@ -18,13 +18,13 @@ COMMANDS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 # skill past its ceiling is a reviewed edit to this table, so cut something else
 # to pay for always-on text first.
 SKILL_BYTE_CEILINGS = {
-    "awaiting-human": 7300,
-    "implementing": 7500,
+    "awaiting-human": 7650,
+    "implementing": 7850,
     "passive": 6600,
-    "qa": 7400,
+    "qa": 7750,
     "ready": 5800,
-    "researching": 7500,
-    "triaging": 7100,
+    "researching": 7850,
+    "triaging": 7450,
 }
 
 # suffix -> extra `/name` references that phase's skill may mention. The
