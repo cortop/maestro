@@ -9,7 +9,7 @@ import time
 
 from conftest import seed_ticket
 
-from maestro import cli, event_log, sessions, store
+from maestro import cli, event_log, sessions
 from maestro.view import rounds as rounds_view
 
 KEY = "T-950"

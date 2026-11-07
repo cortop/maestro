@@ -47,7 +47,8 @@ from .providers import ollama as ollama_mod
 from .providers import pi as pi_mod
 from .sessions import DryRunSessions
 from .sessions import build_routing_sessions
-from .sessions import list_pruned, list_sessions
+from .sessions import list_pruned
+from .sessions import list_sessions
 from .statemachine import Phase
 
 HOME_DIRS = ["events", "inbox", "tickets", "worktrees",
