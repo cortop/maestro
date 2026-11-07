@@ -105,9 +105,10 @@ def test_logs_screen_renders_every_session_oldest_first_then_tails_live(seeded_h
 
             log_widget = app.screen.query_one("#logs-view", RichLog)
             rendered = "\n".join(strip.text for strip in log_widget.lines)
-            assert rendered.index("said-old") < rendered.index("said-mid") < rendered.index("said-live")
-            for sid in ("reconcile-T-3-1000.000000", "reconcile-T-3-2000.000000", "reconcile-T-3-3000.000000"):
-                assert f"=== session {sid} | " in rendered
+            # T-234: past sessions are summary rows (oldest first); only the live one has detail
+            assert "said-old" not in rendered and "said-mid" not in rendered
+            assert rendered.count("▸") == 2 and "said-live" in rendered
+            assert "=== session reconcile-T-3-3000.000000 | " in rendered
             assert app._exception is None
             await pilot.press("escape")
             await pilot.pause()
@@ -137,8 +138,8 @@ def test_logs_screen_header_names_model(seeded_home):
             await app.workers.wait_for_complete()
             await pilot.pause()
             rendered = "\n".join(strip.text for strip in app.screen.query_one("#logs-view", RichLog).lines)
-            assert "runner: claude | model: claude-sonnet-5 ===" in rendered
-            assert "model: unknown ===" in rendered
+            assert "stream-json" in rendered and "claude-sonnet-5" in rendered  # past summary row
+            assert "model: unknown ===" in rendered  # live session header
             assert app._exception is None
             await pilot.press("escape")
             await pilot.pause()

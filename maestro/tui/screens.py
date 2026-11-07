@@ -57,8 +57,10 @@ from ..config import Config
 from ..dispatcher import list_keys
 from ..dispatcher import schedule_status
 from ..dispatcher import spec_runner
+from ..sessions import list_pruned
 from ..sessions import list_sessions
 from ..statemachine import Phase
+from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
 from . import checks as checks_mod
@@ -271,6 +273,7 @@ class LogsScreen(Screen):
         ("f", "toggle_follow", "Follow"),
         ("s", "pick_session", "Session"),
         ("e", "next_error", "Next error"),
+        ("c", "collapse", "Collapse"),
     ]
 
     DEFAULT_CSS = """
@@ -408,6 +411,8 @@ class LogsScreen(Screen):
         sessions = list_sessions(self._home, self._key, with_outcome=True)
         events = event_log.read(self._home, self._key)
         newest = sessions[0]["path"] if sessions else None
+        sessions = sorted([*sessions, *list_pruned(self._home, self._key)],
+                          key=lambda s: s.get("epoch", 0.0), reverse=True)
         labels = [steplog.format_session_oneliner(
             s, rounds_view.session_digest(self._home, self._key, s, events, newest))
             for s in sessions]
@@ -441,22 +446,24 @@ class LogsScreen(Screen):
 
     def _render_history(self, gen: int, sessions_list: list[dict],
                         skip_path: Path | None) -> None:
-        """T-119: render every captured session oldest-first under a header, one file at a
-        time. *skip_path* (the live session) is left for the tail loop to render."""
-        from .. import steplog
-        for sess in reversed(sessions_list):
-            path = Path(sess["path"])
-            if not self._live(gen) or (skip_path is not None and path == skip_path):
+        """Emit one collapsed summary row per past session, oldest-first (pruned ones from
+        their persisted digest). *skip_path* (the live session) is left for the tail loop."""
+        tl = logs_view.build(self._home, self._key)
+        for past in reversed(tl.past):
+            if not self._live(gen):
+                return
+            sess = past.sess
+            if skip_path is not None and sess.get("path") == str(skip_path):
                 continue
-            if not path.exists():
-                self._emit(gen, f"(session {sess['session_id']}: log file missing, skipped)")
-                continue
-            try:
-                outcome = steplog.session_outcome(path)["outcome"]
-                self._emit(gen, _session_header(sess, outcome, steplog.session_model(path)))
-                self._render_file(gen, path)
-            except OSError:
-                self._emit(gen, f"(session {sess['session_id']}: log file missing, skipped)")
+            self._emit(gen, "[dim]▸[/dim] " + rich_escape(past.summary))
+
+    def action_collapse(self) -> None:
+        """Back from one expanded session to the live view with past sessions as summaries."""
+        log = self.query_one("#logs-view", RichLog)
+        log.clear()
+        self._err_lines = []
+        self._last_jump = -1
+        self._start_tail(pick=None)
 
     def _render_file(self, gen: int, path: Path) -> None:
         from .. import steplog
@@ -490,6 +497,10 @@ class LogsScreen(Screen):
 
     def _tail(self, gen: int, pick: dict | None = None) -> None:
         from .. import steplog
+        if pick is not None and pick.get("pruned"):
+            for line in rounds_view.session_lines(self._home, self._key, pick):
+                self._emit(gen, rich_escape(line))
+            return
         if pick is not None:
             path = Path(pick["path"])
             self.app.call_from_thread(self._set_current, gen, path)

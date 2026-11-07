@@ -1,0 +1,9 @@
+{% if lg.past %}<h2>Past sessions</h2>
+<div id="logs-view">
+{% if lg.live %}<section class="live-session"><strong>live</strong> {{ lg.live.session_id }}</section>{% endif %}
+{% for p in lg.past %}
+<details class="past-session"><summary>{{ p.summary }}</summary>
+<pre>{% for line in detail(p) %}{{ line }}
+{% endfor %}</pre></details>
+{% endfor %}
+</div>{% endif %}
