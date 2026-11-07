@@ -107,12 +107,60 @@ def category_of(type_: str) -> int:
     return CATEGORY_OF.get(type_, _OTHER_CATEGORY)
 
 
+_SUMMARY_CAP = 160
+
+# Event type -> payload keys tried in order; the first non-empty value is the summary.
+_LEAD_KEYS = {
+    ev_types.REVIEW_REPLY_POSTED: ("body",),
+    ev_types.NOTE: ("text", "note", "summary", "body"),
+    ev_types.POST_QA_SKILL_SPAWNED: ("skill",),
+}
+
+
+def _first_line(value: object) -> str:
+    """The first non-empty line of ``str(value)``, whitespace-trimmed."""
+    for line in str(value if value is not None else "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _lead_summary(type_: object, payload: dict) -> str:
+    """The type-specific lead text for *type_*, or ``""`` when it has none."""
+    if type_ == ev_types.AC_QA_VERDICT:
+        verdict = _first_line(payload.get("verdict")).upper()
+        head = f"AC {payload.get('ac_index', '?')} {verdict}".rstrip()
+        evidence = _first_line(payload.get("evidence"))
+        return f"{head}: {evidence}" if evidence else head
+    if type_ == ev_types.AC_VERIFIED:
+        evidence = payload.get("evidence")
+        if isinstance(evidence, dict):
+            what, where, result = (_first_line(evidence.get(k)) for k in ("what", "where", "result"))
+            return f"AC {payload.get('ac_index', '?')}: {what} @ {where} → {result}"
+        return f"AC {payload.get('ac_index', '?')}: {_first_line(evidence)}"
+    if type_ == ev_types.REVIEW_FEEDBACK_RECEIVED:
+        author, path = (_first_line(payload.get(k)) for k in ("author", "path"))
+        return f"{author} {path}:{payload.get('line', '')} {_first_line(payload.get('body'))}".strip()
+    for key in _LEAD_KEYS.get(type_, ()):
+        text = _first_line(payload.get(key))
+        if text:
+            return text
+    return ""
+
+
 def event_summary(ev: dict) -> str:
-    """Plain-text payload summary, built the way ``render_event`` builds it."""
-    payload = ev.get("payload") or {}
-    if ev.get("type") == _IMPL_STEP:
-        return f"{payload.get('kind', 'note')} {str(payload.get('summary', ''))[:80]}"
-    return ", ".join(f"{k}={v}" for k, v in list(payload.items())[:3])
+    """Plain-text one-line payload summary: lead fields for the types in ``_LEAD_KEYS``
+    and the verdict / evidence / feedback types, else the first three ``k=v`` pairs."""
+    payload = ev.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    type_ = ev.get("type")
+    if type_ == _IMPL_STEP:
+        return f"{payload.get('kind', 'note')} {_first_line(payload.get('summary', ''))[:80]}"
+    text = _lead_summary(type_, payload)
+    if not text:
+        text = _first_line(", ".join(f"{k}={v}" for k, v in list(payload.items())[:3]))
+    return text if len(text) <= _SUMMARY_CAP else text[:_SUMMARY_CAP - 1] + "…"
 
 
 def _complete_lines(data: bytes) -> tuple[list[dict], int]:
