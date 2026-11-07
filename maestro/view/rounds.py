@@ -113,6 +113,7 @@ class Round:
     outcome: str
     warn: bool = False
     count: int = 1
+    first_session: str = ""  # path of the earliest session log in the round, "" when none
 
 
 @dataclass(frozen=True)
@@ -191,7 +192,7 @@ def _collapse(rows: list[Round]) -> list[Round]:
     for r in rows:
         if out and not r.warn and not out[-1].warn and (out[-1].label, out[-1].outcome) == (r.label, r.outcome):
             out[-1] = Round(out[-1].when, out[-1].label, out[-1].duration, out[-1].outcome,
-                            False, out[-1].count + 1)
+                            False, out[-1].count + 1, out[-1].first_session or r.first_session)
         else:
             out.append(r)
     return out
@@ -267,13 +268,19 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
         else:
             continue
         duration = ""
+        first_session = ""
         if phase != "awaiting-human":
+            hi = end_ts if i + 1 < len(moves) else float("inf")
+            inside = [x for x in sessions if m["ts"] <= x["epoch"] < hi]
+            if inside:
+                first_session = min(inside, key=lambda x: x["epoch"])["path"]
             n, busy = _sessions_in(sessions, m["ts"], end_ts if i + 1 < len(moves) else float("inf"))
             if n:
                 duration = _dur(busy)
             elif retention and now - m["ts"] > retention * 86400:
                 outcome = _join(outcome, "(session log pruned)")
-        rows.append((m["ts"], Round(_when(m["ts"]), label, duration, outcome)))
+        rows.append((m["ts"], Round(_when(m["ts"]), label, duration, outcome,
+                                     first_session=first_session)))
 
     failed = stalled = 0
     for e in events:

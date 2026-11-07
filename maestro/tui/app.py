@@ -94,6 +94,7 @@ from .screens import InboxScreen
 from .screens import LogsScreen
 from .screens import ProposalScreen
 from .screens import ReviewScreen
+from .screens import RoundsScreen
 from .screens import ScheduleScreen
 from .screens import SessionsScreen
 from .screens import SpecScreen
@@ -293,6 +294,7 @@ class MaestroTUI(App):
         Binding("ctrl+d", "discard", "Discard", show=False),
         Binding("ctrl+p", "command_palette", "Palette", show=False, priority=True),
         Binding("ctrl+r", "retry", "Retry", show=False),
+        Binding("d", "rounds_panel", "Rounds", show=False),
         Binding("e", "env_panel", "Env", show=False),
         Binding("escape", "clear_query", "Clear search", show=False),
         Binding("g", "suggest_acs", "Suggest ACs", show=False),
@@ -350,6 +352,7 @@ class MaestroTUI(App):
         "open_worktree",
         "release",
         "retry",
+        "rounds_panel",
         "runner",
         "show_spec",
         "suggest_acs",
@@ -374,7 +377,7 @@ class MaestroTUI(App):
     })
     _NON_TICKET_SCREENS = (FleetScreen, SessionsScreen, BackupsScreen, EnvScreen, ScheduleScreen, ActivityScreen)
     _KEYED_SCREENS = (AcScreen, DetailScreen, SpecScreen, LogsScreen, EventsScreen, InboxScreen,
-                      ProposalScreen, ReviewScreen, WhyScreen)
+                      ProposalScreen, ReviewScreen, RoundsScreen, WhyScreen)
 
     # T-178: actions other tickets add; a menu row appears only if the App has the action.
     _OPTIONAL_MENU_ROWS = (
@@ -1755,6 +1758,13 @@ class MaestroTUI(App):
             self.notify("Select a ticket first", severity="warning")
             return
         self.push_screen(WhyScreen(self._home, key))
+
+    def action_rounds_panel(self) -> None:
+        key = self._target_key()
+        if key is None:
+            self.notify("Select a ticket first", severity="warning")
+            return
+        self.push_screen(RoundsScreen(self._home, key))
 
     def action_view_events(self) -> None:
         key = self._target_key()
