@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .. import config as config_mod, event_log, implementing_brief, outcomes, repos, snapshot as snap_mod, steplog, store
 from .. import events as E
-from ..sessions import list_sessions
+from ..sessions import list_pruned, list_sessions, read_sidecar
 from . import events as ev_view
 
 _PHASE_LABELS = {
@@ -182,6 +182,9 @@ def _sessions_in(sessions: list[dict], start: float, end: float) -> tuple[int, f
     for s in sessions:
         if start <= s["epoch"] < end:
             n += 1
+            if s.get("pruned"):
+                busy += s.get("busy") or 0.0
+                continue
             try:
                 busy += max(0.0, os.stat(s["path"]).st_mtime - s["epoch"])
             except OSError:
@@ -224,7 +227,7 @@ def build(home: Path, key: str, now: float | None = None) -> TicketRounds:
     snap = snap_mod.load(home, key)
     events = event_log.read(home, key)
     moves = ev_view._phase_moves(events)
-    sessions = list_sessions(home, key)
+    sessions = list_sessions(home, key) + list_pruned(home, key)
     retention = (cfg.session_log_retention_days if cfg else None) or 0
 
     rows: list[tuple[float, Round]] = []
@@ -419,6 +422,9 @@ def session_digest(home: Path, key: str, sess: dict, events: list[dict] | None =
     """The digest of one ``list_sessions`` entry, plus its window's reconciler ``events``
     (rendered lines) and trouble ``tags``: killed by watchdog (a Failed payload names the
     log) and ended without summary (no terminal record, not the newest session)."""
+    if sess.get("pruned"):
+        data = read_sidecar(Path(sess["sidecar"]))
+        return data["digest"] if data else {"supported": False, "note": "digest sidecar unreadable"}
     path = Path(sess["path"])
     d = cached_digest(path)
     if d.get("note"):

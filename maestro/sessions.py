@@ -11,6 +11,7 @@ headless sessions don't show up in ``claude agents --json``.
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -81,6 +82,10 @@ _SESSION_FILE_RE = re.compile(
     r"^(reconcile-(?P<key>.+?)-(?P<epoch>\d+\.\d+))\.(?P<ext>log|stream\.jsonl|opencode\.jsonl|pi\.jsonl)$"
 )
 
+# Digest sidecar ``prune-logs`` leaves beside a deleted log: ``<session_id>.summary.json``.
+# It never matches ``_SESSION_FILE_RE``, so listing and pruning ignore it.
+SIDECAR_SUFFIX = ".summary.json"
+
 # Maps a matched filename ``ext`` to the ``format`` value reported to callers. Any
 # ``ext`` not listed here falls back to "text" -- there is currently no such case
 # (the regex's alternation is closed), but the fallback keeps this mapping additive
@@ -137,6 +142,44 @@ def list_sessions(home: Path, key: str, *, with_outcome: bool = False) -> list[d
             entry.update(steplog.session_model(f))
         out.append(entry)
     out.sort(key=lambda d: d["epoch"], reverse=True)
+    return out
+
+
+def sidecar_path(home: Path, key: str, session_id: str) -> Path:
+    """Where the digest sidecar of *session_id* lives."""
+    return home / "agent-logs" / key / f"{session_id}{SIDECAR_SUFFIX}"
+
+
+def read_sidecar(path: Path) -> dict | None:
+    """The parsed sidecar at *path*, or None when missing or unreadable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("session"), dict) \
+        and isinstance(data.get("digest"), dict) else None
+
+
+def list_pruned(home: Path, key: str) -> list[dict]:
+    """Sessions whose log is gone but whose digest sidecar remains, newest-first.
+
+    Each entry is the stored ``list_sessions``-shaped metadata with ``path`` naming the
+    deleted log, plus ``pruned`` and ``sidecar``.
+    """
+    store.validate_key(key)
+    log_dir = home / "agent-logs" / key
+    if not log_dir.exists():
+        return []
+    out = []
+    for f in log_dir.iterdir():
+        if not f.name.endswith(SIDECAR_SUFFIX) or not f.name.startswith("reconcile-"):
+            continue
+        data = read_sidecar(f)
+        if data is None or Path(data["session"].get("path", "")).exists():
+            continue
+        out.append({**data["session"], "pruned": True, "sidecar": str(f),
+                    "busy": data.get("busy")})
+    out.sort(key=lambda d: d.get("epoch", 0.0), reverse=True)
     return out
 
 
