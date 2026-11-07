@@ -198,8 +198,11 @@ def open_pr(cfg: Config, key: str, *, title: str, body: str, stack: list[dict] |
     return {"opened": opened, "recorded": any(recorded)}
 
 
-def handoff(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
-    """Move the ticket to `qa` or `awaiting-ci`, chosen from the implementing round and `pr_draft`."""
+def handoff(cfg: Config, key: str, *, summary: str | None = None, actor: str = "reconciler") -> dict:
+    """Move the ticket to `qa` or `awaiting-ci`, chosen from the implementing round and `pr_draft`.
+
+    A non-blank `summary` is appended to the reason with newlines collapsed to spaces.
+    """
     round_name, reason = implementing_brief.current_round(cfg.home, key)
     if round_name not in _ROUTES:
         raise store.MaestroError(
@@ -209,5 +212,9 @@ def handoff(cfg: Config, key: str, *, actor: str = "reconciler") -> dict:
     if snap.pr_number is None:
         raise store.MaestroError(f"{key}: handoff: no PR is recorded yet -- run `maestro open-pr {key}` first")
     to = _ROUTES[round_name][0 if snap.pr_draft is not False else 1]
-    ev = ops.set_phase(cfg, key, Phase(to), reason=f"{round_name} round done", actor=actor)
+    reason = f"{round_name} round done"
+    text = " ".join((summary or "").split())
+    if text:
+        reason = f"{reason}: {text}"
+    ev = ops.set_phase(cfg, key, Phase(to), reason=reason, actor=actor)
     return {"round": round_name, "pr_draft": snap.pr_draft, "to": to, "moved": ev is not None}

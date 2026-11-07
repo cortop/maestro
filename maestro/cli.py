@@ -1023,7 +1023,7 @@ def cmd_open_pr(args) -> int:
 
 def cmd_handoff(args) -> int:
     """[agent] move to qa or awaiting-ci, chosen from the implementing round and pr_draft."""
-    _print(pr_flow.handoff(_cfg(args), args.key, actor=args.actor))
+    _print(pr_flow.handoff(_cfg(args), args.key, summary=args.summary, actor=args.actor))
     return 0
 
 
@@ -1911,6 +1911,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("handoff", cmd_handoff,
              "[agent] set the next phase (qa or awaiting-ci) from the implementing round and pr_draft")
     sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
+    sp.add_argument("--summary", help="what this round did, addressed or declined, and why "
+                                      "(appended to the PhaseChanged reason)")
 
     sp = add("verify-ac", cmd_verify_ac, "[agent] attest AC #n with structured evidence (content-hash keyed)")
     sp.add_argument("key"); sp.add_argument("--ac", type=int, required=True, dest="ac")

@@ -7,7 +7,7 @@ as-is (the spec, and so their content hashes, didn't change) — do not re-imple
 re-run `verify-ac`, or route the ticket through `qa`.
 ```bash
 git -C <WT> push -q -u origin "<PREFIX>$KEY"
-maestro handoff "$KEY"
+maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
 ```
 `handoff` picks `awaiting-ci` for this round. If it refuses, fix that per its error; `--force` does not override the QA
 gates. If you truly cannot reconcile the two intents yourself, escalate and exit:

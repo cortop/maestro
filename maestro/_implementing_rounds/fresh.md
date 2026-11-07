@@ -33,7 +33,7 @@ No PR exists yet. Implement the spec's Acceptance criteria:
 |----|----------|
 | <ac 1 text> | <what/where/result 1> |
 | <ac 2 text> | <what/where/result 2> |"
-   maestro handoff "$KEY"
+   maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
    ```
    **`exceeds: true` and `split_viable: true`** — do not push or open the PR yet. Split the diff
    into an ordered stack of smaller PRs by file: each entry names its files, the spec ACs it
