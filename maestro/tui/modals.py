@@ -1003,7 +1003,7 @@ class _SessionPickModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="answer-dialog"):
             yield Label("Pick a session")
-            yield OptionList(*self._labels, id="session-pick")
+            yield OptionList(*[Text(label) for label in self._labels], id="session-pick")
 
     def on_mount(self) -> None:
         self.query_one("#session-pick", OptionList).focus()

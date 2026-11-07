@@ -1341,11 +1341,33 @@ def cmd_logs(args) -> int:
 
     if getattr(args, "summary", False):
         from .view import rounds as rounds_view
+        listed = list_sessions(cfg.home, key, with_outcome=True)
+        events = event_log.read(cfg.home, key)
+        newest = listed[0]["path"] if listed else None
+        if args.session:
+            sess = next((s for s in listed if s["session_id"] == args.session), None)
+            if sess is None:
+                print(f"Session {args.session!r} not found.", file=sys.stderr)
+                return 1
+            d = rounds_view.session_digest(cfg.home, key, sess, events, newest)
+            if args.json:
+                _print(d)
+            else:
+                print("\n".join(rounds_view.session_lines(cfg.home, key, sess, events, newest)))
+            return 0
         tr = rounds_view.build(cfg.home, key)
         if args.json:
             _print(rounds_view.to_json(tr))
         else:
-            print("\n".join(rounds_view.format_lines(tr)))
+            by_path = {s["path"]: s for s in listed}
+
+            def nest(path: str) -> list[str]:
+                sess = by_path.get(path)
+                if sess is None:
+                    return []
+                d = rounds_view.session_digest(cfg.home, key, sess, events, newest)
+                return ["    " + steplog.format_session_oneliner(sess, d)]
+            print("\n".join(rounds_view.format_lines(tr, nest)))
         return 0
 
     sessions = list_sessions(cfg.home, key)
@@ -1734,7 +1756,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key", nargs="?", default=None)
     sp.add_argument("--key", dest="key_flag", default=None, help="ticket key (alternative to positional)")
     sp.add_argument("--list", action="store_true", help="list sessions newest-first")
-    sp.add_argument("--session", help="select a specific session_id")
+    sp.add_argument("--session", help="select a specific session_id (with --summary: print its digest)")
     sp.add_argument("--follow", action="store_true", help="tail the live session log")
     sp.add_argument("--json", action="store_true", help="emit raw stream-jsonl lines (with --summary: the view-model)")
     sp.add_argument("--summary", action="store_true", help="per-round history from events only (works after logs are pruned)")

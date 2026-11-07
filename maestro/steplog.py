@@ -920,3 +920,299 @@ def fold_current_session(home: Path, key: str, *, actor: str = "reconciler") -> 
     if not p.exists() or not (p.name.endswith(".stream.jsonl") or p.name.endswith(".pi.jsonl")):
         return 0
     return fold_stream(home, key, p, actor=actor)
+
+
+# --- session digest -----------------------------------------------------------
+
+DIGEST_GROUPS = ("understand", "change", "verify", "ship")
+_GROUP_LABELS = {"understand": "Understand", "change": "Change", "verify": "Verify", "ship": "Ship"}
+_CHANGE_TOOLS = frozenset({"edit", "write", "multiedit", "notebookedit"})
+_SKILL_TOOLS = frozenset({"skill"})
+_AGENT_TOOLS = frozenset({"agent", "task", "subagent"})
+_SHIP_RE = re.compile(
+    r"\bgit\s+(?:commit|push|rebase|merge|reset)\b"
+    r"|\bgh\s+pr\s+(?:create|edit|ready|comment)\b"
+    r"|\bmaestro\s+(?:open-pr|handoff|sync-base)\b")
+_VERIFY_RE = re.compile(
+    r"\b(?:pytest|jest|vitest|playwright|ruff|eslint|tsc|make)\b"
+    r"|\b(?:go|cargo)\s+test\b|\b[\w.-]+\s+test\b|\b(?:bazel|bzl)\s+(?:build|test)\b")
+_TEST_RE = re.compile(r"\b(?:pytest|jest|vitest|playwright)\b|\s(?:test|tests)\b")
+_COMMIT_MSG_RE = re.compile(r"""-m\s+(?:"([^"]*)"|'([^']*)')""", re.DOTALL)
+_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n(.*)", re.DOTALL)
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+_C0_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_FILES_CAP = 20
+_ERROR_EXCERPT_CHARS = 200
+_FINAL_TEXT_CHARS = 2000
+
+
+def sanitize(text, cap: int = _ERROR_EXCERPT_CHARS) -> str:
+    """The one sanitizer for every digest excerpt: strip ANSI and C0 characters (but
+    ``\\n`` and ``\\t``), redact secret-looking spans, then cap the length."""
+    from .friction import redact
+    text = _C0_RE.sub("", _ANSI_RE.sub("", str(text or "")))
+    text = redact(text[: cap * 4]).strip()
+    return text if len(text) <= cap else text[: cap - 1] + "…"
+
+
+def result_text(obj: dict) -> str:
+    """The text of a pi ``tool_execution_end`` record's result content."""
+    content = (obj.get("result") or {}).get("content") or []
+    return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+
+
+def _block_text(content) -> str:
+    """The text of a Claude ``tool_result`` block's content (a string or text blocks)."""
+    if isinstance(content, str):
+        return content
+    return "\n".join(c.get("text", "") for c in content or [] if isinstance(c, dict))
+
+
+def tool_group(name: str, inp: dict) -> str:
+    """The highest group (ship > verify > change > understand) a tool call falls in."""
+    lname = (name or "").lower()
+    if lname in _CHANGE_TOOLS:
+        return "change"
+    if lname == "bash":
+        cmd = str(inp.get("command") or "")
+        if _SHIP_RE.search(cmd):
+            return "ship"
+        if _VERIFY_RE.search(cmd):
+            return "verify"
+    return "understand"
+
+
+def _commit_subject(cmd: str) -> str:
+    m = _COMMIT_MSG_RE.search(cmd)
+    if not m:
+        return ""
+    msg = (m.group(1) if m.group(1) is not None else m.group(2)).strip()
+    h = _HEREDOC_RE.search(msg)
+    if h:
+        msg = h.group(2)
+    return next((ln.strip() for ln in msg.splitlines() if ln.strip()), "")
+
+
+def _scan_digest_records(path: Path, skip: tuple[bytes, ...]) -> Iterator[dict | None]:
+    """Each complete line of *path* as a record; ``None`` for a non-JSON line."""
+    with path.open("rb") as fh:
+        for raw in fh:
+            if not raw.endswith(b"\n") or (skip and raw.startswith(skip)):
+                continue
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                yield None
+                continue
+            if isinstance(obj, dict):
+                yield obj
+
+
+def _assistant_text(msg: dict) -> str:
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(b.get("text") or "" for b in content or []
+                     if isinstance(b, dict) and b.get("type") == "text")
+
+
+def session_digest(path: Path) -> dict:
+    """Fold one session log into a digest: tool-call counts per group, the declared
+    steps with their call counts, facts (edited files, commit subjects, test runs,
+    skills, agents), errors, retries, the terminal flag and the final message.
+
+    Claude and pi logs are digested; an opencode log yields ``supported: False``.
+    Every excerpt passes ``sanitize``. Never raises on a malformed log.
+    """
+    name = path.name
+    runner = next((r for suffix, r in _RUNNER_BY_SUFFIX if name.endswith(suffix)), "unknown")
+    d: dict = {
+        "runner": runner, "supported": runner in ("claude", "pi"),
+        "groups": dict.fromkeys(DIGEST_GROUPS, 0), "calls": 0, "steps": [],
+        "files": [], "files_total": 0, "commits": [], "test_runs": 0, "pushed": False,
+        "pr": False, "skills": [], "agents": 0, "errors": 0, "first_error": "",
+        "retries": 0, "terminal": False, "final_text": "", "outcome": "unknown",
+        "failed_start": False,
+    }
+    if not d["supported"]:
+        return d
+    files: list[str] = []
+    step: dict | None = None
+    final = ""
+
+    def call(tool: str, inp: dict) -> None:
+        nonlocal step
+        group = tool_group(tool, inp)
+        d["calls"] += 1
+        d["groups"][group] += 1
+        if step is not None:
+            step["calls"][group] += 1
+        lname = tool.lower()
+        if group == "change":
+            f = inp.get("file_path") or inp.get("path") or inp.get("filePath") or ""
+            if f and f not in files:
+                files.append(str(f))
+        elif group == "ship":
+            cmd = str(inp.get("command") or "")
+            if re.search(r"\bgit\s+commit\b", cmd):
+                subject = _commit_subject(cmd)
+                if subject:
+                    d["commits"].append(sanitize(subject, 100))
+            if re.search(r"\bgit\s+push\b", cmd):
+                d["pushed"] = True
+            if re.search(r"\bgh\s+pr\s+(?:create|edit|ready)\b|\bmaestro\s+open-pr\b", cmd):
+                d["pr"] = True
+        elif group == "verify" and _TEST_RE.search(str(inp.get("command") or "")):
+            d["test_runs"] += 1
+        if lname in _SKILL_TOOLS:
+            skill = inp.get("skill") or inp.get("name")
+            if skill and skill not in d["skills"]:
+                d["skills"].append(sanitize(skill, 80))
+        elif lname in _AGENT_TOOLS:
+            d["agents"] += 1
+
+    def error(text: str) -> None:
+        d["errors"] += 1
+        if not d["first_error"]:
+            d["first_error"] = sanitize(text.strip())
+
+    def open_steps(obj: dict) -> None:
+        nonlocal step
+        for label in record_steps(obj):
+            step = {"label": sanitize(label, STEP_MAX_CHARS),
+                    "calls": dict.fromkeys(DIGEST_GROUPS, 0)}
+            d["steps"].append(step)
+
+    try:
+        if runner == "pi":
+            for obj in _scan_digest_records(path, PI_NOISE_PREFIXES):
+                if obj is None:
+                    continue
+                t = obj.get("type")
+                if t == PI_MESSAGE_END_TYPE:
+                    open_steps(obj)
+                    msg = obj.get("message") or {}
+                    if msg.get("role") == "assistant":
+                        text = _assistant_text(msg).strip()
+                        if text:
+                            final = text
+                elif t == PI_TOOL_START_TYPE:
+                    call(obj.get("toolName") or "", obj.get("args") or {})
+                elif t == PI_TOOL_END_TYPE:
+                    if obj.get("isError"):
+                        error(result_text(obj))
+                elif t == PI_AUTO_RETRY_START_TYPE:
+                    d["retries"] += 1
+                    d["terminal"] = False
+                elif t in (PI_AGENT_END_TYPE, PI_AGENT_SETTLED_TYPE):
+                    d["terminal"] = True
+        else:
+            for obj in _scan_digest_records(path, ()):
+                if obj is None:
+                    d["retries"] += 1
+                    continue
+                t = obj.get("type")
+                if t == "assistant":
+                    open_steps(obj)
+                    content = (obj.get("message") or {}).get("content")
+                    for block in content if isinstance(content, list) else []:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            inp = block.get("input")
+                            call(block.get("name") or "", inp if isinstance(inp, dict) else {})
+                elif t == "user":
+                    content = (obj.get("message") or {}).get("content")
+                    for block in content if isinstance(content, list) else []:
+                        if (isinstance(block, dict) and block.get("type") == "tool_result"
+                                and block.get("is_error")):
+                            error(_block_text(block.get("content")))
+                elif t == "system" and obj.get("subtype") == "api_retry":
+                    d["retries"] += 1
+                elif t == "result":
+                    d["terminal"] = True
+                    res = obj.get("result")
+                    final = res if isinstance(res, str) else ""
+    except (OSError, ValueError):
+        pass
+    d["files_total"] = len(files)
+    d["files"] = [sanitize(f) for f in files[:_FILES_CAP]]
+    d["final_text"] = sanitize(final, _FINAL_TEXT_CHARS)
+    try:
+        d["outcome"] = outcome_class(session_outcome(path))
+    except (OSError, ValueError):
+        pass
+    d["failed_start"] = (d["calls"] == 0
+                         and d["outcome"] not in ("success", "running", "unknown"))
+    return d
+
+
+def _counts(groups: dict) -> str:
+    return " · ".join(f"{_GROUP_LABELS[g]} {groups.get(g, 0)}" for g in DIGEST_GROUPS)
+
+
+def digest_trouble(d: dict) -> list[str]:
+    """The digest's trouble tags, e.g. ``2 tool errors`` or ``ended without summary``."""
+    out = []
+    if d.get("failed_start"):
+        out.append(f"failed to start: {d.get('outcome')}")
+    if d.get("errors"):
+        out.append(f"{d['errors']} tool error{'' if d['errors'] == 1 else 's'}")
+    if d.get("retries"):
+        out.append(f"{d['retries']} retr{'y' if d['retries'] == 1 else 'ies'}")
+    out.extend(d.get("tags") or [])
+    return out
+
+
+def format_session_oneliner(sess: dict, d: dict) -> str:
+    """One picker line: start time, format, outcome, model, call counts and trouble."""
+    head = f"{sess['ts']} {sess['format']} {sess.get('outcome') or d.get('outcome', '?')} {sess.get('model', '?')}"
+    if d.get("note"):
+        return f"{head} · {d['note']}"
+    if not d.get("supported"):
+        return f"{head} · digest not supported for this runner"
+    parts = [head, f"{d['calls']} calls", "/".join(str(d["groups"][g]) for g in DIGEST_GROUPS)]
+    if d["files_total"]:
+        parts.append(f"{d['files_total']} file{'' if d['files_total'] == 1 else 's'}")
+    parts.extend(digest_trouble(d))
+    return " · ".join(parts)
+
+
+def format_session_digest(d: dict) -> list[str]:
+    """The digest as display lines, shared by ``maestro logs --summary`` and the TUI."""
+    if d.get("note"):
+        return [d["note"]]
+    if not d.get("supported"):
+        return ["digest not supported for this runner"]
+    lines = []
+    for i, s in enumerate(d["steps"], 1):
+        lines.append(f"  {i}. {s['label']} — " + " ".join(
+            f"{g[0].upper()}{s['calls'][g]}" for g in DIGEST_GROUPS))
+    lines.append(_counts(d["groups"]))
+    facts = []
+    if d["files"]:
+        more = d["files_total"] - len(d["files"])
+        facts.append("edited " + ", ".join(d["files"]) + (f" (+{more} more)" if more > 0 else ""))
+    for c in d["commits"]:
+        facts.append(f"commit: {c}")
+    if d["test_runs"]:
+        facts.append(f"{d['test_runs']} test run{'' if d['test_runs'] == 1 else 's'}")
+    if d["pushed"]:
+        facts.append("pushed")
+    if d["pr"]:
+        facts.append("PR opened")
+    if d["skills"]:
+        facts.append("skills: " + ", ".join(d["skills"]))
+    if d["agents"]:
+        facts.append(f"{d['agents']} agent{'' if d['agents'] == 1 else 's'}")
+    lines.extend(f"  {f}" for f in facts)
+    for e in d.get("events") or []:
+        lines.append(f"  event: {e}")
+    trouble = digest_trouble(d)
+    if trouble:
+        first = f" (first: {d['first_error']})" if d["errors"] and d["first_error"] else ""
+        lines.append("Trouble: " + " · ".join(trouble) + first)
+    if d["final_text"]:
+        lines.append("Said: " + d["final_text"])
+    return lines
