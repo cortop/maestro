@@ -58,6 +58,15 @@ def _round_cause(reason: str, prev_phase: str | None) -> str:
     return "other"
 
 
+def resumes_round(cause: str, prev_phase: str | None, pr_seen: bool) -> bool:
+    """True when a transition into implementing re-enters the round a ready detour interrupted.
+
+    A ticket with a recorded PR that comes back from `ready` for no round-specific reason
+    (the "worktree ready" step after a degraded -> ready detour) continues its earlier round.
+    """
+    return pr_seen and prev_phase == "ready" and cause == "other"
+
+
 def implementing_round(reason: str, prev_phase: str | None) -> str:
     """The implementing round a `PhaseChanged -> implementing` transition opens.
 
@@ -99,6 +108,7 @@ def fold_ticket(cfg: Config | None, home: Path, key: str, cutoff: datetime | Non
     rounds: list[dict] = []
     seen_ticks: set[tuple[str, str]] = set()
     reviews: list[bool | None] = []
+    pr_seen = False
     for ev in events:
         typ, pl = ev["type"], ev.get("payload", {})
         if typ == E.PHASE_CHANGED:
@@ -108,12 +118,16 @@ def fold_ticket(cfg: Config | None, home: Path, key: str, cutoff: datetime | Non
             if new == "implementing":
                 cause = _round_cause(pl.get("reason") or "", phase)
                 tick = (cause, ev["ts"])
-                if cause == "review" and tick in seen_ticks:
+                if resumes_round(cause, phase, pr_seen) and rounds:
+                    rounds[-1]["next"] = None  # detour re-entry: the earlier round is still open
+                elif cause == "review" and tick in seen_ticks:
                     pass  # same-tick duplicate review route: counted once
                 elif cause == "review" or phase != "implementing":
                     seen_ticks.add(tick)
                     rounds.append({"cause": cause, "next": None})
             phase = new
+        elif typ == E.PR_OPENED:
+            pr_seen = True
         elif typ == E.PR_UPDATED and pl.get("merged") and "stack_index" not in pl:
             merged_at = merged_at or _parse_ts(ev["ts"])
         elif typ == E.AC_QA_VERDICT and pl.get("axis", "spec") == "spec":

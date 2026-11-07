@@ -15,16 +15,25 @@ _FILES = {"conflict": ("sync", "conflict"), "base-drift": ("sync", "base-drift")
 
 
 def current_round(home: Path, key: str) -> tuple[str, str]:
-    """(round, reason) for the most recent transition into implementing."""
+    """(round, reason) for the most recent transition into implementing.
+
+    A re-entry from `ready` with a PR already recorded (degraded -> ready -> implementing)
+    resumes the round the previous transition into implementing opened.
+    """
     prev = None
+    pr_seen = False
     found: tuple[str, str] = ("unknown", "")
     for ev in event_log.read(home, key):
+        if ev["type"] == E.PR_OPENED:
+            pr_seen = True
         if ev["type"] != E.PHASE_CHANGED:
             continue
         new = ev.get("payload", {}).get("phase")
         if new == "implementing":
             reason = ev["payload"].get("reason") or ""
-            found = (outcomes.implementing_round(reason, prev), reason)
+            if not (outcomes.resumes_round(outcomes._round_cause(reason, prev), prev, pr_seen)
+                    and found[0] != "unknown"):
+                found = (outcomes.implementing_round(reason, prev), reason)
         prev = new
     return found
 
