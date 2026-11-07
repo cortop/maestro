@@ -9,7 +9,7 @@ from ..view.events import (CATEGORY_NAMES, CATEGORY_OF, DwellSegment, EventTail,
                            event_summary, fmt_duration, phase_dwell)
 from ..steplog import (OC_STEP_FINISH_TYPES, OC_STEP_START_TYPES,
                         OC_TEXT_TYPES, OC_TOOL_USE_TYPES, PI_AGENT_END_TYPE,
-                        PI_MESSAGE_END_TYPE, PI_TOOL_START_TYPE,
+                        PI_MESSAGE_END_TYPE, PI_TOOL_END_TYPE, PI_TOOL_START_TYPE,
                         classify_result, format_resets_at, oc_part,
                         oc_summary, pi_summary)
 
@@ -167,9 +167,39 @@ def _esc_log(s: str) -> str:
     return s.replace("\\", "\\\\").replace("[", "\\[")
 
 
-def render_log_line(obj: dict) -> list[str]:
-    """Convert one stream-json event object to Rich markup lines for the logs pane."""
+def _first_line(text: object, limit: int = 200) -> str:
+    """First non-empty line of *text*, clipped to *limit* chars."""
+    for ln in str(text or "").splitlines():
+        if ln.strip():
+            return ln.strip()[:limit]
+    return ""
+
+
+def _error_line(tool: str, text: object) -> str:
+    """The red ``✗ <tool>: <first line>`` row `_is_error_line` matches."""
+    return f"[red]✗ {_esc_log(tool)}: {_esc_log(_first_line(text))}[/red]"
+
+
+def _block_text(content: object) -> str:
+    """Flatten a Claude ``tool_result`` content (string or text blocks) to text."""
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return str(content or "")
+
+
+def render_log_line(obj: dict, names: dict | None = None) -> list[str]:
+    """Convert one stream-json event object to Rich markup lines for the logs pane.
+    *names* (``tool_use_id`` -> tool name), when given, is filled from ``tool_use``
+    blocks so a failing ``tool_result`` can name its tool."""
     type_ = obj.get("type")
+    if type_ == "user":
+        content = (obj.get("message") or {}).get("content")
+        lines = []
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                tool = (names or {}).get(block.get("tool_use_id"), "tool")
+                lines.append(_error_line(tool, _block_text(block.get("content"))))
+        return lines
     if type_ == "assistant":
         lines = []
         for block in obj.get("message", {}).get("content", []):
@@ -180,9 +210,11 @@ def render_log_line(obj: dict) -> list[str]:
                     lines.append(_esc_log(text))
             elif btype == "tool_use":
                 name = block.get("name", "?")
+                if names is not None and block.get("id"):
+                    names[block["id"]] = name
                 inp = block.get("input") or {}
                 inp_str = _esc_log(_json.dumps(inp)[:100])
-                lines.append(f"[dim bold]▶ {name}[/dim bold] [dim]{inp_str}[/dim]")
+                lines.append(f"[dim bold]▶ {_esc_log(name)}[/dim bold] [dim]{inp_str}[/dim]")
         return lines
     if type_ == "result":
         classified = classify_result(obj)
@@ -218,7 +250,7 @@ def render_opencode_log_line(obj: dict) -> list[str]:
     if type_ in OC_TOOL_USE_TYPES:
         name = part.get("tool", "?")
         summary = _esc_log(oc_summary(name, part))
-        return [f"[dim bold]▶ {name}[/dim bold] [dim]{summary}[/dim]"]
+        return [f"[dim bold]▶ {_esc_log(name)}[/dim bold] [dim]{summary}[/dim]"]
     if type_ in OC_STEP_FINISH_TYPES:
         reason = part.get("reason")
         if not reason:
@@ -248,7 +280,12 @@ def render_pi_log_line(obj: dict) -> list[str]:
         name = obj.get("toolName", "?")
         args = obj.get("args") or {}
         summary = _esc_log(pi_summary(name, args))
-        return [f"[dim bold]▶ {name}[/dim bold] [dim]{summary}[/dim]"]
+        return [f"[dim bold]▶ {_esc_log(name)}[/dim bold] [dim]{summary}[/dim]"]
+    if type_ == PI_TOOL_END_TYPE:
+        if not obj.get("isError"):
+            return []
+        content = (obj.get("result") or {}).get("content")
+        return [_error_line(str(obj.get("toolName", "?")), _block_text(content))]
     if type_ == PI_MESSAGE_END_TYPE:
         msg = obj.get("message") or {}
         if msg.get("role") != "assistant":
