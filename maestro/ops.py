@@ -2848,6 +2848,33 @@ def _prune_plan(cfg: Config, key: str, *, now: float | None = None) -> list[dict
     return [f for f in all_files if f["path"] in to_delete]
 
 
+def _write_digest_sidecar(cfg: Config, key: str, f: dict, plan: list[dict]) -> None:
+    """Write ``<session>.summary.json`` for the log *f* about to be deleted; never raises.
+
+    One sidecar per session id, digested from its richest file (any non-``.log`` sibling in
+    *plan* first). An existing sidecar is kept.
+    """
+    from . import sessions as sessions_mod
+    from .view import rounds as rounds_view
+    try:
+        target = sessions_mod.sidecar_path(cfg.home, key, f["session_id"])
+        if target.exists():
+            return
+        sibs = [g for g in plan if g["session_id"] == f["session_id"]]
+        best = next((g for g in sibs if not g["path"].endswith(".log")), sibs[0])
+        if best["path"] != f["path"]:
+            return  # the richest sibling writes it
+        listed = sessions_mod.list_sessions(cfg.home, key, with_outcome=True)
+        sess = next(s for s in listed if s["path"] == f["path"])
+        busy = max(0.0, os.stat(f["path"]).st_mtime - sess["epoch"])
+        digest = rounds_view.session_digest(cfg.home, key, sess, None,
+                                            listed[0]["path"] if listed else None)
+        store.atomic_write(target, json.dumps(
+            {"version": 1, "session": sess, "busy": busy, "digest": digest}, sort_keys=True))
+    except Exception:  # a digest failure must not keep a stale log on disk
+        return
+
+
 def prune_session_logs(cfg: Config, key: str, *, now: float | None = None) -> tuple[int, int]:
     """Delete stale session log files for *key* per retention settings.
 
@@ -2856,12 +2883,14 @@ def prune_session_logs(cfg: Config, key: str, *, now: float | None = None) -> tu
     """
     pruned = 0
     pruned_bytes = 0
-    for f in _prune_plan(cfg, key, now=now):
+    plan = _prune_plan(cfg, key, now=now)
+    for f in plan:
         path = Path(f["path"])
         try:
             size = path.stat().st_size
         except OSError:
             continue
+        _write_digest_sidecar(cfg, key, f, plan)
         try:
             path.unlink()
         except OSError:

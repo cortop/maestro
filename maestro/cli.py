@@ -47,6 +47,7 @@ from .providers import ollama as ollama_mod
 from .providers import pi as pi_mod
 from .sessions import DryRunSessions
 from .sessions import build_routing_sessions
+from .sessions import list_pruned
 from .sessions import list_sessions
 from .statemachine import Phase
 
@@ -1343,9 +1344,10 @@ def cmd_logs(args) -> int:
         from .view import rounds as rounds_view
         listed = list_sessions(cfg.home, key, with_outcome=True)
         events = event_log.read(cfg.home, key)
+        pruned = list_pruned(cfg.home, key)
         newest = listed[0]["path"] if listed else None
         if args.session:
-            sess = next((s for s in listed if s["session_id"] == args.session), None)
+            sess = next((s for s in [*listed, *pruned] if s["session_id"] == args.session), None)
             if sess is None:
                 print(f"Session {args.session!r} not found.", file=sys.stderr)
                 return 1
@@ -1359,7 +1361,7 @@ def cmd_logs(args) -> int:
         if args.json:
             _print(rounds_view.to_json(tr))
         else:
-            by_path = {s["path"]: s for s in listed}
+            by_path = {s["path"]: s for s in [*listed, *pruned]}
 
             def nest(path: str) -> list[str]:
                 sess = by_path.get(path)
