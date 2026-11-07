@@ -1297,6 +1297,38 @@ def _render_opencode_jsonl(path: Path) -> None:
         _print_opencode_part(obj)
 
 
+def _print_pi_record(obj: dict) -> None:
+    """Print one pi record as a readable line; tool updates and deltas print nothing."""
+    t = obj.get("type")
+    if t == steplog.PI_TOOL_START_TYPE:
+        tool_name = obj.get("toolName", "?")
+        print(f"[tool:{tool_name}] {steplog.pi_summary(tool_name, obj.get('args') or {})}")
+    elif t == steplog.PI_MESSAGE_END_TYPE:
+        msg = obj.get("message") or {}
+        if msg.get("role") != "assistant":
+            return
+        content = msg.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        for block in content or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = (block.get("text") or "").strip()
+                if text:
+                    print(text)
+        if msg.get("stopReason") == "error":
+            print(f"[error] {msg.get('errorMessage') or 'error'}")
+    elif t == steplog.PI_AUTO_RETRY_START_TYPE:
+        print("[auto_retry]")
+    elif t == steplog.PI_TURN_START_TYPE:
+        print("[turn_start]")
+
+
+def _render_pi_jsonl(path: Path) -> None:
+    """Print a human-readable view of a pi.jsonl session log, skipping noise unparsed."""
+    for _offset, obj in steplog.iter_records(path, skip_prefixes=steplog.PI_NOISE_PREFIXES):
+        _print_pi_record(obj)
+
+
 def cmd_logs(args) -> int:
     cfg = _cfg(args)
     key = getattr(args, "key_flag", None) or args.key
@@ -1329,6 +1361,7 @@ def cmd_logs(args) -> int:
     log_path = Path(sess["path"])
     is_stream = sess["format"] == "stream-json"
     is_opencode = sess["format"] == "opencode"
+    is_pi = sess["format"] == "pi"
 
     if args.follow:
         # Tail the file; stop when the session process is gone OR its identity is
@@ -1344,15 +1377,17 @@ def cmd_logs(args) -> int:
                 chunk = f.read(4096)
                 if chunk:
                     buf += chunk
-                    if not header_done and not (is_stream or is_opencode):
+                    if not header_done and not (is_stream or is_opencode or is_pi):
                         header_done = True
                         _print_follow_header(sess, log_path)
-                    if (is_stream or is_opencode) and not args.json:
+                    if (is_stream or is_opencode or is_pi) and not args.json:
                         # Emit complete lines only, rendered human-readable
                         while "\n" in buf:
                             line, buf = buf.split("\n", 1)
                             line = line.strip()
                             if not line:
+                                continue
+                            if is_pi and line.encode().startswith(steplog.PI_NOISE_PREFIXES):
                                 continue
                             try:
                                 obj = json.loads(line)
@@ -1361,7 +1396,9 @@ def cmd_logs(args) -> int:
                             if not header_done and steplog.session_model(log_path)["model"] != "unknown":
                                 header_done = True
                                 _print_follow_header(sess, log_path)
-                            if is_opencode:
+                            if is_pi:
+                                _print_pi_record(obj)
+                            elif is_opencode:
                                 _print_opencode_part(obj)
                             elif obj.get("type") == "assistant":
                                 _print_assistant_message(obj)
@@ -1394,6 +1431,20 @@ def _print_follow_header(sess: dict, log_path: Path) -> None:
                                         steplog.session_model(log_path)))
 
 
+def _copy_log(log_path: Path) -> None:
+    """Stream *log_path* to stdout byte-for-byte without loading it into memory."""
+    sys.stdout.flush()
+    out = sys.stdout.buffer
+    last = b""
+    with log_path.open("rb") as f:
+        while chunk := f.read(1 << 20):
+            out.write(chunk)
+            last = chunk[-1:]
+    if last and last != b"\n":
+        out.write(b"\n")  # keep the next session off this one's last line
+    out.flush()
+
+
 def _render_session(sess: dict, *, as_json: bool, header: bool) -> None:
     """Render one captured session with its own format's renderer (T-119).
 
@@ -1408,12 +1459,10 @@ def _render_session(sess: dict, *, as_json: bool, header: bool) -> None:
         outcome = steplog.session_outcome(log_path)["outcome"] if header else None
         if header:
             print(steplog.format_session_header(sess, outcome, steplog.session_model(log_path)))
-        if as_json or sess["format"] not in ("stream-json", "opencode"):
-            with log_path.open(encoding="utf-8", errors="replace") as f:
-                text = f.read()
-            sys.stdout.write(text)
-            if text and not text.endswith("\n"):
-                sys.stdout.write("\n")  # keep the next session off this one's last line
+        if as_json or sess["format"] not in ("stream-json", "opencode", "pi"):
+            _copy_log(log_path)
+        elif sess["format"] == "pi":
+            _render_pi_jsonl(log_path)
         elif sess["format"] == "opencode":
             _render_opencode_jsonl(log_path)
         else:
