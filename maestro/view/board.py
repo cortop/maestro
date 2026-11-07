@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .. import claims, fleet as fleet_mod, projection, snapshot as snap_mod, store
+from .. import claims, fleet as fleet_mod, projection, snapshot as snap_mod, steplog, store
 from ..config import Config
 from ..statemachine import ACTIVE_PHASES, Phase
 
@@ -49,6 +49,7 @@ class BoardRow:
     fails: str
     held: bool = False
     running: bool = False
+    now: str = ""
 
 
 @dataclass
@@ -66,6 +67,28 @@ def running_keys(home: Path, cfg: Config) -> frozenset[str]:
     """Keys with a live claim (read-only: `describe_claims` never releases one)."""
     return frozenset(r["key"] for r in claims.describe_claims(
         home, max_age=cfg.unverified_claim_max_age) if r["claimed"])
+
+
+_LIVE_STATES: dict[str, dict] = {}
+
+
+def live_statuses(home: Path, running: frozenset[str]) -> dict[str, dict]:
+    """`steplog.live_status` for each running key's claimed session log (incremental across
+    calls). Blocking on the first read of a large log: call off the UI thread."""
+    out: dict[str, dict] = {}
+    for key in running:
+        claim = claims.read_claim(home, key) or {}
+        log = claim.get("log_path")
+        if not log:
+            continue
+        status, _LIVE_STATES[log] = steplog.live_status(Path(log), _LIVE_STATES.get(log))
+        out[key] = status
+    return out
+
+
+def live_lines(status: dict | None, now: float) -> tuple[str, str]:
+    """``(doing, now)`` texts for a live status; blank for a key with none."""
+    return steplog.live_texts(status, now) if status else ("", "")
 
 
 def select(home: Path, snaps: list[snap_mod.Snapshot], name: str,
@@ -87,10 +110,13 @@ def board(home: Path, cfg: Config, name: str = "needs-you") -> BoardView:
     running = running_keys(home, cfg)
     counts = {n: len(select(home, snaps, n, running)) for n in FILTER_NAMES}
     shown = {s.key for s in select(home, snaps, name, running)}
+    live = live_statuses(home, running)
+    now = store.now_epoch()
     rows = []
     for cells in projection.rows_from_snapshots(home, [s for s in snaps if s.key in shown]):
         key = cells[-1]
         rows.append(BoardRow(key=key, phase=cells[1], title=cells[2], pr=cells[3], ci=cells[4],
                              fails=cells[5], held=held(home, snap_mod.load(home, key)),
-                             running=key in running))
+                             running=key in running,
+                             now=live_lines(live.get(key), now)[0]))
     return BoardView(filter=name, rows=rows, counts=counts)

@@ -16,7 +16,8 @@ def _esc(s: str) -> str:
 
 def render(snap: snap_mod.Snapshot, title: str | None = None,
            runner: str | None = None, runner_model: str | None = None,
-           hold: dict | None = None) -> str:
+           hold: dict | None = None,
+           live: tuple[str, str, str] | None = None) -> str:
     """Build Rich markup string for the snapshot detail pane.
 
     `title` arrives from the caller (`projection.display_title`) for the same
@@ -111,11 +112,19 @@ def render(snap: snap_mod.Snapshot, title: str | None = None,
 
     pr_stack_line = f"[dim]PR stack[/dim]     {pr_stack_info}\n" if pr_stack_info else ""
 
+    live_lines = ""
+    if live is not None:
+        why, doing, now = live
+        live_lines = (f"[dim]Why[/dim]           {v(why)}\n"
+                      f"[dim]Doing[/dim]         {v(doing)}\n"
+                      f"[dim]Now[/dim]           {v(now)}\n")
+
     return (
         f"[bold]{v(title if title is not None else snap.title)}[/bold]\n\n"
         f"[dim]Key[/dim]           {v(snap.key)}\n"
         f"[dim]Phase[/dim]         {v(snap.phase)}\n"
         f"{hold_line}"
+        f"{live_lines}"
         f"[dim]Runner[/dim]        {runner_info}\n"
         f"[dim]Source[/dim]        {v(snap.source)}\n"
         f"[dim]External[/dim]      {external_info}\n"

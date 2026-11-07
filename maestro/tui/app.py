@@ -50,6 +50,7 @@ from ..sessions import reap_children
 from ..statemachine import Phase
 from ..view import board as board_view
 from ..view import fleet as fleet_view
+from ..view import rounds as rounds_mod
 from . import worktree_open
 from .commands import ActionProvider
 from .commands import TicketProvider
@@ -191,11 +192,15 @@ def _load_board(home: Path) -> dict:
     except store.MaestroError:
         cfg = Config(home=home)
     rows = ticket_rows(home)
+    live = _load_live(home, cfg)
+    statuses = board_view.live_statuses(home, frozenset(k for k, v in live.items() if v.get("claimed")))
     return {
         "rows": rows,
         "snaps": {r[-1]: snap_mod.load(home, r[-1]) for r in rows},
         "graph": depgraph.build(home),
-        "live": _load_live(home, cfg),
+        "live": live,
+        "live_status": statuses,
+        "why": {k: rounds_mod.round_label(home, k) for k in statuses},
         "no_output_timeout": cfg.no_output_timeout,
         "proposals": {r[-1] for r in rows if store.ticket_dir(home, r[-1]).joinpath("proposal.md").exists()},
     }
@@ -426,6 +431,8 @@ class MaestroTUI(App):
         self._snaps: dict[str, snap_mod.Snapshot] = {}
         self._graph = None
         self._live: dict[str, dict] = {}
+        self._live_status: dict[str, dict] = {}
+        self._why: dict[str, str] = {}
         self._no_output_timeout: int = Config.no_output_timeout
         # key -> claim identity that already toasted red.
         self._red_toasted: dict[str, tuple] = {}
@@ -549,6 +556,7 @@ class MaestroTUI(App):
         table.add_column("Fails")
         table.add_column("Deps")
         table.add_column("Idle")
+        table.add_column("Doing")
         table.add_column("Now")
         self._refresh_now()
         self.set_interval(3.0, self._kick_live)
@@ -785,9 +793,15 @@ class MaestroTUI(App):
         if snap is None:
             snap = snap_mod.load(self._home, key)
         runner, runner_model = spec_runner(self._home, key)
+        status = self._live_status.get(key)
+        live = None
+        if status is not None:
+            doing, now_text = board_view.live_lines(status, store.now_epoch())
+            live = (self._why.get(key, ""), doing, now_text)
         detail.update(_render_detail(snap, snap_mod.display_title(self._home, snap),
                                      runner, runner_model,
-                                     hold=fleet_mod.hold_state(self._home, key, store.now_epoch())))
+                                     hold=fleet_mod.hold_state(self._home, key, store.now_epoch()),
+                                     live=live))
         self._refresh_events()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -826,10 +840,14 @@ class MaestroTUI(App):
         self._snaps = data["snaps"]
         self._graph = data["graph"]
         self._live = data["live"]
+        self._live_status = data.get("live_status", {})
+        self._why = data.get("why", {})
         self._no_output_timeout = data["no_output_timeout"]
         self._palette_proposals = data["proposals"]
         self._toast_new_red(store.now_epoch())
         self._populate()
+        if self._selected_key and self._selected_key in self._live_status:
+            self._show_detail(self._selected_key, self._snaps.get(self._selected_key))
 
     def _toast_new_red(self, now: float) -> None:
         red: dict[str, tuple] = {}
@@ -1849,6 +1867,7 @@ class MaestroTUI(App):
             styled = _styled_row(*cells)
             idle = _format_age(_idle_seconds(snaps_by_key[row_key], now))
             table.add_row(*styled, self._deps_cell(graph, row_key, palette), idle,
+                          Text(board_view.live_lines(self._live_status.get(row_key), now)[0]),
                           self._now_cell(row_key, now), key=row_key)
             row_keys.append(row_key)
         if not row_keys:
