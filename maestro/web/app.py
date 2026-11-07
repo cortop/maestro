@@ -18,6 +18,7 @@ from .. import store
 from ..config import Config
 from ..view import board as board_view
 from ..view import events as ev_view
+from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
 from .stream import Hub
 
@@ -84,13 +85,19 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
         require(key)
         tv = ticket_view.ticket(home, key, store.now_epoch())
         page = ticket_view.event_page(home, key)
-        return render(request, "ticket.html", t=tv, page=page, key=key)
+        tr = rounds_view.build(home, key)
+        return render(request, "ticket.html", t=tv, page=page, key=key, tr=tr)
 
     @app.get("/t/{key}/events", response_class=HTMLResponse)
     def ticket_events(request: Request, key: str, before: int | None = Query(None)):
         require(key)
         page = ticket_view.event_page(home, key, before)
         return render(request, "_events.html", page=page, key=key, summary=ev_view.event_summary)
+
+    @app.get("/t/{key}/rounds", response_class=HTMLResponse)
+    def ticket_rounds(request: Request, key: str):
+        require(key)
+        return render(request, "_rounds.html", tr=rounds_view.build(home, key))
 
     @app.get("/stream", response_class=EventSourceResponse)
     async def stream(last_event_id: str | None = Header(None)) -> AsyncIterable[ServerSentEvent]:
