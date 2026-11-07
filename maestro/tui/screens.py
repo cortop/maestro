@@ -59,7 +59,8 @@ from ..dispatcher import schedule_status
 from ..dispatcher import spec_runner
 from ..sessions import list_sessions
 from ..statemachine import Phase
-from ..view import rounds as rounds_view, ticket as ticket_view
+from ..view import rounds as rounds_view
+from ..view import ticket as ticket_view
 from . import checks as checks_mod
 from . import why as why_mod
 from . import worktree_open
