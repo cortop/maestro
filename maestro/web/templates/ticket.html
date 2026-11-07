@@ -23,6 +23,10 @@
 <h2>Spec</h2>
 <pre id="spec">{{ t.spec }}</pre>
 {% if t.proposal %}<h2>Proposal</h2><pre id="proposal">{{ t.proposal }}</pre>{% endif %}
+<h2>Rounds</h2>
+<div id="rounds" hx-get="/t/{{ t.key }}/rounds" hx-trigger="sse:ticket:{{ t.key }}" hx-swap="innerHTML">
+  {% include "_rounds.html" %}
+</div>
 <h2>Events</h2>
 <table id="events"><tbody id="event-rows" hx-get="/t/{{ t.key }}/events" hx-trigger="sse:ticket:{{ t.key }}" hx-swap="innerHTML">
   {% include "_events.html" %}

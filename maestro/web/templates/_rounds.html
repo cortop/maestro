@@ -1,0 +1,13 @@
+<dl id="rounds-header">
+  <dt>Time</dt><dd>{{ tr.time }}</dd>
+  <dt>Rounds</dt><dd>{{ tr.rounds }}</dd>
+  <dt>QA</dt><dd>{{ tr.qa }}</dd>
+  <dt>Review</dt><dd>{{ tr.review }}</dd>
+  <dt>PR</dt><dd>{{ tr.pr }}</dd>
+  <dt>Trouble</dt><dd>{{ tr.trouble }}</dd>
+</dl>
+<table id="rounds-rows"><tbody>
+{% for r in tr.rows %}
+<tr class="round{{ ' warn' if r.warn }}"><td>{{ r.when }}</td><td>{{ r.label }}{% if r.count > 1 %} ×{{ r.count }}{% endif %}</td><td>{{ r.duration }}</td><td>{{ r.outcome }}</td></tr>
+{% else %}<tr><td colspan="4">no rounds yet</td></tr>{% endfor %}
+</tbody></table>
