@@ -91,7 +91,8 @@ def test_logs_console_session_picker(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             await _open_logs(app, pilot)
-            assert "said-1000" in _pane(app)
+            assert "said-1000" not in _pane(app) and "▸" in _pane(app)  # T-234: past = summary
+            assert "said-2000" in _pane(app)
             await pilot.press("s")
             await pilot.pause()
             await pilot.press("down", "enter")  # newest first -> second is the older

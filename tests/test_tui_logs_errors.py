@@ -98,11 +98,12 @@ def test_logs_screen_error_jump_claude_and_pi(seeded_home):
         async with app.run_test(size=(120, 40)) as pilot:
             await _open_logs(app, pilot)
             pane = _pane(app)
-            assert "✗ Bash: boom: it failed" in pane
+            # T-234: the older claude session is a summary row; the live pi session has detail
+            assert "✗ Bash: boom: it failed" not in pane
             assert "✗ read: ENOENT: no such file" in pane
             assert "noise" not in pane
             screen = app.screen
-            assert len(screen._err_lines) == 2
+            assert len(screen._err_lines) == 1
             log = screen.query_one("#logs-view", RichLog)
             await pilot.press("f")  # pause follow, then start from the top
             log.scroll_to(y=0, animate=False)
@@ -110,9 +111,15 @@ def test_logs_screen_error_jump_claude_and_pi(seeded_home):
             await pilot.press("e")
             await pilot.pause()
             assert screen._last_jump == screen._err_lines[0]
-            await pilot.press("e")
+            from maestro.sessions import list_sessions
+            claude = next(s for s in list_sessions(seeded_home, "T-3") if s["format"] == "stream-json")
+            log.clear()
+            screen._err_lines = []
+            screen._last_jump = -1
+            screen._start_tail(pick=claude)  # expand the past session on demand
+            await app.workers.wait_for_complete()
             await pilot.pause()
-            assert screen._last_jump == screen._err_lines[1]
+            assert "✗ Bash: boom: it failed" in _pane(app) and len(screen._err_lines) == 1
             assert app._exception is None
 
     asyncio.run(_inner())
