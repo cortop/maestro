@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -28,8 +29,10 @@ _ROUTES = {
 
 
 def _run(args: list[str], *, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
+    # *env* is a credential overlay; passed alone it would drop PATH.
+    run_env = {**os.environ, **env} if env else None
     try:
-        return subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=_TIMEOUT)
+        return subprocess.run(args, cwd=cwd, env=run_env, capture_output=True, text=True, timeout=_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         raise store.MaestroError(f"`{' '.join(args[:3])} ...` failed to run: {exc}") from exc
 
