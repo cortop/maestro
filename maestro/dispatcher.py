@@ -1547,8 +1547,9 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     within the same group; reading the group's binding here silently gave
     every ticket in it whichever policy created the group first):
     ``"always"`` routes unconditionally (today's byte-identical behavior),
-    ``"on_conflict"`` never routes on drift alone (only a CONFLICTING PR still
-    does, via the separate ``sync_vcs`` hook), and ``"daily"`` routes at most
+    ``"on_conflict"`` never routes on drift alone (only a conflicting PR does:
+    a local ``git merge-tree`` against the base here, reported under
+    ``conflicted``, or GitHub's CONFLICTING via ``sync_vcs``), and ``"daily"`` routes at most
     once per calendar day per ticket, deduped via
     ``schedule.dedup_bucket``/a persisted cursor
     (``derived/.drift_policy_cursor.json``) keyed on ``(key, day-bucket)`` --
@@ -1590,6 +1591,7 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     home = cfg.home
     now = now if now is not None else store.now_epoch()
     routed: list[str] = []
+    conflicted: list[str] = []
     skipped_by_policy: list[str] = []
     # T-82: WHY each key in skipped_by_policy was suppressed -- "policy" (the
     # resolved binding's own base_drift_policy said no) vs "checks_pending"
@@ -1690,6 +1692,16 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
                 if count == 0:
                     continue
 
+                # GitHub reports `mergeable: UNKNOWN` until it recomputes against the
+                # latest base, which a fast-moving base never lets settle between
+                # polls -- so test the real merge locally. A conflict routes under
+                # every policy and regardless of CI: the PR can't merge as-is.
+                pr_number = snap_mod.load(home, key).pr_number
+                if pr_number and _conflicts_with_base(wt, base):
+                    if ops.route_conflict(cfg, key, pr_number, actor="dispatcher"):
+                        conflicted.append(key)
+                    continue
+
                 # T-82: the TICKET's own resolved binding, not the group's --
                 # two tickets can share a (realpath, base_branch) group (a
                 # path collision between the implicit default and a
@@ -1741,9 +1753,23 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     if daily_cursor_changed:
         store.write_json(_drift_policy_cursor_path(home), daily_cursor)
 
-    return {"fetched": fetched_default, "routed": routed,
+    return {"fetched": fetched_default, "routed": routed, "conflicted": conflicted,
             "skipped_by_policy": skipped_by_policy, "skip_reasons": skip_reasons,
             "errors": errors, "blocked": blocked}
+
+
+def _conflicts_with_base(wt: Path, base: str) -> bool:
+    """True iff merging ``origin/<base>`` into *wt*'s HEAD leaves a conflict.
+
+    ``git merge-tree --write-tree`` touches no checkout; exit 1 means conflicts.
+    Any other non-zero exit (a git without ``--write-tree``, a broken ref) is
+    not evidence of a conflict.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(wt), "merge-tree", "--write-tree", "HEAD", f"origin/{base}"],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 1
 
 
 def _compact_cursor_path(home: Path) -> Path:
@@ -1904,6 +1930,10 @@ def sync_vcs(cfg: Config, now: float) -> dict:
                     if Phase(snap_mod.load(home, key).phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
                         break  # already routed away (e.g. by the tracked entry) this tick
                     other_status = vcs.pr_status(other_pr, repo=repo_slug, env=cred.env)
+                    if other_status.get("mergeable") == "CONFLICTING":
+                        from . import ops
+                        ops.route_conflict(cfg, key, other_pr, actor="dispatcher")
+                        break
                     _observe_ci(cfg, key, other_status, phase, repo_slug=repo_slug,
                                pr_number=other_pr, snap=snap, binding=binding, vcs=vcs,
                                env=cred.env, now=now)
