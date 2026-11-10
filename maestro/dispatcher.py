@@ -3165,7 +3165,7 @@ def sync_restacks(cfg: Config, now: float) -> dict:
     command, since restacking needs the worktree and `dispatch()` itself
     never touches one directly.
 
-    Every key with `snap.pending_restack_index` set (RestackQueued, from
+    Every non-terminal key with `snap.pending_restack_index` set (RestackQueued, from
     `ops.check_merged`'s stack advance, not yet matched by a
     RestackCompleted) AND a `gt` stack_tool gets its restack started if none
     is in flight yet, or folded -- base-retargeted via the VCS provider and
@@ -3186,6 +3186,8 @@ def sync_restacks(cfg: Config, now: float) -> dict:
             idx = snap.pending_restack_index
             if idx is None:
                 continue
+            if Phase(snap.phase) in TERMINAL_PHASES:
+                continue  # every entry is merged or the ticket is gone: nothing left to restack
             binding = repos_mod.resolve(cfg, home, key)
             if repos_mod.resolve_stack_tool(binding) != "gt":
                 continue
@@ -3915,6 +3917,8 @@ def _active_agent_keys(sessions: SessionManager, home: Path) -> set[str]:
 def due_check(home: Path, key: str, snap, now: float) -> DueResult:
     """Read-only due verdict for *key* -- the one place the sweep and the TUI's
     Why screen both compute it, so they cannot drift."""
+    if Phase(snap.phase) in TERMINAL_PHASES:
+        return DueResult(False, "terminal")  # skip the inbox/spec/deps reads below
     return is_due(home, key, snap,
                   inbox_pending=inbox.has_pending(home, key),
                   current_spec_hash=spec_hash_on_disk(home, key),
