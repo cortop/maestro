@@ -20,7 +20,9 @@ maestro open-pr "$KEY" --stack '[{"title":"<DISPLAY_KEY>: <entry 1 subject> (1/<
 maestro handoff "$KEY" --summary "<what you did, what you addressed or declined, and why>"
 ```
 The verb labels branches `<PREFIX>$KEY-1`.. with the last entry at `<PREFIX>$KEY`, pushes and
-opens them oldest-first (each based on the previous entry, `gt` doing the same on a gt-managed
-stack), and records them root-first, so a crash-and-respawn never double-opens a PR.
+opens them oldest-first (each based on the previous entry), and records them root-first, so a
+crash-and-respawn never double-opens a PR. On a gt-managed stack the root entry bases on the
+closest pushed branch beneath it and the verb records the split in the Graphite graph
+afterwards -- best-effort, never blocking the PRs on it.
 
 Push normally — never force-push. Then exit; the next sweep spawns the independent `qa` reconciler.

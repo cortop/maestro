@@ -147,6 +147,48 @@ def _record(cfg: Config, key: str, info: dict, *, stack: dict | None, sid: str, 
     return ev is not None
 
 
+def _gt_track_split(w: str, branches: list[str], root_parent: str) -> bool:
+    """Record the split in Graphite's graph so later `gt sync`/`restack` keep
+    seeing the entry branches. Runs after the PRs are open, so a refusal never
+    blocks them.
+
+    `gt track` refuses a parent whose local tip is not in the child's history
+    (a base branch restacked locally but not yet pushed) and any parent that
+    is not itself tracked -- and each entry parents onto the previous one, so
+    the first refusal means the whole chain is unwritable. Skip the rest and
+    leave the graph untouched; the human's next `gt sync` re-tracks. Verified
+    against Graphite 1.8.6, where a refused track leaves no edge behind.
+    """
+    for child, parent in zip(branches, [root_parent, *branches[:-1]]):
+        if _run(["gt", "--cwd", w, "track", child, "--parent", parent]).returncode != 0:
+            return False
+    return True
+
+
+def _stack_root_base(wt: Path, first_sha: str, fallback: str) -> str:
+    """The branch a stack's root entry builds on: the closest pushed origin
+    head among its ancestors -- a dependency's PR branch on a stacked ticket
+    -- else the repo base.
+
+    Derived from commit topology, not Graphite metadata: a base branch
+    restacked locally (tip rewritten, unpushed) is no longer in the entry's
+    history, but the pushed branch the PR must diff against still is.
+    """
+    heads = _run(["git", "-C", str(wt), "branch", "-r", "--merged", first_sha])
+    best: tuple[int, str] | None = None
+    for name in (ln.strip() for ln in heads.stdout.splitlines()):
+        if not name or " -> " in name:
+            continue  # origin/HEAD and other symrefs
+        p = _run(["git", "-C", str(wt), "rev-list", "--count", f"{name}..{first_sha}"])
+        if p.returncode != 0 or not p.stdout.strip().isdigit():
+            continue
+        dist = (int(p.stdout), name)
+        if dist[0] == 0 or (best is not None and dist >= best):
+            continue  # a head already at the entry's tip, or farther than the best
+        best = dist
+    return best[1].removeprefix("origin/") if best else fallback
+
+
 def open_pr(cfg: Config, key: str, *, title: str, body: str, stack: list[dict] | None = None,
             actor: str = "reconciler") -> dict:
     """Push, create or adopt the draft PR(s), and record `PrOpened`; safe to re-run.
@@ -154,6 +196,8 @@ def open_pr(cfg: Config, key: str, *, title: str, body: str, stack: list[dict] |
     *stack* is an ordered list of ``{"title", "body", "sha"}`` entries (``sha`` is the entry's
     last commit; omitted for the final entry, which sits at HEAD). Entries open root-first.
     Titles and bodies come from the caller: the PR's wording is judgment, the plumbing is not.
+    On a gt-managed stack every entry is pushed and PR'd directly -- scoped to the split, never
+    the ancestors -- and the split is recorded in Graphite's graph afterwards, best-effort.
     """
     wt, binding = _worktree(cfg, key)
     prefix, base = binding.branch_prefix, binding.base_branch or "main"
@@ -173,32 +217,29 @@ def open_pr(cfg: Config, key: str, *, title: str, body: str, stack: list[dict] |
             raise store.MaestroError(f"open-pr: stack entry {i} needs title, body and (except the last) sha")
     gt = repos_mod.resolve_stack_tool(binding) == "gt"
     branches = [f"{prefix}{key}-{i + 1}" if i < total - 1 else branch for i in range(total)]
-    bases = [base, *branches[:-1]]
     if gt:
-        for i, e in enumerate(stack[:-1]):
-            _must(["git", "-C", w, "checkout", "-q", e["sha"]], "git checkout")
-            _must(["gt", "--cwd", w, "create", branches[i], "-m", e["title"]], "gt create")
-        _must(["git", "-C", w, "checkout", "-q", branch], "git checkout")
-        _must(["gt", "--cwd", w, "submit", "--stack", "--no-interactive", "--publish"], "gt submit")
+        # `gt create` only appends a leaf branch at HEAD and `gt submit` always spans
+        # trunk-to-current, force-pushing every ancestor with it, so neither can open a
+        # mid-stack split. Branch per entry instead, push and PR each one directly, and
+        # record the graph with `gt track` once the PRs are open.
+        bases = [_stack_root_base(wt, stack[0]["sha"], base), *branches[:-1]]
+    else:
+        bases = [base, *branches[:-1]]
     opened, recorded = [], []
     for i, e in enumerate(stack):  # root-first
-        if gt:
-            info = _pr_info(binding, branches[i], env, wt)
-            if info is None:
-                raise store.MaestroError(f"gt submit left no PR for {branches[i]}")
-            _must(["gh", "pr", "edit", str(info["number"]), *_repo_args(binding), "--title", e["title"],
-                   "--body", e["body"]], "gh pr edit", cwd=wt, env=env)
-        else:
-            if i < total - 1:
-                _run(["git", "-C", w, "branch", branches[i], e["sha"]])  # exists on a re-run
-            _must(["git", "-C", w, "push", "-q", "-u", "origin", branches[i]], "git push")
-            info = _adopt_or_create(binding, wt, env, head=branches[i], base=bases[i],
-                                    title=e["title"], body=e["body"])
+        if i < total - 1:
+            _run(["git", "-C", w, "branch", branches[i], e["sha"]])  # exists on a re-run
+        _must(["git", "-C", w, "push", "-q", "-u", "origin", branches[i]], "git push")
+        info = _adopt_or_create(binding, wt, env, head=branches[i], base=bases[i],
+                                title=e["title"], body=e["body"])
         meta = {"index": i, "total": total, "branch": branches[i], "base": bases[i]}
         sid = f"pr-{key}" if i == 0 else f"pr-stack-{key}-{i}"
         recorded.append(_record(cfg, key, info, stack=meta, sid=sid, actor=actor))
         opened.append(info)
-    return {"opened": opened, "recorded": any(recorded)}
+    result = {"opened": opened, "recorded": any(recorded)}
+    if gt:
+        result["gt_tracked"] = _gt_track_split(w, branches, bases[0])
+    return result
 
 
 def handoff(cfg: Config, key: str, *, summary: str | None = None, actor: str = "reconciler") -> dict:
