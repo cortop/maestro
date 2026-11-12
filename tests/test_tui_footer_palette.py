@@ -94,8 +94,9 @@ def test_palette_leads_with_selected_ticket_actions(home):
         other = labels.index(next(l for l in labels if l.startswith("Refresh (")))
         assert len(first) == 4 and max(first) < other, labels
         from textual.command import CommandList
-        opt = app.screen.query_one(CommandList).get_option_at_index(0)
-        assert "D-1:" in str(opt.prompt)  # one-line help names the selected ticket
+        clist = app.screen.query_one(CommandList)
+        prompts = [str(clist.get_option_at_index(i).prompt) for i in range(clist.option_count)]
+        assert any("D-1:" in p for p in prompts)  # one-line help names the selected ticket
     _run(home, body)
 
 

@@ -21,13 +21,13 @@ from textual.screen import ModalScreen
 from textual.screen import Screen
 from textual.widgets import DataTable
 from textual.widgets import Footer
-from textual.widgets._footer import FooterKey
 from textual.widgets import Header
 from textual.widgets import Input
 from textual.widgets import RichLog
 from textual.widgets import Static
 from textual.widgets import TabbedContent
 from textual.widgets import TabPane
+from textual.widgets._footer import FooterKey
 from textual.worker import Worker
 from textual.worker import WorkerState
 
