@@ -7,8 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterable
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Header
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -16,11 +15,9 @@ from fastapi.templating import Jinja2Templates
 from .. import config as config_mod
 from .. import store
 from ..config import Config
-from ..view import board as board_view
 from ..view import events as ev_view
-from ..view import logs as logs_view
-from ..view import rounds as rounds_view
-from ..view import ticket as ticket_view
+from . import routes_board, routes_ticket
+from .shell import Shell
 from .stream import Hub
 
 _HERE = Path(__file__).parent
@@ -52,59 +49,10 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     app.state.home = home
     app.state.hub = hub
     app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
-    templates = Jinja2Templates(directory=str(_HERE / "templates"))
-    templates.env.filters["dur"] = ev_view.fmt_duration
-
-    def render(request: Request, name: str, **ctx) -> HTMLResponse:
-        return templates.TemplateResponse(request, name, {"home": str(home.resolve()), **ctx})
-
-    def board_ctx(filter: str) -> dict:
-        try:
-            view = board_view.board(home, _cfg(home), filter)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"view": view, "filters": board_view.FILTER_NAMES}
-
-    @app.get("/", response_class=HTMLResponse)
-    def index(request: Request, filter: str = "needs-you"):
-        return render(request, "board.html", **board_ctx(filter))
-
-    @app.get("/board/rows", response_class=HTMLResponse)
-    def board_rows(request: Request, filter: str = "needs-you"):
-        return render(request, "_rows.html", **board_ctx(filter))
-
-    def require(key: str) -> None:
-        try:
-            ok = ticket_view.exists(home, key)
-        except store.MaestroError:
-            ok = False
-        if not ok:
-            raise HTTPException(status_code=404, detail=f"no such ticket: {key}")
-
-    @app.get("/t/{key}", response_class=HTMLResponse)
-    def ticket_page(request: Request, key: str):
-        require(key)
-        tv = ticket_view.ticket(home, key, store.now_epoch())
-        page = ticket_view.event_page(home, key)
-        tr = rounds_view.build(home, key)
-        return render(request, "ticket.html", t=tv, page=page, key=key, tr=tr)
-
-    @app.get("/t/{key}/events", response_class=HTMLResponse)
-    def ticket_events(request: Request, key: str, before: int | None = Query(None)):
-        require(key)
-        page = ticket_view.event_page(home, key, before)
-        return render(request, "_events.html", page=page, key=key, summary=ev_view.event_summary)
-
-    @app.get("/t/{key}/rounds", response_class=HTMLResponse)
-    def ticket_rounds(request: Request, key: str):
-        require(key)
-        return render(request, "_rounds.html", tr=rounds_view.build(home, key))
-
-    @app.get("/t/{key}/logs", response_class=HTMLResponse)
-    def ticket_logs(request: Request, key: str):
-        require(key)
-        return render(request, "_logs.html", lg=logs_view.build(home, key),
-                      detail=lambda p: logs_view.detail_lines(home, key, p))
+    shell = Shell(home, _cfg, Jinja2Templates(directory=str(_HERE / "templates")))
+    shell.templates.env.filters["dur"] = ev_view.fmt_duration
+    routes_board.register(app, shell)
+    routes_ticket.register(app, shell)
 
     @app.get("/stream", response_class=EventSourceResponse)
     async def stream(last_event_id: str | None = Header(None)) -> AsyncIterable[ServerSentEvent]:
