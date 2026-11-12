@@ -70,7 +70,7 @@ def test_palette_runs_app_action(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            await _palette(app, pilot, "ctrl+p", "Fleet")
+            await _palette(app, pilot, "ctrl+p", "Fleet (F)")
             await pilot.press("enter")
             await pilot.pause(0.5)
             assert isinstance(app.screen, FleetScreen)
