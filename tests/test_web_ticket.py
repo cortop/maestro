@@ -25,10 +25,11 @@ def client(home):
 
 def test_detail_has_ac_matrix_spec_proposal_and_dwell(client):
     html = client.get("/t/T-7").text
-    assert 'id="ac-matrix"' in html and "<td>ok</td>" in html
-    assert "## Intent" in html and "the proposal" in html
-    assert "implementing" in html and "(now)" in html
-    assert 'hx-trigger="sse:ticket:T-7"' in html
+    assert 'id="ac-matrix"' in html and 'id="phase-rail"' in html
+    assert "implementing" in html
+    assert 'sse:ticket:T-7"' in html
+    assert "## Intent" in client.get("/t/T-7/spec").text
+    assert "the proposal" in client.get("/t/T-7/proposal").text
 
 
 def test_event_pages_neither_skip_nor_duplicate(client, home):

@@ -121,3 +121,21 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* ticket page */
+.crumb { margin: 0 0 .3rem; }
+.title-row { display: flex; align-items: center; gap: 1rem; justify-content: space-between; }
+.title-row h1 { margin: .2rem 0; }
+.status-sentence { font-size: 16px; margin: .3rem 0 1rem; }
+.rail-times { margin-top: 4px; font-size: 11px; }
+.rail-times > span { flex: 1 1 0; min-width: 0; overflow: hidden; height: auto; background: none; }
+.ticket-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 1.5rem; margin-top: 1.5rem; }
+.ticket-side > .panel { margin-bottom: 1rem; }
+.tabs { display: flex; flex-wrap: wrap; }
+.tab-radio { position: absolute; opacity: 0; }
+.tab-label { padding: .5rem 1rem; font: 600 12px var(--font-mono); text-transform: uppercase; color: var(--soft);
+  border-bottom: 2px solid var(--line-2); cursor: pointer; }
+.tab-radio:checked + .tab-label { color: var(--gold); border-bottom-color: var(--gold); }
+.tab-radio:focus-visible + .tab-label { outline: 2px solid var(--cyan); }
+.tab-panel { display: none; order: 9; width: 100%; padding-top: 1rem; }
+.tab-radio:checked + .tab-label + .tab-panel { display: block; }
