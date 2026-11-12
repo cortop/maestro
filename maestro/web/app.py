@@ -16,7 +16,7 @@ from .. import config as config_mod
 from .. import store
 from ..config import Config
 from ..view import events as ev_view
-from . import routes_board, routes_fleet, routes_now, routes_ticket
+from . import routes_actions, routes_board, routes_fleet, routes_now, routes_ticket
 from .guard import WriteGuard
 from .shell import Shell
 from .stream import Hub
@@ -33,9 +33,11 @@ def _cfg(home: Path) -> Config:
 
 def create_app(home: Path | str, *, poll_interval: float = 1.0,
                stream_limit: int | None = None, host: str = "127.0.0.1",
-               read_only: bool = False, allow_remote_writes: bool = False) -> FastAPI:
+               read_only: bool = False, allow_remote_writes: bool = False,
+               nudge_on_action: bool = True) -> FastAPI:
     """Build the app over *home*. *stream_limit* ends each `/stream` after that many events
-    (tests; a browser stream is unbounded)."""
+    (tests; a browser stream is unbounded). *nudge_on_action* False skips the dispatch
+    sweep an answered or retried ticket otherwise triggers (tests: a live nudge spawns a reconciler)."""
     home = Path(home)
     hub = Hub(home, poll_interval)
 
@@ -61,6 +63,7 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     routes_now.register(app, shell)
     routes_ticket.register(app, shell)
     routes_fleet.register(app, shell)
+    routes_actions.register(app, shell, routes_actions.default_nudge(shell) if nudge_on_action else None)
 
     @app.get("/stream", response_class=EventSourceResponse)
     async def stream(last_event_id: str | None = Header(None)) -> AsyncIterable[ServerSentEvent]:

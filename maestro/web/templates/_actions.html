@@ -1,0 +1,28 @@
+{# T-243: per-ticket action forms. Each posts urlencoded fields to /t/<key>/<action>; ctx picks the fragment that comes back. #}
+{% macro form(key, action, ctx, target, label, cls="btn-secondary", fields=none, confirm=false, text=none) -%}
+<form class="act-form" hx-post="/t/{{ key }}/{{ action }}" hx-target="{{ target }}" hx-swap="innerHTML">
+  <input type="hidden" name="ctx" value="{{ ctx }}">
+  {% if confirm %}<input type="hidden" name="confirm" value="1">{% endif %}
+  {% for name, value in (fields or {}).items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+  {% if text %}<textarea name="text" rows="3" placeholder="{{ text }}" aria-label="{{ text }}"></textarea>{% endif %}
+  <button type="submit" class="btn {{ cls }}">{{ label }}</button>
+</form>
+{%- endmacro %}
+
+{% macro confirm_form(key, action, ctx, target, label, prompt) -%}
+<details class="confirm">
+  <summary class="btn btn-danger">{{ label }}</summary>
+  <div class="confirm-body"><p>{{ prompt }}</p>{{ form(key, action, ctx, target, "Confirm " ~ label|lower, "btn-danger", confirm=true) }}</div>
+</details>
+{%- endmacro %}
+
+{% macro note_form(key, action, ctx, target, summary, label, placeholder, fields=none) -%}
+<details class="write">
+  <summary class="btn btn-secondary">{{ summary }}</summary>
+  {{ form(key, action, ctx, target, label, "btn-primary", fields=fields, text=placeholder) }}
+</details>
+{%- endmacro %}
+
+{% macro error(err, key) -%}
+{% if err and err.key == key %}<p class="action-error" role="alert">{{ err.msg }}</p>{% endif %}
+{%- endmacro %}
