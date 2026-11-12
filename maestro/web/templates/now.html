@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}maestro now{% endblock %}
+{% block body %}
+<section id="now-headline" class="now-head" hx-get="/now/headline" hx-trigger="sse:board" hx-swap="innerHTML">
+  {% include "_now_headline.html" %}
+</section>
+<div class="now-cols">
+  <section class="now-decide" aria-label="Decide">
+    <h2>Decide</h2>
+    <div id="now-decide" hx-get="/now/decide" hx-trigger="sse:board" hx-swap="innerHTML">
+      {% include "_now_decide.html" %}
+    </div>
+  </section>
+  <section class="now-ledger" aria-label="The ledger">
+    <h2>The ledger</h2>
+    <div id="now-ledger" class="ledger-scroll" hx-get="/now/ledger" hx-trigger="sse:board" hx-swap="innerHTML">
+      {% include "_now_ledger.html" %}
+    </div>
+  </section>
+</div>
+{% endblock %}

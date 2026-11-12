@@ -121,3 +121,21 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* now page */
+.now-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; }
+.now-title { font-size: clamp(2rem, 6vw, 4rem); line-height: 1; margin: 0; animation: none; }
+.now-title .you { color: var(--gold); }
+.counters { display: flex; flex-wrap: wrap; gap: 1.5rem; list-style: none; margin: 0; padding: 0; font: 600 12px var(--font-mono); color: var(--dim); text-transform: uppercase; }
+.counters b { display: block; font: 900 1.8rem var(--font-display); color: var(--text); }
+.now-cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 1.5rem; align-items: start; }
+.now-decide .card { margin-bottom: 1rem; }
+.card-title .waiting { float: right; color: var(--dim); }
+.card-question { white-space: pre-wrap; }
+.card-actions:empty { display: none; }
+.ledger-scroll { overflow: auto; }
+.ledger tbody + tbody td { border-top: 1px solid var(--line-2); }
+@media (max-width: 700px) {
+  .now-cols { grid-template-columns: minmax(0, 1fr); }
+  .ledger-scroll { max-height: 60vh; }
+}

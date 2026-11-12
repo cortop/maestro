@@ -32,8 +32,8 @@ def test_rows_fragment_matches_view_layer(client, seeded_home, name):
     assert _keys(resp.text) == expected and expected
 
 
-def test_index_renders_board_with_needs_you_count(client):
-    resp = client.get("/")
+def test_tickets_renders_board_with_needs_you_count(client):
+    resp = client.get("/tickets")
     assert resp.status_code == 200
     assert "needs you: 2" in resp.text and "needs-you(2)" in resp.text
     assert _keys(resp.text) == {"T-1", "T-2"}

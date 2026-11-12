@@ -1,0 +1,17 @@
+{% for c in view.needs_you %}
+<article class="card{% if c.reason is defined %} degraded{% endif %}" data-key="{{ c.key }}" data-group="needs-you">
+  <div class="card-inner">
+    <div class="card-title"><a href="/t/{{ c.key }}">{{ c.key }}</a> · {% if c.reason is defined %}degraded{% else %}question{% if c.total and c.total > 1 %} {{ c.position }}/{{ c.total }}{% endif %}{% endif %}
+      <span class="waiting">waiting {{ c.waiting_s|dur }}</span></div>
+    <div class="card-body">
+      <p class="card-ticket">{{ c.title }}</p>
+      <p class="card-question">{% if c.reason is defined %}{{ c.reason }}{% else %}{{ c.body }}{% endif %}</p>
+      {% if c.recommendation %}<p class="card-rec"><span class="dim">Recommended:</span> {{ c.recommendation }}</p>{% endif %}
+      {% if c.dependents %}<p class="card-blocks dim">blocks {% for d in c.dependents %}<a href="/t/{{ d }}">{{ d }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+      <div class="card-actions" data-slot="actions"><!-- T-243: action buttons --></div>
+    </div>
+  </div>
+</article>
+{% else %}
+<p class="dim empty">Nothing is waiting on you.</p>
+{% endfor %}
