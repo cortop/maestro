@@ -1,0 +1,27 @@
+<div class="panel"><div class="panel-head">Acceptance criteria</div>
+<div class="panel-body"><table class="ledger" id="ac-matrix">
+  <thead><tr><th>Criterion</th><th>Agent</th><th>QA</th><th>Check</th></tr></thead>
+  <tbody>
+  {% for a in t.acs %}
+  <tr><td>{{ a.index }}. {{ a.text }}</td>
+    <td>{{ "yes" if a.self else "—" }}</td>
+    <td>{{ (a.qa_spec or {}).get("verdict", "—") }}</td>
+    <td>{% if a.check %}{{ a.check.get("status") or a.check.get("result") or "run" }}{{ "" if a.check.current else " (stale)" }}{% else %}—{% endif %}</td></tr>
+  {% else %}<tr><td colspan="4">no acceptance criteria</td></tr>{% endfor %}
+  </tbody>
+</table></div></div>
+<div class="panel" id="dispatch-card"><div class="panel-head">Dispatch</div>
+<div class="panel-body"><dl>
+  <dt>Verdict</dt><dd>{{ card.verdict }}</dd>
+  <dt>Claim</dt><dd>{{ card.claim }}</dd>
+  <dt>Attempts</dt><dd>{{ card.attempts }}</dd>
+  <dt>Throttle</dt><dd>{{ card.throttle }}</dd>
+  <dt>Depends on</dt><dd>{% for d in card.open_deps %}{{ d.key }} ({{ d.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
+</dl></div></div>
+<div class="panel" id="pr-card"><div class="panel-head">Pull request</div>
+<div class="panel-body">
+  {% if t.snap.pr_url %}<p><a href="{{ t.snap.pr_url }}">#{{ t.snap.pr_number }}</a> {{ t.snap.pr_state or "" }}{{ " (draft)" if t.snap.pr_draft }}</p>
+  <p>CI {{ t.snap.ci_state or "—" }} · unresolved reviews {{ t.snap.unresolved_reviews }}</p>
+  {% if t.snap.failing_checks %}<ul id="pr-checks">{% for c in t.snap.failing_checks %}<li class="forced">{{ c }}</li>{% endfor %}</ul>{% endif %}
+  {% else %}<p class="dim">no pull request yet</p>{% endif %}
+</div></div>

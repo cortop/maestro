@@ -40,8 +40,9 @@ def test_rounds_partial_unknown_ticket_404(home):
 def test_ticket_page_embeds_partial_and_escapes(home):
     _seed(home, reason="<script>alert(1)</script> blocked")
     with TestClient(create_app(home)) as c:
-        html = c.get(f"/t/{KEY}").text
-    assert f'hx-get="/t/{KEY}/rounds"' in html
+        page = c.get(f"/t/{KEY}").text
+        html = c.get(f"/t/{KEY}/rounds").text
+    assert f'hx-get="/t/{KEY}/rounds"' in page
     assert 'id="rounds-header"' in html
     assert "<script>alert(1)" not in html
     assert "&lt;script&gt;alert(1)" in html

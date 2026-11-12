@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import store
+from .. import gates, store
 from ..view import events as ev_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
@@ -23,25 +23,61 @@ def register(app: FastAPI, shell: Shell) -> None:
         if not ok:
             raise HTTPException(status_code=404, detail=f"no such ticket: {key}")
 
+    def head_ctx(key: str) -> dict:
+        now = store.now_epoch()
+        cfg = shell.cfg()
+        tv = ticket_view.ticket(home, key, now)
+        runner = gates.spec_runner(home, key)[0] or cfg.runner
+        return {"t": tv, "key": key, "priority": gates.spec_priority(home, key),
+                "repo": tv.snap.repo or "default", "runner": runner,
+                "card": ticket_view.dispatch_card(home, key, tv.snap, cfg, now)}
+
+    def live_steps(key: str) -> list[str]:
+        """Step digest lines of the session in progress (memoized by log size and mtime)."""
+        lg = logs_view.build(home, key)
+        if not lg.live:
+            return []
+        return rounds_view.session_lines(home, key, lg.live)[1:]
+
     @app.get("/t/{key}", response_class=HTMLResponse)
     def ticket_page(request: Request, key: str):
         require(key)
-        tv = ticket_view.ticket(home, key, store.now_epoch())
-        page = ticket_view.event_page(home, key)
-        tr = rounds_view.build(home, key)
-        return shell.render(request, "ticket.html", nav="tickets", t=tv, page=page, key=key, tr=tr)
+        return shell.render(request, "ticket.html", nav="tickets", **head_ctx(key))
+
+    @app.get("/t/{key}/head", response_class=HTMLResponse)
+    def ticket_head(request: Request, key: str):
+        require(key)
+        return shell.render(request, "_ticket_head.html", **head_ctx(key))
+
+    @app.get("/t/{key}/side", response_class=HTMLResponse)
+    def ticket_side(request: Request, key: str):
+        require(key)
+        return shell.render(request, "_ticket_side.html", **head_ctx(key))
+
+    @app.get("/t/{key}/spec", response_class=HTMLResponse)
+    def ticket_spec(request: Request, key: str):
+        require(key)
+        return shell.render(request, "_ticket_text.html", id="spec",
+                            text=ticket_view.read_text(store.spec_path(home, key)))
+
+    @app.get("/t/{key}/proposal", response_class=HTMLResponse)
+    def ticket_proposal(request: Request, key: str):
+        require(key)
+        return shell.render(request, "_ticket_text.html", id="proposal",
+                            text=ticket_view.read_text(store.ticket_dir(home, key) / "proposal.md"))
 
     @app.get("/t/{key}/events", response_class=HTMLResponse)
     def ticket_events(request: Request, key: str, before: int | None = Query(None)):
         require(key)
         page = ticket_view.event_page(home, key, before)
-        return shell.render(request, "_events.html", page=page, key=key,
+        return shell.render(request, "_events.html", page=page, key=key, wrap=before is None,
                             summary=ev_view.event_summary)
 
     @app.get("/t/{key}/rounds", response_class=HTMLResponse)
     def ticket_rounds(request: Request, key: str):
         require(key)
-        return shell.render(request, "_rounds.html", tr=rounds_view.build(home, key))
+        return shell.render(request, "_rounds.html", tr=rounds_view.build(home, key),
+                            live=live_steps(key))
 
     @app.get("/t/{key}/logs", response_class=HTMLResponse)
     def ticket_logs(request: Request, key: str):

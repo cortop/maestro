@@ -1,3 +1,6 @@
+{% if live %}<div class="card live-round"><div class="card-inner"><div class="card-title">round in progress</div>
+<div class="card-body"><pre>{% for line in live %}{{ line }}
+{% endfor %}</pre></div></div></div>{% endif %}
 <dl id="rounds-header">
   <dt>Time</dt><dd>{{ tr.time }}</dd>
   <dt>Rounds</dt><dd>{{ tr.rounds }}</dd>

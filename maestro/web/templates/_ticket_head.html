@@ -1,0 +1,12 @@
+<p class="crumb mono dim">{{ t.key }} <span class="chip chip-agent phase-chip">{{ t.phase }}</span> · P{{ priority }} · {{ repo }} · {{ runner }}</p>
+<div class="title-row">
+  <h1>{{ t.title }}</h1>
+  <div class="title-actions" id="ticket-actions"><!-- T-243: action buttons --></div>
+</div>
+<p class="status-sentence" id="status-sentence">{{ t.status }}</p>
+<div class="rail" id="phase-rail">
+  {% for r in t.rail %}<div class="{{ 'visited' if r.visits }}{{ ' current' if r.current }}{{ ' failed' if r.failed }}" title="{{ r.phase }}"></div>{% endfor %}
+</div>
+<div class="rail rail-times mono dim" id="rail-times">
+  {% for r in t.rail %}<span>{{ r.phase }}{% if r.visits %}<br>{{ r.dwell_s | dur }}{% endif %}</span>{% endfor %}
+</div>
