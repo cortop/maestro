@@ -2073,9 +2073,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("tui", cmd_tui, "launch the interactive TUI (requires [tui] extra)")
 
-    sp = add("web", cmd_web, "serve the read-only web UI (requires [web] extra)")
+    sp = add("web", cmd_web, "serve the web UI (requires [web] extra)")
     sp.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     sp.add_argument("--port", type=int, default=8765, help="bind port (default 8765)")
+    sp.add_argument("--read-only", action="store_true",
+                    help="disable every state-changing route and hide action buttons")
+    sp.add_argument("--allow-remote-writes", action="store_true",
+                    help="permit state-changing routes when bound to a non-loopback address")
     return p
 
 

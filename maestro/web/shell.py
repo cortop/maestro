@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import fleet, ratelimit, spend, store
 from ..config import Config
+from .guard import WriteGuard
 
 NAV = (("now", "Now", "/"), ("tickets", "Tickets", "/tickets"), ("fleet", "Fleet", "/fleet"))
 
@@ -17,10 +18,12 @@ NAV = (("now", "Now", "/"), ("tickets", "Tickets", "/tickets"), ("fleet", "Fleet
 class Shell:
     """Holds the home, config loader and templates every route module renders through."""
 
-    def __init__(self, home: Path, load_cfg: Callable[[Path], Config], templates: Jinja2Templates):
+    def __init__(self, home: Path, load_cfg: Callable[[Path], Config], templates: Jinja2Templates,
+                 guard: WriteGuard | None = None):
         self.home = home
         self.load_cfg = load_cfg
         self.templates = templates
+        self.guard = guard or WriteGuard()
 
     def cfg(self) -> Config:
         return self.load_cfg(self.home)
@@ -41,5 +44,6 @@ class Shell:
 
     def render(self, request: Request, name: str, *, nav: str = "now", **ctx) -> HTMLResponse:
         ctx = {"home": str(self.home.resolve()), "nav": nav, "nav_items": NAV,
-               "shell_status": self.status(), **ctx}
+               "shell_status": self.status(),
+               "can_write": self.guard.writes_enabled, "write_token": self.guard.token, **ctx}
         return self.templates.TemplateResponse(request, name, ctx)

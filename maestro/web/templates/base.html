@@ -8,7 +8,7 @@
 <script src="/static/htmx.min.js"></script>
 <script src="/static/htmx-ext-sse.js"></script>
 </head>
-<body hx-ext="sse" sse-connect="/stream">
+<body hx-ext="sse" sse-connect="/stream"{% if can_write %} hx-headers='{"X-Maestro-Token": "{{ write_token }}"}'{% endif %}>
 <header class="site-header">
   <a class="logo" href="/">maestro</a>
   <nav class="site-nav" aria-label="Primary">
