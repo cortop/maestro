@@ -25,6 +25,7 @@ from . import event_log
 from . import events
 from . import fleet
 from . import health
+from . import human_actions
 from . import implementing_brief
 from . import inbox
 from . import ops
@@ -404,13 +405,9 @@ def cmd_create(args) -> int:
 
 def cmd_ans(args) -> int:
     cfg = _cfg(args)
-    a = {"text": args.text}
-    if args.qid:
-        a["qid"] = args.qid
-    inbox.append_command(cfg.home, args.key, "ans", a)
+    nudge = None if args.no_nudge or not cfg.nudge_on_human_input else (lambda _k: _nudge(cfg))
+    human_actions.answer(cfg.home, args.key, args.text, qid=args.qid or None, nudge=nudge)
     _print(f"answer queued for {args.key}")
-    if not args.no_nudge and cfg.nudge_on_human_input:
-        _nudge(cfg)
     return 0
 
 
@@ -782,9 +779,9 @@ def cmd_fleet(args) -> int:
             until = _parse_until(args.until)
         elif args.for_:
             until = store.now_epoch() + schedule.parse_every(args.for_)
-        _print(fleet.pause(cfg.home, until=until, reason=args.reason))
+        _print(human_actions.pause(cfg.home, until=until, reason=args.reason))
     elif args.action == "resume":
-        _print(fleet.resume(cfg.home))
+        _print(human_actions.resume(cfg.home))
     else:
         _print(fleet.status(cfg.home))
     return 0
@@ -801,9 +798,6 @@ def cmd_hold(args) -> int:
     if not args.key:
         print("error: hold: KEY required (or --list)", file=sys.stderr)
         return 2
-    if disp._never_minted(home, args.key):
-        print(f"error: unknown ticket {args.key!r}", file=sys.stderr)
-        return 1
     until = None
     try:
         if args.until:
@@ -813,7 +807,11 @@ def cmd_hold(args) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    _print(fleet.hold(home, args.key, until=until, reason=args.reason))
+    try:
+        _print(human_actions.hold(home, args.key, until=until, reason=args.reason))
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -821,19 +819,24 @@ def cmd_stop(args) -> int:
     """[human] SIGTERM one key's live session (see `ops.stop_session`). Exit 0 only
     when the process stopped. Never added to `_AGENT_TOOL_VERBS`."""
     cfg = _cfg(args)
-    result = ops.stop_session(cfg, args.key, wait=args.wait)
+    try:
+        result = human_actions.stop(cfg, args.key, wait=args.wait)
+    except human_actions.StopRefused as e:
+        _print(e.result)
+        return 1
     _print(result)
-    return 0 if result["stopped"] else 1
+    return 0
 
 
 def cmd_unhold(args) -> int:
     """[human] release a ticket's hold (never an agent verb)."""
     home = _cfg(args).home
-    if fleet.hold_path(home, args.key).exists() or not disp._never_minted(home, args.key):
-        _print(fleet.unhold(home, args.key))
-        return 0
-    print(f"error: unknown ticket {args.key!r}", file=sys.stderr)
-    return 1
+    try:
+        _print(human_actions.release(home, args.key))
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_snapshot(args) -> int:

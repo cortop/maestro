@@ -45,6 +45,7 @@ from .. import dispatcher
 from .. import event_log
 from .. import fleet as fleet_mod
 from .. import health
+from .. import human_actions
 from .. import inbox
 from .. import ops
 from .. import projection
@@ -633,7 +634,7 @@ def toggle_fleet_pause(app, home: Path, run, *, top_keys=None) -> None:
 
         def _on_confirm(ok: bool | None) -> None:
             if ok:
-                run("fleet-resume", lambda: fleet_mod.resume(home))
+                run("fleet-resume", lambda: human_actions.resume(home))
 
         app.push_screen(_ConfirmModal(msg), _on_confirm)
         return
@@ -643,7 +644,7 @@ def toggle_fleet_pause(app, home: Path, run, *, top_keys=None) -> None:
             return
         seconds, reason = result
         until = store.now_epoch() + seconds if seconds is not None else None
-        run("fleet-pause", lambda: fleet_mod.pause(home, until=until, reason=reason))
+        run("fleet-pause", lambda: human_actions.pause(home, until=until, reason=reason))
 
     app.push_screen(_PauseModal(top_keys), _on_pause)
 
