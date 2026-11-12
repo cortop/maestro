@@ -96,8 +96,8 @@ def test_different_screens_still_stack_one_escape_each(seeded_home):
 # (keys leading to the opener screen, key that opens screen_type from there, screen it opens)
 NESTED_KEYS = [
     (["F"], "b", BackupsScreen),
-    (["enter"], "v", EventsScreen),
-    (["enter"], "p", ProposalScreen),
+    (["2", "enter"], "v", EventsScreen),
+    (["2", "enter"], "p", ProposalScreen),
 ]
 
 

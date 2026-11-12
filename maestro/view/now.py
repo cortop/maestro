@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .. import depgraph, event_log, fleet as fleet_mod, ops, projection, snapshot as snap_mod, store
+from .. import depgraph, event_log, fleet as fleet_mod, inbox, ops, projection, snapshot as snap_mod, store
 from .. import events as E
 from ..config import Config
 from ..dispatcher import DISPATCHER_OWNED_PHASES
@@ -83,20 +83,42 @@ def _ask_times(home: Path, key: str) -> dict[str, float]:
     return out
 
 
+def _queued_for(home: Path, key: str) -> tuple[set[str], bool]:
+    """(qids with a queued answer, whether an untargeted/ticket-level command is queued)."""
+    qids: set[str] = set()
+    whole = False
+    for cmd in inbox.pending(home, key):
+        name = cmd.get("command", "")
+        if name in ("retry", "discard"):
+            whole = True
+        elif name in ops.ANSWER_COMMANDS:
+            qid = (cmd.get("args") or {}).get("qid")
+            if qid:
+                qids.add(qid)
+            else:
+                whole = True
+    return qids, whole
+
+
 def _cards(home: Path, snap: snap_mod.Snapshot, graph: depgraph.DepGraph, now: float) -> list:
     title = snap_mod.display_title(home, snap)
     dependents = tuple(graph.dependents.get(snap.key, ()))
     since = _epoch(snap.updated_ts, now)
+    queued_qids, queued_whole = _queued_for(home, snap.key)  # answered, not yet folded
+    if queued_whole:
+        return []
     if snap.phase == Phase.DEGRADED.value:
         reason = snap.last_error or "degraded"
         return [DegradedCard(snap.key, title, reason, max(0.0, now - since), dependents)]
     asked = _ask_times(home, snap.key)
     cards = []
     for qid, text in snap.open_questions.items():
+        if qid in queued_qids:
+            continue
         position, total, body, rec = ops.parse_round_question(text)
         cards.append(QuestionCard(snap.key, title, qid, body, rec, position, total,
                                   max(0.0, now - asked.get(qid, since)), dependents))
-    if not cards:  # awaiting-human with no open question yet
+    if not cards and not queued_qids:  # awaiting-human with no open question yet
         cards.append(DegradedCard(snap.key, title, snap.last_error or "awaiting your input",
                                   max(0.0, now - since), dependents))
     return cards
