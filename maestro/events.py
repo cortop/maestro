@@ -36,6 +36,10 @@ CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, head_s
                                          # dispatcher._observe_ci and CiRerunRequested below.
 # T-250: one inbound-review round on a `review`-kind ticket (someone else's PR).
 REVIEW_ROUND_STARTED = "ReviewRoundStarted"  # {round, head_sha, url, source?}  idempotent per head_sha
+# T-251: one drafted review comment (a finding) and the round's brief, both recorded
+# through `maestro review-finding` / `maestro review-brief` -- never per-session events.
+REVIEW_FINDING_RECORDED = "ReviewFindingRecorded"  # {head_sha, file, line, severity, comment}  idempotent per content
+REVIEW_BRIEF_WRITTEN = "ReviewBriefWritten"  # {head_sha, summary, checked, decisions, verdict, reading_order, path}
 REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body, author}  one PR review; idempotent per comment_id
 # T-128: `ops.reply_review`'s own record that it posted a reply through the VCS
 # provider -- to the `/replies` thread endpoint for an `inline-<id>` comment_id,

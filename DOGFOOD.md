@@ -105,7 +105,7 @@ permitted only once MR-1 through MR-6 have all merged to `main`:
    `/maestro-reconcile-<phase>` command (the dispatcher routes to the one matching the ticket's
    current phase — see `dispatcher.resolve_reconcile_command`) only resolves from a checkout
    that has it under `.claude/commands/`, or from the user commands directory (resolves from any
-   cwd). `maestro install-commands --repo <name>` copies the seven files into that
+   cwd). `maestro install-commands --repo <name>` copies the eight files into that
    `[repos.<name>]` checkout — prefer this when you own the repo and can commit them into it.
    `maestro install-commands --user` symlinks them into the user commands directory instead —
    prefer this for a repo the board does not own (e.g. a shared monorepo), since it leaves that
