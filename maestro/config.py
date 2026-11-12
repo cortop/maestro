@@ -1011,9 +1011,9 @@ KNOBS: tuple[Knob, ...] = (
     Knob("reconcile_web_tools", _bool),
     Knob("research_effort", _str),
     Knob("research_model", _str),
-    Knob("runner", _str),
+    Knob("runner", _str, per_repo=True),
     Knob("runner_enabled", _runner_enabled),
-    Knob("runner_model", _opt_str),
+    Knob("runner_model", _opt_str, per_repo=True),
     Knob("suggest_acs_model", _opt_str),
     Knob("suggest_acs_prompt", _suggest_acs_prompt),
     # --- housekeeping ---
@@ -1707,6 +1707,10 @@ implementer = "claude_skill"
 # ci_failure_excerpt = true          # T-123: this repo's override of [maestro]
                                      # ci_failure_excerpt above -- unset inherits the
                                      # board-wide default.
+# runner = "opencode"               # this repo's default runner -- a spec `runner:` line wins,
+                                     # unset inherits [maestro] runner.
+# runner_model = "qwen3-coder:30b"   # ditto, for [maestro] runner_model (falls through
+                                     # independently of `runner`).
 # file_hints = true                 # T-124: this repo's override of [maestro] file_hints
                                      # above -- unset inherits the board-wide default.
 # pr_split_threshold = 1500         # T-126: this repo's override of [maestro]

@@ -100,6 +100,8 @@ _OVERRIDE_SAMPLES = {
     "pr_split_threshold": 0,
     "prime_timeout": 6,
     "qa_skill": "/review",
+    "runner": "opencode",
+    "runner_model": "m",
     "test_command": "make check",
     "worktree_timeout": 5,
 }
