@@ -36,6 +36,7 @@ from . import ratelimit
 from . import repos as repos_mod
 from . import schedule
 from . import skills_install
+from . import slack_watcher
 from . import snapshot as snap_mod
 from . import steplog
 from . import store
@@ -950,6 +951,26 @@ def cmd_ask(args) -> int:
 def cmd_fold_inbox(args) -> int:
     folded = ops.fold_inbox(_cfg(args), args.key)
     _print({"folded": folded})
+    return 0
+
+
+def cmd_slack_cursor(args) -> int:
+    """[agent] T-255: print the Slack message cursor (a ts) the watcher reads from."""
+    print(slack_watcher.load_state(_cfg(args).home).get("cursor") or "0")
+    return 0
+
+
+def cmd_slack_intake(args) -> int:
+    """[agent] T-255: file reviews from Slack messages (a JSON list on stdin or --file);
+    the keep/ignore decision is made here in Python, never by the calling session."""
+    raw = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    try:
+        messages = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise store.MaestroError(f"slack-intake: input is not JSON: {exc}") from None
+    if not isinstance(messages, list):
+        raise store.MaestroError("slack-intake: input must be a JSON list of messages")
+    _print(slack_watcher.intake(_cfg(args), messages))
     return 0
 
 
@@ -1979,6 +2000,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("fold-inbox", cmd_fold_inbox, "[agent] fold pending human commands into events")
     sp.add_argument("key")
+    sp = add("slack-cursor", cmd_slack_cursor,
+             "[agent] print the Slack watcher's message cursor (ts to read newer messages from)")
+    sp = add("slack-intake", cmd_slack_intake,
+             "[agent] file reviews from a JSON list of Slack messages (stdin or --file); "
+             "only direct @mentions of the configured user with a PR link count")
+    sp.add_argument("--file", default=None, help="read the JSON list from this file instead of stdin")
     sp = add("inbox-ack", cmd_inbox_ack, "[agent] advance inbox cursor (after phase advance)")
     sp.add_argument("key")
     sp = add("observe-spec", cmd_observe_spec, "[agent] record current spec hash"); sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")

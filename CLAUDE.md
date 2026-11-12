@@ -105,6 +105,7 @@ Supporting:
 - `testlang.py` — per-language test-name extraction and selector formatting.
 - `skills_install.py` — `maestro install-commands` (payload in `maestro/_skill_commands/`).
 - `fleet.py` — launchd LaunchAgent management + pause switch.
+- `slack_watcher.py` — dispatcher-owned Slack PR-ping poll: gates/spawns the read-only session, `maestro slack-intake` files reviews.
 - `diagram.py` — generates the two derived docs from `statemachine.TRANSITIONS` and an AST
   walk of `dispatcher.py` (gate rows are labelled by enclosing function, no line
   numbers); `tests/test_diagram.py` fails on drift. It pins literal

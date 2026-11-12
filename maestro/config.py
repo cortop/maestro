@@ -459,6 +459,18 @@ class Config:
     # dropped even if listed here (see `scrubbed_env`'s docstring).
     scrub_env: list = field(default_factory=list)
 
+    # --- slack watcher ---
+    # T-255: the PR-ping watcher (`maestro/slack_watcher.py`) ships dark -- it needs a channel,
+    # the human's user id and at least one read tool before it ever spawns.
+    slack_active_hours: str = "09:00-19:00"  # local "HH:MM-HH:MM" window the fast interval applies in ("" = always)
+    slack_channel: str | None = None         # the one channel the watcher reads
+    slack_daily_cap: int = 300               # watcher sessions per UTC day (0 = uncapped)
+    slack_idle_interval: int = 1800          # seconds between polls outside the active hours
+    slack_interval: int = 120                # seconds between polls inside the active hours
+    slack_model: str = "haiku"               # the cheapest configured model
+    slack_read_tools: list = field(default_factory=list)  # Slack plugin read tools the session is granted
+    slack_user_id: str | None = None         # the human's Slack user id; only direct mentions count
+
     # --- tables & state (not [maestro] knobs) ---
     # [repos.<name>] tables: name -> {path, slug, base_branch, branch_prefix, default}.
     # Optional -- when empty, repos.resolve() synthesizes an implicit default binding
@@ -939,6 +951,16 @@ def _allowed_paths(raw, where, default):
     return _string_list(raw, where, default)
 
 
+def _active_hours(raw, where, default):
+    value = _str(raw, where, default)
+    from .slack_watcher import parse_active_hours
+    try:
+        parse_active_hours(value)
+    except store.MaestroError as exc:
+        raise store.MaestroError(f"config.toml: {where}: {exc}") from None
+    return value
+
+
 def _runner_enabled(raw, where, default):
     return _normalize_runner_enabled(raw, default)
 
@@ -1039,6 +1061,15 @@ KNOBS: tuple[Knob, ...] = (
     Knob("repo_path", _str),
     Knob("repo_preflight", _bool),
     Knob("scrub_env", _string_list),
+    # --- slack watcher ---
+    Knob("slack_active_hours", _active_hours),
+    Knob("slack_channel", _opt_str),
+    Knob("slack_daily_cap", _nonneg_int),
+    Knob("slack_idle_interval", _nonneg_int),
+    Knob("slack_interval", _nonneg_int),
+    Knob("slack_model", _str),
+    Knob("slack_read_tools", _string_list),
+    Knob("slack_user_id", _opt_str),
 )
 
 # `bash_max_timeout` is declared here too, but load() re-resolves it after the table,
@@ -1569,6 +1600,17 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
                                   # tracker's token/key env var are always dropped too, with no
                                   # listing needed here. Empty by default (ships dark). GH_TOKEN
                                   # itself is never dropped.
+
+# --- slack watcher ---
+# slack_active_hours = "09:00-19:00"   # T-255: local window the fast slack_interval applies in
+                                  # ("" = always); outside it slack_idle_interval applies
+# slack_channel = "C0123456789"   # the one channel the watcher reads; unset keeps the watcher dark
+# slack_daily_cap = 300           # watcher sessions per UTC day (0 = uncapped)
+# slack_idle_interval = 1800      # seconds between polls outside the active hours
+# slack_interval = 120            # seconds between polls inside the active hours
+# slack_model = "haiku"           # the cheapest configured model
+# slack_read_tools = ["mcp__slack__read_channel"]   # the Slack read tools the session is granted
+# slack_user_id = "U0123456789"   # only messages that directly @mention this user become reviews
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom

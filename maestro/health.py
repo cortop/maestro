@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 from . import backup as backup_mod
-from . import claims, credentials, depgraph, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, spend as spend_mod, store
+from . import claims, credentials, depgraph, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, slack_watcher, spend as spend_mod, store
 from . import config as config_mod
 from . import sessions as sessions_mod, steplog
 from . import snapshot as snap_mod
@@ -1083,6 +1083,51 @@ def check_reconciler_permissions(cfg: Config, now: float) -> dict:
             "missing_by_repo": missing_by_repo, "not_applicable_by_repo": not_applicable_by_repo}
 
 
+def _mcp_server_states(*, run=None) -> dict[str, bool] | None:
+    """``{normalized server name: usable}`` from ``claude mcp list``, or ``None`` when the
+    CLI cannot be run. A line is unusable when it reports a failure or a missing login."""
+    run = run or subprocess.run
+    try:
+        proc = run(["claude", "mcp", "list"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    states: dict[str, bool] = {}
+    for line in (proc.stdout or "").splitlines():
+        name, sep, rest = line.partition(": ")
+        if not sep:
+            continue
+        bad = any(m in rest for m in ("\u2717", "Failed", "Needs authentication"))
+        states[re.sub(r"[^a-z0-9]+", "_", name.strip().lower())] = not bad
+    return states
+
+
+def check_slack_tools(cfg: Config, now: float, *, probe=None) -> dict:
+    """WARN when the Slack read tools `slack_read_tools` names are not reachable: each
+    ``mcp__<server>__<tool>`` needs its server listed and usable by ``claude mcp list``.
+    Skipped (``ok``) while the watcher is unconfigured. *probe* is a test seam returning
+    what `_mcp_server_states` does."""
+    name = "slack_tools"
+    if not slack_watcher.configured(cfg):
+        return {"name": name, "status": "ok", "detail": "slack watcher not configured", "missing": []}
+    states = (probe or _mcp_server_states)()
+    if states is None:
+        return {"name": name, "status": "warn", "missing": [],
+                "detail": "could not list MCP servers (`claude mcp list` failed): Slack tools unverified"}
+    missing = []
+    for tool in cfg.slack_read_tools:
+        parts = tool.split("__")
+        server = re.sub(r"[^a-z0-9]+", "_", parts[1].lower()) if tool.startswith("mcp__") and len(parts) >= 3 else None
+        if server is None or not states.get(server, False):
+            missing.append(tool)
+    if missing:
+        return {"name": name, "status": "warn", "missing": missing,
+                "detail": "Slack tools unavailable: " + ", ".join(missing)}
+    return {"name": name, "status": "ok", "missing": [],
+            "detail": f"{len(cfg.slack_read_tools)} Slack read tool(s) reachable"}
+
+
 def check_spawn_floor(cfg: Config, now: float) -> dict:
     """WARN when the effective per-key spawn floor (``dispatcher.spawn_floor``,
     i.e. ``min_spawn_interval``) is 0 -- the setting has no other surface (GA-8):
@@ -2049,6 +2094,7 @@ CHECKS = (
     check_repo_preflight,
     check_runner_binary,
     check_serving_checkout,
+    check_slack_tools,
     check_spawn_floor,
     check_unknown_repo_bindings,
     check_unresolvable_spec_hints,

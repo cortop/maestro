@@ -80,6 +80,7 @@ def fleet_ctx(shell: Shell) -> dict:
         "sessions": _safe("sessions", fleet_view.session_rows, home, cfg, now),
         "schedule": _safe("schedule", fleet_view.schedule_rows, cfg, now),
         "backups": _safe("backups", fleet_view.backup_panel, cfg, now),
+        "slack": _safe("slack", fleet_view.slack_panel, cfg, now),
         "doctor": doctor, "problems": problems, "passing": passing,
     }
 

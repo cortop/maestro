@@ -40,6 +40,7 @@ from . import inbox
 from . import notify
 from . import ratelimit
 from . import schedule
+from . import slack_watcher
 from . import snapshot as snap_mod
 from . import spend
 from . import steplog
@@ -237,6 +238,8 @@ AGENT_TOOL_VERBS = (
     "requeue",
     "set-phase",
     "show",  # maestro-reconcile-passive.md reads pending_inbox through it
+    "slack-cursor",  # the Slack watcher session (never a reconciler phase)
+    "slack-intake",  # the Slack watcher session (never a reconciler phase)
     "snapshot",
     "sync-base",
     "verify-ac",
@@ -3375,6 +3378,9 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
         pid = claim.get("pid")
         kill(pid)
         claims.release(home, key)
+        if key == slack_watcher.WATCHER_KEY:
+            reaped.append(key)  # a dispatcher-owned session, not a ticket: nothing to fail
+            continue
         from . import health
         from . import ops
         if provider_state == "_sentinel":
@@ -3424,6 +3430,8 @@ def detect_zero_turn_spawns(cfg: Config, now: float) -> list[str]:
         if not result or result.get("num_turns") != 0:
             continue  # no terminal result yet, or it ran real turns
         claims.release(home, key)
+        if key == slack_watcher.WATCHER_KEY:
+            continue  # not a ticket: no event log to fail, and the next poll retries
         from . import ops
         command = claim.get("prompt", "?")
         cwd = claim.get("cwd", "?")
@@ -3877,6 +3885,7 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     # The one hook that needs `sessions`: it spawns the post-QA skill itself.
     _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,
               runner_probe=runner_probe, runner_verdict=runner_verdict, default={})
+    _run_hook("slack_watcher", hook_errors, slack_watcher.sync, cfg, sessions, now, default={})
     _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
     _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
     _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)

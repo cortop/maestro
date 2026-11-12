@@ -181,6 +181,8 @@ def test_agent_tool_verbs_named_exactly():
         "requeue",
         "set-phase",
         "show",
+        "slack-cursor",
+        "slack-intake",
         "snapshot",
         "sync-base",
         "verify-ac",

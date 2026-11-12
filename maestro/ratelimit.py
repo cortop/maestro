@@ -101,6 +101,7 @@ def probe(cfg: Config, now: float) -> dict | None:
     # Lazy: dispatcher imports ratelimit at module load, so importing dispatcher
     # back at our own module level would be a load-time cycle.
     from . import dispatcher as disp
+    from . import slack_watcher
 
     ledger = store.read_json(disp._spawn_ledger_path(home), {}) or {}
     cursor_path = _cursor_path(home)
@@ -108,7 +109,7 @@ def probe(cfg: Config, now: float) -> dict | None:
     cursor_changed = False
     best = state
 
-    for key in ledger:
+    for key in [*ledger, slack_watcher.WATCHER_KEY]:  # T-255: the watcher is off the ledger
         candidates = sessions_mod.list_sessions(home, key)
         for candidate in candidates:
             if candidate["format"] != "stream-json":

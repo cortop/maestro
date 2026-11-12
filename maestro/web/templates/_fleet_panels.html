@@ -79,5 +79,13 @@
     <p id="backups" class="mono">{{ backups.count }} kept · last {{ ago(backups.last) if backups.last is not none else "never" }}{% if backups.next is not none %} · next in {{ [backups.next - now, 0]|max|dur }}{% endif %}</p>
     <p class="dim">every {{ backups.interval|dur }}, keeps {{ backups.retention }}</p>
     {% endif %}
+
+    <h2>Slack watcher</h2>
+    {% if slack is none %}<p class="mono">unknown</p>
+    {% elif not slack.enabled %}<p id="slack-watcher" class="mono dim">not configured</p>
+    {% else %}
+    <p id="slack-watcher" class="mono">last poll {{ ago(slack.last_poll) if slack.last_poll is not none else "never" }} · {{ slack.polls_today }}{% if slack.cap %}/{{ slack.cap }}{% endif %} polls today · {% if slack.spend_today is none %}spend unknown{% else %}${{ "%.2f"|format(slack.spend_today) }} spent today{% endif %}</p>
+    {% if slack.skip_reason and slack.skip_reason != "not due" %}<p class="dim">idle: {{ slack.skip_reason }}</p>{% endif %}
+    {% endif %}
   </div>
 </section>
