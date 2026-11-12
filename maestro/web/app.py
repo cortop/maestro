@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import AsyncIterable
 
 from fastapi import FastAPI, Header
-from fastapi.responses import HTMLResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
