@@ -22,6 +22,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable
 from textual.widgets import Footer
 from textual.widgets import Header
+from textual.widgets import HelpPanel
 from textual.widgets import Input
 from textual.widgets import RichLog
 from textual.widgets import Static
@@ -101,6 +102,8 @@ from .screens import EventsScreen
 from .screens import FleetScreen
 from .screens import InboxScreen
 from .screens import LogsScreen
+from .screens import MaskHelpPanel
+from .screens import MaskLogo
 from .screens import ProposalScreen
 from .screens import ReviewScreen
 from .screens import RoundsScreen
@@ -292,7 +295,9 @@ class MaestroTUI(App):
         background: transparent;
     }
     #now-body { height: 1fr; }
-    #now-groups { width: 1fr; padding: 0 1; }
+    #now-left { width: 1fr; height: 1fr; }
+    #now-groups { width: 1fr; height: auto; padding: 0 1; }
+    #now-logo { display: none; }
     #now-right { width: 1fr; height: 1fr; padding: 0 1; }
     #tickets { width: 2fr; height: 1fr; }
     #right   { width: 1fr; height: 1fr; }
@@ -548,9 +553,17 @@ class MaestroTUI(App):
             detail = ("[dim]Nothing needs you[/dim]" if card is None else
                       _render_now_detail(card, r["history"].get(card.key, []), r["now"]))
             self.query_one("#now-detail", Static).update(detail)
+            self.query_one("#now-logo", MaskLogo).display = card is None and not cards
         except NoMatches:  # app is tearing down
             pass
         self._refresh_bindings()
+
+    def action_show_help_panel(self) -> None:
+        """Show the key panel with the mask logo above the key list."""
+        try:
+            self.screen.query_one(HelpPanel)
+        except NoMatches:
+            self.screen.mount(MaskHelpPanel())
 
     def action_now_next(self) -> None:
         self._now_idx += 1
@@ -645,7 +658,9 @@ class MaestroTUI(App):
             with TabPane("Now", id="tab-now"):
                 yield Static("", id="now-status")
                 with Horizontal(id="now-body"):
-                    yield _NowList("[dim]Loading…[/dim]", id="now-groups")
+                    with Vertical(id="now-left"):
+                        yield _NowList("[dim]Loading…[/dim]", id="now-groups")
+                        yield MaskLogo("Nothing needs you right now", id="now-logo")
                     with VerticalScroll(id="now-right"):
                         yield Static("[dim]Select a needs-you row[/dim]", id="now-detail")
             with TabPane("Tickets", id="tab-tickets"):
