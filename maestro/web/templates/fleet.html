@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}maestro fleet{% endblock %}
+{% block body %}
+<div id="fleet" hx-get="/fleet/panels" hx-trigger="sse:fleet" hx-swap="innerHTML">
+  {% include "_fleet_panels.html" %}
+</div>
+{% endblock %}
