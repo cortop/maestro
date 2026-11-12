@@ -47,6 +47,7 @@ pre { white-space: pre-wrap; background: var(--panel); border: 1px solid var(--l
 .site-header .logo { display: flex; align-items: center; padding: 0 2.2rem 0 1.2rem; background: var(--gold);
   color: var(--ground); font: 900 1.2rem var(--font-display); text-transform: uppercase; letter-spacing: -.02em;
   text-decoration: none; clip-path: polygon(0 0, 100% 0, calc(100% - 18px) 100%, 0 100%); }
+.site-header .logo .logo-mark { height: 1.2rem; width: auto; margin-right: .5rem; }
 .site-nav { display: flex; gap: 1.5rem; align-items: stretch; }
 .site-nav a { display: flex; align-items: center; min-height: 44px; color: var(--soft); text-decoration: none;
   font-weight: 700; text-transform: uppercase; letter-spacing: .08em; border-bottom: 4px solid transparent; }
