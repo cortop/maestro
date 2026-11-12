@@ -35,6 +35,7 @@ from .. import event_log
 from .. import fleet as fleet_mod
 from .. import gates
 from .. import health
+from .. import human_actions
 from .. import inbox
 from .. import ops as ops_mod
 from .. import snapshot as snap_mod
@@ -121,6 +122,14 @@ def _running_placeholder(home: Path, s: snap_mod.Snapshot) -> bool:
 # filtering (show all). A predicate takes (home, Snapshot) -> bool; wider than
 # a bare phase set for callers that need one.
 # T-161: sortable board columns, in table order; numeric ones first-sort descending.
+def _stop_session_result(cfg, key: str) -> dict:
+    """`human_actions.stop`, folding a refusal back into its result dict for the toast."""
+    try:
+        return human_actions.stop(cfg, key)
+    except human_actions.StopRefused as e:
+        return e.result
+
+
 _SORT_COLUMNS = ("Key", "Phase", "Title", "PR", "CI", "Fails", "Deps", "Idle")
 _NUMERIC_SORT = frozenset({"Fails", "Deps", "PR", "Idle"})
 _FILTERS: list[tuple[str, Callable[[Path, snap_mod.Snapshot], bool] | None]] = [
@@ -736,8 +745,8 @@ class MaestroTUI(App):
                             severity="information" if r["stopped"] else "warning")
                 if r["stopped"] and self._stop_note:  # after the stop, so the sweep sees it dead
                     self._stop_note = False
-                    inbox.append_command(self._home, r["key"], "msg",
-                                         {"text": "Session stopped by a human (maestro stop)."})
+                    human_actions.message(self._home, r["key"],
+                                          "Session stopped by a human (maestro stop).")
                     self._nudge(r["key"])
             elif event.state == WorkerState.ERROR:
                 self.notify(f"Stop failed: {event.worker.error}", severity="error")
@@ -1077,7 +1086,12 @@ class MaestroTUI(App):
                 return
 
             def _queue() -> None:
-                inbox.append_command(self._home, key, command, args)
+                if command == "ans":
+                    human_actions.answer(self._home, key, args.get("text", ""))
+                elif command == "msg":
+                    human_actions.message(self._home, key, args.get("text", ""))
+                else:  # the modal never carried the degraded-only guard
+                    inbox.append_command(self._home, key, command, args)
                 self.notify(f"'{command}' queued for {key}")
                 self._nudge(key)
 
@@ -1099,13 +1113,17 @@ class MaestroTUI(App):
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
-        snap = snap_mod.load(self._home, key)
-        if snap.phase != Phase.DEGRADED.value:
+        if snap_mod.load(self._home, key).phase != Phase.DEGRADED.value:
             self.notify(f"{key}: '{command}' only applies to degraded tickets", severity="warning")
             return
 
         def _queue() -> None:
-            inbox.append_command(self._home, key, command, {})
+            try:
+                (human_actions.retry if command == "retry" else human_actions.discard)(
+                    self._home, key)
+            except store.MaestroError as e:
+                self.notify(str(e), severity="warning")
+                return
             self.notify(f"'{command}' queued for {key}")
             self._nudge(key)
 
@@ -1498,9 +1516,8 @@ class MaestroTUI(App):
                 for q_qid, q_text in questions[idx:]:
                     _, _, _, q_recommend = ops_mod.parse_round_question(q_text)
                     if q_recommend:
-                        inbox.append_command(
-                            self._home, key, "ans",
-                            {"qid": q_qid, "text": q_recommend, "accepted_recommendation": True})
+                        human_actions.answer(self._home, key, q_recommend, qid=q_qid,
+                                             accepted_recommendation=True)
                         queued += 1
                     else:
                         unanswered.append((q_qid, q_text))
@@ -1512,10 +1529,9 @@ class MaestroTUI(App):
             # subclass equal to the recommendation) -- carry the accept marker
             # onto the queued command only then, never for an identical TYPED
             # answer (a plain `str`, no marker).
-            args = {"qid": qid, "text": str(answer)}
-            if isinstance(answer, _AcceptedRecommendation):
-                args["accepted_recommendation"] = True
-            inbox.append_command(self._home, key, "ans", args)
+            human_actions.answer(
+                self._home, key, str(answer), qid=qid,
+                accepted_recommendation=isinstance(answer, _AcceptedRecommendation))
             self._walk_questions(key, questions, idx + 1, answered + 1, initial)
 
         self.push_screen(
@@ -1605,7 +1621,7 @@ class MaestroTUI(App):
             def _on_confirm(ok: bool | None) -> None:
                 if not ok:
                     return
-                fleet_mod.unhold(self._home, key)
+                human_actions.release(self._home, key)
                 self.notify(f"Released hold on {key}")
                 self._populate()
 
@@ -1618,7 +1634,7 @@ class MaestroTUI(App):
                 return
             seconds, reason = result
             until = store.now_epoch() + seconds if seconds is not None else None
-            fleet_mod.hold(self._home, key, until=until, reason=reason)
+            human_actions.hold(self._home, key, until=until, reason=reason)
             self.notify(f"Held {key}")
             self._populate()
 
@@ -1677,7 +1693,7 @@ class MaestroTUI(App):
                 return
             self._stop_note = result[1]
             cfg = Config(home=self._home)
-            self.run_worker(lambda: ops_mod.stop_session(cfg, key), thread=True, name="stop-session")
+            self.run_worker(lambda: _stop_session_result(cfg, key), thread=True, name="stop-session")
 
         self.push_screen(
             _StopModal(key, pid=row["pid"], age_s=row["age_s"], verdict=row["verdict"], silence_s=silence),
@@ -1782,7 +1798,7 @@ class MaestroTUI(App):
         def _on_dismiss(text: str | None) -> None:
             if text is None:
                 return
-            inbox.append_command(self._home, key, "msg", {"text": text})
+            human_actions.message(self._home, key, text)
             self.notify(f"Message queued for {key}")
             self._nudge(key)
 
