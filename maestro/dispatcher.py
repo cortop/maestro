@@ -4928,8 +4928,10 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     deliberate config change, not a code edit.
 
     Precedence when the phase IS eligible: spec `runner:`/`runner_model:`
-    front-matter -> board config (``cfg.runner``/``cfg.runner_model``) -- two
-    levels only, matching `model`/`effort` (no ``[repos.*].runner`` layer).
+    front-matter -> the bound repo's ``[repos.<name>] runner``/``runner_model``
+    -> board config (``cfg.runner``/``cfg.runner_model``). The repo binding
+    already inherits the board value for an unset key, so each of the two
+    falls through independently.
 
     Pure config + spec reads -- never spawns a subprocess (``maestro env --key``
     is a hot path every reconciler preamble calls; see
@@ -4951,8 +4953,11 @@ def resolve_runner(cfg: Config, key: str, phase: str) -> tuple[str, str | None]:
     if spec_file.exists():
         overrides = parse_spec_overrides(spec_file.read_text(encoding="utf-8"))
 
-    runner = overrides.get("runner") or cfg.runner
-    runner_model = overrides.get("runner_model") or cfg.runner_model
+    from . import repos as repos_mod  # lazy: repos imports us at module load time
+
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    runner = overrides.get("runner") or binding.runner
+    runner_model = overrides.get("runner_model") or binding.runner_model
     if phase_enum not in runner_eligible_phases(cfg, runner):
         return "claude", None
     return runner, runner_model

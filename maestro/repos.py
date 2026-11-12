@@ -140,6 +140,13 @@ class RepoBinding:
     # fully disabled for this key (ships dark).
     test_command: str | None = None
 
+    # --- runners & models ---
+    # This repo's default runner/runner_model, already resolved against the
+    # board-wide [maestro] defaults -- see resolve(), the sole reader
+    # `dispatcher.resolve_runner` goes through. A spec `runner:` line still wins.
+    runner: str = "claude"
+    runner_model: str | None = None
+
     # --- housekeeping ---
     # T-124: this repo's file_hints override, already resolved against the
     # board-wide [maestro] file_hints default -- see resolve(), the sole
