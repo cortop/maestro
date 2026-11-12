@@ -16,7 +16,7 @@ from .. import config as config_mod
 from .. import store
 from ..config import Config
 from ..view import events as ev_view
-from . import routes_board, routes_fleet, routes_ticket
+from . import routes_board, routes_fleet, routes_now, routes_ticket
 from .guard import WriteGuard
 from .shell import Shell
 from .stream import Hub
@@ -58,6 +58,7 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     shell.templates.env.filters["dur"] = ev_view.fmt_duration
     app.state.shell = shell
     routes_board.register(app, shell)
+    routes_now.register(app, shell)
     routes_ticket.register(app, shell)
     routes_fleet.register(app, shell)
 
