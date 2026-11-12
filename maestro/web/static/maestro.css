@@ -122,7 +122,6 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 
-<<<<<<< HEAD
 /* ticket page */
 .crumb { margin: 0 0 .3rem; }
 .title-row { display: flex; align-items: center; gap: 1rem; justify-content: space-between; }
@@ -140,7 +139,7 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
 .tab-radio:focus-visible + .tab-label { outline: 2px solid var(--cyan); }
 .tab-panel { display: none; order: 9; width: 100%; padding-top: 1rem; }
 .tab-radio:checked + .tab-label + .tab-panel { display: block; }
-=======
+
 /* fleet page */
 .fleet-headline h1 { font-size: 4rem; margin: .5rem 0 .2rem; }
 .fleet-headline.state-healthy h1 { color: var(--cyan); }
@@ -161,4 +160,3 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
 .check-fail .chip { color: var(--magenta-soft); border-color: var(--magenta); }
 .check-warn .chip { color: var(--gold); border-color: var(--gold); }
 @media (max-width: 800px) { .fleet-budget, .fleet-columns { grid-template-columns: 1fr; } }
->>>>>>> origin/main
