@@ -1,0 +1,5 @@
+<form hx-post="/fleet/stop/{{ key }}" hx-target="#fleet" hx-swap="innerHTML" class="stop-confirm">
+  <input type="hidden" name="confirm" value="yes">
+  <span class="dim">Stop {{ key }}?</span>
+  <button class="btn btn-danger" type="submit">Confirm stop</button>
+</form>

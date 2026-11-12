@@ -1,12 +1,14 @@
-"""Fleet page routes (`/fleet`, `/fleet/panels`) of `maestro web`: a read-only fleet health picture."""
+"""Fleet page routes of `maestro web`: the fleet health picture and its guarded actions."""
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
-from .. import fleet, spend as spend_mod, store
+from .. import backup, fleet, human_actions, spend as spend_mod, store
 from ..view import fleet as fleet_view
 from .shell import Shell
 
@@ -84,6 +86,20 @@ def fleet_ctx(shell: Shell) -> dict:
     }
 
 
+async def _form(request: Request) -> dict[str, str]:
+    """First value of each field of an urlencoded body (no multipart dependency)."""
+    raw = (await request.body()).decode("utf-8", "replace")
+    return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+
+
+def _parse_until(value: str) -> float:
+    """A bare epoch or an ISO-8601 string (naive = local time); raises ``ValueError``."""
+    try:
+        return float(value)
+    except ValueError:
+        return datetime.fromisoformat(value).timestamp()
+
+
 def register(app: FastAPI, shell: Shell) -> None:
     @app.get("/fleet", response_class=HTMLResponse)
     def fleet_page(request: Request):
@@ -92,3 +108,50 @@ def register(app: FastAPI, shell: Shell) -> None:
     @app.get("/fleet/panels", response_class=HTMLResponse)
     def fleet_panels(request: Request):
         return shell.render(request, "_fleet_panels.html", nav="fleet", **fleet_ctx(shell))
+
+    def panels(request: Request, **extra):
+        return shell.render(request, "_fleet_panels.html", nav="fleet", **fleet_ctx(shell), **extra)
+
+    async def pause(request: Request):
+        form = await _form(request)
+        until_raw = form.get("until", "").strip()
+        try:
+            until = _parse_until(until_raw) if until_raw else None
+        except ValueError:
+            return panels(request, notice=f"invalid until time {until_raw!r}")
+        human_actions.pause(shell.home, until=until, reason=form.get("reason", "").strip() or None)
+        return panels(request, notice="fleet paused")
+
+    async def resume(request: Request):
+        human_actions.resume(shell.home)
+        return panels(request, notice="fleet resumed")
+
+    async def doctor(request: Request):
+        return panels(request, notice="doctor re-run")
+
+    async def backup_now(request: Request):
+        try:
+            path = backup.create_backup(shell.cfg(), store.now_epoch())
+        except (OSError, store.MaestroError) as e:
+            return panels(request, notice=f"backup failed: {e}")
+        return panels(request, notice=f"backup created: {path.name}")
+
+    @app.get("/fleet/stop/{key}", response_class=HTMLResponse)
+    def stop_confirm(request: Request, key: str):
+        return shell.render(request, "_fleet_stop_confirm.html", nav="fleet", key=key)
+
+    async def stop(request: Request, key: str):
+        if (await _form(request)).get("confirm") != "yes":
+            return panels(request, notice=f"stop {key} not confirmed")
+        try:
+            human_actions.stop(shell.cfg(), key)
+        except (human_actions.StopRefused, store.MaestroError) as e:
+            return panels(request, notice=f"stop {key} refused: {e}")
+        return panels(request, notice=f"stopped {key}")
+
+    guard = shell.guard
+    guard.post(app, "/fleet/pause", pause, response_class=HTMLResponse)
+    guard.post(app, "/fleet/resume", resume, response_class=HTMLResponse)
+    guard.post(app, "/fleet/doctor", doctor, response_class=HTMLResponse)
+    guard.post(app, "/fleet/backup", backup_now, response_class=HTMLResponse)
+    guard.post(app, "/fleet/stop/{key}", stop, response_class=HTMLResponse)
