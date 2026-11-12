@@ -122,7 +122,6 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 
-<<<<<<< HEAD
 /* ticket page */
 .crumb { margin: 0 0 .3rem; }
 .title-row { display: flex; align-items: center; gap: 1rem; justify-content: space-between; }
@@ -140,7 +139,7 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
 .tab-radio:focus-visible + .tab-label { outline: 2px solid var(--cyan); }
 .tab-panel { display: none; order: 9; width: 100%; padding-top: 1rem; }
 .tab-radio:checked + .tab-label + .tab-panel { display: block; }
-=======
+
 /* now page */
 .now-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; }
 .now-title { font-size: clamp(2rem, 6vw, 4rem); line-height: 1; margin: 0; animation: none; }
@@ -158,7 +157,6 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
   .now-cols { grid-template-columns: minmax(0, 1fr); }
   .ledger-scroll { max-height: 60vh; }
 }
->>>>>>> origin/main
 
 /* fleet page */
 .fleet-headline h1 { font-size: 4rem; margin: .5rem 0 .2rem; }
