@@ -13,7 +13,7 @@ from textual.app import ScreenStackError
 from textual.binding import Binding
 from textual.command import CommandPalette
 from textual.containers import Horizontal
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
@@ -85,7 +85,7 @@ from .render import _fmt_duration
 from .render import _nudge_toast
 from .render import _render_badge
 from .render import _render_fleet
-from .render import _render_now
+from .render import _render_now, _render_now_detail
 from .render import _render_pulse
 from .render import _styled_row
 from .screens import AcScreen
@@ -251,6 +251,25 @@ def _filter_idx_by_name(name: str) -> int:
     return next(i for i, (n, _) in enumerate(_FILTERS) if n == name)
 
 
+class _NowList(Static, can_focus=True):
+    """The Now tab's group list: focused, it owns the cursor keys and Enter-to-accept."""
+
+    BINDINGS = [
+        Binding("down", "now_next", "Next", show=False),
+        Binding("enter", "now_accept", "Accept", show=False),
+        Binding("up", "now_prev", "Previous", show=False),
+    ]
+
+    def action_now_accept(self) -> None:
+        self.app._now_accept()
+
+    def action_now_next(self) -> None:
+        self.app.action_now_next()
+
+    def action_now_prev(self) -> None:
+        self.app.action_now_prev()
+
+
 class MaestroTUI(App):
     CSS = """
     Screen { layers: base topbar; }
@@ -270,6 +289,9 @@ class MaestroTUI(App):
         text-align: right;
         background: transparent;
     }
+    #now-body { height: 1fr; }
+    #now-groups { width: 1fr; padding: 0 1; }
+    #now-right { width: 1fr; height: 1fr; padding: 0 1; }
     #tickets { width: 2fr; height: 1fr; }
     #right   { width: 1fr; height: 1fr; }
     #detail  { width: 1fr; height: 1fr; padding: 0 1; }
@@ -417,6 +439,9 @@ class MaestroTUI(App):
         self._sessions_factory = sessions_factory or build_routing_sessions
         # T-153: `N` toggles nudging for THIS session only (no config write).
         self._nudge_enabled: bool = True
+        self._now_result: dict | None = None  # last Now-tab worker result
+        self._now_key: str | None = None  # key last handed to _selected_key by the Now cursor
+        self._now_idx: int = 0  # needs-you cursor on the Now tab
         self._badge_result: dict | None = None
         self.sub_title = str(self._home.resolve())
         self._selected_key: str | None = None
@@ -497,6 +522,61 @@ class MaestroTUI(App):
                 return None
         return self._selected_key
 
+    def _now_card(self):
+        """The needs-you card under the Now cursor, or None."""
+        cards = self._now_result["view"].needs_you if self._now_result else []
+        if not cards:
+            return None
+        return cards[min(self._now_idx, len(cards) - 1)]
+
+    def _paint_now(self) -> None:
+        r = self._now_result
+        if r is None:
+            return
+        cards = r["view"].needs_you
+        self._now_idx = min(self._now_idx, max(0, len(cards) - 1))
+        card = self._now_card()
+        if card is not None and card.key != self._now_key:
+            self._selected_key = self._now_key = card.key  # actions target the Now cursor
+        status, groups = _render_now(r["view"], r["pulse"], r["sessions"], r["fleet"], r["now"],
+                                     self._now_idx if card is not None else None)
+        try:
+            self.query_one("#now-status", Static).update(status)
+            self.query_one("#now-groups", Static).update(groups)
+            detail = ("[dim]Nothing needs you[/dim]" if card is None else
+                      _render_now_detail(card, r["history"].get(card.key, []), r["now"]))
+            self.query_one("#now-detail", Static).update(detail)
+        except NoMatches:  # app is tearing down
+            pass
+        self._refresh_bindings()
+
+    def action_now_next(self) -> None:
+        self._now_idx += 1
+        self._paint_now()
+
+    def action_now_prev(self) -> None:
+        self._now_idx = max(0, self._now_idx - 1)
+        self._paint_now()
+
+    def _now_accept(self) -> None:
+        """Enter on the Now tab: accept the recommendation (same marker as Ctrl+R), else
+        fall back to the answer modal / ticket detail."""
+        card = self._now_card()
+        if card is None:
+            return
+        if hasattr(card, "reason"):
+            self.push_screen(DetailScreen(self._home, card.key))
+            return
+        siblings = sum(1 for c in self._now_result["view"].needs_you if c.key == card.key)
+        if not card.recommendation or siblings > 1:
+            self.action_answer()  # no recommendation, or a multi-question round: walk-through
+            return
+        human_actions.answer(self._home, card.key, card.recommendation, qid=card.qid,
+                             accepted_recommendation=True)
+        self.notify(f"recommendation queued for {card.key}")
+        self._nudge(card.key)
+        self._refresh_now_tab()
+
     def _on_board(self) -> bool:
         return len(self._base_stack()) <= 1
 
@@ -562,7 +642,10 @@ class MaestroTUI(App):
         with TabbedContent(initial="tab-now", id="tabs"):
             with TabPane("Now", id="tab-now"):
                 yield Static("", id="now-status")
-                yield Static("[dim]Loading…[/dim]", id="now-groups")
+                with Horizontal(id="now-body"):
+                    yield _NowList("[dim]Loading…[/dim]", id="now-groups")
+                    with VerticalScroll(id="now-right"):
+                        yield Static("[dim]Select a needs-you row[/dim]", id="now-detail")
             with TabPane("Tickets", id="tab-tickets"):
                 with Horizontal():
                     yield DataTable(id="tickets")
@@ -589,6 +672,7 @@ class MaestroTUI(App):
         table.add_column("Doing")
         table.add_column("Now")
         self._refresh_now()
+        self.query_one("#now-groups").focus(scroll_visible=False)
         self.set_interval(3.0, self._kick_live)
         self._refresh_badge()
         self.set_interval(5.0, self._refresh_badge)
@@ -700,7 +784,17 @@ class MaestroTUI(App):
         def _load() -> dict:
             cfg = config_mod.load(str(self._home))
             now = store.now_epoch()
-            return {"view": now_view.build(self._home, cfg, now),
+            view = now_view.build(self._home, cfg, now)
+            history = {}
+            for card in view.needs_you:
+                if card.key not in history:
+                    try:
+                        rows = rounds_mod.build(self._home, card.key, now).rows
+                    except Exception:  # history is garnish; never block the pane
+                        rows = ()
+                    history[card.key] = [f"{r.when}  {r.label}  {r.outcome}".rstrip()
+                                         for r in rows[-5:]]
+            return {"view": view, "history": history,
                     "pulse": fleet_view.pulse(self._home, cfg, now),
                     "sessions": len(fleet_view.session_rows(self._home, cfg, now)),
                     "fleet": fleet_mod.status(self._home), "now": now}
@@ -723,6 +817,7 @@ class MaestroTUI(App):
             self._refresh_fleet_tab()
         else:
             self._refresh_now_tab()
+            self.query_one("#now-groups").focus(scroll_visible=False)
 
     def action_tab_now(self) -> None:
         self._show_tab("tab-now")
@@ -756,13 +851,8 @@ class MaestroTUI(App):
             self.sub_title = self._badge_result["banner"]
             self._paint_badge()
         elif event.worker.name == "now-tab" and event.state == WorkerState.SUCCESS:
-            r = event.worker.result
-            try:
-                status, groups = _render_now(r["view"], r["pulse"], r["sessions"], r["fleet"], r["now"])
-                self.query_one("#now-status", Static).update(status)
-                self.query_one("#now-groups", Static).update(groups)
-            except NoMatches:  # app is tearing down
-                pass
+            self._now_result = event.worker.result
+            self._paint_now()
         elif event.worker.name == "now-tab" and event.state == WorkerState.ERROR:
             try:
                 self.query_one("#now-groups", Static).update(f"[red]now: {event.worker.error}[/red]")
@@ -1202,6 +1292,7 @@ class MaestroTUI(App):
                 return
             self.notify(f"'{command}' queued for {key}")
             self._nudge(key)
+            self._refresh_now_tab()
 
         if command == "discard":
             self._confirm_discard(key, _queue)
@@ -1569,6 +1660,7 @@ class MaestroTUI(App):
                 if key == self._selected_key and self._on_board():
                     self._show_detail(key)
                 self._nudge(key)  # once, however the walk ended
+                self._refresh_now_tab()
             return
         qid, text = questions[idx]
         remaining = len(questions) - idx

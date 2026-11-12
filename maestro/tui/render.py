@@ -366,8 +366,10 @@ def _fmt_wait(seconds: float) -> str:
     return f"{s // 60}m" if s >= 60 else f"{s}s"
 
 
-def _render_now(view, pulse: dict, sessions: int, fleet: dict, now: float) -> tuple[str, str]:
-    """The Now tab: ``(status row, three labelled groups)`` as Rich markup."""
+def _render_now(view, pulse: dict, sessions: int, fleet: dict, now: float,
+                selected: int | None = None) -> tuple[str, str]:
+    """The Now tab: ``(status row, three labelled groups)`` as Rich markup; *selected*
+    is the needs-you row index carrying the cursor."""
     if fleet.get("paused"):
         state = "[#FF7FA6]paused[/]"
     elif fleet.get("loaded"):
@@ -384,9 +386,11 @@ def _render_now(view, pulse: dict, sessions: int, fleet: dict, now: float) -> tu
     status = f"fleet {state}  ·  {sessions} live session(s)  ·  {spend_str}"
     gold, cyan = "#EBCB55", "#00E5FF"
     lines = [f"[bold {gold}]NEEDS YOU ({len(view.needs_you)})[/]"]
-    for c in view.needs_you:
+    for i, c in enumerate(view.needs_you):
         kind = "degraded" if hasattr(c, "reason") else "question"
-        lines.append(f"  {escape(c.key)}  {kind}  waiting {_fmt_wait(c.waiting_s)}")
+        mark = f"[bold {gold}]▸ " if i == selected else "  "
+        end = "[/]" if i == selected else ""
+        lines.append(f"{mark}{escape(c.key)}  {kind}  waiting {_fmt_wait(c.waiting_s)}{end}")
     lines += ["", f"[bold {cyan}]IN FLIGHT ({len(view.in_flight)})[/]"]
     for r in view.in_flight:
         lines.append(f"  {escape(r.key)}  {escape(r.phase)}  {escape(r.doing)}  [#9A9AA8]{escape(r.tool_line)}[/]")
@@ -394,3 +398,29 @@ def _render_now(view, pulse: dict, sessions: int, fleet: dict, now: float) -> tu
     for q in view.queued:
         lines.append(f"  {escape(q.key)}  [#9A9AA8]{escape(q.reason)}[/]")
     return status, "\n".join(lines)
+
+
+def _render_now_detail(card, history: list[str], now: float) -> str:
+    """The Now tab's right pane for the selected needs-you card, as Rich markup."""
+    gold, muted = "#EBCB55", "#9A9AA8"
+    head = f"[bold {gold}]{escape(card.key)}[/]  {escape(card.title)}"
+    waiting = f"[{muted}]waiting {_fmt_wait(card.waiting_s)}"
+    if card.dependents:
+        waiting += " · blocks " + escape(", ".join(card.dependents))
+    lines = [head, waiting + "[/]", ""]
+    if hasattr(card, "reason"):
+        lines += [f"[bold #FF7FA6]Failure[/]", escape(card.reason), "",
+                  f"[bold {gold}]Ctrl+R[/] retry   [bold {gold}]Ctrl+D[/] discard (confirmed)"]
+    else:
+        pos = f" ({card.position} of {card.total})" if card.position and card.total else ""
+        lines += [f"[bold]Question{pos}[/]", escape(card.body), ""]
+        if card.recommendation:
+            lines += [f"[bold {gold}]▸ 1. Accept recommendation[/]  [{muted}](Enter)[/]",
+                      f"    {escape(card.recommendation)}",
+                      f"  2. Write an answer  [{muted}](a)[/]"]
+        else:
+            lines += [f"[{muted}]No recommendation.[/]",
+                      f"[bold {gold}]▸ Write an answer[/]  [{muted}](Enter or a)[/]"]
+    if history:
+        lines += ["", f"[bold]How it got here[/]"] + [f"  {escape(h)}" for h in history]
+    return "\n".join(lines)
