@@ -143,6 +143,7 @@ def test_header_click_sorts_and_reverses(home):
         async with app.run_test(size=(140, 40)) as pilot:
             app._filter_idx = _filter_idx("all")
             app._populate()
+            await pilot.press("2")
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             cols = list(table.columns.values())

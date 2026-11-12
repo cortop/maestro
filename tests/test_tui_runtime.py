@@ -68,6 +68,7 @@ def test_filter_bar_renders_on_its_own_visible_row(seeded_home):
     async def _inner():
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
             await pilot.pause()
             bar = app.query_one("#filter-bar", Static)
             header = app.query_one("Header")
@@ -160,6 +161,7 @@ def test_detail_panel_resize_bindings_grow_shrink_and_clamp(seeded_home):
     async def _inner():
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             assert table.styles.width.value == 2.0
