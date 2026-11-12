@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import health, ratelimit, spend as spend_mod, store
+from .. import (backup, claims, dispatcher, health, ratelimit, sessions,
+                spend as spend_mod, steplog, store)
 from ..config import Config
+from . import rounds as rounds_view
 
 _SPARK = "▁▂▃▄▅▆▇█"
 
@@ -36,3 +38,54 @@ def pulse(home: Path, cfg: Config, now: float | None = None) -> dict:
         "paused_until": rl.get("paused_until") if rl.get("paused") else None,
     }
 
+
+
+def session_rows(home: Path, cfg: Config, now: float | None = None) -> list[dict]:
+    """One row per live claim: key, round label, live tool line, runner, pid, age and the
+    session's cost. ``cost`` is ``None`` (absent, never zero) until its log carries a result."""
+    now = store.now_epoch() if now is None else now
+    rows = []
+    for c in claims.describe_claims(home, max_age=cfg.unverified_claim_max_age):
+        if not c["claimed"]:
+            continue
+        key = c["key"]
+        row = {"key": key, "round": "", "tool": "", "runner": None, "pid": c["pid"],
+               "age_s": c["age_s"], "cost": None}
+        try:
+            row["round"] = rounds_view.round_label(home, key)
+            logs = sessions.list_sessions(home, key)
+        except (OSError, ValueError, store.MaestroError):
+            logs = []
+        if logs:
+            path = Path(logs[0]["path"])
+            row["runner"] = steplog.session_model(path)["runner"]
+            status, _ = steplog.live_status(path)
+            row["tool"] = steplog.live_texts(status, now)[1]
+            if logs[0]["format"] == "stream-json":
+                row["cost"] = steplog.result_summary(
+                    obj for _o, obj in steplog.iter_records(path))["cost"]
+        rows.append(row)
+    return rows
+
+
+def doctor_rows(cfg: Config, now: float | None = None) -> list[dict]:
+    """`health.run_checks` results, problems (fail, then warn) before ok."""
+    now = store.now_epoch() if now is None else now
+    order = {"fail": 0, "warn": 1}
+    return sorted(health.run_checks(cfg, now), key=lambda r: order.get(r.get("status"), 2))
+
+
+def backup_panel(cfg: Config, now: float | None = None) -> dict:
+    """Last backup epoch, next due epoch (``None`` when disabled or none taken yet),
+    count and the interval/retention knobs."""
+    last = backup.newest_backup_epoch(cfg)
+    interval = cfg.backup_interval or 0
+    return {"last": last, "next": last + interval if last is not None and interval > 0 else None,
+            "count": len(backup.list_backups(cfg)), "interval": interval,
+            "retention": cfg.backup_retention}
+
+
+def schedule_rows(cfg: Config, now: float | None = None) -> list[dict]:
+    """Each scheduled task with its last-fired and next-due epochs (``schedule.next_due``)."""
+    now = store.now_epoch() if now is None else now
+    return dispatcher.schedule_status(cfg, now)

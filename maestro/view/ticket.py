@@ -5,7 +5,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import event_log, ops, snapshot as snap_mod, store
+from ..config import Config
 from . import events as ev_view
+from . import rounds as rounds_view
+from . import why as why_view
+
+# Pipeline order of the phase rail; a phase the ticket never visited still gets an entry.
+RAIL_ORDER = ("triaging", "researching", "awaiting-human", "ready", "implementing", "verifying",
+              "qa", "awaiting-ci", "in-review", "terminating", "done")
+# Phases whose bounce back to implementing means a CI / QA / test failure sent it back.
+_FAIL_SOURCES = frozenset({"qa", "awaiting-ci", "in-review", "verifying"})
+
+
+@dataclass(frozen=True)
+class RailEntry:
+    phase: str
+    dwell_s: float
+    visits: int
+    current: bool
+    failed: bool
 
 
 @dataclass
@@ -18,6 +36,8 @@ class TicketView:
     proposal: str | None
     dwell: list[ev_view.DwellSegment]
     acs: list[dict]
+    status: str = ""
+    rail: list[RailEntry] | None = None
 
 
 def exists(home: Path, key: str) -> bool:
@@ -49,7 +69,70 @@ def ticket(home: Path, key: str, now: float) -> TicketView:
         key=key, title=snap_mod.display_title(home, snap), phase=snap.phase, snap=snap,
         spec=spec, proposal=proposal,
         dwell=ev_view.phase_dwell(event_log.read(home, key), now),
-        acs=ac_matrix(home, key, snap, spec))
+        acs=ac_matrix(home, key, snap, spec),
+        status=status_sentence(home, key, snap),
+        rail=phase_rail(event_log.read(home, key), now))
+
+
+def phase_rail(events: list[dict], now: float) -> list[RailEntry]:
+    """One entry per phase in pipeline order: total dwell, visit count, a ``current`` marker
+    and a ``failed`` marker for a phase a CI/QA/test failure sent back to implementing.
+    Phases outside ``RAIL_ORDER`` (e.g. degraded) follow, in first-visit order."""
+    segs = ev_view.phase_dwell(events, now)
+    dwell: dict[str, float] = {}
+    visits: dict[str, int] = {}
+    failed: set[str] = set()
+    for i, seg in enumerate(segs):
+        dwell[seg.phase] = dwell.get(seg.phase, 0.0) + seg.seconds
+        visits[seg.phase] = visits.get(seg.phase, 0) + 1
+        nxt = segs[i + 1].phase if i + 1 < len(segs) else None
+        if seg.phase in _FAIL_SOURCES and nxt == "implementing":
+            failed.add(seg.phase)
+    current = segs[-1].phase if segs else None
+    extra = [p for p in visits if p not in RAIL_ORDER]
+    return [RailEntry(p, dwell.get(p, 0.0), visits.get(p, 0), p == current, p in failed)
+            for p in (*RAIL_ORDER, *extra)]
+
+
+def status_sentence(home: Path, key: str, snap: snap_mod.Snapshot) -> str:
+    """One line: who is acting and on what, from the phase, the round label and the snapshot."""
+    phase = snap.phase
+    label = rounds_view.round_label(home, key)
+    if phase == "done":
+        return "Done."
+    if phase == "degraded":
+        return "Parked by the dispatcher" + (f": {snap.last_error}" if snap.last_error else ".")
+    if phase == "awaiting-human" and (snap.open_questions or snap.question_open):
+        return "Waiting on you to answer."
+    if phase == "awaiting-ci":
+        if snap.ci_state == "failure" or snap.failing_checks:
+            return "The dispatcher is handing a CI failure back to an agent."
+        return "The dispatcher is waiting on CI."
+    if phase == "in-review":
+        return "Waiting on you to review and merge."
+    if phase == "verifying":
+        return "The dispatcher is running the test suite."
+    if phase == "terminating":
+        return "The dispatcher is running teardown."
+    if label:
+        return f"An agent is working: {label}."
+    return f"In {phase}."
+
+
+def dispatch_card(home: Path, key: str, snap: snap_mod.Snapshot, cfg: Config, now: float) -> dict:
+    """The dispatch verdict as a card: verdict, claim, attempts, throttle and open deps,
+    each text built by `view/why`. Reads only (never releases a claim)."""
+    res, verdict = why_view.now_verdict(home, key, snap, now)
+    ctx = why_view.gather_context(home, key, cfg, now)
+    return {
+        "due": res.due,
+        "reason": res.reason,
+        "verdict": verdict,
+        "claim": why_view.claim_text(ctx),
+        "attempts": why_view.attempts_text(snap, cfg, ctx),
+        "throttle": why_view.throttle_text(home, key, snap, res, cfg, ctx, now),
+        "open_deps": [{"key": d, "phase": p} for d, p in why_view.open_deps(home, key)],
+    }
 
 
 EVENTS_PAGE = 50
