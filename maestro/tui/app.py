@@ -13,7 +13,8 @@ from textual.app import ScreenStackError
 from textual.binding import Binding
 from textual.command import CommandPalette
 from textual.containers import Horizontal
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
@@ -85,7 +86,8 @@ from .render import _fmt_duration
 from .render import _nudge_toast
 from .render import _render_badge
 from .render import _render_fleet
-from .render import _render_now, _render_now_detail
+from .render import _render_now
+from .render import _render_now_detail
 from .render import _render_pulse
 from .render import _styled_row
 from .screens import AcScreen
