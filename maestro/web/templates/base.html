@@ -2,16 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}maestro{% endblock %}</title>
 <link rel="stylesheet" href="/static/maestro.css">
 <script src="/static/htmx.min.js"></script>
 <script src="/static/htmx-ext-sse.js"></script>
 </head>
 <body hx-ext="sse" sse-connect="/stream">
-<header>
-  <a href="/"><strong>maestro</strong></a>
-  <span id="home" class="dim">{{ home }}</span>
+<header class="site-header">
+  <a class="logo" href="/">maestro</a>
+  <nav class="site-nav" aria-label="Primary">
+    {% for id, label, href in nav_items %}
+    <a href="{{ href }}"{% if id == nav %} class="current" aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <div class="status" id="shell-status">
+    <span class="fleet-state state-{{ shell_status.state }}">fleet {{ shell_status.state }}</span>
+    <span class="spend" id="shell-spend">{% if shell_status.spend_unavailable or shell_status.spend is none %}spend n/a{% else %}${{ "%.2f"|format(shell_status.spend) }}{% if shell_status.ceiling is not none %} / ${{ "%.2f"|format(shell_status.ceiling) }}{% endif %}{% endif %}</span>
+  </div>
 </header>
 <main>{% block body %}{% endblock %}</main>
+<footer class="dim" id="home">{{ home }}</footer>
 </body>
 </html>
