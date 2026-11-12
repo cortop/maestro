@@ -24,6 +24,8 @@ from textual.widgets import Header
 from textual.widgets import Input
 from textual.widgets import RichLog
 from textual.widgets import Static
+from textual.widgets import TabbedContent
+from textual.widgets import TabPane
 from textual.worker import Worker
 from textual.worker import WorkerState
 
@@ -51,6 +53,7 @@ from ..sessions import reap_children
 from ..statemachine import Phase
 from ..view import board as board_view
 from ..view import fleet as fleet_view
+from ..view import now as now_view
 from ..view import rounds as rounds_mod
 from . import worktree_open
 from .commands import ActionProvider
@@ -76,10 +79,13 @@ from .modals import _StopModal
 from .modals import _SuggestAcsModal
 from .modals import _TicketPickModal
 from .modals import menu_actions
+from .render import NEON_LEDGER
 from .render import _dep_color
 from .render import _fmt_duration
 from .render import _nudge_toast
 from .render import _render_badge
+from .render import _render_fleet
+from .render import _render_now
 from .render import _render_pulse
 from .render import _styled_row
 from .screens import AcScreen
@@ -280,6 +286,9 @@ class MaestroTUI(App):
     # T-162: Textual only auto-binds ctrl+p when nothing binds `command_palette`, so bind both.
     # sorted-registry
     _HIDDEN_BINDINGS = [
+        Binding("1", "tab_now", "Now tab", show=False),
+        Binding("2", "tab_tickets", "Tickets tab", show=False),
+        Binding("3", "tab_fleet", "Fleet tab", show=False),
         Binding("<", "flip_sort", "Sort direction", show=False),
         Binding(">", "cycle_sort", "Sort column", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
@@ -550,14 +559,23 @@ class MaestroTUI(App):
         yield qi
         yield Static("", id="pulse")
         yield Static("", id="fleet-badge")
-        with Horizontal():
-            yield DataTable(id="tickets")
-            with Vertical(id="right"):
-                yield Static("[dim]Select a ticket[/dim]", id="detail")
-                yield RichLog(id="events", highlight=True, markup=True)
+        with TabbedContent(initial="tab-now", id="tabs"):
+            with TabPane("Now", id="tab-now"):
+                yield Static("", id="now-status")
+                yield Static("[dim]Loading…[/dim]", id="now-groups")
+            with TabPane("Tickets", id="tab-tickets"):
+                with Horizontal():
+                    yield DataTable(id="tickets")
+                    with Vertical(id="right"):
+                        yield Static("[dim]Select a ticket[/dim]", id="detail")
+                        yield RichLog(id="events", highlight=True, markup=True)
+            with TabPane("Fleet", id="tab-fleet"):
+                yield Static("[dim]Loading…[/dim]", id="fleet-tab")
         yield Footer()
 
     def on_mount(self) -> None:
+        self.register_theme(NEON_LEDGER)
+        self.theme = NEON_LEDGER.name
         table = self.query_one("#tickets", DataTable)
         table.cursor_type = "row"
         table.add_column("Key")
@@ -576,6 +594,8 @@ class MaestroTUI(App):
         self.set_interval(5.0, self._refresh_badge)
         self._refresh_pulse()
         self.set_interval(5.0, self._refresh_pulse)
+        self._refresh_now_tab()
+        self.set_interval(5.0, self._refresh_now_tab)
         # T-153: reap exited reconcilers this long-lived process spawned, so a
         # zombie never keeps its claim `confirmed` and blocks the key's respawn.
         self.set_interval(3.0, reap_children)
@@ -675,6 +695,44 @@ class MaestroTUI(App):
             return fleet_view.pulse(self._home, cfg)
         self.run_worker(_load, thread=True, group="pulse", exclusive=True, name="pulse")
 
+    def _refresh_now_tab(self) -> None:
+        """Load the Now tab (view/now groups + status row) off the UI thread."""
+        def _load() -> dict:
+            cfg = config_mod.load(str(self._home))
+            now = store.now_epoch()
+            return {"view": now_view.build(self._home, cfg, now),
+                    "pulse": fleet_view.pulse(self._home, cfg, now),
+                    "sessions": len(fleet_view.session_rows(self._home, cfg, now)),
+                    "fleet": fleet_mod.status(self._home), "now": now}
+        self.run_worker(_load, thread=True, group="now-tab", exclusive=True,
+                        name="now-tab", exit_on_error=False)
+
+    def _refresh_fleet_tab(self) -> None:
+        def _load() -> tuple[dict, dict]:
+            status = fleet_mod.status(self._home)
+            doctor = health.report(config_mod.load(str(self._home)), store.now_epoch())
+            return status, doctor
+        self.run_worker(_load, thread=True, group="fleet-tab", exclusive=True,
+                        name="fleet-tab", exit_on_error=False)
+
+    def _show_tab(self, tab: str) -> None:
+        self.query_one("#tabs", TabbedContent).active = tab
+        if tab == "tab-tickets":
+            self.query_one("#tickets", DataTable).focus()
+        elif tab == "tab-fleet":
+            self._refresh_fleet_tab()
+        else:
+            self._refresh_now_tab()
+
+    def action_tab_now(self) -> None:
+        self._show_tab("tab-now")
+
+    def action_tab_tickets(self) -> None:
+        self._show_tab("tab-tickets")
+
+    def action_tab_fleet(self) -> None:
+        self._show_tab("tab-fleet")
+
     def _refresh_badge(self) -> None:
         # T-89 (AC1): the header badge is the one always-visible surface, so
         # this is where the provider_availability check's state rides along
@@ -697,6 +755,24 @@ class MaestroTUI(App):
             self._badge_result = event.worker.result
             self.sub_title = self._badge_result["banner"]
             self._paint_badge()
+        elif event.worker.name == "now-tab" and event.state == WorkerState.SUCCESS:
+            r = event.worker.result
+            try:
+                status, groups = _render_now(r["view"], r["pulse"], r["sessions"], r["fleet"], r["now"])
+                self.query_one("#now-status", Static).update(status)
+                self.query_one("#now-groups", Static).update(groups)
+            except NoMatches:  # app is tearing down
+                pass
+        elif event.worker.name == "now-tab" and event.state == WorkerState.ERROR:
+            try:
+                self.query_one("#now-groups", Static).update(f"[red]now: {event.worker.error}[/red]")
+            except NoMatches:
+                pass
+        elif event.worker.name == "fleet-tab" and event.state == WorkerState.SUCCESS:
+            try:
+                self.query_one("#fleet-tab", Static).update(_render_fleet(*event.worker.result))
+            except NoMatches:
+                pass
         elif event.worker.name == "blockers":
             if event.state == WorkerState.SUCCESS:
                 self._open_blockers_picker(*event.worker.result)

@@ -16,7 +16,7 @@ from .. import config as config_mod
 from .. import store
 from ..config import Config
 from ..view import events as ev_view
-from . import routes_board, routes_now, routes_ticket
+from . import routes_board, routes_fleet, routes_now, routes_ticket
 from .shell import Shell
 from .stream import Hub
 
@@ -54,6 +54,7 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     routes_board.register(app, shell)
     routes_now.register(app, shell)
     routes_ticket.register(app, shell)
+    routes_fleet.register(app, shell)
 
     @app.get("/stream", response_class=EventSourceResponse)
     async def stream(last_event_id: str | None = Header(None)) -> AsyncIterable[ServerSentEvent]:

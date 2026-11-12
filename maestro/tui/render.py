@@ -4,7 +4,9 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+from rich.markup import escape
 from rich.text import Text
+from textual.theme import Theme
 
 from ..view.fleet import sparkline as _sparkline
 from .. import config as config_mod
@@ -329,3 +331,66 @@ def _render_pulse(p: dict) -> str:
         until = datetime.fromtimestamp(p["paused_until"], tz=timezone.utc).strftime("%H:%M")
         parts.append(f"[yellow bold]rate-limited → {until}[/yellow bold]")
     return "  ".join(parts)
+
+
+# Neon Ledger: ground, panel, lines, text, gold (needs you / working / selection), cyan
+# (dispatcher-owned / healthy), soft magenta (failure).
+NEON_LEDGER = Theme(
+    name="neon-ledger",
+    primary="#EBCB55",
+    secondary="#00E5FF",
+    accent="#EBCB55",
+    warning="#EBCB55",
+    error="#FF7FA6",
+    success="#00E5FF",
+    foreground="#F2F2F0",
+    background="#07070A",
+    surface="#0E0E14",
+    panel="#0E0E14",
+    boost="#2B2612",
+    dark=True,
+    variables={
+        "border": "#23232E",
+        "border-blurred": "#23232E",
+        "text-muted": "#9A9AA8",
+        "block-cursor-background": "#2B2612",
+        "block-cursor-foreground": "#EBCB55",
+    },
+)
+
+
+def _fmt_wait(seconds: float) -> str:
+    s = int(max(0, seconds))
+    if s >= 3600:
+        return f"{s // 3600}h{s % 3600 // 60:02d}m"
+    return f"{s // 60}m" if s >= 60 else f"{s}s"
+
+
+def _render_now(view, pulse: dict, sessions: int, fleet: dict, now: float) -> tuple[str, str]:
+    """The Now tab: ``(status row, three labelled groups)`` as Rich markup."""
+    if fleet.get("paused"):
+        state = "[#FF7FA6]paused[/]"
+    elif fleet.get("loaded"):
+        state = "[#00E5FF]running[/]"
+    else:
+        state = "[#9A9AA8]down[/]"
+    spend = pulse.get("spend") or {}
+    ceiling, today = spend.get("ceiling_usd"), spend.get("today_usd")
+    if spend.get("unavailable"):
+        spend_str = "spend unavailable"
+    else:
+        spend_str = (f"${today:.2f}" if today is not None else "$—") + (
+            f" / ${float(ceiling):.2f}" if ceiling is not None else " / no cap")
+    status = f"fleet {state}  ·  {sessions} live session(s)  ·  {spend_str}"
+    gold, cyan = "#EBCB55", "#00E5FF"
+    lines = [f"[bold {gold}]NEEDS YOU ({len(view.needs_you)})[/]"]
+    for c in view.needs_you:
+        kind = "degraded" if hasattr(c, "reason") else "question"
+        lines.append(f"  {escape(c.key)}  {kind}  waiting {_fmt_wait(c.waiting_s)}")
+    lines += ["", f"[bold {cyan}]IN FLIGHT ({len(view.in_flight)})[/]"]
+    for r in view.in_flight:
+        lines.append(f"  {escape(r.key)}  {escape(r.phase)}  {escape(r.doing)}  [#9A9AA8]{escape(r.tool_line)}[/]")
+    lines += ["", f"[bold #C9C9D4]QUEUED ({len(view.queued)})[/]"]
+    for q in view.queued:
+        lines.append(f"  {escape(q.key)}  [#9A9AA8]{escape(q.reason)}[/]")
+    return status, "\n".join(lines)

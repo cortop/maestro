@@ -139,3 +139,24 @@ nav#filters a.active { color: var(--gold); font-weight: 700; }
   .now-cols { grid-template-columns: minmax(0, 1fr); }
   .ledger-scroll { max-height: 60vh; }
 }
+
+/* fleet page */
+.fleet-headline h1 { font-size: 4rem; margin: .5rem 0 .2rem; }
+.fleet-headline.state-healthy h1 { color: var(--cyan); }
+.fleet-headline.state-needs-attention h1, .fleet-headline.state-paused h1,
+.fleet-headline.state-rate-limited h1 { color: var(--gold); }
+.fleet-headline.state-unknown h1 { color: var(--dim); }
+.fleet-actions:empty { display: none; }
+.fleet-budget { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1rem 0; }
+.fleet-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+.meter { position: relative; height: 10px; background: var(--line-2); }
+.meter-fill { height: 100%; background: var(--cyan); }
+.meter.over .meter-fill { background: var(--magenta); }
+.meter-mark { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--gold); }
+.buckets { display: flex; align-items: flex-end; gap: 2px; height: 40px; }
+.bucket { flex: 1 1 0; background: var(--gold-dim); }
+.checks { list-style: none; padding: 0; margin: 0; }
+.checks li { padding: .2rem 0; border-top: 1px solid var(--line); }
+.check-fail .chip { color: var(--magenta-soft); border-color: var(--magenta); }
+.check-warn .chip { color: var(--gold); border-color: var(--gold); }
+@media (max-width: 800px) { .fleet-budget, .fleet-columns { grid-template-columns: 1fr; } }
