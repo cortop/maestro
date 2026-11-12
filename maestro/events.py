@@ -34,6 +34,8 @@ CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, head_s
                                          # (ci_failure_excerpt=true), present only on the observation that actually
                                          # routes to `implementing` after a ci_auto_rerun rerun -- see
                                          # dispatcher._observe_ci and CiRerunRequested below.
+# T-250: one inbound-review round on a `review`-kind ticket (someone else's PR).
+REVIEW_ROUND_STARTED = "ReviewRoundStarted"  # {round, head_sha, url, source?}  idempotent per head_sha
 REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body, author}  one PR review; idempotent per comment_id
 # T-128: `ops.reply_review`'s own record that it posted a reply through the VCS
 # provider -- to the `/replies` thread endpoint for an `inline-<id>` comment_id,

@@ -72,6 +72,16 @@ class VCS(Protocol):
         """
         ...
 
+    def pr_head(self, pr_number: int, repo: str | None = None,
+                env: dict | None = None) -> dict:
+        """Read one PR's head for an inbound review (someone else's PR).
+
+        Returns {"head_sha": str|None, "head_ref": str|None, "is_fork": bool,
+        "state": str, "title": str|None, "error": same vocabulary as
+        ``pr_status`` (optional)}. ``is_fork`` is True when the head branch
+        lives in a different repo than the PR's base."""
+        ...
+
     def review_feedback(self, pr_number: int, repo: str | None = None,
                         env: dict | None = None) -> list[dict]:
         """Return every review left on the PR as [{"id": str, "state": str|None,
@@ -182,6 +192,10 @@ class NullVCS:
                   env: dict | None = None) -> dict:
         return {"state": "unknown", "mergeable": "UNKNOWN", "head_sha": None,
                 "ci_state": "unknown", "failing_checks": [], "draft": None}
+    def pr_head(self, pr_number: int, repo: str | None = None,
+                env: dict | None = None) -> dict:
+        return {"head_sha": None, "head_ref": None, "is_fork": False, "state": "unknown",
+                "title": None, "error": "unknown"}
     def review_feedback(self, pr_number: int, repo: str | None = None,
                         env: dict | None = None) -> list[dict]: return []
     def pr_ready(self, pr_number: int, repo: str | None = None,

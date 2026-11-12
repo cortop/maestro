@@ -1590,6 +1590,16 @@ def cmd_import_linear(args) -> int:
     return 0
 
 
+def cmd_review(args) -> int:
+    """[human] T-250: mint (or advance) a review ticket for someone else's PR."""
+    cfg = _cfg(args)
+    result = ops.start_review(cfg, args.pr_url, source=args.source)
+    _print(result)
+    if not result["started"]:
+        print(f"{result['key']}: no new review round ({result['reason']})", file=sys.stderr)
+    return 0
+
+
 def cmd_sync_tracker(args) -> int:
     """[human] T-110: run a configured tracker's bulk import on demand -- the
     explicit counterpart to the dispatcher's own polled sync tick, whose
@@ -1879,6 +1889,10 @@ def build_parser() -> argparse.ArgumentParser:
              "[human] mint a ticket from a Linear issue URL or bare identifier (LINEAR-<id>)")
     sp.add_argument("url_or_id", metavar="URL_OR_ID",
                     help="a Linear issue URL (https://linear.app/<org>/issue/<id>/...) or bare identifier (e.g. ENG-123)")
+    sp = add("review", cmd_review,
+             "[human] mint a review ticket for someone else's PR and check its head out")
+    sp.add_argument("pr_url", metavar="PR_URL", help="https://github.com/<owner>/<repo>/pull/<n>")
+    sp.add_argument("--source", default=None, help="optional link to where the PR was raised (e.g. a chat permalink)")
     sp = add("sync-tracker", cmd_sync_tracker,
              "[human] run a configured tracker's bulk import on demand (bypasses auto_import + the sync cursor)")
     sp.add_argument("--name", default=None,

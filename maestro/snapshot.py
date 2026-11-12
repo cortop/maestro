@@ -294,6 +294,13 @@ class Snapshot:
     # dispatcher's sync tick knows which tickets to `refresh`.
     external_source: str | None = None
     external_id: str | None = None
+    # T-250: a `review`-kind ticket's inbound-review state, from ReviewRoundStarted:
+    # the PR url, the optional source link (e.g. a chat permalink), the head SHA the
+    # latest round was started for, and how many rounds have started.
+    review_url: str | None = None
+    review_source: str | None = None
+    review_head_sha: str | None = None
+    review_round: int = 0
     # [repos.<name>] this ticket is bound to, from TicketCreated.repo. None = no
     # explicit binding -- repos.resolve() falls back to the implicit default.
     repo: str | None = None
@@ -545,6 +552,13 @@ def _fold_ticket_created(s: Snapshot, p: dict, seq, t: str) -> None:
     s.external_id = p.get("external_id", s.external_id)
     s.repo = p.get("repo", s.repo)
     s.phase = Phase.TRIAGING.value
+
+
+def _fold_review_round_started(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.review_url = p.get("url", s.review_url)
+    s.review_source = p.get("source") or s.review_source
+    s.review_head_sha = p.get("head_sha", s.review_head_sha)
+    s.review_round += 1
 
 
 def _fold_spec_observed(s: Snapshot, p: dict, seq, t: str) -> None:
@@ -804,6 +818,7 @@ def _fold_finalized(s: Snapshot, p: dict, seq, t: str) -> None:
 
 _FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
     E.TICKET_CREATED: _fold_ticket_created,
+    E.REVIEW_ROUND_STARTED: _fold_review_round_started,
     E.SPEC_OBSERVED: _fold_spec_observed,
     E.PHASE_CHANGED: _fold_phase_changed,
     E.QUESTION_ASKED: _fold_question_asked,
