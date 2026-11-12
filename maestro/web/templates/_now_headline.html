@@ -1,0 +1,6 @@
+<h1 class="now-title" data-needs="{{ needs_count }}">
+{% if needs_count == 0 %}Nothing needs <span class="you">you</span>{% elif needs_count == 1 %}1 ticket needs <span class="you">you</span>{% else %}{{ needs_count }} tickets need <span class="you">you</span>{% endif %}
+</h1>
+<ul class="counters">
+  {% for label, n in counters %}<li><b>{{ n }}</b> {{ label }}</li>{% endfor %}
+</ul>

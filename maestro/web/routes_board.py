@@ -1,4 +1,4 @@
-"""Board page routes (`/`, `/board/rows`) of `maestro web`."""
+"""Board page routes (`/tickets`, `/board/rows`) of `maestro web`."""
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,9 +16,9 @@ def register(app: FastAPI, shell: Shell) -> None:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"view": view, "filters": board_view.FILTER_NAMES}
 
-    @app.get("/", response_class=HTMLResponse)
-    def index(request: Request, filter: str = "needs-you"):
-        return shell.render(request, "board.html", nav="now", **board_ctx(filter))
+    @app.get("/tickets", response_class=HTMLResponse)
+    def tickets(request: Request, filter: str = "needs-you"):
+        return shell.render(request, "board.html", nav="tickets", **board_ctx(filter))
 
     @app.get("/board/rows", response_class=HTMLResponse)
     def board_rows(request: Request, filter: str = "needs-you"):

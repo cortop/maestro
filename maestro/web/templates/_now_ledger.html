@@ -1,0 +1,25 @@
+<table class="ledger">
+  <thead><tr><th>Key</th><th>Title</th><th>Stage</th><th>Now</th></tr></thead>
+  {% for group, rows in (("agent", agents), ("dispatcher", dispatcher)) %}
+  <tbody data-group="in-flight-{{ group }}">
+    {% for r in rows %}
+    <tr data-key="{{ r.key }}">
+      <td class="key"><a href="/t/{{ r.key }}">{{ r.key }}</a></td>
+      <td>{{ r.title }}</td>
+      <td><span class="chip chip-{{ group }}">{{ r.phase }}</span></td>
+      <td>{{ r.doing }}{% if r.tool_line %}<div class="dim mono">{{ r.tool_line }}</div>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+  {% endfor %}
+  <tbody data-group="queued">
+    {% for r in view.queued %}
+    <tr data-key="{{ r.key }}">
+      <td class="key"><a href="/t/{{ r.key }}">{{ r.key }}</a></td>
+      <td>{{ r.title }}</td>
+      <td><span class="chip">{{ r.phase }}</span></td>
+      <td class="dim">{{ r.reason }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
