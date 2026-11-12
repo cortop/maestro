@@ -409,7 +409,7 @@ def _render_now_detail(card, history: list[str], now: float) -> str:
         waiting += " · blocks " + escape(", ".join(card.dependents))
     lines = [head, waiting + "[/]", ""]
     if hasattr(card, "reason"):
-        lines += [f"[bold #FF7FA6]Failure[/]", escape(card.reason), "",
+        lines += ["[bold #FF7FA6]Failure[/]",escape(card.reason), "",
                   f"[bold {gold}]Ctrl+R[/] retry   [bold {gold}]Ctrl+D[/] discard (confirmed)"]
     else:
         pos = f" ({card.position} of {card.total})" if card.position and card.total else ""
@@ -422,5 +422,5 @@ def _render_now_detail(card, history: list[str], now: float) -> str:
             lines += [f"[{muted}]No recommendation.[/]",
                       f"[bold {gold}]▸ Write an answer[/]  [{muted}](Enter or a)[/]"]
     if history:
-        lines += ["", f"[bold]How it got here[/]"] + [f"  {escape(h)}" for h in history]
+        lines += ["", "[bold]How it got here[/]"] + [f"  {escape(h)}" for h in history]
     return "\n".join(lines)
