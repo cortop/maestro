@@ -3249,6 +3249,126 @@ def import_linear(cfg: Config, url_or_id: str, *, tracker: object | None = None)
     return {"key": minted_key, "minted": True}
 
 
+_REVIEW_PR_URL_RE = re.compile(r"^https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[/?#].*)?$")
+
+
+def _review_binding(cfg: Config, slug: str) -> str | None:
+    """The `[repos.<name>]` name whose slug is *slug* (case-insensitive), if any."""
+    for name, table in cfg.repos.items():
+        if str(table.get("slug") or "").lower() == slug.lower() and table.get("path"):
+            return name
+    return None
+
+
+def _review_checkout(cfg: Config, key: str, binding: repos_mod.RepoBinding, number: int,
+                     head_sha: str) -> Path:
+    """Check the PR head out, detached, in *key*'s own worktree.
+
+    Only the repo's object store is touched (a fetch of the PR head ref); the
+    main checkout's HEAD, index and working tree never change."""
+    repo, wt = binding.path, store.worktree_path(cfg.home, key)
+    timeout = binding.worktree_timeout
+
+    def _git(*args: str, cwd: str | Path) -> subprocess.CompletedProcess:
+        try:
+            p = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                               timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise store.MaestroError(f"{key}: git {args[0]} did not complete ({exc})") from exc
+        if p.returncode != 0:
+            raise store.MaestroError(
+                f"{key}: git {' '.join(args[:2])} failed (rc={p.returncode}): {p.stderr.strip()}")
+        return p
+
+    _git("fetch", "-q", "origin", f"refs/pull/{number}/head", cwd=repo)
+    fetched = _git("rev-parse", "FETCH_HEAD", cwd=repo).stdout.strip()
+    if fetched != head_sha:
+        raise store.MaestroError(
+            f"{key}: PR #{number} head moved while checking out ({fetched[:12]} != {head_sha[:12]}); "
+            "re-run `maestro review` to pick up the new head")
+    if wt.exists():
+        _git("checkout", "-q", "--detach", head_sha, cwd=wt)
+    else:
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        _git("worktree", "add", "-q", "--detach", str(wt), head_sha, cwd=repo)
+    return wt
+
+
+def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
+                 vcs: object | None = None) -> dict:
+    """[human] T-250: turn someone else's PR into a `review`-kind ticket (never
+    `implementing`), keyed by the PR, with its head checked out in the ticket's
+    own worktree.
+
+    Idempotent: a re-run for the same head SHA is a no-op; a re-run after new
+    commits starts another round (`ReviewRoundStarted`) on the same ticket. The
+    ticket parks in `ready` between rounds, which the dispatcher holds for
+    `review` tickets (`dispatcher._fold_and_gate`). A repo with no
+    `[repos.<name>]` slug match, or a PR whose head is in a fork, mints the
+    ticket but checks nothing out and asks a needs-you question instead.
+
+    The PR's title and body are never read here: other people's text stays out
+    of the ticket. *vcs* is a test-only injection point for the VCS boundary."""
+    m = _REVIEW_PR_URL_RE.match((pr_url or "").strip())
+    if not m:
+        raise store.MaestroError(f"not a GitHub pull request URL: {pr_url!r}")
+    owner, name, number = m.group(1), m.group(2), int(m.group(3))
+    slug = f"{owner}/{name}"
+    key = store.validate_key(f"REVIEW-{owner}-{name}-{number}".lower())
+    url = f"https://github.com/{slug}/pull/{number}"
+    snap = snap_mod.load(cfg.home, key) if event_log.last_seq(cfg.home, key) > 0 else None
+    if snap is not None and snap.open_questions:
+        return {"key": key, "minted": False, "started": False, "reason": "question open"}
+
+    repo_name = _review_binding(cfg, slug)
+    head: dict = {}
+    refusal = None
+    if repo_name is None:
+        refusal = ("unbound", f"{slug} is not bound in any [repos.<name>] table. Bind it in "
+                              f"config.toml then re-run `maestro review {url}`, or dismiss this ticket.")
+    else:
+        binding = repos_mod._binding_from_table(cfg, repo_name, cfg.repos[repo_name])
+        if vcs is None:
+            from .providers import get_vcs
+            vcs = get_vcs(cfg)
+        from .dispatcher import resolve_credential
+        env = resolve_credential(binding, {}).env or None
+        head = vcs.pr_head(number, slug, env=env)
+        if head.get("error") or not head.get("head_sha"):
+            raise store.MaestroError(
+                f"{key}: cannot read PR head for {url} ({head.get('error') or 'no head sha'})")
+        if head.get("is_fork"):
+            refusal = ("fork", f"{url} comes from a fork; reviews only check out branches in "
+                               f"{slug} itself. Dismiss this ticket, or review it by hand.")
+
+    minted = snap is None
+    if minted:
+        mint_one(cfg, key=key, prefix=None, title=f"Review {slug}#{number}",
+                 ticket_args={"intent": f"Review {url} (someone else's pull request).",
+                              "kind": "review", "repo": repo_name,
+                              "external_source": "github-pr", "external_id": f"{slug}#{number}"})
+        snap = snap_mod.load(cfg.home, key)
+    if refusal is not None:
+        qid = f"review-{refusal[0]}-{key}"
+        if qid not in _resolved_qids(cfg, key):
+            ask(cfg, key, f"{key}: {refusal[1]}", qid=qid, actor="human")
+        return {"key": key, "minted": minted, "started": False, "reason": refusal[0]}
+    if snap.review_head_sha == head["head_sha"]:
+        return {"key": key, "minted": False, "started": False, "reason": "up to date"}
+
+    wt = _review_checkout(cfg, key, binding, number, head["head_sha"])
+    payload = {"head_sha": head["head_sha"], "url": url}
+    if source:
+        payload["source"] = source
+    _append(cfg, key, E.REVIEW_ROUND_STARTED, payload, actor="human",
+            sid=f"review-round-{key}-{head['head_sha']}")
+    if Phase(snap.phase) != Phase.READY:
+        set_phase(cfg, key, Phase.READY, reason=f"review round at {head['head_sha'][:12]}",
+                  actor="human", force=True)
+    return {"key": key, "minted": minted, "started": True, "worktree": str(wt),
+            "head_sha": head["head_sha"]}
+
+
 def sync_tracker(cfg: Config, name: str | None = None) -> dict:
     """[human] T-110: explicit, on-demand bulk import -- the counterpart to the
     dispatcher's own polled sync tick (``dispatcher.sync_external_sources``),

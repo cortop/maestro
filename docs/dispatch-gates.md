@@ -11,6 +11,7 @@ Every `decisions[key]["outcome"]` a sweep can assign -- via either `decisions[ke
 | `phantom` | `dispatcher._fold_and_gate` |
 | `fold_error` | `dispatcher._fold_and_gate` |
 | `held` | `dispatcher._fold_and_gate` |
+| `review_round_pending` | `dispatcher._fold_and_gate` |
 | `not_due` | `dispatcher._fold_and_gate` |
 | `would_park_missing_acs` | `dispatcher._fold_and_gate` |
 | `missing_acs` | `dispatcher._fold_and_gate` |

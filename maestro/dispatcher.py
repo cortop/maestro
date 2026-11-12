@@ -3962,6 +3962,11 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
         decisions[key] = {"outcome": "held",
                           "reason": "held by a human" + (f": {held['reason']}" if held.get("reason") else "")}
         return None
+    # T-250: a review-kind ticket's pending round (`ready`) has no reconciler yet.
+    if snap.kind == "review" and snap.phase in (Phase.TRIAGING.value, Phase.READY.value):
+        decisions[key] = {"outcome": "review_round_pending",
+                          "reason": "review ticket: no reconciler for its round yet"}
+        return None
     res = due_check(home, key, snap, now)
     if not res.due:
         decisions[key] = {"outcome": "not_due", "reason": res.reason}

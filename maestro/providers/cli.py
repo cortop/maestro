@@ -196,6 +196,22 @@ class GitHubCliVCS:
             "draft": bool(data.get("isDraft", False)),
         }
 
+    def pr_head(self, pr_number: int, repo: str | None = None,
+                env: dict | None = None) -> dict:
+        repo = repo or (self.repos[0] if self.repos else None)
+        cmd = ["gh", "pr", "view", str(pr_number), "--json",
+               "headRefOid,headRefName,isCrossRepository,state,title"]
+        if repo:
+            cmd += ["--repo", repo]
+        rc, out, err = _run(cmd, env=env)
+        if rc != 0 or not out.strip():
+            return {"head_sha": None, "head_ref": None, "is_fork": False, "state": "unknown",
+                    "title": None, "error": classify_gh_failure(rc, out, err)}
+        data = json.loads(out)
+        return {"head_sha": data.get("headRefOid"), "head_ref": data.get("headRefName"),
+                "is_fork": bool(data.get("isCrossRepository")),
+                "state": data.get("state", "unknown"), "title": data.get("title")}
+
     def review_feedback(self, pr_number: int, repo: str | None = None,
                         env: dict | None = None) -> list[dict]:
         repo = repo or (self.repos[0] if self.repos else None)
