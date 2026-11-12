@@ -17,6 +17,7 @@ from .. import store
 from ..config import Config
 from ..view import events as ev_view
 from . import routes_board, routes_fleet, routes_now, routes_ticket
+from .guard import WriteGuard
 from .shell import Shell
 from .stream import Hub
 
@@ -31,7 +32,8 @@ def _cfg(home: Path) -> Config:
 
 
 def create_app(home: Path | str, *, poll_interval: float = 1.0,
-               stream_limit: int | None = None) -> FastAPI:
+               stream_limit: int | None = None, host: str = "127.0.0.1",
+               read_only: bool = False, allow_remote_writes: bool = False) -> FastAPI:
     """Build the app over *home*. *stream_limit* ends each `/stream` after that many events
     (tests; a browser stream is unbounded)."""
     home = Path(home)
@@ -48,9 +50,13 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     app = FastAPI(title="maestro", lifespan=lifespan)
     app.state.home = home
     app.state.hub = hub
+    app.state.guard = guard = WriteGuard(host, read_only=read_only,
+                                         allow_remote_writes=allow_remote_writes)
     app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
-    shell = Shell(home, _cfg, Jinja2Templates(directory=str(_HERE / "templates")))
+    shell = Shell(home, _cfg, Jinja2Templates(directory=str(_HERE / "templates")),
+                  guard)
     shell.templates.env.filters["dur"] = ev_view.fmt_duration
+    app.state.shell = shell
     routes_board.register(app, shell)
     routes_now.register(app, shell)
     routes_ticket.register(app, shell)
@@ -89,5 +95,7 @@ def main(args) -> int:
     import uvicorn
 
     cfg = config_mod.load(getattr(args, "home", None))
-    uvicorn.run(create_app(cfg.home), host=args.host, port=args.port, log_level="warning")
+    app = create_app(cfg.home, host=args.host, read_only=getattr(args, "read_only", False),
+                     allow_remote_writes=getattr(args, "allow_remote_writes", False))
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
