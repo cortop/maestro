@@ -1,0 +1,9 @@
+{# T-245: palette entries, server-filtered by what is valid now; palette.js filters and runs them. #}
+{% for title, entries in groups %}
+<li class="palette-group" role="presentation">{{ title }}</li>
+{% for e in entries %}
+<li class="palette-entry" role="option" data-text="{{ e.text|lower }}"{% if e.post %} data-post="{{ e.post }}"{% else %} data-href="{{ e.href }}"{% endif %}>
+  <span class="palette-label">{{ e.label }}</span>{% if e.hint %} <span class="palette-hint dim">{{ e.hint }}</span>{% endif %}{% if e.tui %}<kbd>{{ e.tui }}</kbd>{% endif %}
+</li>
+{% endfor %}
+{% endfor %}

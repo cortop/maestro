@@ -194,3 +194,18 @@ details.confirm[open] > summary, details.write[open] > summary { margin-bottom: 
 .card.review .card-title { color: var(--cyan); }
 .finding { display: grid; gap: .5rem; padding: .6rem 0; border-top: 1px solid var(--line); }
 .finding textarea, .finding select { background: var(--ground); color: inherit; border: 1px solid var(--cyan); padding: .5rem; font: inherit; }
+
+/* T-245: command palette */
+.palette-open { margin-left: auto; align-self: center; background: transparent; color: var(--text); border: 1px solid var(--gold-dim); padding: .25rem .6rem; font: 12px var(--font-mono); cursor: pointer; }
+.palette-open + .status { margin-left: 0; }
+.palette[hidden] { display: none; }
+.palette { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+.palette-box { --cut: 14px; width: min(40rem, 92vw); background: var(--panel); border: 1px solid var(--gold-dim); padding: .6rem;
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut)); }
+.palette-input { width: 100%; box-sizing: border-box; background: var(--ground); color: var(--text); border: 1px solid var(--gold-dim); padding: .5rem .7rem; font: 14px var(--font-mono); }
+.palette-list { list-style: none; margin: .5rem 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+.palette-group { color: var(--gold); font: 600 11px var(--font-mono); text-transform: uppercase; padding: .5rem .6rem .2rem; }
+.palette-entry { display: flex; gap: .6rem; align-items: baseline; padding: .35rem .6rem; cursor: pointer; }
+.palette-entry .palette-label { flex: 1; }
+.palette-entry.selected { background: var(--gold-tint); box-shadow: inset 2px 0 var(--gold); }
+.palette-entry kbd { font: 11px var(--font-mono); color: var(--gold); border: 1px solid var(--gold-dim); padding: 0 .35rem; }
