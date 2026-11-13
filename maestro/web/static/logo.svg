@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" role="img" aria-label="maestro">
+  <polygon points="124,56 276,56 332,112 332,226 288,306 200,352 112,306 68,226 68,112" fill="#0E0E14" stroke="#EBCB55" stroke-width="6" stroke-linejoin="miter"/>
+  <polygon points="98,150 184,172 184,192 108,182" fill="#00E5FF"/>
+  <polygon points="302,150 216,172 216,192 292,182" fill="#00E5FF"/>
+  <path d="M200 266 C 160 286, 116 266, 106 208 C 126 244, 164 250, 200 242 Z" fill="#EBCB55"/>
+  <path d="M200 266 C 240 286, 284 266, 294 208 C 274 244, 236 250, 200 242 Z" fill="#EBCB55"/>
+</svg>

@@ -1,3 +1,5 @@
+<p align="center"><img src="maestro/web/static/logo.svg" alt="maestro logo" width="120"></p>
+
 # maestro
 
 **A per-ticket reconciler over append-only event streams.** A project-agnostic,

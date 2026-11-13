@@ -4,13 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}maestro{% endblock %}</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo-mark.svg">
 <link rel="stylesheet" href="/static/maestro.css">
 <script src="/static/htmx.min.js"></script>
 <script src="/static/htmx-ext-sse.js"></script>
 </head>
 <body hx-ext="sse" sse-connect="/stream"{% if can_write %} hx-headers='{"X-Maestro-Token": "{{ write_token }}"}'{% endif %}>
 <header class="site-header">
-  <a class="logo" href="/">maestro</a>
+  <a class="logo" href="/"><svg class="logo-mark"viewBox="56 44 288 320" aria-hidden="true"><polygon points="124,56 276,56 332,112 332,226 288,306 200,352 112,306 68,226 68,112" fill="#07070A"/><polygon points="98,150 184,172 184,192 108,182" fill="#EBCB55"/><polygon points="302,150 216,172 216,192 292,182" fill="#EBCB55"/><path d="M200 270 C 160 290, 116 268, 106 208 C 126 242, 164 248, 200 240 Z" fill="#EBCB55"/><path d="M200 270 C 240 290, 284 268, 294 208 C 274 242, 236 248, 200 240 Z" fill="#EBCB55"/></svg>maestro</a>
   <nav class="site-nav" aria-label="Primary">
     {% for id, label, href in nav_items %}
     <a href="{{ href }}"{% if id == nav %} class="current" aria-current="page"{% endif %}>{{ label }}</a>
