@@ -11,6 +11,37 @@ _EXACT_KEY, _PREFIX_KEY = 1e6, 1e3
 _SUB_SCREENS = (("Detail", "DetailScreen"), ("Spec", "SpecScreen"), ("Logs", "LogsScreen"),
                 ("Events", "EventsScreen"), ("Proposal", "ProposalScreen"))
 
+# One-line help for each action that targets the selected ticket (keyed by action name).
+_TICKET_ACTION_HELP = {
+    "ac_matrix": "Acceptance criteria and their QA verdicts",
+    "action_menu": "Pick any action for this ticket",
+    "add_ac": "Append an acceptance criterion to the spec",
+    "answer": "Answer the open question",
+    "blockers": "What is blocking this ticket",
+    "cmd": "Send a command to the ticket",
+    "compact": "Compact the ticket's event log",
+    "deps_panel": "Dependency tree around this ticket",
+    "discard": "Discard a degraded ticket",
+    "edit_spec": "Edit the spec in your editor",
+    "focus_detail": "Open the ticket detail",
+    "hold": "Hold the ticket so no session is spawned",
+    "inbox_message": "Leave a message in the ticket's inbox",
+    "now_accept": "Accept the recommended answer",
+    "open_pr": "Open the ticket's pull request",
+    "open_worktree": "Open the ticket's worktree",
+    "release": "Release a held ticket",
+    "retry": "Retry a degraded ticket",
+    "rounds_panel": "Implementation rounds so far",
+    "runner": "Choose the runner for this ticket",
+    "show_spec": "Read the spec",
+    "suggest_acs": "Draft acceptance criteria",
+    "trigger_post_qa": "Run the post-QA step",
+    "view_events": "The ticket's event log",
+    "view_inbox": "The ticket's inbox log",
+    "view_logs": "Session logs",
+    "why_panel": "Why the ticket is in its current state",
+}
+
 
 class TicketProvider(Provider):
     """Fuzzy-match tickets by key and title (from the app's in-memory cache) and jump to them."""
@@ -88,7 +119,16 @@ class ActionProvider(Provider):
 
     async def discover(self) -> Hits:
         entries = self._entries()
-        for binding, ok, is_screen in sorted(entries, key=lambda e: e[0].show):  # stable: hidden first
+        key = self.app._target_key()
+        first = [e for e in entries if key and e[0].action.split("(", 1)[0] in self.app._TICKET_ACTIONS]
+        for binding, ok, is_screen in first:  # the selected ticket's actions lead
+            label = self._label(binding)
+            name = binding.action.split("(", 1)[0]
+            help_ = _TICKET_ACTION_HELP.get(name) or binding.description or name
+            yield DiscoveryHit(self._text(binding, ok, label), self._runner(binding, ok, is_screen),
+                               text=label, help=f"{key}: {help_}")
+        rest = [e for e in entries if e not in first]
+        for binding, ok, is_screen in sorted(rest, key=lambda e: e[0].show):  # stable: hidden first
             label = self._label(binding)
             yield DiscoveryHit(self._text(binding, ok, label), self._runner(binding, ok, is_screen),
                                text=label, help=binding.tooltip or None)

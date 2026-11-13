@@ -27,6 +27,7 @@ from textual.widgets import RichLog
 from textual.widgets import Static
 from textual.widgets import TabbedContent
 from textual.widgets import TabPane
+from textual.widgets._footer import FooterKey
 from textual.worker import Worker
 from textual.worker import WorkerState
 
@@ -270,6 +271,35 @@ class _NowList(Static, can_focus=True):
 
     def action_now_prev(self) -> None:
         self.app.action_now_prev()
+
+
+class _ContextFooter(Footer):
+    """Footer listing only `MaestroTUI.footer_actions()`, then help and the palette key."""
+
+    def compose(self) -> ComposeResult:
+        if not self._bindings_ready:
+            return
+        active = self.screen.active_bindings
+        wanted = getattr(self.app, "footer_actions", lambda: ())()
+        by_action: dict[str, tuple] = {}
+        for _node, binding, enabled, tooltip in active.values():
+            name = binding.action.split("(", 1)[0]
+            if name in wanted and name not in by_action:
+                by_action[name] = (binding, enabled, tooltip)
+        palette = active.get(self.app.COMMAND_PALETTE_BINDING)
+        self.styles.grid_size_columns = len(by_action) + (1 if palette else 0)
+        for name in wanted:  # `wanted` is ordered: the footer reads left to right
+            if name not in by_action:
+                continue
+            binding, enabled, tooltip = by_action[name]
+            yield FooterKey(binding.key, self.app.get_key_display(binding), binding.description,
+                            binding.action, disabled=not enabled, tooltip=tooltip,
+                            ).data_bind(compact=Footer.compact)
+        if palette:
+            _node, binding, enabled, tooltip = palette
+            yield FooterKey(binding.key, self.app.get_key_display(binding), binding.description,
+                            binding.action, classes="-command-palette", disabled=not enabled,
+                            tooltip=binding.tooltip or binding.description)
 
 
 class MaestroTUI(App):
@@ -579,6 +609,43 @@ class MaestroTUI(App):
         self._nudge(card.key)
         self._refresh_now_tab()
 
+    # Footer actions per context, in display order. Keys stay accelerators: the full list is in
+    # the palette (ctrl+p) and the help panel (?).
+    _FOOTER_TICKET = ("show_spec", "view_logs", "hold")
+
+    def footer_actions(self) -> tuple[str, ...]:
+        """Actions the footer shows for the focused tab and selected row; palette key is appended."""
+        try:
+            tab = self.query_one("#tabs", TabbedContent).active
+        except NoMatches:
+            tab = "tab-now"
+        out: list[str] = []
+        if tab == "tab-fleet":
+            out += ["refresh", "fleet_panel"]
+        else:
+            key = self._target_key()
+            phase, open_qs = self._snap_cache.get(key or "", (None, 0))
+            if tab == "tab-now":
+                card = self._now_card()
+                key = card.key if card is not None else key
+                if card is not None and hasattr(card, "reason"):
+                    out += ["retry", "discard"]
+                elif card is not None:
+                    out += ["now_accept"] if card.recommendation else []
+                    out += ["answer"]
+            else:
+                if open_qs:
+                    out.append("answer")
+                if phase == Phase.DEGRADED.value:
+                    out += ["retry", "discard"]
+            if key:
+                out += list(self._FOOTER_TICKET)
+        out.append("show_help_panel")
+        return tuple(out)
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self._refresh_bindings()
+
     def _on_board(self) -> bool:
         return len(self._base_stack()) <= 1
 
@@ -656,7 +723,7 @@ class MaestroTUI(App):
                         yield RichLog(id="events", highlight=True, markup=True)
             with TabPane("Fleet", id="tab-fleet"):
                 yield Static("[dim]Loading…[/dim]", id="fleet-tab")
-        yield Footer()
+        yield _ContextFooter()
 
     def on_mount(self) -> None:
         self.register_theme(NEON_LEDGER)
