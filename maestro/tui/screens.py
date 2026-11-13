@@ -23,9 +23,11 @@ from textual.containers import Horizontal
 from textual.containers import Vertical
 from textual.containers import VerticalScroll
 from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import DataTable
 from textual.widgets import Footer
 from textual.widgets import Header
+from textual.widgets import HelpPanel
 from textual.widgets import Input
 from textual.widgets import Markdown
 from textual.widgets import RichLog
@@ -96,6 +98,9 @@ from .modals import _IntervalModal
 from .modals import _PauseModal
 from .modals import _ScheduleModal
 from .modals import _TextViewModal
+from .render import MASK_LOGO_HEIGHT
+from .render import MASK_LOGO_WIDTH
+from .render import NEON_LEDGER
 from .render import _dep_label
 from .render import _fmt_duration
 from .render import _fmt_epoch
@@ -103,6 +108,7 @@ from .render import _nudge_toast
 from .render import _render_dep_header
 from .render import _render_env
 from .render import _render_fleet
+from .render import _render_mask_logo
 
 
 def editor_argv(path: Path, line: int | None = None) -> list[str]:
@@ -3197,3 +3203,50 @@ class DecisionsScreen(Screen):
         app = self.app
         app.pop_screen()
         app._decisions_closed(self._answered, self._queued, self._skipped, self._touched)
+
+
+class MaskLogo(Widget):
+    """The mask logo over one caption line; the caption alone when the area is too small.
+
+    Colours come from the active theme (primary for the outline and moustache, secondary
+    for the eye slits). *fit_parent* sizes the check against the parent pane instead of
+    this widget, for a widget whose own height is `auto`."""
+
+    DEFAULT_CSS = """
+    MaskLogo { width: 1fr; height: 1fr; content-align: center middle; text-align: center; }
+    MaskLogo#help-logo { height: auto; margin-bottom: 1; }
+    """
+
+    def __init__(self, caption: str, *, fit_parent: bool = False, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._caption = caption
+        self._fit_parent = fit_parent
+
+    def _room(self):
+        return self.parent.size if self._fit_parent and self.parent is not None else self.size
+
+    def render(self):
+        theme = self.app.current_theme
+        outline, eyes = (theme.primary or NEON_LEDGER.primary), (theme.secondary or NEON_LEDGER.secondary)
+        room = self._room()
+        caption = Text(self._caption, style=eyes, justify="center")
+        if room.width < MASK_LOGO_WIDTH or room.height < MASK_LOGO_HEIGHT + 2:
+            return caption
+        art = _render_mask_logo(outline, eyes)
+        art.append("\n")
+        art.append_text(caption)
+        art.justify = "center"
+        return art
+
+    def get_content_height(self, container, viewport, width: int) -> int:
+        if self._fit_parent and self.parent is not None and self.parent.size.height < MASK_LOGO_HEIGHT + 2:
+            return 1
+        return MASK_LOGO_HEIGHT + 1 if self._fit_parent else container.height
+
+
+class MaskHelpPanel(HelpPanel):
+    """The built-in key help panel with the mask logo above the key list."""
+
+    def compose(self) -> ComposeResult:
+        yield MaskLogo("maestro", fit_parent=True, id="help-logo")
+        yield from super().compose()

@@ -359,6 +359,38 @@ NEON_LEDGER = Theme(
 )
 
 
+# The mask logo, 21 columns by 11 rows; shared by the Now tab's empty state and the help panel.
+MASK_LOGO = (
+    "    ▄▄▄▄▄▄▄▄▄▄▄▄▄    ",
+    "  ▄▀             ▀▄  ",
+    "  █               █  ",
+    "  █ ▀▀▄▄     ▄▄▀▀ █  ",
+    "  █               █  ",
+    "  █  ▄         ▄  █  ",
+    "  █  ▀▄▄▄███▄▄▄▀  █  ",
+    "  ▀▄             ▄▀  ",
+    "    ▀▄         ▄▀    ",
+    "      ▀▄     ▄▀      ",
+    "        ▀▄▄▄▀        ",
+)
+MASK_LOGO_WIDTH = max(len(row) for row in MASK_LOGO)
+MASK_LOGO_HEIGHT = len(MASK_LOGO)
+_MASK_EYE_ROW = 3
+
+
+def _render_mask_logo(outline: str, eyes: str) -> Text:
+    """The mask as styled Text: *outline* colours the outline and moustache, *eyes* the slits."""
+    out = Text(no_wrap=True)
+    for r, row in enumerate(MASK_LOGO):
+        lo, hi = row.find("█"), row.rfind("█")
+        for c, ch in enumerate(row):
+            slit = r == _MASK_EYE_ROW and lo < c < hi
+            out.append(ch, style=eyes if slit else outline)
+        if r < MASK_LOGO_HEIGHT - 1:
+            out.append("\n")
+    return out
+
+
 def _fmt_wait(seconds: float) -> str:
     s = int(max(0, seconds))
     if s >= 3600:
