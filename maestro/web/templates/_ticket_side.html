@@ -1,29 +1,41 @@
+{% macro verdict(v) -%}
+<span class="verdict{% if v != "—" %} v-{{ v|lower|replace(" ", "-") }}{% endif %}">{{ v }}</span>
+{%- endmacro %}
 {% if t.snap.kind != "review" %}
-<div class="panel"><div class="panel-head">Acceptance criteria</div>
-<div class="panel-body"><table class="ledger" id="ac-matrix">
-  <thead><tr><th>Criterion</th><th>Agent</th><th>QA</th><th>Check</th></tr></thead>
-  <tbody>
-  {% for a in t.acs %}
-  <tr><td>{{ a.index }}. {{ a.text }}</td>
-    <td>{{ "yes" if a.self else "—" }}</td>
-    <td>{{ (a.qa_spec or {}).get("verdict", "—") }}</td>
-    <td>{% if a.check %}{{ a.check.get("status") or a.check.get("result") or "run" }}{{ "" if a.check.current else " (stale)" }}{% else %}—{% endif %}</td></tr>
-  {% else %}<tr><td colspan="4">no acceptance criteria</td></tr>{% endfor %}
-  </tbody>
-</table></div></div>
+{% set stale = t.acs|selectattr("check")|rejectattr("check.current")|list|length %}
+<div class="panel">
+  <div class="panel-head split"><h2 class="panel-title">Acceptance criteria · {{ t.acs|length }}</h2>{% if stale %}<span class="panel-note warn">{{ stale }} check{{ "s" if stale != 1 }} stale</span>{% endif %}</div>
+  <div class="panel-scroll"><table class="ledger" id="ac-matrix">
+    <thead><tr><th scope="col">Criterion</th><th scope="col">Agent</th><th scope="col">QA</th><th scope="col">Check</th></tr></thead>
+    <tbody>
+    {% for a in t.acs %}
+    <tr><td>{{ a.index }}. {{ a.text }}</td>
+      <td>{{ verdict("yes" if a.self else "—") }}</td>
+      <td>{{ verdict((a.qa_spec or {}).get("verdict", "—")) }}</td>
+      <td>{% if a.check %}{{ verdict(a.check.get("status") or a.check.get("result") or "run") }}{{ "" if a.check.current else " (stale)" }}{% else %}{{ verdict("—") }}{% endif %}</td></tr>
+    {% else %}<tr><td colspan="4" class="dim">no acceptance criteria</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</div>
 {% endif %}
-<div class="panel" id="dispatch-card"><div class="panel-head">Dispatch</div>
-<div class="panel-body"><dl>
-  <dt>Verdict</dt><dd>{{ card.verdict }}</dd>
-  <dt>Claim</dt><dd>{{ card.claim }}</dd>
-  <dt>Attempts</dt><dd>{{ card.attempts }}</dd>
-  <dt>Throttle</dt><dd>{{ card.throttle }}</dd>
-  <dt>Depends on</dt><dd>{% for d in card.open_deps %}{{ d.key }} ({{ d.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
-</dl></div></div>
-<div class="panel" id="pr-card"><div class="panel-head">Pull request</div>
-<div class="panel-body">
-  {% if t.snap.pr_url %}<p><a href="{{ t.snap.pr_url }}">#{{ t.snap.pr_number }}</a> {{ t.snap.pr_state or "" }}{{ " (draft)" if t.snap.pr_draft }}</p>
-  <p>CI {{ t.snap.ci_state or "—" }} · unresolved reviews {{ t.snap.unresolved_reviews }}</p>
-  {% if t.snap.failing_checks %}<ul id="pr-checks">{% for c in t.snap.failing_checks %}<li class="forced">{{ c }}</li>{% endfor %}</ul>{% endif %}
-  {% else %}<p class="dim">no pull request yet</p>{% endif %}
-</div></div>
+<div class="panel" id="dispatch-card">
+  <div class="panel-head">Dispatch</div>
+  <div class="panel-body"><dl class="kv">
+    <dt>Verdict</dt><dd>{{ card.verdict }}</dd>
+    <dt>Claim</dt><dd>{{ card.claim }}</dd>
+    <dt>Attempts</dt><dd>{{ card.attempts }}</dd>
+    <dt>Throttle</dt><dd>{{ card.throttle }}</dd>
+    <dt>Depends on</dt><dd>{% for d in card.open_deps %}<a href="/t/{{ d.key }}">{{ d.key }}</a> ({{ d.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
+  </dl></div>
+</div>
+{% set pr_link = t.snap.pr_url and t.snap.pr_url.startswith("https:") %}
+<div class="panel" id="pr-card">
+  <div class="panel-head split"><h2 class="panel-title">Pull request{% if t.snap.pr_url %} #{{ t.snap.pr_number }}{% if t.snap.pr_draft %} · draft{% elif t.snap.pr_state %} · {{ t.snap.pr_state }}{% endif %}{% endif %}</h2>{% if pr_link %}<a href="{{ t.snap.pr_url }}">Open on GitHub</a>{% endif %}</div>
+  {% if t.snap.pr_url %}
+  <ul class="rows" id="pr-checks">
+    <li class="meta"><span class="grow">CI</span>{{ verdict(t.snap.ci_state or "—") }}</li>
+    {% for c in t.snap.failing_checks %}<li class="meta forced"><span class="grow">{{ c }}</span>{{ verdict("fail") }}</li>{% endfor %}
+    <li class="meta"><span class="grow">unresolved reviews</span><span>{{ t.snap.unresolved_reviews }}</span></li>
+  </ul>
+  {% else %}<div class="panel-body"><p class="dim">no pull request yet</p></div>{% endif %}
+</div>

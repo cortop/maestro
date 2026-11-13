@@ -1,16 +1,22 @@
 {% macro ago(epoch) %}{% if epoch is none %}unknown{% else %}{{ (now - epoch)|dur }} ago{% endif %}{% endmacro %}
-<section class="fleet-headline state-{{ state|replace(' ', '-') }}">
-  <h1 id="fleet-state">{{ state }}</h1>
-  <p id="fleet-attention" class="dim">{% if attention %}{{ attention|join(" · ") }}{% else %}Nothing needs attention.{% endif %}</p>
-  {% if notice is defined and notice %}<p id="fleet-notice" class="mono" role="status">{{ notice }}</p>{% endif %}
+<section class="hero fleet-headline state-{{ state|replace(' ', '-') }}">
+  <div class="hero-main">
+    <p class="kicker">&gt; <span class="keep">{{ home }}</span> // heartbeat {% if hb.get("epoch") %}{{ ago(hb.get("epoch")) }}{% else %}unknown{% endif %}</p>
+    <h1 class="fleet-title">Fleet <span class="state-word" id="fleet-state">{{ state }}</span><span class="state-word">.</span></h1>
+    <p id="fleet-attention" class="lede">{% if attention %}{{ attention|join(" · ") }}{% else %}Nothing needs attention.{% endif %}</p>
+    {% if notice is defined and notice %}<p id="fleet-notice" role="status">&gt; {{ notice }}</p>{% endif %}
+  </div>
   <div id="fleet-actions" class="fleet-actions">{% if can_write %}
     {% if paused is none %}
-    <form hx-post="/fleet/pause" hx-target="#fleet" hx-swap="innerHTML" id="pause-form">
-      <input name="until" placeholder="until (ISO time, optional)" aria-label="pause until">
-      <input name="reason" placeholder="reason (optional)" aria-label="pause reason">
-      <button class="btn btn-danger" type="submit">Pause fleet</button>
-    </form>
-    <p class="dim">Sessions already running keep going until they exit.</p>
+    <details class="write">
+      <summary class="btn btn-danger">Pause the fleet…</summary>
+      <form hx-post="/fleet/pause" hx-target="#fleet" hx-swap="innerHTML" id="pause-form">
+        <input name="until" placeholder="until (ISO time, optional)" aria-label="pause until">
+        <input name="reason" placeholder="reason (optional)" aria-label="pause reason">
+        <p class="dim">Sessions already running keep going until they exit.</p>
+        <button class="btn btn-danger" type="submit">Pause fleet</button>
+      </form>
+    </details>
     {% else %}
     <button class="btn btn-primary" hx-post="/fleet/resume" hx-target="#fleet" hx-swap="innerHTML">Resume fleet</button>
     {% endif %}
@@ -19,88 +25,106 @@
   {% endif %}</div>
 </section>
 
-<section class="fleet-budget">
+<section class="fleet-budget" aria-label="Budgets">
   <div class="panel" id="panel-spend">
     <div class="panel-head">Spend today</div>
     <div class="panel-body">
       {% if spend.known %}
-      <p class="mono">${{ "%.2f"|format(spend.today) }}{% if spend.ceiling is not none %} / ${{ "%.2f"|format(spend.ceiling) }}{% else %} · no ceiling{% endif %}</p>
+      <div class="big-row"><span class="big">${{ "%.2f"|format(spend.today) }}</span>{% if spend.ceiling is not none %}<span>of a ${{ "%.2f"|format(spend.ceiling) }} ceiling</span>{% else %}<span>no ceiling</span>{% endif %}</div>
       {% if spend.ceiling is not none %}
       <div class="meter{% if spend.over %} over{% endif %}" role="meter" aria-valuemin="0" aria-valuemax="{{ spend.ceiling }}" aria-valuenow="{{ spend.today }}">
         <div class="meter-fill" style="width: {{ spend.pct }}%"></div>
         {% for m in spend.marks %}<span class="meter-mark" style="left: {{ m }}%" title="warn at {{ m|round|int }}%"></span>{% endfor %}
       </div>
+      <div class="scale"><span>$0</span>{% for m in spend.marks %}<span class="{{ 'hot' if loop.last else 'warm' }}">warn ${{ "%.0f"|format(spend.ceiling * m / 100) }}</span>{% endfor %}<span>stop ${{ "%.0f"|format(spend.ceiling) }}</span></div>
       {% endif %}
-      {% else %}<p class="mono">unknown</p><p class="dim">The spend meter is unavailable or unreadable.</p>{% endif %}
+      {% else %}<div class="big-row"><span class="big">unknown</span></div><p class="note">The spend meter is unavailable or unreadable.</p>{% endif %}
     </div>
   </div>
   <div class="panel" id="panel-spawns">
-    <div class="panel-head">Spawns / hour</div>
+    <div class="panel-head">Spawns, last hour</div>
     <div class="panel-body">
       {% if pulse %}
-      <p class="mono{% if pulse.runaway %} forced{% endif %}">{{ pulse.spawns }}{% if pulse.budget %} / {{ pulse.budget }}{% else %} · no budget{% endif %}</p>
-      <div class="buckets" aria-label="spawns per bucket">{% for b in buckets %}<span class="bucket" style="height: {{ [b.pct, 4]|max }}%" title="{{ b.n }}"></span>{% endfor %}</div>
-      {% else %}<p class="mono">unknown</p>{% endif %}
+      <div class="big-row"><span class="big{% if pulse.runaway %} bad{% endif %}">{{ pulse.spawns }}</span>{% if pulse.budget %}<span>of a {{ pulse.budget }} per hour budget</span>{% else %}<span>no budget</span>{% endif %}</div>
+      <div class="buckets" aria-label="spawns per bucket">{% for b in buckets %}<span class="bucket{% if not b.n %} zero{% endif %}" style="height: {{ b.pct }}%" title="{{ b.n }}"></span>{% endfor %}</div>
+      <div class="scale"><span>1h ago</span><span>now</span></div>
+      <p class="note">{% if pulse.runaway %}Spawn rate is over budget.{% else %}Runaway alarm is quiet.{% endif %}</p>
+      {% else %}<div class="big-row"><span class="big">unknown</span></div>{% endif %}
     </div>
   </div>
   <div class="panel" id="panel-ratelimit">
     <div class="panel-head">Rate limit</div>
     <div class="panel-body">
-      {% if not pulse %}<p class="mono">unknown</p>
-      {% elif pulse.paused_until is not none %}<p class="mono forced">limited · resets in {{ (pulse.paused_until - now)|dur }}</p>
-      {% else %}<p class="mono">clear</p>{% endif %}
-      {% if paused is not none %}<p class="dim">dispatch paused{% if paused.get("reason") %}: {{ paused.get("reason") }}{% endif %}</p>{% endif %}
-      <p class="dim">heartbeat {% if hb.get("epoch") %}{{ ago(hb.get("epoch")) }}{% else %}unknown{% endif %}</p>
+      {% if not pulse %}<div class="big">unknown</div>
+      {% elif pulse.paused_until is not none %}<div class="big bad">limited</div><p class="note">resets in {{ (pulse.paused_until - now)|dur }}</p>
+      {% else %}<div class="big ok">clear</div><p class="note">Spawning is open for every runner.</p>{% endif %}
+      <dl class="kv">
+        <dt>Dispatch</dt><dd>{% if paused is not none %}paused{% if paused.get("reason") %}: {{ paused.get("reason") }}{% endif %}{% else %}running{% endif %}</dd>
+        <dt>Heartbeat</dt><dd>{% if hb.get("epoch") %}{{ ago(hb.get("epoch")) }}{% else %}unknown{% endif %}</dd>
+      </dl>
     </div>
   </div>
 </section>
 
-<section class="fleet-columns">
-  <div class="fleet-col">
-    <h2>Live sessions</h2>
-    {% if sessions is none %}<p class="mono" id="sessions-unknown">unknown</p>
-    {% elif sessions %}
-    <table class="ledger" id="sessions"><thead><tr><th>Key</th><th>Round</th><th>Doing</th><th>Runner</th><th>Age</th><th>Cost</th>{% if can_write %}<th></th>{% endif %}</tr></thead><tbody>
-      {% for s in sessions %}<tr data-key="{{ s.key }}"><td class="key"><a href="/t/{{ s.key }}">{{ s.key }}</a></td><td>{{ s.round }}</td><td>{{ s.tool }}</td><td>{{ s.runner or "—" }}</td><td class="mono">{{ s.age_s|dur if s.age_s is not none else "—" }}</td><td class="mono">{% if s.cost is none %}—{% else %}${{ "%.2f"|format(s.cost) }}{% endif %}</td>{% if can_write %}<td><button class="btn btn-danger" hx-get="/fleet/stop/{{ s.key }}" hx-target="closest td" hx-swap="innerHTML">Stop</button></td>{% endif %}</tr>{% endfor %}
-    </tbody></table>
-    {% else %}<p class="dim" id="sessions-empty">No live sessions.</p>{% endif %}
+<section class="cols fleet-columns">
+  <div class="col col-wide fleet-col">
+    <div class="panel glow">
+      <div class="panel-head split"><h2 class="panel-title">Live sessions{% if sessions %} · {{ sessions|length }}{% endif %}</h2><span class="panel-note">every claim verified against a live process</span></div>
+      {% if sessions is none %}<div class="panel-body"><p class="mono" id="sessions-unknown">unknown</p></div>
+      {% elif sessions %}
+      <div class="panel-scroll"><table class="ledger" id="sessions"><thead><tr><th scope="col">Ticket</th><th scope="col">Doing</th><th scope="col">Runner</th><th scope="col">Age</th><th scope="col">Cost</th>{% if can_write %}<th scope="col" class="right">Stop</th>{% endif %}</tr></thead><tbody>
+        {% for s in sessions %}<tr data-key="{{ s.key }}"><td class="key"><a href="/t/{{ s.key }}">{{ s.key }}</a></td><td><div class="title">{{ s.round or "working" }}</div>{% if s.tool %}<div class="mono tool"><span class="cursor" aria-hidden="true"></span>{{ s.tool }}</div>{% endif %}</td><td class="mono">{{ s.runner or "—" }}{% if s.pid %} · {{ s.pid }}{% endif %}</td><td class="mono">{{ s.age_s|dur if s.age_s is not none else "—" }}</td><td class="mono">{% if s.cost is none %}—{% else %}${{ "%.2f"|format(s.cost) }}{% endif %}</td>{% if can_write %}<td class="right"><button class="btn btn-danger btn-sm" aria-label="Stop the {{ s.key }} session" hx-get="/fleet/stop/{{ s.key }}" hx-target="closest td" hx-swap="innerHTML">Stop</button></td>{% endif %}</tr>{% endfor %}
+      </tbody></table></div>
+      {% else %}<div class="panel-body"><p class="dim" id="sessions-empty">No live sessions.</p></div>{% endif %}
+    </div>
 
-    <h2>Schedule</h2>
-    {% if schedule is none %}<p class="mono">unknown</p>
-    {% elif schedule %}
-    <table class="ledger" id="schedule"><thead><tr><th>Task</th><th>Cadence</th><th>Last</th><th>Next</th></tr></thead><tbody>
-      {% for t in schedule %}<tr><td>{{ t.name }}{% if not t.enabled %} <span class="dim">(disabled)</span>{% endif %}</td><td class="mono">{{ t.every or t.cron or "—" }}</td><td>{{ ago(t.last_fired) if t.last_fired else "never" }}</td><td class="mono">{% if t.next_due is none %}—{% else %}in {{ [t.next_due - now, 0]|max|dur }}{% endif %}</td></tr>{% endfor %}
-    </tbody></table>
-    {% else %}<p class="dim">No scheduled tasks.</p>{% endif %}
+    <div class="panel">
+      <div class="panel-head">Schedule</div>
+      {% if schedule is none %}<div class="panel-body"><p class="mono">unknown</p></div>
+      {% elif schedule %}
+      <ul class="rows" id="schedule">
+        {% for t in schedule %}<li><span class="grow">{{ t.name }}{% if not t.enabled %} <span class="dim">(disabled)</span>{% endif %}</span><span class="meta dim">{% if t.cron %}cron {{ t.cron }}{% elif t.every %}every {{ t.every }}{% else %}—{% endif %}</span><span class="meta dim">last {{ ago(t.last_fired) if t.last_fired else "never" }}</span><span class="meta">{% if t.next_due is none %}—{% else %}next in {{ [t.next_due - now, 0]|max|dur }}{% endif %}</span></li>{% endfor %}
+      </ul>
+      {% else %}<div class="panel-body"><p class="dim">No scheduled tasks.</p></div>{% endif %}
+    </div>
   </div>
 
-  <div class="fleet-col">
-    <h2>Doctor</h2>
-    {% if doctor is none %}<p class="mono" id="doctor-unknown">unknown</p>
-    {% else %}
-    <ul class="checks" id="doctor-problems">
-      {% for r in problems %}<li class="check-{{ r.status }}"><span class="chip">{{ r.status }}</span> <b>{{ r.name }}</b> <span class="dim">{{ r.detail }}</span></li>{% endfor %}
-    </ul>
-    {% if not problems %}<p class="dim">No problems.</p>{% endif %}
-    <details id="doctor-passing"><summary>{{ passing|length }} passing</summary>
-      <ul class="checks">{% for r in passing %}<li><span class="chip">ok</span> <b>{{ r.name }}</b> <span class="dim">{{ r.detail }}</span></li>{% endfor %}</ul>
-    </details>
-    {% endif %}
+  <div class="col fleet-col">
+    <div class="panel">
+      <div class="panel-head split"><h2 class="panel-title">Doctor</h2><span class="panel-note">problems first</span></div>
+      {% if doctor is none %}<div class="panel-body"><p class="mono" id="doctor-unknown">unknown</p></div>
+      {% else %}
+      <ul class="checks" id="doctor-problems">
+        {% for r in problems %}<li class="check-{{ r.status }}"><span class="tag">{{ r.status }}</span><span class="check-body"><b>{{ r.name }}</b> <span class="detail">{{ r.detail }}</span></span></li>{% endfor %}
+        {% if not problems %}<li><span class="tag">ok</span><span class="check-body">No problems.</span></li>{% endif %}
+      </ul>
+      <details id="doctor-passing"><summary>{{ passing|length }} passing</summary>
+        <ul class="checks">{% for r in passing %}<li><span class="tag">ok</span><span class="check-body"><b>{{ r.name }}</b> <span class="detail">{{ r.detail }}</span></span></li>{% endfor %}</ul>
+      </details>
+      {% endif %}
+    </div>
 
-    <h2>Backups</h2>
-    {% if backups is none %}<p class="mono">unknown</p>
-    {% else %}
-    <p id="backups" class="mono">{{ backups.count }} kept · last {{ ago(backups.last) if backups.last is not none else "never" }}{% if backups.next is not none %} · next in {{ [backups.next - now, 0]|max|dur }}{% endif %}</p>
-    <p class="dim">every {{ backups.interval|dur }}, keeps {{ backups.retention }}</p>
-    <p class="dim">Restore is deliberate: run <code class="mono" id="restore-cmd">maestro restore</code> on the command line.</p>
-    {% endif %}
+    <div class="panel">
+      <div class="panel-head split"><h2 class="panel-title">Backups</h2>{% if backups is not none %}<span class="panel-note">every {{ backups.interval|dur }} · keeps {{ backups.retention }}</span>{% endif %}</div>
+      <div class="panel-body">
+        {% if backups is none %}<p class="mono">unknown</p>
+        {% else %}
+        <p id="backups" class="mono">{{ backups.count }} kept · last {{ ago(backups.last) if backups.last is not none else "never" }}{% if backups.next is not none %} · next in {{ [backups.next - now, 0]|max|dur }}{% endif %}</p>
+        <p class="dim">Restore is deliberate: run <code class="mono" id="restore-cmd">maestro restore</code> on the command line.</p>
+        {% endif %}
+      </div>
+    </div>
 
-    <h2>Slack watcher</h2>
-    {% if slack is none %}<p class="mono">unknown</p>
-    {% elif not slack.enabled %}<p id="slack-watcher" class="mono dim">not configured</p>
-    {% else %}
-    <p id="slack-watcher" class="mono">last poll {{ ago(slack.last_poll) if slack.last_poll is not none else "never" }} · {{ slack.polls_today }}{% if slack.cap %}/{{ slack.cap }}{% endif %} polls today · {% if slack.spend_today is none %}spend unknown{% else %}${{ "%.2f"|format(slack.spend_today) }} spent today{% endif %}</p>
-    {% if slack.skip_reason and slack.skip_reason != "not due" %}<p class="dim">idle: {{ slack.skip_reason }}</p>{% endif %}
-    {% endif %}
+    <div class="panel">
+      <div class="panel-head">Slack watcher</div>
+      <div class="panel-body">
+        {% if slack is none %}<p class="mono">unknown</p>
+        {% elif not slack.enabled %}<p id="slack-watcher" class="mono dim">not configured</p>
+        {% else %}
+        <p id="slack-watcher" class="mono">last poll {{ ago(slack.last_poll) if slack.last_poll is not none else "never" }} · {{ slack.polls_today }}{% if slack.cap %}/{{ slack.cap }}{% endif %} polls today · {% if slack.spend_today is none %}spend unknown{% else %}${{ "%.2f"|format(slack.spend_today) }} spent today{% endif %}</p>
+        {% if slack.skip_reason and slack.skip_reason != "not due" %}<p class="dim">idle: {{ slack.skip_reason }}</p>{% endif %}
+        {% endif %}
+      </div>
+    </div>
   </div>
 </section>

@@ -1,0 +1,9 @@
+{# Short display names of the phases, shared by the ledger chips and the phase rail. #}
+{% set PHASE_LABELS = {"triaging": "Triage", "researching": "Research", "awaiting-human": "Needs you", "ready": "Queued",
+                       "implementing": "Build", "verifying": "Tests", "qa": "QA", "awaiting-ci": "CI", "in-review": "Review",
+                       "terminating": "Cleanup", "done": "Done", "degraded": "Degraded"} %}
+{% set DISPATCHER_PHASES = ("verifying", "awaiting-ci", "in-review", "terminating") %}
+{% macro phase(p) -%}{{ PHASE_LABELS.get(p, p) }}{%- endmacro %}
+{% macro chip_class(p) -%}
+{% if p in DISPATCHER_PHASES %}chip-dispatcher{% elif p == "ready" %}chip-queued{% elif p == "done" %}chip-done{% elif p == "degraded" %}chip-degraded{% else %}chip-agent{% endif %}
+{%- endmacro %}

@@ -1,11 +1,16 @@
+{% from "_labels.html" import chip_class %}
 {% for r in view.rows %}
 <tr class="row" data-key="{{ r.key }}">
-  <td><a href="/t/{{ r.key }}">{% if r.held %}⏸ {% endif %}{{ r.key }}</a></td>
-  <td class="phase-{{ r.phase }}">{{ r.phase }}</td>
-  <td>{{ r.title }}</td>
-  <td>{{ r.pr }}</td>
-  <td>{{ r.ci }}</td>
-  <td>{{ r.fails }}</td>
-  <td class="doing">{{ r.now }}</td>
+  <td class="key"><a href="/t/{{ r.key }}">{% if r.held %}⏸ {% endif %}{{ r.key }}</a></td>
+  <td class="phase-{{ r.phase }}"><span class="chip {{ chip_class(r.phase) }}">{{ r.phase }}</span></td>
+  <td class="title">{{ r.title }}</td>
+  {# the shared row carries the PR as terminal link markup: [link=URL]#N[/link] #}
+  {% set pr_url = r.pr[6:].split("]")[0] if r.pr.startswith("[link=") else "" %}
+  <td class="num">{% if pr_url.startswith("https:") %}<a href="{{ pr_url }}">{{ r.pr.split("]")[1].split("[")[0] }}</a>{% elif pr_url %}{{ r.pr.split("]")[1].split("[")[0] }}{% else %}{{ r.pr }}{% endif %}</td>
+  <td class="num">{{ r.ci }}</td>
+  <td class="num">{{ r.fails }}</td>
+  <td class="doing">{% if r.running %}<span class="cursor" aria-hidden="true"></span>{% endif %}{{ r.now }}</td>
 </tr>
+{% else %}
+<tr><td colspan="7" class="dim">No tickets match this filter.</td></tr>
 {% endfor %}

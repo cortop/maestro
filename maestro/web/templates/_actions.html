@@ -16,9 +16,9 @@
 </details>
 {%- endmacro %}
 
-{% macro note_form(key, action, ctx, target, summary, label, placeholder, fields=none) -%}
+{% macro note_form(key, action, ctx, target, summary, label, placeholder, fields=none, cls="btn-secondary") -%}
 <details class="write">
-  <summary class="btn btn-secondary">{{ summary }}</summary>
+  <summary class="btn {{ cls }}">{{ summary }}</summary>
   {{ form(key, action, ctx, target, label, "btn-primary", fields=fields, text=placeholder) }}
 </details>
 {%- endmacro %}

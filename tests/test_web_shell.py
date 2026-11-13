@@ -61,10 +61,13 @@ def test_ticket_page_marks_tickets_current(client):
     assert re.search(r'class="current" aria-current="page">Tickets<', html)
 
 
-def test_no_external_hosts_and_font_fallbacks():
+def test_no_external_hosts_and_bundled_fonts_with_fallbacks(client):
     for f in [*(WEB / "templates").glob("*.html"), WEB / "static" / "maestro.css"]:
         assert not re.search(r"(https?:)?//[\w.-]+\.\w", f.read_text()), f.name
-    assert not list((WEB / "static" / "fonts").glob("*.woff2")), "fixture assumes no bundled fonts"
+    fonts = re.findall(r'url\("(/static/fonts/[^"]+\.woff2)"\)', CSS)
+    assert {"Archivo", "Chakra Petch", "JetBrains Mono"} <= set(re.findall(r'font-family: "([^"]+)"; font-weight', CSS))
+    assert fonts and all(client.get(url).status_code == 200 for url in fonts)
+    assert list((WEB / "static" / "fonts").glob("LICENSE-*.txt")), "bundled fonts ship with their licences"
     for var in ("--font-display", "--font-ui", "--font-mono"):
         stack = re.search(var + r":([^;]+);", CSS).group(1)
         assert re.search(r"system-ui|ui-monospace|sans-serif", stack)

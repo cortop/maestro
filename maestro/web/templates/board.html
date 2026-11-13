@@ -1,16 +1,24 @@
 {% extends "base.html" %}
 {% block title %}maestro board{% endblock %}
 {% block body %}
-<nav id="filters" hx-get="/tickets?filter={{ view.filter }}" hx-trigger="sse:board" hx-select="#filters" hx-target="#filters" hx-swap="outerHTML">
+<section class="hero">
+  <div class="hero-main">
+    <p class="kicker">&gt; tickets // every ticket on the board, by filter</p>
+    <h1>Tickets</h1>
+  </div>
+</section>
+<nav id="filters" aria-label="Ticket filters" hx-get="/tickets?filter={{ view.filter }}" hx-trigger="sse:board" hx-select="#filters" hx-target="#filters" hx-swap="outerHTML">
   {% for f in filters %}
   <a href="/tickets?filter={{ f }}"{% if f == view.filter %} class="active"{% endif %}>{{ f }}({{ view.counts[f] }})</a>
   {% endfor %}
   <span id="needs-you-count" class="needs-you">needs you: {{ view.needs_you }}</span>
 </nav>
-<table id="board">
-  <thead><tr><th>Key</th><th>Phase</th><th>Title</th><th>PR</th><th>CI</th><th>Fails</th><th>Doing</th></tr></thead>
+<div class="frame board-frame">
+<table id="board" class="ledger">
+  <thead><tr><th scope="col">Key</th><th scope="col">Phase</th><th scope="col">Title</th><th scope="col">PR</th><th scope="col">CI</th><th scope="col">Fails</th><th scope="col">Doing</th></tr></thead>
   <tbody id="rows" hx-get="/board/rows?filter={{ view.filter }}" hx-trigger="sse:board" hx-swap="innerHTML">
     {% include "_rows.html" %}
   </tbody>
 </table>
+</div>
 {% endblock %}
