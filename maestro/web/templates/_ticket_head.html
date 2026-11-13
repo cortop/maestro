@@ -1,8 +1,17 @@
+{% import "_actions.html" as act %}
 <p class="crumb mono dim">{{ t.key }} <span class="chip chip-agent phase-chip">{{ t.phase }}</span> · P{{ priority }} · {{ repo }} · {{ runner }}</p>
 <div class="title-row">
   <h1>{{ t.title }}</h1>
-  <div class="title-actions" id="ticket-actions"><!-- T-243: action buttons --></div>
+  <div class="title-actions" id="ticket-actions">
+    {% if can_write %}
+    {% if can_message %}{{ act.note_form(key, "message", "ticket", "#ticket-head", "Message agent", "Send message", "Message for the agent") }}{% endif %}
+    {% if can_hold %}{{ act.form(key, "hold", "ticket", "#ticket-head", "Hold") }}{% endif %}
+    {% if can_release %}{{ act.form(key, "release", "ticket", "#ticket-head", "Release") }}{% endif %}
+    {% if can_stop %}{{ act.confirm_form(key, "stop", "ticket", "#ticket-head", "Stop session", "Stop the live session of " ~ key ~ "?") }}{% endif %}
+    {% endif %}
+  </div>
 </div>
+{{ act.error(action_error, key) }}
 <p class="status-sentence" id="status-sentence">{{ t.status }}</p>
 <div class="rail" id="phase-rail">
   {% for r in t.rail %}<div class="{{ 'visited' if r.visits }}{{ ' current' if r.current }}{{ ' failed' if r.failed }}" title="{{ r.phase }}"></div>{% endfor %}

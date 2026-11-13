@@ -1,3 +1,4 @@
+{% import "_actions.html" as act %}
 {% for c in view.needs_you %}
 <article class="card{% if c.reason is defined %} degraded{% endif %}" data-key="{{ c.key }}" data-group="needs-you">
   <div class="card-inner">
@@ -8,7 +9,19 @@
       <p class="card-question">{% if c.reason is defined %}{{ c.reason }}{% else %}{{ c.body }}{% endif %}</p>
       {% if c.recommendation %}<p class="card-rec"><span class="dim">Recommended:</span> {{ c.recommendation }}</p>{% endif %}
       {% if c.dependents %}<p class="card-blocks dim">blocks {% for d in c.dependents %}<a href="/t/{{ d }}">{{ d }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
-      <div class="card-actions" data-slot="actions"><!-- T-243: action buttons --></div>
+      <div class="card-actions" data-slot="actions">
+        {% if can_write %}
+        {% if c.reason is defined %}
+        {{ act.note_form(c.key, "retry", "now", "#now-decide", "Retry with a note", "Retry", "Optional note for the next attempt") }}
+        <a class="btn btn-secondary" href="/t/{{ c.key }}">Open the last session</a>
+        {{ act.confirm_form(c.key, "discard", "now", "#now-decide", "Discard", "Discard " ~ c.key ~ "? The ticket is closed.") }}
+        {% else %}
+        {% if c.recommendation %}{{ act.form(c.key, "answer", "now", "#now-decide", "Accept recommendation", "btn-primary", {"qid": c.qid, "accept": "1"}) }}{% endif %}
+        {{ act.note_form(c.key, "answer", "now", "#now-decide", "Write an answer", "Send answer", "Your answer", {"qid": c.qid}) }}
+        {% endif %}
+        {% endif %}
+        {{ act.error(action_error, c.key) }}
+      </div>
     </div>
   </div>
 </article>

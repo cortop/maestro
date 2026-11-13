@@ -4,12 +4,31 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import gates, store
+from .. import claims, fleet, gates, store
+from ..statemachine import TERMINAL_PHASES
 from ..view import events as ev_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
 from .shell import Shell
+
+
+def head_ctx(shell: Shell, key: str, **extra) -> dict:
+    """Context of the ticket head: the view plus which actions are valid for its state."""
+    home = shell.home
+    now = store.now_epoch()
+    cfg = shell.cfg()
+    tv = ticket_view.ticket(home, key, now)
+    runner = gates.spec_runner(home, key)[0] or cfg.runner
+    live = tv.snap.phase not in {p.value for p in TERMINAL_PHASES}
+    claim = claims.read_claim(home, key)
+    can_stop = bool(claim) and claim.get("kind") not in ("testrun", "restack")
+    return {"t": tv, "key": key, "priority": gates.spec_priority(home, key),
+            "repo": tv.snap.repo or "default", "runner": runner,
+            "card": ticket_view.dispatch_card(home, key, tv.snap, cfg, now),
+            "can_message": live, "can_hold": live and fleet.hold_state(home, key, now) is None,
+            "can_release": fleet.hold_state(home, key, now) is not None,
+            "can_stop": can_stop, **extra}
 
 
 def register(app: FastAPI, shell: Shell) -> None:
@@ -23,15 +42,6 @@ def register(app: FastAPI, shell: Shell) -> None:
         if not ok:
             raise HTTPException(status_code=404, detail=f"no such ticket: {key}")
 
-    def head_ctx(key: str) -> dict:
-        now = store.now_epoch()
-        cfg = shell.cfg()
-        tv = ticket_view.ticket(home, key, now)
-        runner = gates.spec_runner(home, key)[0] or cfg.runner
-        return {"t": tv, "key": key, "priority": gates.spec_priority(home, key),
-                "repo": tv.snap.repo or "default", "runner": runner,
-                "card": ticket_view.dispatch_card(home, key, tv.snap, cfg, now)}
-
     def live_steps(key: str) -> list[str]:
         """Step digest lines of the session in progress (memoized by log size and mtime)."""
         lg = logs_view.build(home, key)
@@ -42,17 +52,17 @@ def register(app: FastAPI, shell: Shell) -> None:
     @app.get("/t/{key}", response_class=HTMLResponse)
     def ticket_page(request: Request, key: str):
         require(key)
-        return shell.render(request, "ticket.html", nav="tickets", **head_ctx(key))
+        return shell.render(request, "ticket.html", nav="tickets", **head_ctx(shell, key))
 
     @app.get("/t/{key}/head", response_class=HTMLResponse)
     def ticket_head(request: Request, key: str):
         require(key)
-        return shell.render(request, "_ticket_head.html", **head_ctx(key))
+        return shell.render(request, "_ticket_head.html", **head_ctx(shell, key))
 
     @app.get("/t/{key}/side", response_class=HTMLResponse)
     def ticket_side(request: Request, key: str):
         require(key)
-        return shell.render(request, "_ticket_side.html", **head_ctx(key))
+        return shell.render(request, "_ticket_side.html", **head_ctx(shell, key))
 
     @app.get("/t/{key}/spec", response_class=HTMLResponse)
     def ticket_spec(request: Request, key: str):
