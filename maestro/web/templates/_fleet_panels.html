@@ -2,7 +2,21 @@
 <section class="fleet-headline state-{{ state|replace(' ', '-') }}">
   <h1 id="fleet-state">{{ state }}</h1>
   <p id="fleet-attention" class="dim">{% if attention %}{{ attention|join(" · ") }}{% else %}Nothing needs attention.{% endif %}</p>
-  <div id="fleet-actions" class="fleet-actions"><!-- slot: pause / doctor / backup buttons (T-244) --></div>
+  {% if notice is defined and notice %}<p id="fleet-notice" class="mono" role="status">{{ notice }}</p>{% endif %}
+  <div id="fleet-actions" class="fleet-actions">{% if can_write %}
+    {% if paused is none %}
+    <form hx-post="/fleet/pause" hx-target="#fleet" hx-swap="innerHTML" id="pause-form">
+      <input name="until" placeholder="until (ISO time, optional)" aria-label="pause until">
+      <input name="reason" placeholder="reason (optional)" aria-label="pause reason">
+      <button class="btn btn-danger" type="submit">Pause fleet</button>
+    </form>
+    <p class="dim">Sessions already running keep going until they exit.</p>
+    {% else %}
+    <button class="btn btn-primary" hx-post="/fleet/resume" hx-target="#fleet" hx-swap="innerHTML">Resume fleet</button>
+    {% endif %}
+    <button class="btn btn-secondary" hx-post="/fleet/doctor" hx-target="#fleet" hx-swap="innerHTML">Run doctor</button>
+    <button class="btn btn-secondary" hx-post="/fleet/backup" hx-target="#fleet" hx-swap="innerHTML">Back up now</button>
+  {% endif %}</div>
 </section>
 
 <section class="fleet-budget">
@@ -46,8 +60,8 @@
     <h2>Live sessions</h2>
     {% if sessions is none %}<p class="mono" id="sessions-unknown">unknown</p>
     {% elif sessions %}
-    <table class="ledger" id="sessions"><thead><tr><th>Key</th><th>Round</th><th>Doing</th><th>Runner</th><th>Age</th><th>Cost</th></tr></thead><tbody>
-      {% for s in sessions %}<tr data-key="{{ s.key }}"><td class="key"><a href="/t/{{ s.key }}">{{ s.key }}</a></td><td>{{ s.round }}</td><td>{{ s.tool }}</td><td>{{ s.runner or "—" }}</td><td class="mono">{{ s.age_s|dur if s.age_s is not none else "—" }}</td><td class="mono">{% if s.cost is none %}—{% else %}${{ "%.2f"|format(s.cost) }}{% endif %}</td></tr>{% endfor %}
+    <table class="ledger" id="sessions"><thead><tr><th>Key</th><th>Round</th><th>Doing</th><th>Runner</th><th>Age</th><th>Cost</th>{% if can_write %}<th></th>{% endif %}</tr></thead><tbody>
+      {% for s in sessions %}<tr data-key="{{ s.key }}"><td class="key"><a href="/t/{{ s.key }}">{{ s.key }}</a></td><td>{{ s.round }}</td><td>{{ s.tool }}</td><td>{{ s.runner or "—" }}</td><td class="mono">{{ s.age_s|dur if s.age_s is not none else "—" }}</td><td class="mono">{% if s.cost is none %}—{% else %}${{ "%.2f"|format(s.cost) }}{% endif %}</td>{% if can_write %}<td><button class="btn btn-danger" hx-get="/fleet/stop/{{ s.key }}" hx-target="closest td" hx-swap="innerHTML">Stop</button></td>{% endif %}</tr>{% endfor %}
     </tbody></table>
     {% else %}<p class="dim" id="sessions-empty">No live sessions.</p>{% endif %}
 
@@ -78,6 +92,7 @@
     {% else %}
     <p id="backups" class="mono">{{ backups.count }} kept · last {{ ago(backups.last) if backups.last is not none else "never" }}{% if backups.next is not none %} · next in {{ [backups.next - now, 0]|max|dur }}{% endif %}</p>
     <p class="dim">every {{ backups.interval|dur }}, keeps {{ backups.retention }}</p>
+    <p class="dim">Restore is deliberate: run <code class="mono" id="restore-cmd">maestro restore</code> on the command line.</p>
     {% endif %}
   </div>
 </section>
