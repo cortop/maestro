@@ -26,8 +26,8 @@ WATCHER_STEPS = (
     "1) Run `maestro slack-cursor`: it prints a Slack message ts. "
     "2) With the granted Slack read tool, read that channel's messages posted after that ts (pass "
     "it as `oldest`), oldest first; if there are none, stop. "
-    '3) Build a JSON list of {"ts": <message ts>, "text": <raw text, unmodified>, "permalink": '
-    "<the message permalink>} -- do not filter or summarise; the intake verb decides. "
+    '3) Build a JSON list of {"ts": <message ts>, "text": <raw text, unmodified>} -- do not '
+    "filter or summarise; the intake verb decides. "
     "4) Pipe that list once to `maestro slack-intake` on stdin. 5) Exit; do not poll again. Key:"
 )
 INTAKE_VERB = "slack-intake"
@@ -160,11 +160,19 @@ def is_ping(cfg: Config, text: str) -> list[str]:
     return list(dict.fromkeys(_PR_LINK_RE.findall(text)))
 
 
+def permalink(cfg: Config, ts: str) -> str | None:
+    """The Slack permalink of message *ts* in the watched channel, or None without a workspace url."""
+    if not (cfg.slack_workspace_url and cfg.slack_channel):
+        return None
+    return f"{cfg.slack_workspace_url.rstrip('/')}/archives/{cfg.slack_channel}/p{str(ts).replace('.', '')}"
+
+
 def intake(cfg: Config, messages: list, now: float | None = None, *,
            start_review: Callable[..., dict] | None = None) -> dict:
     """File a review for each not-yet-seen message that pings the user with a PR link.
 
-    *messages* are ``{"ts", "text", "permalink"}`` dicts (Slack ts strings). Messages at or
+    *messages* are ``{"ts", "text"}`` dicts (Slack ts strings); a message's ``permalink``, when
+    given, wins over the one built from ``slack_workspace_url``. Messages at or
     before the cursor are skipped; the cursor then advances to the newest ts seen. A filing
     that raises is retried on later intakes up to ``MAX_INTAKE_ATTEMPTS`` times. *start_review*
     is a test seam (default ``ops.start_review``)."""
@@ -187,17 +195,17 @@ def intake(cfg: Config, messages: list, now: float | None = None, *,
             continue
         newest = max(newest, key)
         links = is_ping(cfg, str(msg.get("text") or ""))
-        if not links or not msg.get("permalink"):
+        if not links:
             skipped += 1
             continue
-        todo.append({"ts": msg["ts"], "permalink": str(msg["permalink"]), "links": links,
-                     "attempts": 0})
+        todo.append({"ts": msg["ts"], "permalink": msg.get("permalink") or permalink(cfg, msg["ts"]),
+                     "links": links, "attempts": 0})
     new_retry = []
     for item in todo:
         failed = False
         for link in item["links"]:
             try:
-                result = start_review(cfg, link, source=item["permalink"])
+                result = start_review(cfg, link, source=item.get("permalink"))
                 filed.append({"ts": item["ts"], "pr_url": link, "key": result.get("key"),
                               "minted": result.get("minted"), "started": result.get("started")})
             except store.MaestroError as exc:

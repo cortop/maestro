@@ -471,6 +471,7 @@ class Config:
     slack_model: str = "haiku"               # the cheapest configured model
     slack_read_tools: list = field(default_factory=list)  # Slack plugin read tools the session is granted
     slack_user_id: str | None = None         # the human's Slack user id; only direct mentions count
+    slack_workspace_url: str | None = None   # e.g. "https://acme.slack.com"; builds review source permalinks
 
     # --- tables & state (not [maestro] knobs) ---
     # [repos.<name>] tables: name -> {path, slug, base_branch, branch_prefix, default}.
@@ -1072,6 +1073,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("slack_model", _str),
     Knob("slack_read_tools", _string_list),
     Knob("slack_user_id", _opt_str),
+    Knob("slack_workspace_url", _opt_str),
 )
 
 # `bash_max_timeout` is declared here too, but load() re-resolves it after the table,
@@ -1617,6 +1619,7 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
 # slack_model = "haiku"           # the cheapest configured model
 # slack_read_tools = ["mcp__slack__read_channel"]   # the Slack read tools the session is granted
 # slack_user_id = "U0123456789"   # only messages that directly @mention this user become reviews
+# slack_workspace_url = "https://acme.slack.com"   # builds each review's link back to its message
 
 [providers]
 tracker = "none"          # "none" | "jira" | "jira_cli" | "linear" | "github_issues" | custom

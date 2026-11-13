@@ -21,24 +21,25 @@ UID = "U111AAA"
 PR = "https://github.com/acme/widgets/pull/7"
 PR2 = "https://github.com/acme/widgets/pull/8"
 TOOLS = ["mcp__chat__read_channel"]
+WORKSPACE = "https://chat.example"
 
 
 def _cfg(home, **kw):
     base = dict(home=home, max_concurrency=3, slack_channel="C0SYNTH", slack_user_id=UID,
-                slack_read_tools=list(TOOLS), slack_active_hours="")
+                slack_read_tools=list(TOOLS), slack_active_hours="", slack_workspace_url=WORKSPACE)
     base.update(kw)
     return Config(**base)
 
 
 class FakeSlack:
-    """The injectable Slack source: channel history, read since a cursor."""
+    """The injectable Slack source: channel history, read since a cursor. Like the real read
+    tool, it gives each message's ts and text but no permalink."""
 
     def __init__(self):
         self.msgs = []
 
     def post(self, ts, text):
-        self.msgs.append({"ts": ts, "text": text,
-                          "permalink": f"https://chat.example/archives/C0SYNTH/p{ts.replace('.', '')}"})
+        self.msgs.append({"ts": ts, "text": text})
 
     def since(self, cursor):
         k = slack_watcher._ts_key
@@ -56,10 +57,11 @@ def _intake_cli(home, messages, monkeypatch):
     return code, json.loads(out.getvalue())
 
 
-def _write_cfg(home):
+def _write_cfg(home, workspace=WORKSPACE):
     (home / "config.toml").write_text(
         '[maestro]\nslack_channel = "C0SYNTH"\n'
-        f'slack_user_id = "{UID}"\nslack_read_tools = ["{TOOLS[0]}"]\nslack_active_hours = ""\n')
+        f'slack_user_id = "{UID}"\nslack_read_tools = ["{TOOLS[0]}"]\nslack_active_hours = ""\n'
+        + (f'slack_workspace_url = "{workspace}"\n' if workspace else ""))
 
 
 # --- AC1: interval, active hours, grant -------------------------------------------------------
@@ -150,7 +152,7 @@ def test_intake_files_reviews_for_direct_mentions_only(home, monkeypatch):
     assert snap.kind == "review"
 
 
-def test_review_verb_gets_the_message_permalink_as_source(home):
+def test_review_source_is_the_permalink_built_from_the_workspace_url(home):
     cfg, seen = _cfg(home), []
 
     def fake_review(cfg, url, source=None):
@@ -160,7 +162,20 @@ def test_review_verb_gets_the_message_permalink_as_source(home):
     slack = FakeSlack()
     slack.post("1700000001.000100", f"<@{UID}> {PR}")
     slack_watcher.intake(cfg, slack.msgs, 1.0, start_review=fake_review)
-    assert seen == [(PR, slack.msgs[0]["permalink"])]
+    assert seen == [(PR, "https://chat.example/archives/C0SYNTH/p1700000001000100")]
+
+
+def test_a_ping_is_filed_without_a_workspace_url(home):
+    cfg, seen = _cfg(home, slack_workspace_url=None), []
+
+    def fake_review(cfg, url, source=None):
+        seen.append((url, source))
+        return {"key": "k", "minted": True, "started": True}
+
+    slack = FakeSlack()
+    slack.post("1700000001.000100", f"<@{UID}> {PR}")
+    out = slack_watcher.intake(cfg, slack.msgs, 1.0, start_review=fake_review)
+    assert seen == [(PR, None)] and out["skipped"] == 0
 
 
 def test_cursor_prevents_reprocessing(home, monkeypatch):
