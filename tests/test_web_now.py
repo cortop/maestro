@@ -26,7 +26,7 @@ def test_index_renders_cards_in_flight_and_queued(client):
     html = client.get("/").text
     cards = html.split('data-group="in-flight-agent"')[0]
     assert _keys(cards) >= {"T-1", "T-2"}
-    assert "2 tickets need" in html and 'class="you"' in html
+    assert '2 need <span class="you">you.</span>' in html
     assert 'data-key="T-4"' in html and 'data-key="T-5"' in html  # dispatcher-owned, queued
     assert 'data-slot="actions"' in html
     assert "Shall I proceed" in html
@@ -52,7 +52,7 @@ def test_headline_reads_differently_at_zero(home):
     seed_ticket(home, "T-9", "working", phase="implementing")
     with TestClient(create_app(home)) as c:
         html = c.get("/").text
-    assert "Nothing needs" in html and "tickets need" not in html
+    assert 'Nothing needs <span class="you">' in html and 'data-needs="0"' in html
     assert "Nothing is waiting on you" in html
 
 
@@ -62,4 +62,4 @@ def test_agent_text_is_escaped(home):
     with TestClient(create_app(home)) as c:
         html = c.get("/").text
     assert "<script>alert" not in html and "<img src=x" not in html
-    assert "1 ticket needs" in html
+    assert '1 needs <span class="you">' in html

@@ -1,24 +1,26 @@
+{% from "_labels.html" import phase %}
 <table class="ledger">
-  <thead><tr><th>Key</th><th>Title</th><th>Stage</th><th>Now</th></tr></thead>
+  <thead><tr><th scope="col">Key</th><th scope="col">Ticket</th><th scope="col">Stage</th><th scope="col">Right now</th></tr></thead>
   {% for group, rows in (("agent", agents), ("dispatcher", dispatcher)) %}
   <tbody data-group="in-flight-{{ group }}">
     {% for r in rows %}
     <tr data-key="{{ r.key }}">
       <td class="key"><a href="/t/{{ r.key }}">{{ r.key }}</a></td>
-      <td>{{ r.title }}</td>
-      <td><span class="chip chip-{{ group }}">{{ r.phase }}</span>{% if r.kind == "review" %} <span class="chip">review</span>{% endif %}</td>
-      <td>{{ r.doing }}{% if r.tool_line %}<div class="dim mono">{{ r.tool_line }}</div>{% endif %}</td>
+      <td class="title">{{ r.title }}</td>
+      <td><span class="chip chip-{{ group }}">{{ phase(r.phase) }}</span>{% if r.kind == "review" %} <span class="chip chip-kind">review</span>{% endif %}</td>
+      <td class="now">{% if group == "agent" %}<span class="cursor" aria-hidden="true"></span>{% endif %}{{ r.doing or ("working" if group == "agent" else "waiting on " ~ phase(r.phase)|lower) }}{% if r.tool_line %}<div class="tool">{{ r.tool_line }}</div>{% endif %}</td>
     </tr>
     {% endfor %}
   </tbody>
   {% endfor %}
   <tbody data-group="queued">
     {% for r in view.queued %}
+    {% set held = r.reason.startswith("held") %}
     <tr data-key="{{ r.key }}">
       <td class="key"><a href="/t/{{ r.key }}">{{ r.key }}</a></td>
-      <td>{{ r.title }}</td>
-      <td><span class="chip">{{ r.phase }}</span></td>
-      <td class="dim">{{ r.reason }}</td>
+      <td class="title">{{ r.title }}</td>
+      <td><span class="chip chip-{{ 'held' if held else 'queued' }}">{{ "Held" if held else phase(r.phase) }}</span></td>
+      <td class="now">{{ r.reason }}</td>
     </tr>
     {% endfor %}
   </tbody>

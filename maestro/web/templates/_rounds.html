@@ -1,7 +1,4 @@
-{% if live %}<div class="card live-round"><div class="card-inner"><div class="card-title">round in progress</div>
-<div class="card-body"><pre>{% for line in live %}{{ line }}
-{% endfor %}</pre></div></div></div>{% endif %}
-<dl id="rounds-header">
+<dl id="rounds-header" class="facts">
   <dt>Time</dt><dd>{{ tr.time }}</dd>
   <dt>Rounds</dt><dd>{{ tr.rounds }}</dd>
   <dt>QA</dt><dd>{{ tr.qa }}</dd>
@@ -14,3 +11,6 @@
 <tr class="round{{ ' warn' if r.warn }}"><td>{{ r.when }}</td><td>{{ r.label }}{% if r.count > 1 %} ×{{ r.count }}{% endif %}</td><td>{{ r.duration }}</td><td>{{ r.outcome }}</td></tr>
 {% else %}<tr><td colspan="4">no rounds yet</td></tr>{% endfor %}
 </tbody></table>
+{% set working = tr.phase in ("triaging", "researching", "implementing", "qa") %}
+{% if live %}<div class="card live-round"><div class="card-inner"><div class="card-title"><span>{% if working %}<span class="cursor" aria-hidden="true"></span>round in progress{% else %}latest session{% endif %}</span></div>
+<div class="card-body"><ol class="steps">{% for line in live %}<li>{{ line }}</li>{% endfor %}</ol></div></div></div>{% endif %}
