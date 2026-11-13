@@ -42,7 +42,13 @@
   function build() {
     dlg = document.createElement("div"); dlg.id = "palette"; dlg.className = "palette"; dlg.hidden = true;
     dlg.setAttribute("role", "dialog"); dlg.setAttribute("aria-label", "Command palette");
-    dlg.innerHTML = '<div class="palette-box"><input type="text" class="palette-input" placeholder="Type a command or ticket" aria-label="Command"><ul class="palette-list" role="listbox"></ul></div>';
+    dlg.innerHTML = '<div class="palette-box"><div class="palette-inner">' +
+      '<div class="palette-top"><span class="palette-context"></span>' +
+      '<input type="text" class="palette-input" placeholder="Type a command, a ticket key or a title…" aria-label="Command">' +
+      '<span class="palette-esc">ESC</span></div>' +
+      '<ul class="palette-list" role="listbox"></ul>' +
+      '<div class="palette-foot">↑↓ move · ↵ run · esc close</div></div></div>';
+    dlg.querySelector(".palette-context").textContent = "> " + (document.body.dataset.ticket || "maestro");
     document.body.appendChild(dlg);
     input = dlg.querySelector("input"); list = dlg.querySelector("ul");
     input.addEventListener("input", filter);
@@ -58,4 +64,7 @@
     else if (ev.key === "Enter") { ev.preventDefault(); run(entries()[current()]); }
   });
   document.addEventListener("click", function (ev) { if (ev.target.closest("[data-palette-open]")) open(); });
+  if (/Mac|iPhone|iPad/.test(navigator.platform)) {
+    document.querySelectorAll("[data-palette-key]").forEach(function (k) { k.textContent = "⌘K"; });
+  }
 })();

@@ -1,6 +1,9 @@
-<h1 class="now-title" data-needs="{{ needs_count }}">
-{% if needs_count == 0 %}Nothing needs <span class="you">you</span>{% elif needs_count == 1 %}1 ticket needs <span class="you">you</span>{% else %}{{ needs_count }} tickets need <span class="you">you</span>{% endif %}
-</h1>
-<ul class="counters">
-  {% for label, n in counters %}<li><b>{{ n }}</b> {{ label }}</li>{% endfor %}
-</ul>
+<div class="hero-main">
+  <p class="kicker">&gt; {{ stamp }} // last sweep {% if sweep_age is none %}unknown{% else %}+{{ sweep_age|dur }}{% endif %} // home <span class="keep">{{ home_short }}</span></p>
+  <h1 class="now-title" data-needs="{{ needs_count }}">
+  {% if needs_count == 0 %}Nothing needs <span class="you">you.</span>{% elif needs_count == 1 %}1 needs <span class="you">you.</span>{% else %}{{ needs_count }} need <span class="you">you.</span>{% endif %}
+  </h1>
+</div>
+<dl class="counters">
+  {% for label, n in counters %}<div><dt>{{ label }}</dt><dd>{{ "%02d"|format(n) }}</dd></div>{% endfor %}
+</dl>

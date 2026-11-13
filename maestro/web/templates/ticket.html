@@ -4,8 +4,8 @@
 <section id="ticket-head" hx-get="/t/{{ key }}/head" hx-trigger="sse:ticket:{{ key }}" hx-swap="innerHTML">
   {% include "_ticket_head.html" %}
 </section>
-<div class="ticket-grid">
-  <section class="ticket-main">
+<div class="cols ticket-grid">
+  <section class="col col-wide ticket-main" aria-label="Ticket history">
     <div class="tabs" role="tablist">
       {% set tabs = (("story","Story","rounds"),) + ((("review","Review","review"),) if t.snap.kind == "review" else ()) + (("spec","Spec","spec"),("proposal","Proposal","proposal"),("events","Events","events"),("sessions","Sessions","logs")) %}
       {% for id, label, url in tabs %}
@@ -15,7 +15,7 @@
       {% endfor %}
     </div>
   </section>
-  <aside class="ticket-side" id="ticket-side" hx-get="/t/{{ key }}/side" hx-trigger="sse:ticket:{{ key }}" hx-swap="innerHTML">
+  <aside class="col ticket-side" id="ticket-side" hx-get="/t/{{ key }}/side" hx-trigger="sse:ticket:{{ key }}" hx-swap="innerHTML">
     {% include "_ticket_side.html" %}
   </aside>
 </div>

@@ -1,21 +1,33 @@
 {% import "_actions.html" as act %}
-<p class="crumb mono dim">{{ t.key }} <span class="chip chip-agent phase-chip">{{ t.phase }}</span> · P{{ priority }} · {{ repo }} · {{ runner }}</p>
-<div class="title-row">
-  <h1>{{ t.title }}</h1>
+{% from "_labels.html" import PHASE_LABELS, DISPATCHER_PHASES, chip_class %}
+<div class="hero">
+  <div class="hero-main">
+    <p class="kicker crumb">&gt; <a href="/tickets">tickets</a> / <b>{{ t.key }}</b> // <span class="chip {{ chip_class(t.phase) }} phase-chip">{{ t.phase }}</span> // priority {{ priority }} // <span class="keep">{{ repo }}</span> // runner {{ runner }}</p>
+    <h1 class="ticket-title">{{ t.title }}</h1>
+    <p class="status-sentence" id="status-sentence">{% if can_stop %}<span class="cursor" aria-hidden="true"></span>{% endif %}{{ t.status }}</p>
+  </div>
   <div class="title-actions" id="ticket-actions">
     {% if can_write %}
-    {% if can_message %}{{ act.note_form(key, "message", "ticket", "#ticket-head", "Message agent", "Send message", "Message for the agent") }}{% endif %}
+    {% if can_message %}{{ act.note_form(key, "message", "ticket", "#ticket-head", "Message agent", "Send message", "Message for the agent", cls="btn-primary") }}{% endif %}
     {% if can_hold %}{{ act.form(key, "hold", "ticket", "#ticket-head", "Hold") }}{% endif %}
     {% if can_release %}{{ act.form(key, "release", "ticket", "#ticket-head", "Release") }}{% endif %}
     {% if can_stop %}{{ act.confirm_form(key, "stop", "ticket", "#ticket-head", "Stop session", "Stop the live session of " ~ key ~ "?") }}{% endif %}
     {% endif %}
   </div>
+  {{ act.error(action_error, key) }}
 </div>
-{{ act.error(action_error, key) }}
-<p class="status-sentence" id="status-sentence">{{ t.status }}</p>
-<div class="rail" id="phase-rail">
-  {% for r in t.rail %}<div class="{{ 'visited' if r.visits }}{{ ' current' if r.current }}{{ ' failed' if r.failed }}" title="{{ r.label }}"></div>{% endfor %}
-</div>
-<div class="rail rail-times mono dim" id="rail-times">
-  {% for r in t.rail %}<span>{{ r.label }}{% if r.visits %}<br>{{ r.dwell_s | dur }}{% endif %}</span>{% endfor %}
+<div class="rail-scroll">
+  <ol class="rail" id="phase-rail" aria-hidden="true">
+    {% for r in t.rail %}<li class="{{ 'visited' if r.visits }}{{ ' by-dispatcher' if r.phase in DISPATCHER_PHASES }}{{ ' failed' if r.failed }}{{ ' current' if r.current }}" title="{{ r.label }}"></li>{% endfor %}
+  </ol>
+  {% set ns = namespace(past=true) %}
+  <ol class="rail-times" id="rail-times" aria-label="Phase progress and time spent in each">
+    {% for r in t.rail %}
+    <li class="{{ 'visited' if r.visits }}{{ ' failed' if r.failed }}{{ ' current' if r.current }}">
+      <span class="rail-label">{{ PHASE_LABELS.get(r.label, r.label) }}{% if r.current %} · now{% elif r.failed %} · failed{% endif %}</span>
+      <span class="rail-time">{% if r.visits %}{{ r.dwell_s | dur }}{% if r.visits > 1 %} · {{ r.visits }}×{% endif %}{% elif ns.past %}skipped{% else %}not yet{% endif %}</span>
+    </li>
+    {% if r.current %}{% set ns.past = false %}{% endif %}
+    {% endfor %}
+  </ol>
 </div>

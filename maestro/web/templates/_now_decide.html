@@ -1,46 +1,50 @@
 {% import "_actions.html" as act %}
+{% macro blocks(c) -%}
+{% if c.dependents %}<p class="card-blocks">blocks {% for d in c.dependents %}<a href="/t/{{ d }}">{{ d }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+{%- endmacro %}
 {% for c in view.needs_you %}
 {% if c.counts is defined %}
 <article class="card review" data-key="{{ c.key }}" data-group="needs-you" data-kind="review">
   <div class="card-inner">
-    <div class="card-title">REVIEW · <a href="/t/{{ c.key }}?tab=review">{{ c.key }}</a>
+    <div class="card-title"><span><a href="/t/{{ c.key }}?tab=review">{{ c.key }}</a> // REVIEW</span>
       <span class="waiting">waiting {{ c.waiting_s|dur }}</span></div>
     <div class="card-body">
-      <p class="card-ticket">{{ c.title }}</p>
-      <p class="card-question">{{ c.url }}{% if c.author %} · by {{ c.author }}{% endif %}</p>
-      <p class="card-counts mono">{% for sev, n in c.counts.items() %}{{ n }} {{ sev }}{{ " · " if not loop.last }}{% endfor %}{% if c.verdict %} · suggested: {{ c.verdict }}{% endif %}</p>
+      <p class="card-ticket keep">{{ c.url }}{% if c.author %} · by {{ c.author }}{% endif %}</p>
+      <p class="card-question">{{ c.title }}</p>
+      <p class="card-counts">{% for sev, n in c.counts.items() %}{{ n }} {{ sev }}{{ " · " if not loop.last }}{% endfor %}{% if c.verdict %} · suggested: {{ c.verdict }}{% endif %}</p>
       <div class="card-actions"><a class="btn btn-primary" href="/t/{{ c.key }}?tab=review">Open the review</a></div>
-      {% if c.dependents %}<p class="card-blocks dim">blocks {% for d in c.dependents %}<a href="/t/{{ d }}">{{ d }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+      {{ blocks(c) }}
     </div>
   </div>
 </article>
 {% else %}
+{% set text = c.reason if c.reason is defined else c.body %}
 <article class="card{% if c.reason is defined %} degraded{% endif %}" data-key="{{ c.key }}" data-group="needs-you">
   <div class="card-inner">
-    <div class="card-title"><a href="/t/{{ c.key }}">{{ c.key }}</a> · {% if c.reason is defined %}degraded{% else %}question{% if c.total and c.total > 1 %} {{ c.position }}/{{ c.total }}{% endif %}{% endif %}
-      <span class="waiting">waiting {{ c.waiting_s|dur }}</span></div>
+    <div class="card-title"><span><a href="/t/{{ c.key }}">{{ c.key }}</a> // {% if c.reason is defined %}degraded{% else %}question{% if c.total and c.total > 1 %} {{ c.position }}/{{ c.total }}{% endif %}{% endif %}</span>
+      <span class="waiting">{{ "parked" if c.reason is defined else "waiting" }} {{ c.waiting_s|dur }}</span></div>
     <div class="card-body">
       <p class="card-ticket">{{ c.title }}</p>
-      <p class="card-question">{% if c.reason is defined %}{{ c.reason }}{% else %}{{ c.body }}{% endif %}</p>
-      {% if c.recommendation %}<p class="card-rec"><span class="dim">Recommended:</span> {{ c.recommendation }}</p>{% endif %}
-      {% if c.dependents %}<p class="card-blocks dim">blocks {% for d in c.dependents %}<a href="/t/{{ d }}">{{ d }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+      <p class="card-question{% if text|length > 220 %} long{% endif %}">{{ text }}</p>
+      {% if c.recommendation %}<p class="card-rec"><span class="rec-label">&gt;&gt; AGENT RECOMMENDS</span> {{ c.recommendation }}</p>{% endif %}
       <div class="card-actions" data-slot="actions">
         {% if can_write %}
         {% if c.reason is defined %}
-        {{ act.note_form(c.key, "retry", "now", "#now-decide", "Retry with a note", "Retry", "Optional note for the next attempt") }}
+        {{ act.note_form(c.key, "retry", "now", "#now-decide", "Retry with a note", "Retry", "Optional note for the next attempt", cls="btn-light") }}
         <a class="btn btn-secondary" href="/t/{{ c.key }}">Open the last session</a>
         {{ act.confirm_form(c.key, "discard", "now", "#now-decide", "Discard", "Discard " ~ c.key ~ "? The ticket is closed.") }}
         {% else %}
         {% if c.recommendation %}{{ act.form(c.key, "answer", "now", "#now-decide", "Accept recommendation", "btn-primary", {"qid": c.qid, "accept": "1"}) }}{% endif %}
-        {{ act.note_form(c.key, "answer", "now", "#now-decide", "Write an answer", "Send answer", "Your answer", {"qid": c.qid}) }}
+        {{ act.note_form(c.key, "answer", "now", "#now-decide", "Write an answer", "Send answer", "Your answer", {"qid": c.qid}, cls="btn-ghost" if c.recommendation else "btn-secondary") }}
         {% endif %}
         {% endif %}
         {{ act.error(action_error, c.key) }}
       </div>
+      {{ blocks(c) }}
     </div>
   </div>
 </article>
 {% endif %}
 {% else %}
-<p class="dim empty">Nothing is waiting on you.</p>
+<div class="empty"><img src="/static/logo.svg" alt=""><p>Nothing is waiting on you.</p></div>
 {% endfor %}
