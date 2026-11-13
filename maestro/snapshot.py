@@ -306,6 +306,9 @@ class Snapshot:
     # recording order) and its brief (None until written), both reset by a new round.
     review_comments: list = field(default_factory=list)
     review_brief: dict | None = None
+    # T-253: the pending GitHub review created from the round's findings ({review_id,
+    # pr_number, head_sha, inline, in_body}), None until created; reset by a new round.
+    review_pending: dict | None = None
     # [repos.<name>] this ticket is bound to, from TicketCreated.repo. None = no
     # explicit binding -- repos.resolve() falls back to the implicit default.
     repo: str | None = None
@@ -567,6 +570,11 @@ def _fold_review_round_started(s: Snapshot, p: dict, seq, t: str) -> None:
     s.review_round += 1
     s.review_comments = []
     s.review_brief = None
+    s.review_pending = None
+
+
+def _fold_review_pending_created(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.review_pending = {k: p.get(k) for k in ("review_id", "pr_number", "head_sha", "inline", "in_body")}
 
 
 def _fold_review_finding_recorded(s: Snapshot, p: dict, seq, t: str) -> None:
@@ -838,6 +846,7 @@ _FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
     E.REVIEW_ROUND_STARTED: _fold_review_round_started,
     E.REVIEW_FINDING_RECORDED: _fold_review_finding_recorded,
     E.REVIEW_BRIEF_WRITTEN: _fold_review_brief_written,
+    E.REVIEW_PENDING_CREATED: _fold_review_pending_created,
     E.SPEC_OBSERVED: _fold_spec_observed,
     E.PHASE_CHANGED: _fold_phase_changed,
     E.QUESTION_ASKED: _fold_question_asked,

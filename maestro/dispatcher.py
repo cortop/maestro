@@ -1981,6 +1981,64 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     return {"checked": checked, "worktree_removal_errors": worktree_removal_errors}
 
 
+def sync_review_pending(cfg: Config, now: float) -> dict:
+    """T-253: finish a review ticket whose pending GitHub review the human has handled.
+
+    A `review`-kind ticket in `awaiting-ci` with a created pending review is polled with the
+    same cursor-gated, pure-Python shape as `sync_vcs` (no reconciler spawns). It is done once
+    the review is no longer pending (submitted, or deleted on GitHub) or its PR is merged or
+    closed; the review checkout is removed. maestro never edits the pending review."""
+    home = cfg.home
+    vcs_name = cfg.providers.get("vcs", "none")
+    if vcs_name in (None, "", "none"):
+        return {"checked": 0}
+    interval = int(cfg.provider_config.get("vcs", {}).get(vcs_name, {}).get("sync_interval", 120))
+    cursor_path = _vcs_cursor_path(home)
+    cursor = store.read_json(cursor_path, {}) or {}
+    if now - cursor.get("review_pending", 0) < interval:
+        return {"checked": 0}
+
+    from . import ops, providers, repos
+    vcs = providers.get_vcs(cfg)
+    cache: dict = {}
+    checked = 0
+    for key in list_keys(home):
+        snap = snap_mod.load(home, key)
+        pending = snap.review_pending
+        if snap.kind != "review" or snap.phase != Phase.AWAITING_CI.value or not pending:
+            continue
+        checked += 1
+        cred = resolve_credential(repos.resolve(cfg, home, key), cache)
+        if not cred.ok:
+            continue
+        m = re.match(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/", snap.review_url or "")
+        slug = m.group(1) if m else None
+        number = pending["pr_number"]
+        reason = None
+        state = vcs.review_state(number, pending["review_id"], repo=slug, env=cred.env)
+        if state.get("ok") and state.get("state") != "PENDING":
+            reason = f"review {str(state.get('state')).lower()} on GitHub"
+        else:
+            status = vcs.pr_status(number, repo=slug, env=cred.env)
+            if status.get("state") in ("MERGED", "CLOSED"):
+                reason = f"pull request {status['state'].lower()}"
+        if reason is None:
+            continue
+        try:
+            ops.set_phase(cfg, key, Phase.DONE, reason=reason, actor="dispatcher",
+                          expect=snap.observed_seq)
+        except event_log.StaleAppendError:
+            continue
+        wt = store.worktree_path(home, key)
+        binding = repos.resolve(cfg, home, key)
+        if wt.exists() and binding.path:
+            subprocess.run(["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
+                           capture_output=True, text=True)
+    cursor["review_pending"] = now
+    store.write_json(cursor_path, cursor)
+    return {"checked": checked}
+
+
 def _still_polled(cfg: Config, key: str) -> bool:
     """True iff *key* is still in a phase `sync_vcs` polls (nothing routed it this sweep)."""
     return Phase(snap_mod.load(cfg.home, key).phase) in (Phase.AWAITING_CI, Phase.IN_REVIEW)
@@ -3909,6 +3967,7 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     # call just queued -- same detached-subprocess shape as `sync_test_runs`
     # below, so it needs its own hook run.
     _run_hook("sync_restacks", hook_errors, sync_restacks, cfg, now, default={})
+    _run_hook("sync_review_pending", hook_errors, sync_review_pending, cfg, now, default={})
     _run_hook("sync_test_runs", hook_errors, sync_test_runs, cfg, now, default={})
     # The one hook that needs `sessions`: it spawns the post-QA skill itself.
     _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,

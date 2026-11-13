@@ -70,7 +70,7 @@ Core (correctness-critical):
 - `idempotency.py` — deterministic `step_id = hash(key, phase, observed_seq, action)`.
 - `claims.py` — per-key liveness dedup backed by verified process identity.
 - `inbox.py` — per-key append-only human inbox.
-- `human_actions.py` — human actions (answer, message, retry, discard, hold, release, stop, pause, resume) shared by TUI, CLI and web.
+- `human_actions.py` — human actions (answer, message, retry, discard, hold, release, stop, pause, resume, create-pending-review) shared by TUI, CLI and web.
 - `dispatcher.py` — level-triggered work queue: mint → find due → gate → spawn → exit.
   Also owns per-phase tool grants, VCS/CI sync, dispatcher-run test suites, runner routing.
 - `ops.py` — high-level reconciler verbs (each correct-by-construction); what agents call.

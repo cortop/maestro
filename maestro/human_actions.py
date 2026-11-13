@@ -1,14 +1,18 @@
-"""Human actions (answer, message, retry, discard, hold, release, stop, pause, resume) shared by the TUI, CLI and web UI."""
+"""Human actions (answer, message, retry, discard, hold, release, stop, pause, resume, create-pending-review) shared by the TUI, CLI and web UI."""
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 
 from . import dispatcher as disp
+from . import events as E
 from . import fleet, inbox, ops, store
 from . import snapshot as snap_mod
 from .config import Config
 from .statemachine import Phase
+
+_PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 
 # Called with the ticket key (or None) after a successful inbox write; None = no nudge.
 Nudge = Callable[[str | None], object]
@@ -99,3 +103,84 @@ def pause(home: Path, *, until: float | None = None, reason: str | None = None) 
 def resume(home: Path) -> dict:
     """Resume a paused fleet."""
     return fleet.resume(home)
+
+
+def create_pending_review(cfg: Config, key: str, findings: list[dict], *, vcs=None) -> dict:
+    """Create ONE pending (never submitted) GitHub review from a review ticket's kept findings.
+
+    *findings* is ``[{"index": int, "comment": str}, ...]``: the round's finding at ``index``
+    (file and line come from the folded snapshot) with the human's edited comment, posted
+    verbatim. A finding whose line is not in the PR's diff goes in the review body with its
+    file and line. Plain Python through the VCS provider and the repo's credential: no agent
+    session runs between the click and GitHub. Refuses, creating nothing, when the PR has
+    new commits, the user already has a pending review on it, or nothing was kept. Afterwards
+    the ticket sleeps in `awaiting-ci` and `dispatcher.sync_review_pending` finishes it."""
+    snap = snap_mod.load(cfg.home, key)
+    if snap.kind != "review":
+        raise store.MaestroError(f"{key}: only a review ticket can create a pending review")
+    if snap.phase != Phase.AWAITING_HUMAN.value or not snap.review_brief or not snap.review_head_sha:
+        raise store.MaestroError(f"{key}: the review brief is not ready (phase {snap.phase})")
+    m = _PR_URL.match(snap.review_url or "")
+    if not m:
+        raise store.MaestroError(f"{key}: no GitHub pull request url on this review")
+    slug, number = m.group(1), int(m.group(2))
+    chosen: list[tuple[dict, str]] = []
+    seen: set[int] = set()
+    for f in findings:
+        i = f.get("index")
+        if not isinstance(i, int) or not 0 <= i < len(snap.review_comments) or i in seen:
+            raise store.MaestroError(f"{key}: unknown or repeated finding {i!r}")
+        seen.add(i)
+        text = f.get("comment")
+        if not isinstance(text, str) or not text.strip():
+            raise store.MaestroError(f"{key}: finding {i + 1} has an empty comment")
+        chosen.append((snap.review_comments[i], text))
+    if not chosen:
+        raise store.MaestroError(f"{key}: no finding is included; nothing to send")
+
+    from . import providers
+    from . import repos as repos_mod
+    cred = disp.resolve_credential(repos_mod.resolve(cfg, cfg.home, key), {})
+    if not cred.ok:
+        raise store.MaestroError(f"{key}: credential resolution failed ({cred.error})")
+    vcs = vcs or providers.get_vcs(cfg)
+
+    def need(res: dict, what: str) -> dict:
+        if res.get("ok") is False or res.get("error"):
+            raise store.MaestroError(f"{key}: could not {what} on GitHub ({res.get('error')})")
+        return res
+
+    head = need(vcs.pr_head(number, slug, env=cred.env), "read the pull request")
+    if head.get("head_sha") != snap.review_head_sha:
+        raise store.MaestroError(
+            f"{key}: the pull request has new commits since this brief; start a new review round first")
+    if head.get("state") not in (None, "OPEN"):
+        raise store.MaestroError(f"{key}: the pull request is {head.get('state')}, not open")
+    existing = need(vcs.pending_review(number, slug, env=cred.env), "look for a pending review")
+    if existing.get("review_id"):
+        raise store.MaestroError(
+            f"{key}: you already have a pending review on this pull request; submit or delete it "
+            f"on GitHub first. Nothing was created.")
+    in_diff = need(vcs.pr_diff_lines(number, slug, env=cred.env), "read the diff")["lines"]
+
+    inline, in_body = [], []
+    for f, text in chosen:
+        if f["line"] in in_diff.get(f["file"], ()):
+            inline.append({"path": f["file"], "line": f["line"], "body": text})
+        else:
+            in_body.append(f"`{f['file']}:{f['line']}`\n\n{text}")
+    body = "\n\n".join(in_body)
+    made = need(vcs.create_pending_review(number, snap.review_head_sha, body, inline, slug,
+                                          env=cred.env), "create the pending review")
+
+    payload = {"review_id": made["id"], "pr_number": number, "head_sha": snap.review_head_sha,
+               "inline": len(inline), "in_body": len(in_body)}
+    ops._append(cfg, key, E.REVIEW_PENDING_CREATED, payload, actor="human",
+                sid=f"review-pending-{key}-{snap.review_head_sha}")
+    for qid in snap.open_questions:
+        ops._append(cfg, key, E.QUESTION_ANSWERED,
+                    {"qid": qid, "answer": "pending review created on GitHub"},
+                    actor="human", sid=f"ans-{key}-pending-{qid}")
+    ops.set_phase(cfg, key, Phase.AWAITING_CI, reason="pending review created; waiting for submit",
+                  actor="human")
+    return payload
