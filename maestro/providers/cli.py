@@ -246,7 +246,7 @@ class GitHubCliVCS:
         rc, out, err = _run(cmd, env=env)
         if rc != 0 or not out.strip():
             return {"head_sha": None, "head_ref": None, "is_fork": False, "state": "unknown",
-                    "title": None, "error": classify_gh_failure(rc, out, err)}
+                    "title": None, "error": classify_gh_failure(rc, out, err), "detail": err.strip()}
         data = json.loads(out)
         return {"head_sha": data.get("headRefOid"), "head_ref": data.get("headRefName"),
                 "is_fork": bool(data.get("isCrossRepository")),
@@ -451,7 +451,7 @@ class GitHubCliVCS:
         rc, out, err = _run(["gh", "api", "--paginate", f"repos/{slug}/pulls/{pr_number}/reviews"],
                             env=env)
         if rc != 0:
-            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+            return {"ok": False, "error": classify_gh_failure(rc, out, err), "detail": err.strip()}
         try:
             rows = _json_rows(out)
         except ValueError:
@@ -467,7 +467,7 @@ class GitHubCliVCS:
         rc, out, err = _run(["gh", "api", "--paginate", f"repos/{slug}/pulls/{pr_number}/files"],
                             env=env)
         if rc != 0:
-            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+            return {"ok": False, "error": classify_gh_failure(rc, out, err), "detail": err.strip()}
         try:
             rows = _json_rows(out)
         except ValueError:

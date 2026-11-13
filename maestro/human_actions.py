@@ -147,7 +147,9 @@ def create_pending_review(cfg: Config, key: str, findings: list[dict], *, vcs=No
 
     def need(res: dict, what: str) -> dict:
         if res.get("ok") is False or res.get("error"):
-            raise store.MaestroError(f"{key}: could not {what} on GitHub ({res.get('error')})")
+            detail = " ".join((res.get("detail") or "").split())[:300]
+            why = f"{res.get('error')}: {detail}" if detail else res.get("error")
+            raise store.MaestroError(f"{key}: could not {what} on GitHub ({why})")
         return res
 
     head = need(vcs.pr_head(number, slug, env=cred.env), "read the pull request")

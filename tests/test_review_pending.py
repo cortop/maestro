@@ -124,6 +124,20 @@ def test_refusals_create_nothing(home, form, vcs_kw, msg):
     assert vcs.created == [] and snap_mod.load(home, KEY).review_pending is None
 
 
+def test_a_gh_failure_shows_ghs_own_message(home, monkeypatch):
+    seed_review_ticket(home)
+    monkeypatch.setattr(gh_cli, "_run", lambda cmd, timeout=60, env=None: (
+        1, "", "HTTP 502: Bad Gateway (https://api.github.com/graphql)\n"))
+    app = create_app(home, nudge_on_action=False, vcs=gh_cli.GitHubCliVCS({}))
+    with TestClient(app) as c:
+        c.headers[TOKEN_HEADER] = app.state.guard.token
+        r = c.post(f"/t/{KEY}/review/pending", data=_form())
+    assert r.status_code == 409
+    assert ("could not read the pull request on GitHub "
+            "(unknown: HTTP 502: Bad Gateway (https://api.github.com/graphql))") in r.text
+    assert snap_mod.load(home, KEY).review_pending is None
+
+
 def test_post_is_behind_the_write_guard(board):
     c, home, vcs = board
     del c.headers[TOKEN_HEADER]
