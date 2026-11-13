@@ -61,6 +61,7 @@ def test_footer_follows_selected_row_and_tab(home):
     _seed(home)
 
     async def body(app, pilot):
+        await _settle(pilot)
         acts = _footer(app)  # first Now row is the degraded ticket
         assert "retry" in acts and "discard" in acts and "answer" not in acts, acts
         await pilot.press("down")
