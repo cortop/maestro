@@ -67,10 +67,11 @@ def _write_cfg(home):
 def test_spawn_grants_only_slack_read_tools_and_intake_verbs(home):
     cfg, sessions = _cfg(home), DryRunSessions()
     assert slack_watcher.sync(cfg, sessions, 1_000_000.0)["spawned"] is True
-    (key, _prompt, _cwd, model, _eff, disallowed, allowed, env, _runner, _rm), = sessions.spawned
+    (key, prompt, _cwd, model, _eff, disallowed, allowed, env, _runner, _rm), = sessions.spawned
     assert key == slack_watcher.WATCHER_KEY
     assert allowed == [*TOOLS, "Bash(maestro slack-cursor:*)", "Bash(maestro slack-intake:*)"]
-    assert model == "haiku" and env == {"MAESTRO_SLACK_CHANNEL": "C0SYNTH"}
+    assert model == "haiku" and env == {}
+    assert prompt.startswith("You are a tiny read-only Slack poll for the Slack channel id C0SYNTH. ")
     assert "Bash(gh pr merge:*)" in disallowed
 
 
