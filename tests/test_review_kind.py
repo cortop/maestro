@@ -84,12 +84,13 @@ def test_mints_review_ticket_checks_out_head_and_never_implements(board, monkeyp
     assert _head(repo) == main_head
     assert not (repo / "pr-one.txt").exists()
 
-    # a sweep neither triages nor spawns the review ticket
+    # a sweep neither triages nor spawns a ready-phase reconciler: it only starts the round
+    # (T-251), which with no test_command goes straight to `qa`
     sessions = DryRunSessions()
     report = disp.dispatch(Config(home=home), sessions, now=1000)
     assert KEY not in report.spawned and KEY not in [k for k, _ in report.due]
     assert sessions.spawned == []
-    assert snap_mod.load(home, KEY).phase == "ready"  # no triage/ready reconciler moved it
+    assert snap_mod.load(home, KEY).phase == "qa"
 
 
 def test_rerun_is_noop_and_new_commit_starts_new_round(board, monkeypatch):

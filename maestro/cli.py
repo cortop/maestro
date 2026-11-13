@@ -1621,6 +1621,21 @@ def cmd_review(args) -> int:
     return 0
 
 
+def cmd_review_finding(args) -> int:
+    """[agent] T-251: record one drafted review comment (file, line, severity, comment)."""
+    _print(ops.record_review_finding(_cfg(args), args.key, file=args.file, line=args.line,
+                                     severity=args.severity, comment=args.comment))
+    return 0
+
+
+def cmd_review_brief(args) -> int:
+    """[agent] T-251: write the review brief and park the ticket in awaiting-human."""
+    _print(ops.write_review_brief(_cfg(args), args.key, summary=args.summary, checked=args.checked,
+                                  decisions=args.decisions, verdict=args.verdict,
+                                  reading_order=args.reading_order))
+    return 0
+
+
 def cmd_sync_tracker(args) -> int:
     """[human] T-110: run a configured tracker's bulk import on demand -- the
     explicit counterpart to the dispatcher's own polled sync tick, whose
@@ -1637,7 +1652,7 @@ def cmd_sync_tracker(args) -> int:
 
 
 def cmd_install_commands(args) -> int:
-    """GA-15: idempotently install the seven per-phase reconcile command files —
+    """GA-15: idempotently install the eight per-phase reconcile command files —
     ``--repo <name>`` copies them into a configured repo's checkout,
     ``--user`` symlinks them into the user commands directory instead (for a
     repo the board doesn't own). Replaces DOGFOOD.md's old "vendor by hand"
@@ -1678,7 +1693,7 @@ def _env_key_payload(cfg: Config, key: str) -> dict:
     # reconciler phase preamble calls `maestro env --key`), so it must stay
     # zero-cost and never touch the secret value.
     gh_credential = credentials.credential_label(binding.gh_account, binding.token_env)
-    disallowed_tools = disp.MERGE_DENYLIST + disp.phase_denylist(snap.phase)
+    disallowed_tools = disp.MERGE_DENYLIST + disp.phase_denylist(snap.phase, snap.kind)
     # RF-2: same per-key spawn-arg resolution `dispatch()` uses right before
     # `sessions.spawn` -- surfaced here so `make reconcile` (and any human
     # inspecting a ticket) sees exactly what a real spawn would resolve to.
@@ -1690,7 +1705,7 @@ def _env_key_payload(cfg: Config, key: str) -> dict:
     return {"repo": binding.name, "repo_path": binding.path, "slug": binding.slug,
             "base_branch": binding.base_branch, "branch_prefix": binding.branch_prefix,
             "mode": binding.mode, "gh_credential": gh_credential, "prime": binding.prime,
-            "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase),
+            "reconcile_command": disp.resolve_reconcile_command(cfg, snap.phase, snap.kind),
             "disallowed_tools": disallowed_tools,
             "model": model, "effort": effort,
             "runner": runner, "runner_model": runner_model,
@@ -1914,12 +1929,28 @@ def build_parser() -> argparse.ArgumentParser:
              "[human] mint a review ticket for someone else's PR and check its head out")
     sp.add_argument("pr_url", metavar="PR_URL", help="https://github.com/<owner>/<repo>/pull/<n>")
     sp.add_argument("--source", default=None, help="optional link to where the PR was raised (e.g. a chat permalink)")
+    sp = add("review-finding", cmd_review_finding,
+             "[agent] record one drafted review comment on a review ticket's PR head")
+    sp.add_argument("key")
+    sp.add_argument("--file", required=True)
+    sp.add_argument("--line", type=int, required=True)
+    sp.add_argument("--severity", required=True, choices=ops.REVIEW_SEVERITIES)
+    sp.add_argument("--comment", required=True, help="drafted to be posted as is")
+    sp = add("review-brief", cmd_review_brief,
+             "[agent] write a review ticket's brief and hand it to the human (awaiting-human)")
+    sp.add_argument("key")
+    sp.add_argument("--summary", required=True, help="what the PR does")
+    sp.add_argument("--checked", required=True, help="what was checked: tests, claims vs diff")
+    sp.add_argument("--decisions", required=True, help="the decisions only the human can make")
+    sp.add_argument("--verdict", required=True, choices=ops.REVIEW_VERDICTS)
+    sp.add_argument("--reading-order", required=True, dest="reading_order",
+                    help="the order to read the files in")
     sp = add("sync-tracker", cmd_sync_tracker,
              "[human] run a configured tracker's bulk import on demand (bypasses auto_import + the sync cursor)")
     sp.add_argument("--name", default=None,
                     help="tracker name to sync (default: every configured tracker)")
     sp = add("install-commands", cmd_install_commands,
-             "install the seven per-phase maestro-reconcile-*.md commands into a repo or user dir")
+             "install the eight per-phase maestro-reconcile-*.md commands into a repo or user dir")
     sp.add_argument("--repo", default=None,
                     help="[repos.<name>] (or 'default' for the legacy repo_path) to copy into")
     sp.add_argument("--user", action="store_true",

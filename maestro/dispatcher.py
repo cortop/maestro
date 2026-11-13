@@ -144,17 +144,26 @@ def parse_depends_on(spec_text: str) -> list[str]:
 MERGE_DENYLIST = ["Bash(gh pr merge:*)"]
 
 
-def phase_denylist(phase: str) -> list[str]:
+# T-251: a review session only drafts; every `gh` verb that writes to GitHub is denied it.
+REVIEW_POST_DENYLIST = [f"Bash(gh {verb}:*)" for verb in (
+    "api", "issue", "pr close", "pr comment", "pr edit", "pr review", "pr ready", "pr reopen")]
+
+
+def phase_denylist(phase: str, kind: str | None = None) -> list[str]:
     """Tool-surface denylist for a spawned reconciler, keyed by phase (RF-6).
 
     Unioned with ``MERGE_DENYLIST`` at spawn time. Empty for every phase except
     ``qa``: a QA reconciler judges a diff independently of the agent that wrote
-    it, so it must not be able to Edit or Write the code it's reviewing.
+    it, so it must not be able to Edit or Write the code it's reviewing. T-251: a
+    `review`-kind ticket's `qa` round additionally cannot post to GitHub
+    (`REVIEW_POST_DENYLIST`); it only drafts.
     """
     try:
-        return ["Edit", "Write"] if Phase(phase) == Phase.QA else []
+        if Phase(phase) != Phase.QA:
+            return []
     except ValueError:
         return []
+    return ["Edit", "Write"] + (REVIEW_POST_DENYLIST if kind == "review" else [])
 
 
 def resolved_allowed_tools(cfg: Config, binding) -> list[str]:
@@ -236,6 +245,8 @@ AGENT_TOOL_VERBS = (
     "release",
     "reply-review",
     "requeue",
+    "review-brief",
+    "review-finding",
     "set-phase",
     "show",  # maestro-reconcile-passive.md reads pending_inbox through it
     "slack-cursor",  # the Slack watcher session (never a reconciler phase)
@@ -314,16 +325,23 @@ _PHASE_VERB_GRANT_BY_SUFFIX: dict[str, tuple[str, ...]] = {
                       "sync-base", "verify-ac", "worktree"),
     "qa": ("append", "ask", "env", "fail", "fold-inbox", "locate", "observe-spec", "qa-brief",
            "qa-verdict", "release", "set-phase"),
+    # T-251: a review ticket's `qa` round -- it drafts findings and a brief; the brief verb
+    # itself parks the ticket, so no set-phase/ask.
+    "review": ("env", "fail", "fold-inbox", "locate", "release", "review-brief",
+               "review-finding", "show", "snapshot"),
     "passive": ("append", "ask", "checked", "env", "finalize", "fold-inbox", "inbox-ack",
                 "observe-spec", "release", "set-phase", "show", "snapshot"),
 }
 
 
-def _phase_verb_suffix(phase: str) -> str:
+def _phase_verb_suffix(phase: str, kind: str | None = None) -> str:
     """Same resolution `resolve_reconcile_command` uses for which skill file
     spawns -- an unrecognized *phase* falls back to "passive" here too, so a
     phase this table hasn't caught up with yet still gets *a* working verb
-    set (fail toward working, never toward wedged)."""
+    set (fail toward working, never toward wedged). T-251: a `review`-kind ticket's
+    `qa` round resolves to the `review` suffix."""
+    if kind == "review" and phase == Phase.QA.value:
+        return "review"
     try:
         return _PHASE_COMMAND_SUFFIX[Phase(phase)]
     except (ValueError, KeyError):
@@ -344,7 +362,7 @@ def phase_verbs_by_suffix(suffix: str) -> tuple[str, ...]:
     return _PHASE_VERB_GRANT_BY_SUFFIX[suffix]
 
 
-def phase_verb_grant(phase: str) -> list[str]:
+def phase_verb_grant(phase: str, kind: str | None = None) -> list[str]:
     """The ``Bash(maestro <verb>:*)`` ALLOW rules a *phase*-spawned reconciler
     is granted (RB-16) -- the phase-narrowed replacement for handing every
     spawn the full ``maestro_verb_grant(AGENT_TOOL_VERBS)``. Resolved per key
@@ -352,7 +370,7 @@ def phase_verb_grant(phase: str) -> list[str]:
     `dispatch()` below), so a `qa` spawn and a `triaging` spawn in the same
     sweep -- sharing one `SessionManager` -- get different verb grants.
     """
-    return maestro_verb_grant(phase_verbs_by_suffix(_phase_verb_suffix(phase)))
+    return maestro_verb_grant(phase_verbs_by_suffix(_phase_verb_suffix(phase, kind)))
 
 
 def skill_grant(command: str) -> list[str]:
@@ -395,7 +413,7 @@ def qa_skill_grant(phase: str, binding) -> list[str]:
     return skill_grant(binding.qa_skill)
 
 
-def phase_verb_denylist(phase: str) -> list[str]:
+def phase_verb_denylist(phase: str, kind: str | None = None) -> list[str]:
     """The ``Bash(maestro <verb>:*)`` DENY rules for every verb `phase_verb_grant`
     does NOT grant *phase* -- the enforcement half of RB-16's narrowing.
 
@@ -411,7 +429,7 @@ def phase_verb_denylist(phase: str) -> list[str]:
     deny, a narrower ``--allowedTools`` alone would be silently defeated in
     exactly the repo that most needs it: maestro's own dogfood checkout.
     """
-    granted = set(phase_verbs_by_suffix(_phase_verb_suffix(phase)))
+    granted = set(phase_verbs_by_suffix(_phase_verb_suffix(phase, kind)))
     return maestro_verb_grant([v for v in AGENT_TOOL_VERBS if v not in granted])
 
 
@@ -3067,6 +3085,16 @@ def _route_test_run(cfg: Config, key: str, record: dict, *, actor: str, cwd: Pat
     from . import repos as repos_mod
     from . import testlang
 
+    if snap_mod.load(cfg.home, key).kind == "review":
+        # T-251: someone else's PR -- a red suite is a finding for the brief, not a bounce
+        # back to `implementing`, and there are no ACs/test deletions to gate on. The
+        # captured run stays in the snapshot's `test_runs` for the review session to read.
+        fresh = snap_mod.rebuild(cfg.home, key)
+        state = "passed" if record.get("passed") else f"failed (exit {record.get('exit_code')})"
+        ops.set_phase(cfg, key, Phase.QA, reason=f"tests {state}; review round", actor=actor,
+                      expect=fresh.observed_seq)
+        return
+
     if not record.get("passed"):
         fresh = snap_mod.rebuild(cfg.home, key)
         excerpt = record.get("failure_excerpt") or ""
@@ -3938,6 +3966,39 @@ def _due_check(home: Path, key: str, snap, now: float) -> DueResult:
     return due_check(home, key, snap, now)
 
 
+def _start_review_round(cfg: Config, key: str, snap) -> str | None:
+    """T-251: start a pending review round on a `ready` review ticket.
+
+    A round already briefed at the current head is left alone (the human's answer
+    wakes the ticket back to `ready`; it must not loop). A diff above the resolved
+    `pr_split_threshold` asks the human first (qid per head SHA, so an answer for
+    this head passes straight through). Otherwise the ticket enters `verifying` when
+    a `test_command` resolves (`sync_test_runs` runs it, `_route_test_run` hands on
+    to `qa`), else `qa` directly. Returns what it did, or None."""
+    from . import ops
+    from . import repos as repos_mod
+    head = snap.review_head_sha or ""
+    if not head or (snap.review_brief or {}).get("head_sha") == head:
+        return None
+    size = ops.pr_size(cfg, key)
+    qid = f"review-size-{key}-{head[:12]}"
+    if size["exceeds"] and not _question_answered(cfg.home, key, qid):
+        ops.ask(cfg, key,
+                f"{key}: this PR is {size['lines_changed']} lines changed (threshold "
+                f"{size['threshold']}). Reviewing it costs a full round -- answer to go ahead "
+                "with the review, or say to skip it.",
+                qid=qid, actor="dispatcher")
+        return "diff over pr_split_threshold: asked the human first"
+    binding = repos_mod.resolve(cfg, cfg.home, key)
+    dest = Phase.VERIFYING if binding.test_command and binding.mode != "local" else Phase.QA
+    try:
+        ops.set_phase(cfg, key, dest, reason=f"review round at {head[:12]}", actor="dispatcher",
+                      expect=snap.observed_seq)
+    except event_log.StaleAppendError:
+        return None  # lost a benign race; the next sweep re-derives
+    return f"review round started ({dest.value})"
+
+
 def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
     """Fold *key* and run the pre-spawn checks that can end its sweep early
     (never minted, fold error, not due, no ACs, already claimed), recording
@@ -3975,6 +4036,12 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
     if snap.kind == "review" and snap.phase in (Phase.TRIAGING.value, Phase.READY.value):
         decisions[key] = {"outcome": "review_round_pending",
                           "reason": "review ticket: no reconciler for its round yet"}
+        # T-251: a pending round starts here -- tests (verifying) then the qa-phase review.
+        if snap.phase == Phase.READY.value and not dry_run:
+            started = _run_hook(f"review-round:{key}", hook_errors, _start_review_round,
+                                sweep.cfg, key, snap)
+            if started:
+                decisions[key] = {"outcome": "review_round_started", "reason": started}
         return None
     res = due_check(home, key, snap, now)
     if not res.due:
@@ -3982,7 +4049,9 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
         return None
     # T-80: park a spec with no acceptance criteria before it reaches any spawn
     # gate -- unless a human answer is pending, which must reach a reconciler.
-    if res.reason not in _MISSING_ACS_EXEMPT_DUE_REASONS and _missing_acs(home, key):
+    # T-251: a review ticket (someone else's PR) has no ACs by design.
+    if (snap.kind != "review" and res.reason not in _MISSING_ACS_EXEMPT_DUE_REASONS
+            and _missing_acs(home, key)):
         if dry_run:
             decisions[key] = {
                 "outcome": "would_park_missing_acs",
@@ -4576,12 +4645,13 @@ def _spawn_due(sweep: _Sweep, sessions: SessionManager, to_spawn: list, active: 
             decisions[key]["outcome"] = "attempts_exhausted"
             continue
 
-        command = resolve_reconcile_command(cfg, phase)
+        kind = snap_mod.load(cfg.home, key).kind
+        command = resolve_reconcile_command(cfg, phase, kind)
         model, effort = _resolve_model_effort(cfg, key)
         # RB-16: the explicit phase-verb deny is the enforcement half of the
         # narrowed grant -- an allowedTools omission alone is not enough.
-        disallowed_tools = MERGE_DENYLIST + phase_denylist(phase) + phase_verb_denylist(phase)
-        allowed_tools = (phase_verb_grant(phase) + skill_grant(command)
+        disallowed_tools = MERGE_DENYLIST + phase_denylist(phase, kind) + phase_verb_denylist(phase, kind)
+        allowed_tools = (phase_verb_grant(phase, kind) + skill_grant(command)
                          + qa_skill_grant(phase, binding)
                          + resolved_allowed_tools(cfg, binding))
         # RF-1: command and key go separately; each backend composes its own
@@ -4798,7 +4868,7 @@ _PHASE_COMMAND_SUFFIX = {
 }
 
 
-def resolve_reconcile_command(cfg: Config, phase: str) -> str:
+def resolve_reconcile_command(cfg: Config, phase: str, kind: str | None = None) -> str:
     """The ``claude -p`` command to spawn for *phase* (T-22): resolved once,
     here, beside ``_resolve_model_effort``/``MERGE_DENYLIST`` -- the dispatcher
     already resolves per-key spawn state at this point, so per-phase command
@@ -4810,6 +4880,8 @@ def resolve_reconcile_command(cfg: Config, phase: str) -> str:
         suffix = _PHASE_COMMAND_SUFFIX[Phase(phase)]
     except (ValueError, KeyError):
         suffix = "passive"
+    if kind == "review" and phase == Phase.QA.value:
+        suffix = "review"  # T-251: a review ticket's round has its own skill
     return f"{cfg.reconcile_command}-{suffix}"
 
 

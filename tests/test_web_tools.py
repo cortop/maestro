@@ -179,6 +179,8 @@ def test_agent_tool_verbs_named_exactly():
         "release",
         "reply-review",
         "requeue",
+        "review-brief",
+        "review-finding",
         "set-phase",
         "show",
         "slack-cursor",

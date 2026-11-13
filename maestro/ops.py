@@ -271,6 +271,8 @@ def _refuse_if_missing_acs(cfg: Config, key: str, phase: Phase) -> None:
     *phase*, not the source. A missing spec.md is not this gate's problem
     (nothing to check); some other, unrelated failure will surface that."""
     text = _spec_text(cfg, key)
+    if snap_mod.load(cfg.home, key).kind == "review":
+        return  # T-251: someone else's PR has no acceptance criteria
     if text is not None and not snap_mod.has_acs(text):
         raise store.MaestroError(
             f"{key}: refusing {phase.value} — spec.md has no acceptance criteria "
@@ -3367,6 +3369,106 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
                   actor="human", force=True)
     return {"key": key, "minted": minted, "started": True, "worktree": str(wt),
             "head_sha": head["head_sha"]}
+
+
+REVIEW_SEVERITIES = ("blocking", "question", "nit")
+REVIEW_VERDICTS = ("approve", "request-changes", "comment")
+
+
+def _review_round_snap(cfg: Config, key: str, verb: str):
+    """The folded snapshot of a `review` ticket in `qa`; anything else refuses."""
+    snap = snap_mod.load(cfg.home, key)
+    if snap.kind != "review":
+        raise store.MaestroError(f"{key}: {verb} only applies to a review ticket (kind={snap.kind})")
+    if snap.phase != Phase.QA.value:
+        raise store.MaestroError(f"{key}: {verb} needs phase qa, ticket is in {snap.phase}")
+    if not snap.review_head_sha:
+        raise store.MaestroError(f"{key}: {verb}: no review round has started")
+    return snap
+
+
+def record_review_finding(cfg: Config, key: str, *, file: str, line: int, severity: str,
+                          comment: str, actor: str = "reconciler") -> dict:
+    """[agent] T-251: record one drafted review comment on the current round's PR head.
+
+    A finding is structured data -- file, line, severity (`REVIEW_SEVERITIES`) and a
+    comment drafted to be posted as is. Idempotent per content: the same finding
+    twice appends once."""
+    snap = _review_round_snap(cfg, key, "review-finding")
+    if severity not in REVIEW_SEVERITIES:
+        raise store.MaestroError(
+            f"{key}: severity must be one of {', '.join(REVIEW_SEVERITIES)} (got {severity!r})")
+    file = (file or "").strip()
+    if not file:
+        raise store.MaestroError(f"{key}: review-finding needs a non-empty --file")
+    if not isinstance(line, int) or line < 1:
+        raise store.MaestroError(f"{key}: --line must be a positive integer (got {line!r})")
+    comment = (comment or "").strip()
+    if not comment:
+        raise store.MaestroError(f"{key}: review-finding needs a non-empty --comment")
+    payload = {"head_sha": snap.review_head_sha, "file": file, "line": line,
+               "severity": severity, "comment": comment}
+    _append(cfg, key, E.REVIEW_FINDING_RECORDED, payload, actor=actor,
+            sid=f"review-finding-{key}-{content_hash(json.dumps(payload, sort_keys=True))[:16]}")
+    return payload
+
+
+def review_brief_path(home: Path, key: str) -> Path:
+    return home / "derived" / "briefs" / f"{store.validate_key(key)}.md"
+
+
+def render_review_brief(snap, brief: dict, findings: list[dict]) -> str:
+    """The human-readable brief: what the PR does, what was checked, the findings, the
+    decisions only the human can make, a suggested verdict and a reading order."""
+    link = f"[{snap.review_url}]({snap.review_url})" if snap.review_url else "(no url)"
+    lines = [f"# Review brief: {snap.key}", "",
+             f"PR: {link} at `{(brief.get('head_sha') or '')[:12]}`"]
+    if snap.review_source:
+        lines.append(f"Source: {snap.review_source}")
+    lines += ["", "## What the PR does", "", brief["summary"], "", "## What was checked", "",
+              brief["checked"], "",
+              "> The PR has no acceptance criteria. Its claims come from the PR description "
+              "and the diff was checked against those, which is weaker than checking a spec.",
+              "", "## Findings", ""]
+    if not findings:
+        lines.append("None.")
+    for f in findings:
+        lines.append(f"- **{f['severity']}** `{f['file']}:{f['line']}` -- {f['comment']}")
+    lines += ["", "## Decisions for you", "", brief["decisions"], "",
+              "## Suggested verdict", "", brief["verdict"], "", "## Reading order", "",
+              brief["reading_order"], ""]
+    return "\n".join(lines)
+
+
+def write_review_brief(cfg: Config, key: str, *, summary: str, checked: str, decisions: str,
+                       verdict: str, reading_order: str, actor: str = "reconciler") -> dict:
+    """[agent] T-251: write the round's brief, then hand the ticket to the human.
+
+    Records `ReviewBriefWritten`, writes `derived/briefs/<KEY>.md`, and asks the human
+    one question (qid per head SHA) so the ticket parks in `awaiting-human` -- the
+    dispatcher's existing notification hook (`notify.maybe_notify`) fires on that
+    entry. The question text is the headline; the brief file holds the detail."""
+    snap = _review_round_snap(cfg, key, "review-brief")
+    if verdict not in REVIEW_VERDICTS:
+        raise store.MaestroError(
+            f"{key}: verdict must be one of {', '.join(REVIEW_VERDICTS)} (got {verdict!r})")
+    fields = {"summary": summary, "checked": checked, "decisions": decisions,
+              "reading_order": reading_order}
+    for name, value in fields.items():
+        if not (value or "").strip():
+            raise store.MaestroError(f"{key}: review-brief needs a non-empty --{name.replace('_', '-')}")
+    path = review_brief_path(cfg.home, key)
+    brief = {"head_sha": snap.review_head_sha, "verdict": verdict, "path": str(path),
+             **{k: v.strip() for k, v in fields.items()}}
+    store.atomic_write(path, render_review_brief(snap, brief, snap.review_comments))
+    _append(cfg, key, E.REVIEW_BRIEF_WRITTEN, brief, actor=actor,
+            sid=f"review-brief-{key}-{snap.review_head_sha}")
+    blocking = sum(1 for f in snap.review_comments if f["severity"] == "blocking")
+    text = (f"{key}: review brief ready for {snap.review_url or key} -- suggested verdict "
+            f"{verdict}, {len(snap.review_comments)} finding(s), {blocking} blocking. "
+            f"Read {path}, then decide.")
+    qid = ask(cfg, key, text, qid=f"review-brief-{key}-{snap.review_head_sha[:12]}", actor=actor)
+    return {"key": key, "brief": str(path), "qid": qid, "findings": len(snap.review_comments)}
 
 
 def sync_tracker(cfg: Config, name: str | None = None) -> dict:

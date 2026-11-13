@@ -153,7 +153,7 @@ TRANSITIONS: dict[Phase, set[Phase]] = {
     # `QuestionAnswered` on record (see dispatcher._route_test_run).
     Phase.AWAITING_HUMAN: {Phase.READY, Phase.IMPLEMENTING, Phase.VERIFYING, Phase.AWAITING_CI,
                            Phase.TRIAGING, Phase.RESEARCHING, Phase.DEGRADED, Phase.TERMINATING},
-    Phase.READY: {Phase.IMPLEMENTING, Phase.RESEARCHING, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
+    Phase.READY: {Phase.IMPLEMENTING, Phase.RESEARCHING, Phase.VERIFYING, Phase.QA, Phase.AWAITING_HUMAN, Phase.DEGRADED, Phase.TERMINATING},
     # RB-14: `-> QA` survives directly for the byte-identical-when-unconfigured
     # case (`test_command` unset, or a `mode: local` binding) -- `ops.set_phase`
     # transparently redirects the same call to VERIFYING instead whenever a

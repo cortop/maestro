@@ -22,6 +22,7 @@ SKILL_BYTE_CEILINGS = {
     "implementing": 7850,
     "passive": 6600,
     "qa": 7950,
+    "review": 4000,
     "ready": 5800,
     "researching": 7850,
     "triaging": 7450,
@@ -73,4 +74,4 @@ def test_skill_ref_regex_ignores_prose_slashes():
 
 
 def test_own_command_matches_dispatcher_suffixes():
-    assert {_suffix(p) for p in _skill_files()} == set(disp._PHASE_COMMAND_SUFFIX.values())
+    assert {_suffix(p) for p in _skill_files()} == set(disp._PHASE_COMMAND_SUFFIX.values()) | {"review"}

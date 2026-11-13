@@ -36,6 +36,7 @@ _VERB_RE = re.compile(r"\bmaestro (" + "|".join(re.escape(v) for v in _ALL_VERBS
 # suffix -> a Phase that resolves to it, for functions keyed by Phase
 # (phase_verb_grant/phase_verb_denylist) rather than by suffix directly.
 _PHASE_BY_SUFFIX = {suffix: phase for phase, suffix in disp._PHASE_COMMAND_SUFFIX.items()}
+_PHASE_BY_SUFFIX["review"] = _PHASE_BY_SUFFIX["qa"]  # T-251: a review ticket's qa round
 
 _ROUND_DIRS_BY_SUFFIX = {
     "implementing": REPO_ROOT / "maestro" / "_implementing_rounds",
@@ -118,7 +119,8 @@ def test_every_phase_command_suffix_has_a_verb_grant_row():
 def test_phase_grant_and_denylist_partition_agent_tool_verbs(suffix):
     granted = _granted_verbs(suffix)
     phase = _PHASE_BY_SUFFIX[suffix]
-    denied_rules = disp.phase_verb_denylist(phase.value)
+    kind = "review" if suffix == "review" else None
+    denied_rules = disp.phase_verb_denylist(phase.value, kind)
     denied = {r.removeprefix("Bash(maestro ").removesuffix(":*)") for r in denied_rules}
     assert granted & denied == set()
     assert granted | denied == set(disp.AGENT_TOOL_VERBS)

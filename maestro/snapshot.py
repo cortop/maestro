@@ -301,6 +301,10 @@ class Snapshot:
     review_source: str | None = None
     review_head_sha: str | None = None
     review_round: int = 0
+    # T-251: the current round's drafted findings ([{file, line, severity, comment}], in
+    # recording order) and its brief (None until written), both reset by a new round.
+    review_comments: list = field(default_factory=list)
+    review_brief: dict | None = None
     # [repos.<name>] this ticket is bound to, from TicketCreated.repo. None = no
     # explicit binding -- repos.resolve() falls back to the implicit default.
     repo: str | None = None
@@ -559,6 +563,17 @@ def _fold_review_round_started(s: Snapshot, p: dict, seq, t: str) -> None:
     s.review_source = p.get("source") or s.review_source
     s.review_head_sha = p.get("head_sha", s.review_head_sha)
     s.review_round += 1
+    s.review_comments = []
+    s.review_brief = None
+
+
+def _fold_review_finding_recorded(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.review_comments.append({k: p.get(k) for k in ("file", "line", "severity", "comment")})
+
+
+def _fold_review_brief_written(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.review_brief = {k: p.get(k) for k in (
+        "head_sha", "summary", "checked", "decisions", "verdict", "reading_order", "path")}
 
 
 def _fold_spec_observed(s: Snapshot, p: dict, seq, t: str) -> None:
@@ -819,6 +834,8 @@ def _fold_finalized(s: Snapshot, p: dict, seq, t: str) -> None:
 _FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
     E.TICKET_CREATED: _fold_ticket_created,
     E.REVIEW_ROUND_STARTED: _fold_review_round_started,
+    E.REVIEW_FINDING_RECORDED: _fold_review_finding_recorded,
+    E.REVIEW_BRIEF_WRITTEN: _fold_review_brief_written,
     E.SPEC_OBSERVED: _fold_spec_observed,
     E.PHASE_CHANGED: _fold_phase_changed,
     E.QUESTION_ASKED: _fold_question_asked,

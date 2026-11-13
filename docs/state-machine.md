@@ -33,8 +33,10 @@ stateDiagram-v2
     ready --> awaiting_human
     ready --> degraded
     ready --> implementing
+    ready --> qa
     ready --> researching
     ready --> terminating
+    ready --> verifying
     implementing --> awaiting_ci
     implementing --> awaiting_human
     implementing --> degraded

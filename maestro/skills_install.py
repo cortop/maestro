@@ -62,12 +62,12 @@ from .sessions import OPENCODE_MODEL_PROVIDER
 # tests/test_reconcile_skill.py:36). Excludes maestro-task.md — a human
 # ticket-creation command no reconciler ever invokes, so a bound repo doesn't
 # need it under .claude/commands/.
-PHASE_FILES = ("triaging", "awaiting-human", "ready", "researching", "implementing", "qa", "passive")
+PHASE_FILES = ("triaging", "awaiting-human", "ready", "researching", "implementing", "qa", "review", "passive")
 PAYLOAD_NAMES = tuple(f"maestro-reconcile-{phase}.md" for phase in PHASE_FILES)
 
 
 def payload_dir() -> Path:
-    """The installed package's copy of the seven command files."""
+    """The installed package's copy of the eight command files."""
     return Path(importlib.resources.files("maestro")) / "_skill_commands"
 
 
@@ -375,7 +375,7 @@ def _write_if_changed(target: Path, content: str) -> bool:
 
 
 def install_repo(cfg: Config, name: str, *, force_opencode: bool = False) -> dict:
-    """Copy the seven payload files into ``<repo>/.claude/commands/`` as real,
+    """Copy the eight payload files into ``<repo>/.claude/commands/`` as real,
     byte-identical files — the target repo may not be this one, and needs to
     be able to commit + review them like any other change.
 
@@ -437,7 +437,7 @@ def install_repo(cfg: Config, name: str, *, force_opencode: bool = False) -> dic
 
 
 def install_user(cfg: Config, *, force_opencode: bool = False) -> dict:
-    """Symlink the seven payload files into the user commands directory.
+    """Symlink the eight payload files into the user commands directory.
 
     Idempotent: a symlink already pointing at the payload is left alone; a
     symlink pointing anywhere else (a stale install after a package upgrade
