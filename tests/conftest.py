@@ -277,3 +277,30 @@ def skill_text(path) -> str:
         rounds = Path(__file__).resolve().parents[1] / "maestro" / "_implementing_rounds"
         text += "\n" + "\n".join(f.read_text(encoding="utf-8") for f in sorted(rounds.glob("*.md")))
     return text
+
+
+def seed_review_ticket(home, key="T-60", *, brief=True, phase="awaiting-human", author="octo-reviewer",
+                       findings=(("src/a.py", 3, "blocking", "Please guard the empty case."),
+                                 ("src/b.py", 9, "nit", "Rename `x`."))):
+    """A synthetic `review`-kind ticket folded from events, as the review round leaves it."""
+    store.atomic_write(store.spec_path(home, key), f"# {key}\n\n## Intent\nReview a PR.\n")
+    event_log.append(home, key, "TicketCreated",
+                     {"title": "Review acme/widgets#7", "source": "test", "spec_hash": "x",
+                      "kind": "review"}, actor="d")
+    event_log.append(home, key, "ReviewRoundStarted",
+                     {"head_sha": "a" * 40, "url": "https://github.com/acme/widgets/pull/7",
+                      "author": author}, actor="human")
+    event_log.append(home, key, "PhaseChanged", {"phase": "ready", "reason": ""}, actor="r")
+    for f, line, sev, comment in findings:
+        event_log.append(home, key, "ReviewFindingRecorded",
+                         {"file": f, "line": line, "severity": sev, "comment": comment}, actor="r")
+    if brief:
+        event_log.append(home, key, "ReviewBriefWritten",
+                         {"head_sha": "a" * 40, "summary": "Adds a <b>parser</b>.", "checked": "Tests passed.",
+                          "decisions": "Is the API ok?", "verdict": "request-changes",
+                          "reading_order": "src/a.py", "path": "/x"}, actor="r")
+        event_log.append(home, key, "QuestionAsked",
+                         {"qid": f"review-brief-{key}-aaaaaaaaaaaa", "text": f"{key}: review brief ready"},
+                         actor="r")
+    event_log.append(home, key, "PhaseChanged", {"phase": phase, "reason": ""}, actor="r")
+    return snap_mod.rebuild(home, key)

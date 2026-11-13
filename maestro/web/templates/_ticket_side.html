@@ -1,3 +1,4 @@
+{% if t.snap.kind != "review" %}
 <div class="panel"><div class="panel-head">Acceptance criteria</div>
 <div class="panel-body"><table class="ledger" id="ac-matrix">
   <thead><tr><th>Criterion</th><th>Agent</th><th>QA</th><th>Check</th></tr></thead>
@@ -10,6 +11,7 @@
   {% else %}<tr><td colspan="4">no acceptance criteria</td></tr>{% endfor %}
   </tbody>
 </table></div></div>
+{% endif %}
 <div class="panel" id="dispatch-card"><div class="panel-head">Dispatch</div>
 <div class="panel-body"><dl>
   <dt>Verdict</dt><dd>{{ card.verdict }}</dd>

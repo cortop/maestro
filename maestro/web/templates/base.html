@@ -9,6 +9,8 @@
 <script src="/static/htmx.min.js"></script>
 <script src="/static/htmx-ext-sse.js"></script>
 <script src="/static/actions.js" defer></script>
+<script src="/static/review.js" defer></script>
+
 <script src="/static/palette.js" defer></script>
 </head>
 <body{% if key %} data-ticket="{{ key }}"{% endif %} hx-ext="sse" sse-connect="/stream"{% if can_write %} hx-headers='{"X-Maestro-Token": "{{ write_token }}"}'{% endif %}>

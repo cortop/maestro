@@ -6,7 +6,7 @@
     <tr data-key="{{ r.key }}">
       <td class="key"><a href="/t/{{ r.key }}">{{ r.key }}</a></td>
       <td>{{ r.title }}</td>
-      <td><span class="chip chip-{{ group }}">{{ r.phase }}</span></td>
+      <td><span class="chip chip-{{ group }}">{{ r.phase }}</span>{% if r.kind == "review" %} <span class="chip">review</span>{% endif %}</td>
       <td>{{ r.doing }}{% if r.tool_line %}<div class="dim mono">{{ r.tool_line }}</div>{% endif %}</td>
     </tr>
     {% endfor %}

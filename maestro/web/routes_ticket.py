@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import claims, fleet, gates, store
+from .. import claims, fleet, gates, ops, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import events as ev_view
 from ..view import logs as logs_view
@@ -50,9 +50,9 @@ def register(app: FastAPI, shell: Shell) -> None:
         return rounds_view.session_lines(home, key, lg.live)[1:]
 
     @app.get("/t/{key}", response_class=HTMLResponse)
-    def ticket_page(request: Request, key: str):
+    def ticket_page(request: Request, key: str, tab: str | None = Query(None)):
         require(key)
-        return shell.render(request, "ticket.html", nav="tickets", **head_ctx(shell, key))
+        return shell.render(request, "ticket.html", nav="tickets", tab=tab, **head_ctx(shell, key))
 
     @app.get("/t/{key}/head", response_class=HTMLResponse)
     def ticket_head(request: Request, key: str):
@@ -69,6 +69,15 @@ def register(app: FastAPI, shell: Shell) -> None:
         require(key)
         return shell.render(request, "_ticket_text.html", id="spec",
                             text=ticket_view.read_text(store.spec_path(home, key)))
+
+    @app.get("/t/{key}/review", response_class=HTMLResponse)
+    def ticket_review(request: Request, key: str):
+        """The brief and drafted findings of a review ticket; edits live in the browser only."""
+        require(key)
+        snap = ticket_view.ticket(home, key, store.now_epoch()).snap
+        return shell.render(request, "_ticket_review.html", key=key, snap=snap,
+                            brief=snap.review_brief, findings=snap.review_comments,
+                            severities=ops.REVIEW_SEVERITIES)
 
     @app.get("/t/{key}/proposal", response_class=HTMLResponse)
     def ticket_proposal(request: Request, key: str):

@@ -14,8 +14,8 @@
 {{ act.error(action_error, key) }}
 <p class="status-sentence" id="status-sentence">{{ t.status }}</p>
 <div class="rail" id="phase-rail">
-  {% for r in t.rail %}<div class="{{ 'visited' if r.visits }}{{ ' current' if r.current }}{{ ' failed' if r.failed }}" title="{{ r.phase }}"></div>{% endfor %}
+  {% for r in t.rail %}<div class="{{ 'visited' if r.visits }}{{ ' current' if r.current }}{{ ' failed' if r.failed }}" title="{{ r.label }}"></div>{% endfor %}
 </div>
 <div class="rail rail-times mono dim" id="rail-times">
-  {% for r in t.rail %}<span>{{ r.phase }}{% if r.visits %}<br>{{ r.dwell_s | dur }}{% endif %}</span>{% endfor %}
+  {% for r in t.rail %}<span>{{ r.label }}{% if r.visits %}<br>{{ r.dwell_s | dur }}{% endif %}</span>{% endfor %}
 </div>
