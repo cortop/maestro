@@ -419,7 +419,7 @@ def _render_now(view, pulse: dict, sessions: int, fleet: dict, now: float,
     gold, cyan = "#EBCB55", "#00E5FF"
     lines = [f"[bold {gold}]NEEDS YOU ({len(view.needs_you)})[/]"]
     for i, c in enumerate(view.needs_you):
-        kind = "degraded" if hasattr(c, "reason") else "question"
+        kind = "degraded" if hasattr(c, "reason") else "review" if hasattr(c, "counts") else "question"
         mark = f"[bold {gold}]▸ " if i == selected else "  "
         end = "[/]" if i == selected else ""
         lines.append(f"{mark}{escape(c.key)}  {kind}  waiting {_fmt_wait(c.waiting_s)}{end}")
@@ -432,7 +432,39 @@ def _render_now(view, pulse: dict, sessions: int, fleet: dict, now: float,
     return status, "\n".join(lines)
 
 
-def _render_now_detail(card, history: list[str], now: float) -> str:
+_SEVERITY_STYLE = {"blocking": "#FF7FA6", "question": "#EBCB55", "nit": "#9A9AA8"}
+
+
+def _review_lines(card, review: dict | None) -> list[str]:
+    """Right-pane lines of a brief-ready review: summary, checks, then each finding with its
+    severity, include mark and (edited) comment. *review* is the loaded brief plus the edit state."""
+    gold, muted = "#EBCB55", "#9A9AA8"
+    if not review:
+        return [f"[{muted}]Loading the brief…[/]"]
+    brief, findings = review["brief"], review["findings"]
+    off, text, cur = review["excluded"], review["comments"], review["cursor"]
+    who = f" by {escape(card.author)}" if card.author else ""
+    lines = [f"[bold]Review[/] {escape(card.url)}{who}",
+             f"[{muted}]suggested verdict:[/] {escape(str(brief.get('verdict') or '-'))}", "",
+             "[bold]What the PR does[/]", escape(str(brief.get("summary") or "")), "",
+             "[bold]What was checked[/]", escape(str(brief.get("checked") or "")), "",
+             f"[bold]Findings ({len(findings) - len(off)} of {len(findings)} included)[/]"]
+    for i, f in enumerate(findings):
+        mark = f"[bold {gold}]▸ " if i == cur else "  "
+        box = "[ ]" if i in off else "[x]"
+        sev = f.get("severity", "")
+        colour = _SEVERITY_STYLE.get(sev, muted)
+        lines.append(f"{mark}{box} [{colour}]{escape(sev)}[/]  {escape(str(f.get('file')))}:{f.get('line')}"
+                     + ("[/]" if i == cur else ""))
+        comment = text.get(i, f.get("comment", ""))
+        edited = f"  [{muted}](edited)[/]" if i in text else ""
+        lines.append(f"      {escape(str(comment))}{edited}")
+    lines += ["", f"[{muted}]←/→ move · Space include/exclude · Enter or u edit comment · "
+                 f"[bold {gold}]C[/] create the pending review[/]"]
+    return lines
+
+
+def _render_now_detail(card, history: list[str], now: float, review: dict | None = None) -> str:
     """The Now tab's right pane for the selected needs-you card, as Rich markup."""
     gold, muted = "#EBCB55", "#9A9AA8"
     head = f"[bold {gold}]{escape(card.key)}[/]  {escape(card.title)}"
@@ -440,7 +472,9 @@ def _render_now_detail(card, history: list[str], now: float) -> str:
     if card.dependents:
         waiting += " · blocks " + escape(", ".join(card.dependents))
     lines = [head, waiting + "[/]", ""]
-    if hasattr(card, "reason"):
+    if hasattr(card, "counts"):
+        lines += _review_lines(card, review)
+    elif hasattr(card, "reason"):
         lines += ["[bold #FF7FA6]Failure[/]",escape(card.reason), "",
                   f"[bold {gold}]Ctrl+R[/] retry   [bold {gold}]Ctrl+D[/] discard (confirmed)"]
     else:

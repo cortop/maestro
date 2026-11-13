@@ -757,17 +757,22 @@ class _InboxModal(ModalScreen):
     }
     """
 
-    def __init__(self, key: str, initial: str = "") -> None:
+    def __init__(self, key: str, initial: str = "", *, title: str = "send to inbox",
+                 hint: str = "Message will be queued for the next reconciler sweep.",
+                 placeholder: str = "Message (Enter to send, Esc to cancel)") -> None:
         super().__init__()
         self._key = key
         self._initial = initial
+        self._title = title
+        self._hint = hint
+        self._placeholder = placeholder
 
     def compose(self) -> ComposeResult:
         with Vertical(id="inbox-dialog"):
-            yield Label(f"[bold]{self._key}[/bold] — send to inbox")
-            yield Label("[dim]Message will be queued for the next reconciler sweep.[/dim]")
-            yield Input(value=self._initial,
-                        placeholder="Message (Enter to send, Esc to cancel)", id="inbox-input")
+            head = f"[bold]{self._key}[/bold] — " if self._key else ""
+            yield Label(f"{head}{self._title}")
+            yield Label(f"[dim]{self._hint}[/dim]")
+            yield Input(value=self._initial, placeholder=self._placeholder, id="inbox-input")
 
     def on_mount(self) -> None:
         self.query_one("#inbox-input", Input).focus()
