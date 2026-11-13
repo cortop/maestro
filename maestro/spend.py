@@ -134,6 +134,7 @@ def probe(cfg: Config, now: float) -> dict:
     # back at our own module level would be a load-time cycle (mirrors
     # ratelimit.probe's identical constraint).
     from . import dispatcher as disp
+    from . import slack_watcher
 
     ledger = store.read_json(disp._spawn_ledger_path(home), {}) or {}
     cursor_path = _cursor_path(home)
@@ -141,7 +142,7 @@ def probe(cfg: Config, now: float) -> dict:
     cursor_changed = False
     live_keys: set[str] | None = None  # resolved lazily, only if actually needed
 
-    for key in ledger:
+    for key in [*ledger, slack_watcher.WATCHER_KEY]:  # T-255: the watcher is off the ledger
         candidates = sessions_mod.list_sessions(home, key)
         for candidate in candidates:
             fmt = candidate["format"]

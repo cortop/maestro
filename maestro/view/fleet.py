@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import (backup, claims, dispatcher, health, ratelimit, sessions,
+from .. import (backup, claims, dispatcher, health, ratelimit, sessions, slack_watcher,
                 spend as spend_mod, steplog, store)
 from ..config import Config
 from . import rounds as rounds_view
@@ -89,3 +89,13 @@ def schedule_rows(cfg: Config, now: float | None = None) -> list[dict]:
     """Each scheduled task with its last-fired and next-due epochs (``schedule.next_due``)."""
     now = store.now_epoch() if now is None else now
     return dispatcher.schedule_status(cfg, now)
+
+
+def slack_panel(cfg: Config, now: float | None = None) -> dict:
+    """The Slack watcher's last poll epoch (``None`` before the first), polls today against
+    the daily cap, and its spend today (``slack_watcher.panel``)."""
+    now = store.now_epoch() if now is None else now
+    out = slack_watcher.panel(cfg, now)
+    if out["last_poll"] is None:
+        out["last_poll"] = out["last_spawn"]
+    return out
