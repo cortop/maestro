@@ -188,3 +188,9 @@ details.confirm > summary, details.write > summary { list-style: none; cursor: p
 details.confirm[open] > summary, details.write[open] > summary { margin-bottom: .5rem; }
 .confirm-body p { margin: 0 0 .5rem; }
 .action-error { flex-basis: 100%; margin: 0; color: var(--magenta-soft); }
+
+/* T-252: review tab */
+.review-text { white-space: pre-wrap; margin: 0; }
+.card.review .card-title { color: var(--cyan); }
+.finding { display: grid; gap: .5rem; padding: .6rem 0; border-top: 1px solid var(--line); }
+.finding textarea, .finding select { background: var(--ground); color: inherit; border: 1px solid var(--cyan); padding: .5rem; font: inherit; }

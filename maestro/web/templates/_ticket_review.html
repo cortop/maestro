@@ -1,0 +1,27 @@
+{% if snap.kind != "review" %}<p class="dim">This ticket is not a review.</p>
+{% else %}
+<div id="review" data-key="{{ key }}" data-head="{{ snap.review_head_sha or '' }}" data-round="{{ snap.review_round }}">
+  <p class="crumb mono dim">{% if (snap.review_url or "").startswith("https://") %}<a href="{{ snap.review_url }}">{{ snap.review_url }}</a>{% else %}{{ snap.review_url or "no PR url" }}{% endif %}{% if snap.review_author %} · by {{ snap.review_author }}{% endif %}</p>
+  {% if brief %}
+  <div class="panel"><div class="panel-head">What the PR does</div><div class="panel-body"><p class="review-text">{{ brief.summary }}</p></div></div>
+  <div class="panel"><div class="panel-head">What was checked</div><div class="panel-body"><p class="review-text">{{ brief.checked }}</p></div></div>
+  <div class="panel"><div class="panel-head">Decisions for you</div><div class="panel-body"><p class="review-text">{{ brief.decisions }}</p></div></div>
+  <div class="panel"><div class="panel-head">Suggested verdict</div><div class="panel-body"><p class="review-text">{{ brief.verdict }}</p></div></div>
+  <div class="panel"><div class="panel-head">Reading order</div><div class="panel-body"><p class="review-text">{{ brief.reading_order }}</p></div></div>
+  {% else %}<p class="dim">No brief yet: the review is still being checked.</p>{% endif %}
+  <div class="panel"><div class="panel-head">Findings</div>
+  <div class="panel-body">
+    <p class="dim">Edits stay in this browser. Nothing here is sent to GitHub.</p>
+    {% for f in findings %}
+    <div class="finding" data-index="{{ loop.index0 }}">
+      <p class="mono finding-loc">{{ f.file }}:{{ f.line }}</p>
+      <label class="finding-include"><input type="checkbox" data-field="include" checked> include</label>
+      <label>severity
+        <select data-field="severity">{% for s in severities %}<option value="{{ s }}"{{ " selected" if s == f.severity }}>{{ s }}</option>{% endfor %}</select>
+      </label>
+      <textarea data-field="comment" rows="4" aria-label="Comment for {{ f.file }}:{{ f.line }}">{{ f.comment }}</textarea>
+    </div>
+    {% else %}<p class="dim">No findings.</p>{% endfor %}
+  </div></div>
+</div>
+{% endif %}

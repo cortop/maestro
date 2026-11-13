@@ -299,6 +299,7 @@ class Snapshot:
     # latest round was started for, and how many rounds have started.
     review_url: str | None = None
     review_source: str | None = None
+    review_author: str | None = None
     review_head_sha: str | None = None
     review_round: int = 0
     # T-251: the current round's drafted findings ([{file, line, severity, comment}], in
@@ -561,6 +562,7 @@ def _fold_ticket_created(s: Snapshot, p: dict, seq, t: str) -> None:
 def _fold_review_round_started(s: Snapshot, p: dict, seq, t: str) -> None:
     s.review_url = p.get("url", s.review_url)
     s.review_source = p.get("source") or s.review_source
+    s.review_author = p.get("author") or s.review_author
     s.review_head_sha = p.get("head_sha", s.review_head_sha)
     s.review_round += 1
     s.review_comments = []

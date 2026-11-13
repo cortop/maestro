@@ -32,6 +32,20 @@ class QuestionCard:
 
 
 @dataclass(frozen=True)
+class ReviewCard:
+    """A `review`-kind ticket whose brief is ready: the PR, its author and finding counts."""
+    key: str
+    title: str
+    qid: str
+    url: str
+    author: str | None
+    counts: dict[str, int]      # severity -> number of drafted findings
+    verdict: str | None
+    waiting_s: float
+    dependents: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class DegradedCard:
     key: str
     title: str
@@ -49,6 +63,7 @@ class InFlightRow:
     round_label: str
     doing: str
     tool_line: str
+    kind: str = "implementation"    # "review" for a review round in progress
 
 
 @dataclass(frozen=True)
@@ -61,7 +76,7 @@ class QueuedRow:
 
 @dataclass
 class NowView:
-    needs_you: list[QuestionCard | DegradedCard] = field(default_factory=list)
+    needs_you: list[QuestionCard | ReviewCard | DegradedCard] = field(default_factory=list)
     in_flight: list[InFlightRow] = field(default_factory=list)
     queued: list[QueuedRow] = field(default_factory=list)
 
@@ -115,6 +130,13 @@ def _cards(home: Path, snap: snap_mod.Snapshot, graph: depgraph.DepGraph, now: f
     for qid, text in snap.open_questions.items():
         if qid in queued_qids:
             continue
+        if snap.kind == "review" and snap.review_brief and qid.startswith("review-brief-"):
+            counts = {sev: sum(1 for f in snap.review_comments if f.get("severity") == sev)
+                      for sev in ops.REVIEW_SEVERITIES}
+            cards.append(ReviewCard(snap.key, title, qid, snap.review_url or "", snap.review_author,
+                                    counts, snap.review_brief.get("verdict"),
+                                    max(0.0, now - asked.get(qid, since)), dependents))
+            continue
         position, total, body, rec = ops.parse_round_question(text)
         cards.append(QuestionCard(snap.key, title, qid, body, rec, position, total,
                                   max(0.0, now - asked.get(qid, since)), dependents))
@@ -154,7 +176,8 @@ def build(home: Path, cfg: Config, now: float | None = None) -> NowView:
             doing, tool = board_view.live_lines(live.get(key), now)
             owner = "dispatcher" if snap.phase in _DISPATCHER_PHASES and key not in running else "agent"
             view.in_flight.append(InFlightRow(key, title, snap.phase, owner,
-                                              rounds_view.round_label(home, key), doing, tool))
+                                              rounds_view.round_label(home, key), doing, tool,
+                                              snap.kind))
         else:
             view.queued.append(QueuedRow(key, title, snap.phase, _queued_reason(home, snap, now)))
     return view

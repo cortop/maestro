@@ -77,7 +77,7 @@ class VCS(Protocol):
         """Read one PR's head for an inbound review (someone else's PR).
 
         Returns {"head_sha": str|None, "head_ref": str|None, "is_fork": bool,
-        "state": str, "title": str|None, "error": same vocabulary as
+        "state": str, "title": str|None, "author": str|None, "error": same vocabulary as
         ``pr_status`` (optional)}. ``is_fork`` is True when the head branch
         lives in a different repo than the PR's base."""
         ...

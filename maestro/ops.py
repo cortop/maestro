@@ -3362,6 +3362,8 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
     payload = {"head_sha": head["head_sha"], "url": url}
     if source:
         payload["source"] = source
+    if head.get("author"):
+        payload["author"] = head["author"]
     _append(cfg, key, E.REVIEW_ROUND_STARTED, payload, actor="human",
             sid=f"review-round-{key}-{head['head_sha']}")
     if Phase(snap.phase) != Phase.READY:
