@@ -1998,7 +1998,9 @@ def sync_review_pending(cfg: Config, now: float) -> dict:
     if now - cursor.get("review_pending", 0) < interval:
         return {"checked": 0}
 
-    from . import ops, providers, repos
+    from . import ops
+    from . import providers
+    from . import repos
     vcs = providers.get_vcs(cfg)
     cache: dict = {}
     checked = 0
