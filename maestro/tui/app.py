@@ -263,8 +263,16 @@ class _NowList(Static, can_focus=True):
     BINDINGS = [
         Binding("down", "now_next", "Next", show=False),
         Binding("enter", "now_accept", "Accept", show=False),
+        Binding("left", "review_prev", "Previous finding", show=False),
+        Binding("right", "review_next", "Next finding", show=False),
         Binding("up", "now_prev", "Previous", show=False),
     ]
+
+    def action_review_next(self) -> None:
+        self.app.action_review_next()
+
+    def action_review_prev(self) -> None:
+        self.app.action_review_prev()
 
     def action_now_accept(self) -> None:
         self.app._now_accept()
@@ -352,6 +360,7 @@ class MaestroTUI(App):
         Binding(">", "cycle_sort", "Sort column", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
         Binding("B", "sessions_panel", "Sessions & burn", show=False),
+        Binding("C", "review_create", "Create pending review", show=False),
         Binding("D", "deps_panel", "Deps", show=False),
         Binding("E", "edit_spec", "Edit spec", show=False),
         Binding("F", "fleet_panel", "Fleet", show=False),
@@ -366,6 +375,7 @@ class MaestroTUI(App):
         Binding("Q", "trigger_post_qa", "Post-QA", show=False),
         Binding("S", "schedule_panel", "Schedule", show=False),
         Binding("T", "activity_panel", "Activity", show=False),
+        Binding("V", "review_pr", "Review a PR", show=False),
         Binding("b", "blockers", "Blockers", show=False),
         Binding("colon", "command_palette", "Palette", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
@@ -384,7 +394,9 @@ class MaestroTUI(App):
         Binding("question_mark", "show_help_panel", "Help", show=False),
         Binding("s", "show_spec", "Spec", show=False),
         Binding("slash", "filter_query", "Search", show=False, priority=True),
+        Binding("space", "review_toggle", "Include/exclude finding", show=False),
         Binding("t", "toggle_tail", "Tail/Full", show=False),
+        Binding("u", "review_edit", "Edit finding comment", show=False),
         Binding("v", "ac_matrix", "ACs", show=False),
         Binding("w", "why_panel", "Why", show=False),
         Binding("x", "compact", "Compact", show=False),
@@ -429,6 +441,9 @@ class MaestroTUI(App):
         "open_worktree",
         "release",
         "retry",
+        "review_create",
+        "review_edit",
+        "review_toggle",
         "rounds_panel",
         "runner",
         "show_spec",
@@ -450,6 +465,7 @@ class MaestroTUI(App):
         "jump_running",
         "narrow_detail",
         "project_rebuild",
+        "review_pr",
         "widen_detail",
     })
     _NON_TICKET_SCREENS = (FleetScreen, SessionsScreen, BackupsScreen, EnvScreen, ScheduleScreen, ActivityScreen)
@@ -479,6 +495,8 @@ class MaestroTUI(App):
         self._now_result: dict | None = None  # last Now-tab worker result
         self._now_key: str | None = None  # key last handed to _selected_key by the Now cursor
         self._now_idx: int = 0  # needs-you cursor on the Now tab
+        self._review_edits: dict[str, dict] = {}  # review key -> {head, excluded, comments, cursor}
+        self._vcs = None  # VCS provider for the pending-review action (tests inject a fake)
         self._badge_result: dict | None = None
         self.sub_title = str(self._home.resolve())
         self._selected_key: str | None = None
@@ -581,7 +599,8 @@ class MaestroTUI(App):
             self.query_one("#now-status", Static).update(status)
             self.query_one("#now-groups", Static).update(groups)
             detail = ("[dim]Nothing needs you[/dim]" if card is None else
-                      _render_now_detail(card, r["history"].get(card.key, []), r["now"]))
+                      _render_now_detail(card, r["history"].get(card.key, []), r["now"],
+                                         self._review_state(card)))
             self.query_one("#now-detail", Static).update(detail)
             self.query_one("#now-logo", MaskLogo).display = card is None and not cards
         except NoMatches:  # app is tearing down
@@ -603,6 +622,143 @@ class MaestroTUI(App):
         self._now_idx = max(0, self._now_idx - 1)
         self._paint_now()
 
+    def _review_card(self):
+        """The review card under the Now cursor while the Now tab shows the board, else None."""
+        try:
+            if self.query_one("#tabs", TabbedContent).active != "tab-now" or not self._on_board():
+                return None
+        except (NoMatches, ScreenStackError):
+            return None
+        card = self._now_card()
+        return card if card is not None and hasattr(card, "counts") else None
+
+    def _review_state(self, card) -> dict | None:
+        """The loaded brief and findings of a review card plus the edits not yet sent."""
+        data = (self._now_result or {}).get("reviews", {}).get(getattr(card, "key", None))
+        if not data or not hasattr(card, "counts"):
+            return None
+        edits = self._review_edits.get(card.key)
+        if edits is None or edits["head"] != data["head"]:  # a new round drops the old edits
+            edits = self._review_edits[card.key] = {"head": data["head"], "excluded": set(),
+                                                    "comments": {}, "cursor": 0}
+        edits["cursor"] = min(edits["cursor"], max(0, len(data["findings"]) - 1))
+        return {**data, **{k: v for k, v in edits.items() if k != "head"}}
+
+    def _review_edit_state(self):
+        """(card, shared edit state, number of findings) for the review under the cursor."""
+        card = self._review_card()
+        state = self._review_state(card) if card is not None else None
+        if state is None:
+            return None, None, 0
+        return card, self._review_edits[card.key], len(state["findings"])
+
+    def action_review_next(self) -> None:
+        card, edits, n = self._review_edit_state()
+        if edits is not None and n:
+            edits["cursor"] = min(edits["cursor"] + 1, n - 1)
+            self._paint_now()
+
+    def action_review_prev(self) -> None:
+        card, edits, n = self._review_edit_state()
+        if edits is not None:
+            edits["cursor"] = max(0, edits["cursor"] - 1)
+            self._paint_now()
+
+    def action_review_toggle(self) -> None:
+        """Include or exclude the finding under the cursor from the pending review."""
+        card, edits, n = self._review_edit_state()
+        if edits is None or not n:
+            return
+        edits["excluded"] ^= {edits["cursor"]}
+        self._paint_now()
+
+    def action_review_edit(self) -> None:
+        """Edit the comment of the finding under the cursor in the text modal."""
+        card, edits, n = self._review_edit_state()
+        if edits is None or not n:
+            return
+        i = edits["cursor"]
+        finding = self._now_result["reviews"][card.key]["findings"][i]
+        current = edits["comments"].get(i, finding.get("comment", ""))
+
+        def _on_dismiss(text: str | None) -> None:
+            if text is None:
+                return
+            if text == finding.get("comment"):
+                edits["comments"].pop(i, None)
+            else:
+                edits["comments"][i] = text
+            self._paint_now()
+
+        self.push_screen(_InboxModal(card.key, current, title=f"edit the comment on {finding.get('file')}:{finding.get('line')}",
+                                     hint="Only this finding changes; the original is kept until you create the review.",
+                                     placeholder="Comment (Enter to keep, Esc to cancel)"), _on_dismiss)
+
+    def action_review_create(self) -> None:
+        """Create ONE pending GitHub review from the included findings, after a confirm."""
+        card, edits, n = self._review_edit_state()
+        if edits is None:
+            return
+        data = self._now_result["reviews"][card.key]
+        kept = [{"index": i, "comment": edits["comments"].get(i, f.get("comment", ""))}
+                for i, f in enumerate(data["findings"]) if i not in edits["excluded"]]
+        if not kept:
+            self.notify("No finding is included; nothing to send", severity="warning")
+            return
+        key = card.key
+
+        def _on_confirm(ok: bool | None) -> None:
+            if ok:
+                self._create_pending_review(key, kept)
+
+        self.push_screen(_ConfirmModal(
+            f"Create a [bold]pending[/bold] GitHub review on {card.url} with {len(kept)} "
+            f"finding(s)? It is not submitted until you submit it on GitHub."), _on_confirm)
+
+    def _create_pending_review(self, key: str, kept: list[dict]) -> None:
+        """Run the shared action off the UI thread; `on_worker_state_changed` reports it."""
+        def _run() -> tuple[str, str | None, str]:
+            cfg = config_mod.load(str(self._home))
+            try:
+                made = human_actions.create_pending_review(cfg, key, kept, vcs=self._vcs)
+            except store.MaestroError as exc:
+                return key, str(exc), ""
+            return key, None, f"{made['inline']} inline, {made['in_body']} in the review body"
+
+        self.run_worker(_run, thread=True, group="review-create", name="review-create",
+                        exit_on_error=False)
+
+    def _review_created(self, worker, state) -> None:
+        """Report the finished pending-review worker and reload the Now tab."""
+        if state == WorkerState.ERROR:
+            self.notify(f"Could not create the review: {worker.error}", severity="error")
+            return
+        key, error, detail = worker.result
+        if error:
+            self.notify(error, severity="error")
+        else:
+            self._review_edits.pop(key, None)
+            self.notify(f"Pending review created for {key} ({detail})")
+        self._refresh_now_tab()
+
+    def action_review_pr(self) -> None:
+        """Paste a GitHub PR URL to start a review of it (the same verb as `maestro review`)."""
+        def _on_dismiss(url: str | None) -> None:
+            if not url:
+                return
+            try:
+                made = ops_mod.start_review(config_mod.load(str(self._home)), url, source="tui", vcs=self._vcs)
+            except store.MaestroError as exc:
+                self.notify(str(exc), severity="error")
+                return
+            self.notify(f"Review started: {made.get('key', url)}")
+            self._nudge(made.get("key"))
+            self._refresh_now_tab()
+
+        self.push_screen(_InboxModal("", title="Review a pull request",
+                                     hint="Paste the GitHub pull request URL.",
+                                     placeholder="https://github.com/owner/repo/pull/123"), _on_dismiss)
+
     def _now_accept(self) -> None:
         """Enter on the Now tab: accept the recommendation (same marker as Ctrl+R), else
         fall back to the answer modal / ticket detail."""
@@ -611,6 +767,9 @@ class MaestroTUI(App):
             return
         if hasattr(card, "reason"):
             self.push_screen(DetailScreen(self._home, card.key))
+            return
+        if hasattr(card, "counts"):
+            self.action_review_edit()
             return
         siblings = sum(1 for c in self._now_result["view"].needs_you if c.key == card.key)
         if not card.recommendation or siblings > 1:
@@ -643,6 +802,8 @@ class MaestroTUI(App):
                 key = card.key if card is not None else key
                 if card is not None and hasattr(card, "reason"):
                     out += ["retry", "discard"]
+                elif card is not None and hasattr(card, "counts"):
+                    out += ["review_toggle", "review_edit", "review_create"]
                 elif card is not None:
                     out += ["now_accept"] if card.recommendation else []
                     out += ["answer"]
@@ -673,6 +834,11 @@ class MaestroTUI(App):
             return False
         if action == "review_panel" and isinstance(screen, ReviewScreen):
             return False
+        if action in ("review_create", "review_edit", "review_next", "review_prev",
+                      "review_toggle") and self._review_card() is None:
+            return False
+        if action == "answer" and self._review_card() is not None:
+            return False  # the brief's own question is answered by creating the review
         if action == "filter_query" and self._query_input_shown():
             return False  # let a typed "/" reach the already-open Input
         if action == "clear_query" and not (self._query or self._query_input_shown()):
@@ -878,7 +1044,14 @@ class MaestroTUI(App):
                         rows = ()
                     history[card.key] = [f"{r.when}  {r.label}  {r.outcome}".rstrip()
                                          for r in rows[-5:]]
-            return {"view": view, "history": history,
+            reviews = {}
+            for card in view.needs_you:
+                if hasattr(card, "counts") and card.key not in reviews:
+                    snap = snap_mod.load(self._home, card.key)
+                    reviews[card.key] = {"brief": snap.review_brief or {},
+                                         "findings": list(snap.review_comments),
+                                         "head": snap.review_head_sha or ""}
+            return {"view": view, "history": history, "reviews": reviews,
                     "pulse": fleet_view.pulse(self._home, cfg, now),
                     "sessions": len(fleet_view.session_rows(self._home, cfg, now)),
                     "fleet": fleet_mod.status(self._home), "now": now}
@@ -930,7 +1103,9 @@ class MaestroTUI(App):
         self.run_worker(_load, thread=True, group="badge", exclusive=True, name="fleet-badge")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
+        if event.worker.name == "review-create" and event.state in (WorkerState.SUCCESS, WorkerState.ERROR):
+            self._review_created(event.worker, event.state)
+        elif event.worker.name == "fleet-badge" and event.state == WorkerState.SUCCESS:
             self._badge_result = event.worker.result
             self.sub_title = self._badge_result["banner"]
             self._paint_badge()
