@@ -197,7 +197,8 @@ class SessionManager(Protocol):
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
               runner: str | None = None,
-              runner_model: str | None = None) -> int | None:
+              runner_model: str | None = None,
+              mcp_config: str | None = None) -> int | None:
         """Launch a detached reconciler for ``key``; return its pid (or None).
 
         *command* (RF-1) is the resolved reconcile slash-command (see
@@ -242,6 +243,10 @@ class SessionManager(Protocol):
         the one implementation that actually composes it (prefixed with
         ``ollama/`` -- see its own docstring for why that composition happens
         there and nowhere else).
+
+        *mcp_config* is a ``claude --mcp-config`` value (a JSON file path or string)
+        for this one session; only ``ClaudeCliSessions`` takes it, and only the Slack
+        watcher passes it (see ``slack_watcher.sync``).
         """
 
 
@@ -368,7 +373,8 @@ class ClaudeCliSessions(_ClaimBackedSessions):
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
               runner: str | None = None,
-              runner_model: str | None = None) -> int | None:
+              runner_model: str | None = None,
+              mcp_config: str | None = None) -> int | None:
         # RF-2: this backend only ever speaks Claude -- `runner` doesn't affect
         # the argv built below (the caller, dispatcher.dispatch, has already
         # validated it's either None or "claude" before routing a spawn to this
@@ -414,6 +420,8 @@ class ClaudeCliSessions(_ClaimBackedSessions):
             cmd += ["--allowedTools", ",".join(merged_allowed)]
         if self.strict_mcp:
             cmd.append("--strict-mcp-config")
+        if mcp_config:
+            cmd += ["--mcp-config", mcp_config]
         # T-207: the maestro-owned PreToolUse guard rides every spawn; a missing
         # or unwired settings file raises here rather than launching unguarded.
         cmd += ["--settings", str(claude_guard.require(self.home))]
@@ -457,6 +465,7 @@ class DryRunSessions:
         # the same value as before this ticket.
         self.spawned: list[tuple[str, str, str, str | None, str | None, list[str], list[str],
                                  dict[str, str], str, str | None]] = []
+        self.mcp_configs: dict[str, str] = {}   # key -> mcp_config, for the spawns that pass one
 
     def list_active(self) -> set[str]:
         return set(self._active)
@@ -467,11 +476,14 @@ class DryRunSessions:
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
               runner: str | None = None,
-              runner_model: str | None = None) -> int | None:
+              runner_model: str | None = None,
+              mcp_config: str | None = None) -> int | None:
         prompt = f"{command} {key}"
         self.spawned.append((key, prompt, str(cwd), model, effort,
                              list(disallowed_tools or []), list(allowed_tools or []),
                              dict(env_overlay or {}), runner or "claude", runner_model))
+        if mcp_config:
+            self.mcp_configs[key] = mcp_config
         self._active.add(key)
         return None
 
@@ -849,7 +861,8 @@ class RoutingSessions:
               allowed_tools: list[str] | None = None,
               env_overlay: dict[str, str] | None = None,
               runner: str | None = None,
-              runner_model: str | None = None) -> int | None:
+              runner_model: str | None = None,
+              mcp_config: str | None = None) -> int | None:
         name = runner or "claude"
         try:
             delegate = self.delegates[name]
@@ -859,9 +872,12 @@ class RoutingSessions:
                 f"(registered: {sorted(self.delegates)}) -- the caller must "
                 "validate the runner before calling spawn") from None
         env_overlay = self._prep_pi_env(env_overlay)
+        # Forwarded only when set: the non-claude delegates take no mcp_config.
+        extra = {"mcp_config": mcp_config} if mcp_config else {}
         return delegate.spawn(key, command, cwd, model=model, effort=effort,
                               disallowed_tools=disallowed_tools, allowed_tools=allowed_tools,
-                              env_overlay=env_overlay, runner=name, runner_model=runner_model)
+                              env_overlay=env_overlay, runner=name, runner_model=runner_model,
+                              **extra)
 
     def _prep_pi_env(self, env_overlay: dict[str, str] | None) -> dict[str, str] | None:
         """T-56: regenerate models.json and add ``PI_CODING_AGENT_DIR`` to

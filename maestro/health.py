@@ -12,6 +12,7 @@ forever with zero signal).
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -1103,15 +1104,40 @@ def _mcp_server_states(*, run=None) -> dict[str, bool] | None:
     return states
 
 
+def _mcp_config_servers(cfg: Config) -> dict[str, bool] | None:
+    """The servers `slack_mcp_config` (a JSON string, or a file path resolved from the
+    watcher's cwd, the home) declares, shaped like `_mcp_server_states`; ``None`` if unreadable."""
+    value = cfg.slack_mcp_config or ""
+    try:
+        text = value if value.lstrip().startswith("{") else (Path(cfg.home) / value).read_text(encoding="utf-8")
+        servers = json.loads(text).get("mcpServers")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(servers, dict):
+        return None
+    return {re.sub(r"[^a-z0-9]+", "_", str(n).lower()): True for n in servers}
+
+
 def check_slack_tools(cfg: Config, now: float, *, probe=None) -> dict:
     """WARN when the Slack read tools `slack_read_tools` names are not reachable: each
-    ``mcp__<server>__<tool>`` needs its server listed and usable by ``claude mcp list``.
-    Skipped (``ok``) while the watcher is unconfigured. *probe* is a test seam returning
-    what `_mcp_server_states` does."""
+    ``mcp__<server>__<tool>`` needs its server listed and usable by ``claude mcp list``,
+    or, under `reconcile_strict_mcp`, declared in `slack_mcp_config` (the only MCP config
+    the watcher's spawn then loads). Skipped (``ok``) while the watcher is unconfigured.
+    *probe* is a test seam returning what `_mcp_server_states` does."""
     name = "slack_tools"
     if not slack_watcher.configured(cfg):
         return {"name": name, "status": "ok", "detail": "slack watcher not configured", "missing": []}
-    states = (probe or _mcp_server_states)()
+    if cfg.reconcile_strict_mcp:
+        if not cfg.slack_mcp_config:
+            return {"name": name, "status": "warn", "missing": list(cfg.slack_read_tools),
+                    "detail": "reconcile_strict_mcp strips every MCP server from the watcher's spawn: "
+                              "set slack_mcp_config (the watcher stays dark until then)"}
+        states = _mcp_config_servers(cfg)
+        if states is None:
+            return {"name": name, "status": "warn", "missing": list(cfg.slack_read_tools),
+                    "detail": "slack_mcp_config is not a readable MCP config (JSON with mcpServers)"}
+    else:
+        states = (probe or _mcp_server_states)()
     if states is None:
         return {"name": name, "status": "warn", "missing": [],
                 "detail": "could not list MCP servers (`claude mcp list` failed): Slack tools unverified"}
