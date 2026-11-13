@@ -9,7 +9,6 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from conftest import seed_ticket  # noqa: E402
-from maestro import inbox  # noqa: E402
 from maestro.web.app import create_app  # noqa: E402
 from maestro.web.guard import TOKEN_HEADER  # noqa: E402
 
