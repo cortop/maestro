@@ -467,6 +467,7 @@ class Config:
     slack_daily_cap: int = 300               # watcher sessions per UTC day (0 = uncapped)
     slack_idle_interval: int = 1800          # seconds between polls outside the active hours
     slack_interval: int = 120                # seconds between polls inside the active hours
+    slack_mcp_config: str | None = None      # `claude --mcp-config` value (JSON file or string) for the watcher only
     slack_model: str = "haiku"               # the cheapest configured model
     slack_read_tools: list = field(default_factory=list)  # Slack plugin read tools the session is granted
     slack_user_id: str | None = None         # the human's Slack user id; only direct mentions count
@@ -1067,6 +1068,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("slack_daily_cap", _nonneg_int),
     Knob("slack_idle_interval", _nonneg_int),
     Knob("slack_interval", _nonneg_int),
+    Knob("slack_mcp_config", _opt_str),
     Knob("slack_model", _str),
     Knob("slack_read_tools", _string_list),
     Knob("slack_user_id", _opt_str),
@@ -1608,6 +1610,10 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
 # slack_daily_cap = 300           # watcher sessions per UTC day (0 = uncapped)
 # slack_idle_interval = 1800      # seconds between polls outside the active hours
 # slack_interval = 120            # seconds between polls inside the active hours
+# slack_mcp_config = '{"mcpServers": {"slack": {"type": "http", "url": "https://..."}}}'
+                                  # the watcher's own `claude --mcp-config` (a JSON file path or
+                                  # string); required while reconcile_strict_mcp strips every
+                                  # other MCP server from claude spawns
 # slack_model = "haiku"           # the cheapest configured model
 # slack_read_tools = ["mcp__slack__read_channel"]   # the Slack read tools the session is granted
 # slack_user_id = "U0123456789"   # only messages that directly @mention this user become reviews

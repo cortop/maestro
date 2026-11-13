@@ -97,6 +97,9 @@ def skip_reason(cfg: Config, now: float, *, state: dict | None = None) -> str | 
     from . import fleet, ratelimit, spend
     if not configured(cfg):
         return "not configured"
+    if cfg.reconcile_strict_mcp and not cfg.slack_mcp_config:
+        # --strict-mcp-config would start the session with no Slack server at all.
+        return "strict MCP without slack_mcp_config"
     if fleet.pause_state(cfg.home, now) is not None:
         return "fleet paused"
     if ratelimit.paused_until(cfg.home, now) is not None:
@@ -134,7 +137,8 @@ def sync(cfg: Config, sessions, now: float) -> dict:
     pid = sessions.spawn(WATCHER_KEY, WATCHER_COMMAND, cfg.home,
                          model=cfg.slack_model, allowed_tools=watcher_tools(cfg),
                          disallowed_tools=["Bash(gh pr merge:*)"],
-                         env_overlay={"MAESTRO_SLACK_CHANNEL": cfg.slack_channel})
+                         env_overlay={"MAESTRO_SLACK_CHANNEL": cfg.slack_channel},
+                         mcp_config=cfg.slack_mcp_config)
     return {"spawned": True, "pid": pid}
 
 
