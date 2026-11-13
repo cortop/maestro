@@ -88,7 +88,7 @@ def test_palette_leads_with_selected_ticket_actions(home):
         await pilot.press("ctrl+p")
         for _ in range(100):
             await pilot.pause(0.05)
-            if _labels(app):
+            if any("D-1:" in p for p in _labels(app)):
                 break
         labels = _labels(app)
         first = [i for i, l in enumerate(labels) if l.startswith(("Spec (", "Hold (", "Logs (", "Answer ("))]
