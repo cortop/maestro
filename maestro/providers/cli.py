@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 
 
 def _run(cmd: list[str], timeout: int = 60, env: dict | None = None) -> tuple[int, str, str]:
@@ -101,6 +102,45 @@ def classify_gh_failure(rc: int, stdout: str, stderr: str) -> str:
     if any(m in text for m in _TRANSIENT_MARKERS):
         return "transient"
     return "unknown"
+
+
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _json_documents(text: str) -> list:
+    """Every JSON document in *text*: `gh api --paginate` prints one array per page."""
+    decoder, docs, i = json.JSONDecoder(), [], 0
+    while i < len(text):
+        if text[i].isspace():
+            i += 1
+            continue
+        doc, i = decoder.raw_decode(text, i)
+        docs.append(doc)
+    return docs
+
+
+def _json_rows(text: str) -> list:
+    """The rows of a paginated list response, flattened across pages."""
+    rows: list = []
+    for doc in _json_documents(text):
+        rows.extend(doc if isinstance(doc, list) else [doc])
+    return rows
+
+
+def patch_new_lines(patch: str) -> list[int]:
+    """New-side line numbers (context and added lines) of one file's unified-diff *patch*."""
+    lines: list[int] = []
+    n = None
+    for row in patch.splitlines():
+        m = _HUNK_RE.match(row)
+        if m:
+            n = int(m.group(1))
+        elif n is None or row.startswith("\\") or row.startswith("-"):
+            continue
+        else:
+            lines.append(n)
+            n += 1
+    return lines
 
 
 class JiraCliTracker:
@@ -402,6 +442,78 @@ class GitHubCliVCS:
         # `gh pr comment` prints the new comment's URL (`...#issuecomment-<id>`).
         m = re.search(r"#issuecomment-(\d+)", out)
         return {"ok": True, **({"id": f"issue-{m.group(1)}"} if m else {})}
+
+
+    def pending_review(self, pr_number: int, repo: str | None = None,
+                       env: dict | None = None) -> dict:
+        """T-253: GitHub lists a PENDING review only to its author, so any PENDING row is ours."""
+        slug = repo or (self.repos[0] if self.repos else None) or "{owner}/{repo}"
+        rc, out, err = _run(["gh", "api", "--paginate", f"repos/{slug}/pulls/{pr_number}/reviews"],
+                            env=env)
+        if rc != 0:
+            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+        try:
+            rows = _json_rows(out)
+        except ValueError:
+            return {"ok": False, "error": "unknown"}
+        for r in rows:
+            if isinstance(r, dict) and r.get("state") == "PENDING":
+                return {"ok": True, "review_id": str(r.get("id"))}
+        return {"ok": True, "review_id": None}
+
+    def pr_diff_lines(self, pr_number: int, repo: str | None = None,
+                      env: dict | None = None) -> dict:
+        slug = repo or (self.repos[0] if self.repos else None) or "{owner}/{repo}"
+        rc, out, err = _run(["gh", "api", "--paginate", f"repos/{slug}/pulls/{pr_number}/files"],
+                            env=env)
+        if rc != 0:
+            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+        try:
+            rows = _json_rows(out)
+        except ValueError:
+            return {"ok": False, "error": "unknown"}
+        return {"ok": True, "lines": {r["filename"]: patch_new_lines(r.get("patch") or "")
+                                      for r in rows if isinstance(r, dict) and r.get("filename")}}
+
+    def create_pending_review(self, pr_number: int, head_sha: str, body: str,
+                              comments: list[dict], repo: str | None = None,
+                              env: dict | None = None) -> dict:
+        """T-253: POST a review with no ``event``, which GitHub keeps PENDING. The JSON goes
+        through a temp file (`--input`) so the comment text reaches GitHub byte for byte."""
+        slug = repo or (self.repos[0] if self.repos else None) or "{owner}/{repo}"
+        payload = {"commit_id": head_sha,
+                   "comments": [{"path": c["path"], "line": c["line"], "side": "RIGHT",
+                                 "body": c["body"]} for c in comments]}
+        if body:
+            payload["body"] = body
+        with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+            fh.flush()
+            rc, out, err = _run(["gh", "api", f"repos/{slug}/pulls/{pr_number}/reviews",
+                                 "--input", fh.name], env=env)
+        if rc != 0:
+            return {"ok": False, "error": classify_gh_failure(rc, out, err), "detail": err.strip()}
+        try:
+            data = json.loads(out)
+        except ValueError:
+            return {"ok": False, "error": "unknown"}
+        if data.get("state") != "PENDING" or not data.get("id"):
+            return {"ok": False, "error": "unknown", "detail": f"unexpected state {data.get('state')!r}"}
+        return {"ok": True, "id": str(data["id"])}
+
+    def review_state(self, pr_number: int, review_id: str, repo: str | None = None,
+                     env: dict | None = None) -> dict:
+        slug = repo or (self.repos[0] if self.repos else None) or "{owner}/{repo}"
+        rc, out, err = _run(["gh", "api", f"repos/{slug}/pulls/{pr_number}/reviews/{review_id}"],
+                            env=env)
+        if rc != 0:
+            if "404" in err or "not found" in err.lower():
+                return {"ok": True, "state": "DELETED"}  # a pending review the human discarded
+            return {"ok": False, "error": classify_gh_failure(rc, out, err)}
+        try:
+            return {"ok": True, "state": json.loads(out).get("state") or "unknown"}
+        except ValueError:
+            return {"ok": False, "error": "unknown"}
 
 
 class CommandFetcher:

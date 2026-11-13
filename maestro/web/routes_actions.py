@@ -41,7 +41,7 @@ def _form(body: bytes) -> dict[str, str]:
     return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
 
 
-def register(app: FastAPI, shell: Shell, nudge: Nudge | None) -> None:
+def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
     home = shell.home
 
     def need_text(f: dict, name: str = "text") -> str:
@@ -125,3 +125,29 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None) -> None:
 
     for name in actions:
         shell.guard.post(app, f"/t/{{key}}/{name}", make(name), response_class=HTMLResponse)
+
+    def create_pending(request: Request, key: str, body: bytes) -> HTMLResponse:
+        """The one path from a review ticket to GitHub: a pending review of the kept findings."""
+        f = _form(body)
+        error = None
+        try:
+            if not ticket_exists(key):
+                raise Refused(f"no such ticket: {key}")
+            snap = snap_mod.load(home, key)
+            if f.get("head") != (snap.review_head_sha or ""):
+                raise Refused("the review changed since this page loaded; reload it first")
+            kept = [{"index": i, "comment": f.get(f"comment-{i}", "")}
+                    for i in range(len(snap.review_comments)) if f.get(f"include-{i}") == "1"]
+            human_actions.create_pending_review(shell.cfg(), key, kept, vcs=vcs)
+        except store.MaestroError as e:
+            error = {"key": key, "msg": str(e)}
+        resp = shell.render(request, "_ticket_review.html",
+                            **routes_ticket.review_ctx(shell, key, action_error=error))
+        if error:
+            resp.status_code = 409
+        return resp
+
+    async def create_pending_handler(request: Request, key: str) -> HTMLResponse:
+        return await run_in_threadpool(create_pending, request, key, await request.body())
+
+    shell.guard.post(app, "/t/{key}/review/pending", create_pending_handler, response_class=HTMLResponse)

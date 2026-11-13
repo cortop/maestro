@@ -40,6 +40,9 @@ REVIEW_ROUND_STARTED = "ReviewRoundStarted"  # {round, head_sha, url, source?, a
 # through `maestro review-finding` / `maestro review-brief` -- never per-session events.
 REVIEW_FINDING_RECORDED = "ReviewFindingRecorded"  # {head_sha, file, line, severity, comment}  idempotent per content
 REVIEW_BRIEF_WRITTEN = "ReviewBriefWritten"  # {head_sha, summary, checked, decisions, verdict, reading_order, path}
+# T-253: `human_actions.create_pending_review` posted the round's approved findings to GitHub as a
+# PENDING review (never submitted); the dispatcher polls it until it is submitted or the PR ends.
+REVIEW_PENDING_CREATED = "ReviewPendingCreated"  # {review_id, pr_number, head_sha, inline, in_body}  idempotent per head_sha
 REVIEW_FEEDBACK_RECEIVED = "ReviewFeedbackReceived"  # {comment_id, state, body, author}  one PR review; idempotent per comment_id
 # T-128: `ops.reply_review`'s own record that it posted a reply through the VCS
 # provider -- to the `/replies` thread endpoint for an `inline-<id>` comment_id,

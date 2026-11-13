@@ -11,17 +11,25 @@
   {% else %}<p class="dim">No brief yet: the review is still being checked.</p>{% endif %}
   <div class="panel"><div class="panel-head">Findings</div>
   <div class="panel-body">
-    <p class="dim">Edits stay in this browser. Nothing here is sent to GitHub.</p>
+    {% if snap.review_pending %}
+    <p class="review-pending">A pending review is waiting on GitHub ({{ snap.review_pending.inline }} inline comment(s), {{ snap.review_pending.in_body }} in its body). Read it and submit it there; maestro will not touch it.</p>
+    {% else %}<p class="dim">Edits stay in this browser until you create the pending review.</p>{% endif %}
     {% for f in findings %}
     <div class="finding" data-index="{{ loop.index0 }}">
       <p class="mono finding-loc">{{ f.file }}:{{ f.line }}</p>
-      <label class="finding-include"><input type="checkbox" data-field="include" checked> include</label>
+      <label class="finding-include"><input type="checkbox" name="include-{{ loop.index0 }}" value="1" data-field="include" checked> include</label>
       <label>severity
         <select data-field="severity">{% for s in severities %}<option value="{{ s }}"{{ " selected" if s == f.severity }}>{{ s }}</option>{% endfor %}</select>
       </label>
-      <textarea data-field="comment" rows="4" aria-label="Comment for {{ f.file }}:{{ f.line }}">{{ f.comment }}</textarea>
+      <textarea name="comment-{{ loop.index0 }}" data-field="comment" rows="4" aria-label="Comment for {{ f.file }}:{{ f.line }}">{{ f.comment }}</textarea>
     </div>
     {% else %}<p class="dim">No findings.</p>{% endfor %}
+    <input type="hidden" name="head" value="{{ snap.review_head_sha or '' }}">
+    {% if action_error %}<p class="action-error" role="alert">{{ action_error.msg }}</p>{% endif %}
+    {% if can_write and can_create and findings %}
+    <button type="button" class="btn btn-primary" id="create-pending" hx-post="/t/{{ key }}/review/pending" hx-include="#review" hx-target="#panel-review" hx-swap="innerHTML">Create pending review on GitHub</button>
+    <p class="dim">Creates a pending review only you can see, with the findings ticked above. You read and submit it on GitHub.</p>
+    {% endif %}
   </div></div>
 </div>
 {% endif %}

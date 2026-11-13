@@ -31,6 +31,14 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
             "can_stop": can_stop, **extra}
 
 
+def review_ctx(shell: Shell, key: str, **extra) -> dict:
+    """Context of the Review tab: the brief, the drafted findings and any action refusal."""
+    snap = ticket_view.ticket(shell.home, key, store.now_epoch()).snap
+    return {"key": key, "snap": snap, "brief": snap.review_brief, "findings": snap.review_comments,
+            "severities": ops.REVIEW_SEVERITIES,
+            "can_create": snap.phase == "awaiting-human" and bool(snap.review_brief), **extra}
+
+
 def register(app: FastAPI, shell: Shell) -> None:
     home = shell.home
 
@@ -72,12 +80,9 @@ def register(app: FastAPI, shell: Shell) -> None:
 
     @app.get("/t/{key}/review", response_class=HTMLResponse)
     def ticket_review(request: Request, key: str):
-        """The brief and drafted findings of a review ticket; edits live in the browser only."""
+        """The brief and drafted findings of a review ticket; edits live in the browser until sent."""
         require(key)
-        snap = ticket_view.ticket(home, key, store.now_epoch()).snap
-        return shell.render(request, "_ticket_review.html", key=key, snap=snap,
-                            brief=snap.review_brief, findings=snap.review_comments,
-                            severities=ops.REVIEW_SEVERITIES)
+        return shell.render(request, "_ticket_review.html", **review_ctx(shell, key))
 
     @app.get("/t/{key}/proposal", response_class=HTMLResponse)
     def ticket_proposal(request: Request, key: str):

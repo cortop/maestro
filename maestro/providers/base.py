@@ -168,6 +168,34 @@ class VCS(Protocol):
         """
         ...
 
+    def pending_review(self, pr_number: int, repo: str | None = None,
+                       env: dict | None = None) -> dict:
+        """T-253: the authenticated user's PENDING review on the PR (GitHub shows a pending
+        review only to its author). Returns ``{"ok": True, "review_id": str | None}`` (None
+        when there is none) or ``{"ok": False, "error": ...}`` classified like ``pr_status``."""
+        ...
+
+    def pr_diff_lines(self, pr_number: int, repo: str | None = None,
+                      env: dict | None = None) -> dict:
+        """T-253: the new-side line numbers an inline comment may sit on, per file:
+        ``{"ok": True, "lines": {path: [int, ...]}}`` (context and added lines of each hunk;
+        a file with no patch has none) or ``{"ok": False, "error": ...}``."""
+        ...
+
+    def create_pending_review(self, pr_number: int, head_sha: str, body: str,
+                              comments: list[dict], repo: str | None = None,
+                              env: dict | None = None) -> dict:
+        """T-253: create ONE pending (never submitted) review at *head_sha*; *comments* is
+        ``[{"path", "line", "body"}, ...]`` (right side) and *body* the review body ("" for
+        none). Returns ``{"ok": True, "id": str}`` or ``{"ok": False, "error": ...}``."""
+        ...
+
+    def review_state(self, pr_number: int, review_id: str, repo: str | None = None,
+                     env: dict | None = None) -> dict:
+        """T-253: one review's state, ``{"ok": True, "state": "PENDING"|"COMMENTED"|
+        "APPROVED"|"CHANGES_REQUESTED"|"DISMISSED"|"DELETED"}`` or ``{"ok": False, "error": ...}``."""
+        ...
+
 
 class Fetcher(Protocol):
     """Imports external work into maestro by writing to the ``_new`` inbox."""
@@ -215,6 +243,20 @@ class NullVCS:
         return {"ok": False, "error": "unknown"}
     def set_base(self, pr_number: int, base: str, repo: str | None = None,
                  env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
+
+    def pending_review(self, pr_number: int, repo: str | None = None,
+                       env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
+    def pr_diff_lines(self, pr_number: int, repo: str | None = None,
+                      env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
+    def create_pending_review(self, pr_number: int, head_sha: str, body: str,
+                              comments: list[dict], repo: str | None = None,
+                              env: dict | None = None) -> dict:
+        return {"ok": False, "error": "unknown"}
+    def review_state(self, pr_number: int, review_id: str, repo: str | None = None,
+                     env: dict | None = None) -> dict:
         return {"ok": False, "error": "unknown"}
 
 
