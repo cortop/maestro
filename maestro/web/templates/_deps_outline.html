@@ -1,17 +1,17 @@
-<div class="frame board-frame">
-<table id="deps" class="ledger">
-  <thead><tr><th scope="col">Ticket</th><th scope="col">Phase</th><th scope="col">Title</th><th scope="col">Blocking depth</th></tr></thead>
-  <tbody>
+{% from "_labels.html" import phase, chip_class %}
+<div class="dep-tree-key"><span><i class="dep-dot"></i>can start</span><span><i class="dep-dot d1"></i>one step away</span><span><i class="dep-dot d2"></i>stuck behind a chain</span></div>
+<ol class="dep-tree">
   {% for l in lines %}
-  <tr class="row" data-key="{{ l.key }}" data-level="{{ l.level }}">
-    <td class="key">{{ "   " * l.level }}{% if l.level %}└ {% endif %}<a href="/t/{{ l.key }}">{{ l.key }}</a>{% if l.repeat %} <span class="dim">↑ shown above</span>{% endif %}{% if l.cycle %} <span class="dim">cycle</span>{% endif %}</td>
-    <td class="phase-{{ l.phase }}">{{ l.phase }}</td>
-    <td class="title">{{ l.title }}{% for m in l.missing %} <span class="dim">missing: {{ m }}</span>{% endfor %}</td>
-    <td class="num">{{ l.depth }}</td>
-  </tr>
+  <li{% if l.classes %} class="{{ l.classes }}"{% endif %} data-key="{{ l.key }}" data-level="{{ l.level }}">
+    {% if l.guides %}<span class="dep-guides" aria-hidden="true">{% for g in l.guides %}<i class="{{ g }}"></i>{% endfor %}</span>{% endif %}
+    <div class="dep-row-main">
+      <a class="dep-row-key" href="/t/{{ l.key }}"><i class="{{ l.dot }}"></i>{{ l.key }}</a>
+      <span class="chip {% if l.held %}chip-held{% elif l.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(l.phase) }}{% endif %}">{% if l.held %}Held{% else %}{{ phase(l.phase) }}{% endif %}</span>
+      <span class="dep-row-title">{{ l.title }}</span>
+      <span class="dep-row-note">{{ l.note }}</span>
+    </div>
+  </li>
   {% else %}
-  <tr><td colspan="4" class="dim">No open tickets.</td></tr>
+  <li class="dep-row-note">No open tickets.</li>
   {% endfor %}
-  </tbody>
-</table>
-</div>
+</ol>

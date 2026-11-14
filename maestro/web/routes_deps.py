@@ -126,11 +126,41 @@ def graph_ctx(v: deps_view.DepsView, p: Params) -> dict:
     }
 
 
+def _outline_note(r: deps_view.OutlineRow) -> str:
+    if r.repeat:
+        return "shown above"
+    parts = []
+    if r.cycle:
+        parts.append("in a cycle")
+    parts += [f"missing {m}" for m in r.missing]
+    if r.open_deps > 1:
+        parts.append(f"waits on {r.open_deps}")
+    if r.done_deps:
+        parts.append(f"{r.done_deps} dep done" if r.done_deps == 1 else f"{r.done_deps} deps done")
+    return " · ".join(parts)
+
+
 def outline_ctx(v: deps_view.DepsView) -> dict:
-    """The outline table: one line per open ticket, dependents under their blocker."""
-    lines = [{"key": r.key, "title": v.tickets[r.key].title, "phase": v.tickets[r.key].phase,
-              "level": r.level, "depth": r.depth, "repeat": r.repeat, "cycle": r.cycle,
-              "missing": r.missing} for r in v.outline]
+    """The outline tree: one row per `view.deps` outline row with guide cells, dot, chip and note."""
+    lines = []
+    for i, r in enumerate(v.outline):
+        t = v.tickets[r.key]
+        guides: list[str] = []
+        if r.level:
+            guides = ["dep-g v" if more else "dep-g" for more in r.trail]
+            sibling = False
+            for nxt in v.outline[i + 1:]:
+                if nxt.level < r.level:
+                    break
+                if nxt.level == r.level:
+                    sibling = True
+                    break
+            guides.append("dep-g t" if sibling else "dep-g l")
+        classes = " ".join(c for c, on in (("is-rep", r.repeat),
+                                           ("is-bad", r.cycle or bool(r.missing))) if on)
+        lines.append({"key": r.key, "title": t.title, "level": r.level, "guides": guides,
+                      "dot": "dep-dot" + ("" if r.depth == 0 else " d1" if r.depth == 1 else " d2"),
+                      "held": t.held, "phase": t.phase, "classes": classes, "note": _outline_note(r)})
     return {"lines": lines}
 
 

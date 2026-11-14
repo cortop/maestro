@@ -14,7 +14,7 @@ from maestro.web.app import create_app  # noqa: E402
 
 
 def _order(html: str) -> list[str]:
-    return re.findall(r'<tr class="row" data-key="([^"]+)"', html)
+    return re.findall(r'<(?:tr class="row"|li) (?:class="[^"]*" )?data-key="([^"]+)"', html)
 
 
 @pytest.fixture
@@ -72,9 +72,9 @@ def test_dependency_view_is_a_linked_tree_with_blocking_depth(web):
     assert "T-3" not in html  # terminal tickets are not open
     assert 'data-key="T-1" data-level="0"' in html and 'data-key="T-2" data-level="1"' in html
     for key in ("T-1", "T-2", "T-10"):
-        assert f'<a href="/t/{key}">{key}</a>' in html
-    assert re.search(r'data-key="T-1".*?<td class="num">0</td>', html, re.S)
-    assert re.search(r'data-key="T-2".*?<td class="num">1</td>', html, re.S)
+        assert f'<a class="dep-row-key" href="/t/{key}">' in html
+    assert re.search(r'data-key="T-1".*?<i class="dep-dot"></i>T-1', html, re.S)
+    assert re.search(r'data-key="T-2".*?<i class="dep-dot d1"></i>T-2', html, re.S)
     assert 'href="/deps"' in web.get("/tickets").text
     assert "Open dependency view" in web.get("/palette").text
 
