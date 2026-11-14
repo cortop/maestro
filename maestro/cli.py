@@ -606,6 +606,19 @@ def cmd_spec_set(args) -> int:
     return 0
 
 
+def cmd_stack(args) -> int:
+    """[human] Start a ticket on its single unfinished dependency's branch via
+    `human_actions.stack`. Like `cmd_spec_set`, never added to `_AGENT_TOOL_VERBS`."""
+    cfg = _cfg(args)
+    try:
+        result = human_actions.stack(cfg, args.key)
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
 def cmd_add_ac(args) -> int:
     """Append a new `- [ ] <text>` line to a ticket's spec `## Acceptance
     criteria` section -- the CLI counterpart to the TUI's add-AC modal
@@ -1239,119 +1252,27 @@ def cmd_fold_steps(args) -> int:
     return 0
 
 
-def _render_result_line(obj: dict) -> str:
-    classified = steplog.classify_result(obj)
-    dur = obj.get("duration_ms")
-    suffix = f" ({dur}ms)" if dur else ""
-    outcome = classified["outcome"]
-    if outcome == "success":
-        return f"[result:{classified['subtype']}]{suffix}"
-    parts = [f"[result:{outcome}]"]
-    if classified["api_error_status"] is not None:
-        parts.append(f"api_error_status={classified['api_error_status']}")
-    if classified["message"]:
-        parts.append(classified["message"])
-    return " ".join(parts) + suffix
-
-
-def _render_rate_limit_line(obj: dict) -> str:
-    info = obj.get("rate_limit_info") or {}
-    kind = info.get("rateLimitType", "")
-    status = info.get("status", "")
-    resets_at = steplog.format_resets_at(info.get("resetsAt"))
-    return f"[rate_limit:{kind}] status={status} resetsAt={resets_at}"
+def _print_steps(path: Path, reader) -> None:
+    for step in reader(path):
+        print(step)
 
 
 def _render_stream_jsonl(path: Path) -> None:
     """Print a human-readable view of a stream-jsonl session log."""
-    seen_msg_ids: dict[str, dict] = {}
-    for obj in store.iter_jsonl(path):
-        if obj.get("type") == "assistant":
-            mid = obj["message"]["id"]
-            seen_msg_ids[mid] = obj
-        elif obj.get("type") == "rate_limit_event":
-            print(_render_rate_limit_line(obj))
-        elif obj.get("type") == "result":
-            # Flush collected assistant messages in order, then show result
-            for _, msg_obj in seen_msg_ids.items():
-                _print_assistant_message(msg_obj)
-            seen_msg_ids.clear()
-            print(_render_result_line(obj))
-    # Flush any remaining (live/incomplete session)
-    for _, msg_obj in seen_msg_ids.items():
-        _print_assistant_message(msg_obj)
-
-
-def _print_assistant_message(obj: dict) -> None:
-    for block in obj["message"].get("content", []):
-        btype = block.get("type")
-        if btype == "text":
-            print(block["text"])
-        elif btype == "tool_use":
-            inp = block.get("input", {})
-            inp_preview = json.dumps(inp)[:120]
-            print(f"[tool_use:{block['name']}] {inp_preview}")
-
-
-def _print_opencode_part(obj: dict) -> None:
-    """Render one opencode.jsonl record (OC-5) human-readably. Falls back to
-    printing any bare ``text`` field for a record outside the verified
-    vocabulary (RF-3: an opencode log's grammar the reader doesn't recognize
-    must still show SOMETHING, never a blank render)."""
-    t, part = steplog.oc_part(obj)
-    if t in steplog.OC_TEXT_TYPES:
-        text = part.get("text")
-        if text:
-            print(text)
-    elif t in steplog.OC_TOOL_USE_TYPES:
-        tool_name = part.get("tool", "?")
-        print(f"[tool_use:{tool_name}] {steplog.oc_summary(tool_name, part)}")
-    elif t in steplog.OC_STEP_FINISH_TYPES:
-        reason = part.get("reason")
-        if reason:
-            print(f"[step_finish] reason={reason}")
-    elif t not in steplog.OC_STEP_START_TYPES:
-        text = obj.get("text")
-        if isinstance(text, str) and text:
-            print(text)
+    from .view import logs as logs_view
+    _print_steps(path, logs_view.stream_steps)
 
 
 def _render_opencode_jsonl(path: Path) -> None:
     """Print a human-readable view of an opencode.jsonl session log (OC-5)."""
-    for obj in store.iter_jsonl(path, errors="replace"):
-        _print_opencode_part(obj)
-
-
-def _print_pi_record(obj: dict) -> None:
-    """Print one pi record as a readable line; tool updates and deltas print nothing."""
-    t = obj.get("type")
-    if t == steplog.PI_TOOL_START_TYPE:
-        tool_name = obj.get("toolName", "?")
-        print(f"[tool:{tool_name}] {steplog.pi_summary(tool_name, obj.get('args') or {})}")
-    elif t == steplog.PI_MESSAGE_END_TYPE:
-        msg = obj.get("message") or {}
-        if msg.get("role") != "assistant":
-            return
-        content = msg.get("content")
-        if isinstance(content, str):
-            content = [{"type": "text", "text": content}]
-        for block in content or []:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = (block.get("text") or "").strip()
-                if text:
-                    print(text)
-        if msg.get("stopReason") == "error":
-            print(f"[error] {msg.get('errorMessage') or 'error'}")
-    elif t == steplog.PI_AUTO_RETRY_START_TYPE:
-        print("[auto_retry]")
-    elif t == steplog.PI_TURN_START_TYPE:
-        print("[turn_start]")
+    from .view import logs as logs_view
+    _print_steps(path, logs_view.opencode_steps)
 
 
 def _render_pi_jsonl(path: Path) -> None:
     """Print a human-readable view of a pi.jsonl session log, skipping noise unparsed."""
-    for _offset, obj in steplog.iter_records(path, skip_prefixes=steplog.PI_NOISE_PREFIXES):
-        _print_pi_record(obj)
+    from .view import logs as logs_view
+    _print_steps(path, logs_view.pi_steps)
 
 
 def cmd_logs(args) -> int:
@@ -1453,16 +1374,21 @@ def cmd_logs(args) -> int:
                             if not header_done and steplog.session_model(log_path)["model"] != "unknown":
                                 header_done = True
                                 _print_follow_header(sess, log_path)
+                            from .view import logs as logs_view
                             if is_pi:
-                                _print_pi_record(obj)
+                                steps = logs_view.pi_record_steps(obj)
                             elif is_opencode:
-                                _print_opencode_part(obj)
+                                steps = logs_view.opencode_record_steps(obj)
                             elif obj.get("type") == "assistant":
-                                _print_assistant_message(obj)
+                                steps = logs_view.assistant_steps(obj)
                             elif obj.get("type") == "rate_limit_event":
-                                print(_render_rate_limit_line(obj))
+                                steps = [logs_view.rate_limit_line(obj)]
                             elif obj.get("type") == "result":
-                                print(_render_result_line(obj))
+                                steps = [logs_view.result_line(obj)]
+                            else:
+                                steps = []
+                            for step in steps:
+                                print(step)
                     else:
                         sys.stdout.write(chunk)
                         sys.stdout.flush()
@@ -1824,6 +1750,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--priority", default=None, help="integer >= 0")
     sp.add_argument("--depends-on", dest="depends_on", default=None,
                     help="comma-separated ticket keys; '' clears the list")
+    sp = add("stack", cmd_stack,
+             "[human] start a ticket on its one unfinished dependency's branch instead of waiting for it")
+    sp.add_argument("key")
     sp = add("add-ac", cmd_add_ac,
              "append a new '- [ ] <text>' acceptance criterion to a ticket's spec")
     sp.add_argument("key")

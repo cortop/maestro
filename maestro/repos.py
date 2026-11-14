@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import snapshot as snap_mod
 from . import store
 from .config import REPO_OVERRIDE_KEYS, Config
 from .dispatcher import parse_spec_overrides
+from .statemachine import Phase
 
 _PR_URL_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/pull/\d+")
 
@@ -357,12 +358,43 @@ def resolve(cfg: Config, home: Path, key: str) -> RepoBinding:
     human spec edit naming a typo'd repo) falls back to the implicit default so
     the dispatcher can never wedge.
     """
+    return _with_stacked_base(cfg, home, key, _resolve_unstacked(cfg, home, key))
+
+
+def _resolve_unstacked(cfg: Config, home: Path, key: str) -> RepoBinding:
     name = bound_repo_name(home, key)
     if name:
         table = cfg.repos.get(name)
         if table:
             return _binding_from_table(cfg, name, table)
     return implicit_default(cfg)
+
+
+def stacked_dep(home: Path, key: str) -> str | None:
+    """The dependency *key* is stacked on while that stack is live, else None.
+
+    Live means `maestro stack` recorded it, the dependency has not reached `done`, and
+    `dispatcher.sync_stacks` has not yet resolved it.
+    """
+    snap = snap_mod.load(home, key)
+    if not snap.stacked_on or snap.stack_outcome:
+        return None
+    if snap_mod.load(home, snap.stacked_on).phase == Phase.DONE.value:
+        return None
+    return snap.stacked_on
+
+
+def dep_branch(cfg: Config, home: Path, dep: str) -> str:
+    """The branch *dep*'s own PR is built on (its repo's branch prefix + key)."""
+    return f"{_resolve_unstacked(cfg, home, dep).branch_prefix}{dep}"
+
+
+def _with_stacked_base(cfg: Config, home: Path, key: str, binding: RepoBinding) -> RepoBinding:
+    """*binding* with its base branch swapped for the dependency's branch while stacked."""
+    dep = stacked_dep(home, key)
+    if dep is None:
+        return binding
+    return replace(binding, base_branch=dep_branch(cfg, home, dep))
 
 
 def resolve_stack_tool(binding: RepoBinding) -> str:

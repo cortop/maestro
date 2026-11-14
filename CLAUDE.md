@@ -98,6 +98,7 @@ Supporting:
 - `steplog.py` — reads session logs (Claude/opencode/pi) into steps.
 - `projection.py` — snapshots → `derived/*.md` dashboards. `notify.py` — push notifications.
 - `schedule.py` — interval/cron scheduled tasks. `decision_labels.py` — answer → route fold.
+- `stacking.py` — cross-ticket stacking (`maestro stack`): dependency-branch start, retarget on merge, ask on unmerged end.
 - `pr_flow.py` — `sync-base`, `open-pr` and `handoff`: the implementing round's git and PR plumbing.
 - `implementing_brief.py` — classifies the implementing round and assembles `maestro brief` (rounds in `maestro/_implementing_rounds/`).
 - `outcomes.py` — read-only per-repo/month ticket outcome fold (`maestro scorecard tickets`).
