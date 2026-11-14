@@ -169,6 +169,8 @@ def test_empty_filter_clears_selection(home):
         app = _make_app(home)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
+            await pilot.pause()
             app._filter_idx = _filter_idx("all")
             app._refresh_now()
             await pilot.pause()
