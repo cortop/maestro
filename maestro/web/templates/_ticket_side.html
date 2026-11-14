@@ -9,7 +9,12 @@
     <thead><tr><th scope="col">Criterion</th><th scope="col">Agent</th><th scope="col">QA</th><th scope="col">Check</th></tr></thead>
     <tbody>
     {% for a in t.acs %}
-    <tr><td>{{ a.index }}. {{ a.text }}</td>
+    <tr><td><details class="ac-evidence"><summary>{{ a.index }}. {{ a.text }}</summary>
+      <dl class="kv">
+        <dt>Agent</dt><dd>{% if a.self %}what: {{ a.self.what }}<br>where: {{ a.self.where }}<br>result: {{ a.self.result }}{% else %}none{% endif %}</dd>
+        <dt>QA</dt><dd>{% if a.qa_spec %}{{ a.qa_spec.verdict }}<p class="review-text">{{ a.qa_spec.evidence }}</p>{% else %}none{% endif %}</dd>
+        <dt>Check</dt><dd>{% if a.check %}<span class="mono">{{ a.check.command }}</span><br>{{ "passed" if a.check.passed else "failed" }}, exit {{ a.check.exit_code }} · {{ "current" if a.check.current else "stale" }}{% if a.check.failure_excerpt %}<p class="review-text mono">{{ a.check.failure_excerpt }}</p>{% endif %}{% else %}no captured check{% endif %}</dd>
+      </dl></details></td>
       <td>{{ verdict("yes" if a.self else "—") }}</td>
       <td>{{ verdict((a.qa_spec or {}).get("verdict", "—")) }}</td>
       <td>{% if a.check %}{{ verdict(a.check.get("status") or a.check.get("result") or "run") }}{{ "" if a.check.current else " (stale)" }}{% else %}{{ verdict("—") }}{% endif %}</td></tr>
@@ -37,5 +42,10 @@
     {% for c in t.snap.failing_checks %}<li class="meta forced"><span class="grow">{{ c }}</span>{{ verdict("fail") }}</li>{% endfor %}
     <li class="meta"><span class="grow">unresolved reviews</span><span>{{ t.snap.unresolved_reviews }}</span></li>
   </ul>
+  <div class="panel-body" id="pr-threads"><h3 class="panel-title">Review threads</h3>
+    {% for b in threads %}<p class="review-text">{{ b }}</p>{% else %}<p class="dim">no review feedback</p>{% endfor %}</div>
+  <div class="panel-body" id="ci-timeline"><h3 class="panel-title">CI timeline</h3>
+    {% for c in ci_timeline %}<p class="review-text"><span class="mono">{{ c.ts }}</span> {{ verdict(c.state) }}{% if c.failing_checks %} failing: {{ c.failing_checks|join(", ") }}{% endif %}{% if c.failure_excerpt %}
+{{ c.failure_excerpt }}{% endif %}</p>{% else %}<p class="dim">no CI observations</p>{% endfor %}</div>
   {% else %}<div class="panel-body"><p class="dim">no pull request yet</p></div>{% endif %}
 </div>

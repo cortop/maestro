@@ -1,0 +1,3 @@
+{% if d.error %}<p class="dim" id="diff-note">{{ d.error }}</p>
+{% else %}{% if d.truncated %}<p class="dim" id="diff-note">Diff truncated at {{ d.text|length }} characters.</p>{% endif %}
+<pre class="review-text mono" id="diff-text">{{ d.text or "(no changes)" }}</pre>{% endif %}
