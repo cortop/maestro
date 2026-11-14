@@ -13,8 +13,14 @@
   </div>
   <div class="dep-tools">
     {% if only %}<a class="dep-pill" {{ p.link(p.url(only="")) }}>Only {{ only }} and its chain <span aria-hidden="true">&times;</span></a>{% endif %}
+    <label class="dep-find"><span class="sr">Find a ticket</span><input type="search" placeholder="Find a ticket" data-dep-find></label>
     <a class="dep-toggle{% if p.finished %} on{% endif %}" href="{{ p.url(finished=not p.finished) }}" aria-pressed="{{ 'true' if p.finished else 'false' }}">Finished <span>{{ n_finished }}</span></a>
     <a class="dep-toggle t-compact{% if p.compact %} on{% endif %}" href="{{ p.url(compact=not p.compact) }}" aria-pressed="{{ 'true' if p.compact else 'false' }}">Compact</a>
+    <div class="dep-zoom" role="group" aria-label="Zoom">
+      <button type="button" aria-label="Zoom out" data-dep-zoom="out">-</button>
+      <button type="button" class="dep-zoom-val" aria-label="Reset zoom" data-dep-zoom="reset">100%</button>
+      <button type="button" aria-label="Zoom in" data-dep-zoom="in">+</button>
+    </div>
   </div>
 </nav>
 
@@ -22,4 +28,5 @@
   {% include "_deps_main.html" %}
 </div>
 </div>
+<script src="/static/deps.js" defer></script>
 {% endblock %}

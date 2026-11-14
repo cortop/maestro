@@ -42,7 +42,7 @@
   <div class="dep-tray-head"><h2 id="h-unlinked" class="section-label">Unlinked · {{ dv.unlinked|length }}</h2><span class="dep-tray-note">no open dependency in either direction</span></div>
   <div class="dep-tray-grid">
     {% for k in tray %}{% set t = dv.tickets[k] %}
-    <a class="dep-unlinked{% if state.get(k) %} {{ state[k] }}{% endif %}" {{ p.link(p.pin(k)) }} title="{{ k }} · {{ t.phase }} · {{ t.title }}">{% if t.live %}<span class="cursor" aria-hidden="true"></span>{% endif %}<span class="dep-key">{{ k }}</span><span class="chip {% if t.held %}chip-held{% elif t.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(t.phase) }}{% endif %}">{% if t.held %}Held{% else %}{{ phase(t.phase) }}{% endif %}</span><span class="dep-unlinked-title">{{ t.title }}</span></a>
+    <a class="dep-unlinked{% if state.get(k) %} {{ state[k] }}{% endif %}" {{ p.link(p.pin(k)) }} data-id="{{ k }}" data-deps="" title="{{ k }} · {{ t.phase }} · {{ t.title }}">{% if t.live %}<span class="cursor" aria-hidden="true"></span>{% endif %}<span class="dep-key">{{ k }}</span><span class="chip {% if t.held %}chip-held{% elif t.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(t.phase) }}{% endif %}">{% if t.held %}Held{% else %}{{ phase(t.phase) }}{% endif %}</span><span class="dep-unlinked-title">{{ t.title }}</span></a>
     {% endfor %}
     {% if tray_more %}<a class="dep-tray-more" href="{{ tray_all_url }}">Show all {{ dv.unlinked|length }}</a>{% endif %}
   </div>

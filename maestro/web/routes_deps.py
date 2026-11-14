@@ -235,6 +235,7 @@ def graph_ctx(v: deps_view.DepsView, p: Params) -> dict:
                              only=p.only or None, expanded=p.open,
                              selected=pin[1] if pin and pin[0] == "ticket" else None)
     g = lay.geometry
+    g_nodes = v.graph.nodes
     drawn = bool(lay.cards)
     frame_h = FRAME_EMPTY
     stage_h = lay.height
@@ -256,10 +257,13 @@ def graph_ctx(v: deps_view.DepsView, p: Params) -> dict:
     unlinked = v.unlinked
     tray_more = len(unlinked) > TRAY_MAX and not p.tray_all
     state, lit = classify(v, lay, p, pin)
+    deps_of = {c.id: [*g_nodes[c.key].open_deps, *("?" + m for m in g_nodes[c.key].missing),
+                      *("done:" + d for d in g_nodes[c.key].done_keys)] for c in lay.cards}
+    rows = {k: n for lane in lay.lane_cards for n, k in enumerate(lane)}
     edges = [(e, lit.get(i, "")) for i, e in enumerate(lay.edges)]
     edges.sort(key=lambda t: t[1] in ("lit-up", "lit-down"))
     return {
-        "dv": v, "p": p, "lay": lay, "state": state, "edges": edges,
+        "dv": v, "p": p, "lay": lay, "deps_of": deps_of, "rows": rows, "state": state, "edges": edges,
         "panel": panel_ctx(v, p, pin), "only": p.only, "drawn": drawn, "frame_h": frame_h, "stage_h": stage_h,
         "lanes": lanes, "bg_w": g.nw + g.cg, "bg_x": first_x, "alerts": _alerts(v, p),
         "archived": {k: kp.archived for k, kp in finished.items()},
