@@ -87,7 +87,7 @@ from .render import _dep_color
 from .render import _fmt_duration
 from .render import _nudge_toast
 from .render import _render_badge
-from .render import _render_fleet
+from .render import _render_fleet_painted
 from .render import _render_now
 from .render import _render_now_detail
 from .render import _render_pulse
@@ -493,6 +493,8 @@ class MaestroTUI(App):
         # T-153: `N` toggles nudging for THIS session only (no config write).
         self._nudge_enabled: bool = True
         self._now_result: dict | None = None  # last Now-tab worker result
+        self._doctor_cache: tuple[dict, float] | None = None  # last doctor report, epoch; shared by tab and F panel
+        self._fleet_tab_state: dict = {}  # fleet tab: status, quick payload, doctor_pending
         self._now_key: str | None = None  # key last handed to _selected_key by the Now cursor
         self._now_idx: int = 0  # needs-you cursor on the Now tab
         self._review_edits: dict[str, dict] = {}  # review key -> {head, excluded, comments, cursor}
@@ -1067,12 +1069,31 @@ class MaestroTUI(App):
                         name="now-tab", exit_on_error=False)
 
     def _refresh_fleet_tab(self) -> None:
-        def _load() -> tuple[dict, dict]:
-            status = fleet_mod.status(self._home)
-            doctor = health.report(config_mod.load(str(self._home)), store.now_epoch())
-            return status, doctor
-        self.run_worker(_load, thread=True, group="fleet-tab", exclusive=True,
+        """Paint status and the probe-free doctor fields at once, then the doctor part when it lands."""
+        def _quick() -> dict:
+            cfg = config_mod.load(str(self._home))
+            return {"status": fleet_mod.status(self._home),
+                    "quick": fleet_view.quick_report(self._home, cfg)}
+
+        def _doctor() -> tuple[dict, float]:
+            now = store.now_epoch()
+            return health.report(config_mod.load(str(self._home)), now), now
+        self._fleet_tab_state["pending"] = True
+        self.run_worker(_quick, thread=True, group="fleet-tab", exclusive=True,
                         name="fleet-tab", exit_on_error=False)
+        self.run_worker(_doctor, thread=True, group="fleet-tab-doctor", exclusive=True,
+                        name="fleet-tab-doctor", exit_on_error=False)
+
+    def _paint_fleet_tab(self) -> None:
+        st = self._fleet_tab_state
+        if "status" not in st:
+            return
+        try:
+            self.query_one("#fleet-tab", Static).update(_render_fleet_painted(
+                st["status"], st["quick"], self._doctor_cache, st.get("pending", False),
+                store.now_epoch()))
+        except NoMatches:
+            pass
 
     def _show_tab(self, tab: str) -> None:
         self.query_one("#tabs", TabbedContent).active = tab
@@ -1126,10 +1147,14 @@ class MaestroTUI(App):
             except NoMatches:
                 pass
         elif event.worker.name == "fleet-tab" and event.state == WorkerState.SUCCESS:
-            try:
-                self.query_one("#fleet-tab", Static).update(_render_fleet(*event.worker.result))
-            except NoMatches:
-                pass
+            self._fleet_tab_state.update(event.worker.result)
+            self._paint_fleet_tab()
+        elif event.worker.name == "fleet-tab-doctor" and event.state in (
+                WorkerState.SUCCESS, WorkerState.ERROR):
+            self._fleet_tab_state["pending"] = False
+            if event.state == WorkerState.SUCCESS:
+                self._doctor_cache = event.worker.result
+            self._paint_fleet_tab()
         elif event.worker.name == "blockers":
             if event.state == WorkerState.SUCCESS:
                 self._open_blockers_picker(*event.worker.result)

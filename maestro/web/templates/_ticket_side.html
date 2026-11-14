@@ -32,6 +32,7 @@
     <dt>Attempts</dt><dd>{{ card.attempts }}</dd>
     <dt>Throttle</dt><dd>{{ card.throttle }}</dd>
     <dt>Depends on</dt><dd>{% for d in card.open_deps %}<a href="/t/{{ d.key }}">{{ d.key }}</a> ({{ d.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
+    <dt>Blocks</dt><dd id="blocks">{% for b in blocks %}<a href="/t/{{ b.key }}">{{ b.key }}</a> ({{ b.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
   </dl></div>
   {% if sweep_result %}<div class="panel-body"><p id="sweep-result" role="status">{{ sweep_result }}</p></div>{% endif %}
   {% if can_write %}<div class="panel-body">

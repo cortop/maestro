@@ -581,7 +581,7 @@ def _worktree_status_clean_enough(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> b
     return deletions < _MASS_DELETE_THRESHOLD
 
 
-def worktree_health(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
+def worktree_health(wt: Path, *, timeout: int = _GIT_TIMEOUT, index_probe=None) -> dict:
     """The postcondition for "is *wt* a complete, usable worktree" -- `maestro
     doctor`'s detective check (health.py) and `worktree_ensure`'s
     witnessed-but-unhealthy refusal (see that function's docstring; NOT its
@@ -602,10 +602,14 @@ def worktree_health(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
     this CAN raise `store.MaestroError` if a probe itself times out or errors
     -- a probe timeout is not evidence of an unhealthy worktree and must never
     be silently folded into "unhealthy" (AC5); `health.check_worktree_health`
-    catches this per-worktree so one slow probe can't crash `maestro doctor`."""
+    catches this per-worktree so one slow probe can't crash `maestro doctor`.
+
+    *index_probe* is an optional zero-arg callable standing in for the
+    `_worktree_has_index` probe, so a caller that already asked (doctor's shared
+    pass) does not spawn git twice; the verdict is unchanged."""
     if not wt.exists():
         return {"healthy": False, "reason": "missing"}
-    if not _worktree_has_index(wt, timeout=timeout):
+    if not (index_probe() if index_probe else _worktree_has_index(wt, timeout=timeout)):
         return {"healthy": False, "reason": "no index"}
     if not _worktree_status_clean_enough(wt, timeout=timeout):
         return {"healthy": False, "reason": "mass deletion in git status"}
@@ -907,7 +911,7 @@ def _worktree_witness_path(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> Path | N
         return None
 
 
-def worktree_witness_status(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
+def worktree_witness_status(wt: Path, *, timeout: int = _GIT_TIMEOUT, index_probe=None) -> dict:
     """T-95: the one predicate that decides whether a witness-less *wt* is a
     pre-T-81 worktree (backfill and treat as complete) or an interrupted
     checkout (still torn down) -- shared by `worktree_ensure`'s write path and
@@ -927,13 +931,16 @@ def worktree_witness_status(wt: Path, *, timeout: int = _GIT_TIMEOUT) -> dict:
         still be torn down and rebuilt, never backfilled.
     `witness_path` is the path a witness would live at (or already does),
     None when *wt* isn't even a usable git worktree yet.
+
+    *index_probe*: optional zero-arg callable replacing the `_worktree_has_index`
+    probe (see `worktree_health`).
     """
     witness = _worktree_witness_path(wt, timeout=timeout)
     if witness is None:
         return {"witnessed": False, "backfillable": False, "witness_path": None}
     if witness.exists():
         return {"witnessed": True, "backfillable": False, "witness_path": witness}
-    backfillable = _worktree_has_index(wt, timeout=timeout)
+    backfillable = index_probe() if index_probe else _worktree_has_index(wt, timeout=timeout)
     return {"witnessed": False, "backfillable": backfillable, "witness_path": witness}
 
 

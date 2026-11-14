@@ -68,7 +68,9 @@ def new_entries(shell: Shell) -> list[dict]:
 
 def goto_entries(shell: Shell, current: str | None) -> list[dict]:
     home = shell.home
-    out = [_go("Go to needs you", "/tickets?filter=needs-you", keys="f")]
+    out = [_go("Go to needs you", "/tickets?filter=needs-you", keys="f"),
+           _go("Open activity", "/activity", "recent events across every ticket", "T"),
+           _go("Open dependency view", "/deps", "open-ticket tree", "D")]
     running = sorted(board_view.running_keys(home, shell.cfg()) - {current})
     if running:
         out.append(_go(f"Go to next running ticket ({running[0]})", f"/t/{running[0]}", keys="j"))

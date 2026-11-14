@@ -52,7 +52,7 @@ def _slack_check(home):
 def test_strict_watcher_spawn_loads_only_its_mcp_config(home):
     _write_cfg(home, f"slack_mcp_config = '{MCP_CONFIG}'")
     seed_phase(home, "T-1", Phase.READY)
-    spawns = {cmd[cmd.index("-n") + 1]: cmd for cmd in _sweep(home)}
+    spawns = {cmd[cmd.index("-n") + 1]: cmd for cmd in _sweep(home) if "-n" in cmd}
     watcher = spawns.pop(f"reconcile-{slack_watcher.WATCHER_KEY}")
     assert "--strict-mcp-config" in watcher
     assert watcher[watcher.index("--mcp-config") + 1] == MCP_CONFIG
