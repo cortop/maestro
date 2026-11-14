@@ -2,6 +2,13 @@
 {% macro blocks(c) -%}
 {% if c.dependents %}<p class="card-blocks">blocks {% for d in c.dependents %}<a href="/t/{{ d }}">{{ d }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
 {%- endmacro %}
+{% set rec_n = view.needs_you | selectattr("recommendation") | list | length %}
+{% if can_write and rec_n %}
+<div class="card-actions" id="accept-all">
+  {{ act.confirm_form("", "accept-all", "now", "#now-decide", "Accept all recommendations", "Answer " ~ rec_n ~ " question(s) with the agent's recommendation? Questions without one stay open.", url="/now/accept-all") }}
+  {{ act.error(action_error, "*") }}
+</div>
+{% endif %}
 {% for c in view.needs_you %}
 {% if c.counts is defined %}
 <article class="card review" data-key="{{ c.key }}" data-group="needs-you" data-kind="review">
@@ -30,12 +37,10 @@
       <div class="card-actions" data-slot="actions">
         {% if can_write %}
         {% if c.reason is defined %}
-        {{ act.note_form(c.key, "retry", "now", "#now-decide", "Retry with a note", "Retry", "Optional note for the next attempt", cls="btn-light") }}
+        {% if c.retryable %}{{ act.degraded_actions(c.key, "now", "#now-decide") }}{% endif %}
         <a class="btn btn-secondary" href="/t/{{ c.key }}">Open the last session</a>
-        {{ act.confirm_form(c.key, "discard", "now", "#now-decide", "Discard", "Discard " ~ c.key ~ "? The ticket is closed.") }}
         {% else %}
-        {% if c.recommendation %}{{ act.form(c.key, "answer", "now", "#now-decide", "Accept recommendation", "btn-primary", {"qid": c.qid, "accept": "1"}) }}{% endif %}
-        {{ act.modal_button(c.key, "answer", "now", c.qid, "Write an answer", cls="btn-ghost" if c.recommendation else "btn-secondary") }}
+        {{ act.question_actions(c.key, c.qid, c.recommendation, "now", "#now-decide") }}
         {% endif %}
         {% endif %}
         {{ act.error(action_error, c.key) }}

@@ -2190,6 +2190,19 @@ def check_merged(cfg: Config, key: str, pr_state: str, *, actor: str = "reconcil
     return True
 
 
+def record_ticket_stacked(cfg: Config, key: str, dep: str, *, actor: str = "human") -> dict | None:
+    """Append `TicketStacked` naming *dep*; idempotent per (key, dep). Callers validate first
+    (`stacking.stack`)."""
+    return _append(cfg, key, E.TICKET_STACKED, {"dep": dep}, actor=actor, sid=f"stack-{key}-{dep}")
+
+
+def record_stack_resolved(cfg: Config, key: str, dep: str, outcome: str, *,
+                          actor: str = "dispatcher") -> dict | None:
+    """Append `StackResolved` once *dep* is done ("merged" or "unmerged"); idempotent per dep."""
+    return _append(cfg, key, E.STACK_RESOLVED, {"dep": dep, "outcome": outcome}, actor=actor,
+                   sid=f"stack-resolved-{key}-{dep}")
+
+
 def record_restack_completed(cfg: Config, key: str, *, stack_index: int,
                               actor: str = "reconciler") -> dict:
     """T-132: the second half of a gt restack -- called once

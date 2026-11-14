@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -67,6 +66,9 @@ from ..view import evidence as evidence_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
+from ..view.proposal import ANSWER_ALTERNATIVE  # noqa: F401
+from ..view.proposal import ANSWER_NEEDS_MORE  # noqa: F401
+from ..view.proposal import parse_proposal_options  # noqa: F401
 from . import checks as checks_mod
 from . import why as why_mod
 from . import worktree_open
@@ -1569,33 +1571,6 @@ class SpecScreen(Screen):
         self._refresh()
 
 
-# Phrases the ProposalScreen decision bar sends; the awaiting-human skill routes on them
-# (pinned by tests/test_reconcile_skill.py).
-ANSWER_ALTERNATIVE = "alternative"
-ANSWER_NEEDS_MORE = "needs more"
-
-_ALT_HEADING_RE = re.compile(r"^##\s+Alternative\s+(\d+)\b", re.IGNORECASE)
-
-
-def parse_proposal_options(text: str) -> list[tuple[str, str]]:
-    """`[(label, title)]` for `## Recommended` and every `## Alternative N` in proposal.md.
-    Label is `Recommended` or `N`; title is the section's first non-empty line."""
-    out: list[tuple[str, str]] = []
-    label: str | None = None
-    for line in text.splitlines():
-        if line.startswith("## "):
-            m = _ALT_HEADING_RE.match(line)
-            if m:
-                label = m.group(1)
-            elif line[3:].strip().lower().startswith("recommended"):
-                label = "Recommended"
-            else:
-                label = None
-            if label is not None:
-                out.append((label, ""))
-        elif label is not None and line.strip() and not out[-1][1]:
-            out[-1] = (label, line.strip().lstrip("#").strip())
-    return out
 
 
 class ProposalScreen(Screen):

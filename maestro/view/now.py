@@ -52,6 +52,7 @@ class DegradedCard:
     reason: str
     waiting_s: float
     dependents: tuple[str, ...]
+    retryable: bool = True   # False for an awaiting-human ticket with no open question: retry/discard refuse it
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,7 @@ def _ask_times(home: Path, key: str) -> dict[str, float]:
     return out
 
 
-def _queued_for(home: Path, key: str) -> tuple[set[str], bool]:
+def queued_for(home: Path, key: str) -> tuple[set[str], bool]:
     """(qids with a queued answer, whether an untargeted/ticket-level command is queued)."""
     qids: set[str] = set()
     whole = False
@@ -115,11 +116,26 @@ def _queued_for(home: Path, key: str) -> tuple[set[str], bool]:
     return qids, whole
 
 
+def question_cards(home: Path, snap: snap_mod.Snapshot, now: float) -> list[QuestionCard]:
+    """The open, not-yet-answered question cards of one ticket in round order."""
+    queued_qids, _ = queued_for(home, snap.key)
+    since = _epoch(snap.updated_ts, now)
+    asked = _ask_times(home, snap.key)
+    out = []
+    for qid, text in snap.open_questions.items():
+        if qid in queued_qids:
+            continue
+        position, total, body, rec = ops.parse_round_question(text)
+        out.append(QuestionCard(snap.key, "", qid, body, rec, position, total,
+                                max(0.0, now - asked.get(qid, since)), ()))
+    return sorted(out, key=lambda c: c.position or float("inf"))
+
+
 def _cards(home: Path, snap: snap_mod.Snapshot, graph: depgraph.DepGraph, now: float) -> list:
     title = snap_mod.display_title(home, snap)
     dependents = tuple(graph.dependents.get(snap.key, ()))
     since = _epoch(snap.updated_ts, now)
-    queued_qids, queued_whole = _queued_for(home, snap.key)  # answered, not yet folded
+    queued_qids, queued_whole = queued_for(home, snap.key)  # answered, not yet folded
     if queued_whole:
         return []
     if snap.phase == Phase.DEGRADED.value:
@@ -142,7 +158,7 @@ def _cards(home: Path, snap: snap_mod.Snapshot, graph: depgraph.DepGraph, now: f
                                   max(0.0, now - asked.get(qid, since)), dependents))
     if not cards and not queued_qids:  # awaiting-human with no open question yet
         cards.append(DegradedCard(snap.key, title, snap.last_error or "awaiting your input",
-                                  max(0.0, now - since), dependents))
+                                  max(0.0, now - since), dependents, retryable=False))
     return cards
 
 

@@ -10,6 +10,8 @@ from .. import claims, event_log, fleet, gates, ops, steplog, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import events as ev_view
 from ..view import evidence as evidence_view
+from ..view import now as now_view
+from ..view import proposal as proposal_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
@@ -27,6 +29,8 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
     tv.acs = ticket_view.ac_matrix(home, key, tv.snap, tv.spec, evidence_view.tree_key(home, key))
     runner = gates.spec_runner(home, key)[0] or cfg.runner
     live = tv.snap.phase not in {p.value for p in TERMINAL_PHASES}
+    snap = tv.snap
+    questions = now_view.question_cards(home, snap, now) if snap.phase == "awaiting-human" else []
     claim = claims.read_claim(home, key)
     can_stop = bool(claim) and claim.get("kind") not in ("testrun", "restack")
     return {"t": tv, "key": key, "priority": gates.spec_priority(home, key),
@@ -35,7 +39,21 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
             "can_message": live, "can_hold": live and fleet.hold_state(home, key, now) is None,
             "can_release": fleet.hold_state(home, key, now) is not None,
             "can_stop": can_stop, "threads": rounds_view.review_threads(events),
-            "ci_timeline": evidence_view.ci_timeline(events), **extra}
+            "ci_timeline": evidence_view.ci_timeline(events), "questions": questions,
+            "can_degraded_act": snap.phase == "degraded", **extra}
+
+
+def proposal_ctx(shell: Shell, key: str, **extra) -> dict:
+    """Context of the Proposal tab: the text, its parsed options and the open research-approval ask."""
+    home = shell.home
+    text = ticket_view.read_text(store.ticket_dir(home, key) / "proposal.md")
+    snap = ticket_view.ticket(home, key, store.now_epoch()).snap
+    q = snap.open_questions.get(proposal_view.qid(key))
+    queued_qids, _ = now_view.queued_for(home, key)
+    is_open = q is not None and proposal_view.qid(key) not in queued_qids
+    return {"key": key, "id": "proposal", "text": text, "open": is_open,
+            "recommendation": ops.parse_round_question(q)[3] if is_open else None,
+            "options": proposal_view.parse_proposal_options(text or ""), **extra}
 
 
 def review_ctx(shell: Shell, key: str, **extra) -> dict:
@@ -99,8 +117,7 @@ def register(app: FastAPI, shell: Shell) -> None:
     @app.get("/t/{key}/proposal", response_class=HTMLResponse)
     def ticket_proposal(request: Request, key: str):
         require(key)
-        return shell.render(request, "_ticket_text.html", id="proposal",
-                            text=ticket_view.read_text(store.ticket_dir(home, key) / "proposal.md"))
+        return shell.render(request, "_ticket_proposal.html", **proposal_ctx(shell, key))
 
     @app.get("/t/{key}/events", response_class=HTMLResponse)
     def ticket_events(request: Request, key: str, before: int | None = Query(None)):
