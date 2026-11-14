@@ -78,14 +78,47 @@
       {% else %}<div class="panel-body"><p class="dim" id="sessions-empty">No live sessions.</p></div>{% endif %}
     </div>
 
-    <div class="panel">
+    {% set se = schedule_error if schedule_error is defined and schedule_error else none %}
+    {% macro sched_err(form, name) -%}
+    {% if se and se.form == form and se.name == name %}<p class="action-error" role="alert">{{ se.msg }}</p>{% endif %}
+    {%- endmacro %}
+    {% macro sched_fields(v) -%}
+      <input name="prompt" placeholder="prompt" aria-label="task prompt" value="{{ v.get('prompt') or '' }}">
+      <input name="every" placeholder="every (e.g. 6h)" aria-label="task every" value="{{ v.get('every') or '' }}">
+      <input name="cron" placeholder="cron (e.g. 0 9 * * 1)" aria-label="task cron" value="{{ v.get('cron') or '' }}">
+      <input name="tz" placeholder="timezone (optional)" aria-label="task timezone" value="{{ v.get('tz') or '' }}">
+    {%- endmacro %}
+    <div class="panel" id="schedule-panel">
       <div class="panel-head">Schedule</div>
       {% if schedule is none %}<div class="panel-body"><p class="mono">unknown</p></div>
       {% elif schedule %}
       <ul class="rows" id="schedule">
-        {% for t in schedule %}<li><span class="grow">{{ t.name }}{% if not t.enabled %} <span class="dim">(disabled)</span>{% endif %}</span><span class="meta dim">{% if t.cron %}cron {{ t.cron }}{% elif t.every %}every {{ t.every }}{% else %}—{% endif %}</span><span class="meta dim">last {{ ago(t.last_fired) if t.last_fired else "never" }}</span><span class="meta">{% if t.next_due is none %}—{% else %}next in {{ [t.next_due - now, 0]|max|dur }}{% endif %}</span></li>{% endfor %}
+        {% for t in schedule %}<li><span class="grow">{{ t.name }}{% if not t.enabled %} <span class="dim">(disabled)</span>{% endif %}</span><span class="meta dim">{% if t.cron %}cron {{ t.cron }}{% elif t.every %}every {{ t.every }}{% else %}—{% endif %}</span><span class="meta dim">last {{ ago(t.last_fired) if t.last_fired else "never" }}</span><span class="meta">{% if t.next_due is none %}—{% else %}next in {{ [t.next_due - now, 0]|max|dur }}{% endif %}</span>{% if can_write %}
+          <form class="act-form" hx-post="/fleet/schedule/{{ 'disable' if t.enabled else 'enable' }}" hx-target="#fleet" hx-swap="innerHTML"><input type="hidden" name="name" value="{{ t.name }}"><button class="btn btn-ghost btn-sm" type="submit">{{ "Disable" if t.enabled else "Enable" }}</button></form>
+          <form class="act-form" hx-post="/fleet/schedule/remove" hx-target="#fleet" hx-swap="innerHTML"><input type="hidden" name="name" value="{{ t.name }}"><button class="btn btn-danger btn-sm" type="submit" aria-label="Remove task {{ t.name }}">Remove</button></form>
+          <details class="write"{{ " open" if se and se.form == "edit" and se.name == t.name }}><summary class="btn btn-secondary btn-sm">Edit</summary>
+            <form class="act-form" hx-post="/fleet/schedule/edit" hx-target="#fleet" hx-swap="innerHTML"><input type="hidden" name="name" value="{{ t.name }}">
+              {{ sched_fields(se.fields if se and se.form == "edit" and se.name == t.name else t) }}
+              {{ sched_err("edit", t.name) }}
+              <button class="btn btn-primary" type="submit">Save task</button></form>
+          </details>{% endif %}</li>{% endfor %}
       </ul>
       {% else %}<div class="panel-body"><p class="dim">No scheduled tasks.</p></div>{% endif %}
+      {% if can_write and schedule is not none %}
+      <div class="panel-body">
+        {% if se and se.form in ("toggle", "remove") %}<p class="action-error" role="alert">{{ se.msg }}</p>{% endif %}
+        <details class="write"{{ " open" if se and se.form == "add" }}><summary class="btn btn-secondary">Add scheduled task…</summary>
+          <form class="act-form" id="schedule-add" hx-post="/fleet/schedule/add" hx-target="#fleet" hx-swap="innerHTML">
+            {% set av = se.fields if se and se.form == "add" else {} %}
+            <input name="name" placeholder="name" aria-label="task name" value="{{ av.get('name', '') }}">
+            {{ sched_fields(av) }}
+            <p class="dim">A prompt plus exactly one of every / cron.</p>
+            {{ sched_err("add", "") }}
+            <button class="btn btn-primary" type="submit">Add task</button>
+          </form>
+        </details>
+      </div>
+      {% endif %}
     </div>
   </div>
 
