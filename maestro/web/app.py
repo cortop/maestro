@@ -67,7 +67,7 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     routes_board.register(app, shell)
     routes_now.register(app, shell)
     routes_ticket.register(app, shell)
-    routes_fleet.register(app, shell)
+    routes_fleet.register(app, shell, (lambda: sessions) if sessions is not None else None)
     routes_activity.register(app, shell)
     routes_palette.register(app, shell)
     nudge = routes_actions.default_nudge(shell) if nudge_on_action else None
