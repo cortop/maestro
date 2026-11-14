@@ -1,9 +1,15 @@
+{% if lg.live %}<h2>Live session</h2>
+<div id="live-transcript">{% set sess = lg.live %}{% set live = true %}{% include "_session_transcript.html" %}</div>
+{% endif %}
 {% if lg.past %}<h2>Past sessions</h2>
 <div id="logs-view">
-{% if lg.live %}<section class="live-session"><strong>live</strong> {{ lg.live.session_id }}</section>{% endif %}
 {% for p in lg.past %}
 <details class="past-session"><summary>{{ p.summary }}</summary>
+{% if p.pruned %}<p class="dim">The raw log of this session is gone (pruned); only its digest remains.</p>{% endif %}
 <pre>{% for line in detail(p) %}{{ line }}
-{% endfor %}</pre></details>
+{% endfor %}</pre>
+{% if not p.pruned %}<a href="#" class="btn btn-ghost btn-sm open-transcript" hx-get="/t/{{ key }}/logs/{{ p.session_id }}" hx-target="next .transcript-slot" hx-swap="innerHTML">open full transcript</a>
+<div class="transcript-slot"></div>{% endif %}</details>
 {% endfor %}
 </div>{% endif %}
+{% if not lg.live and not lg.past %}<div class="empty">No sessions yet.</div>{% endif %}

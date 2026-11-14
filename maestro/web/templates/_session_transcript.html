@@ -1,0 +1,9 @@
+<div class="panel transcript" id="transcript-{{ sess.session_id }}"{% if live %} data-live="1"{% endif %}>
+  <div class="panel-head split"><span class="panel-title">{{ head }}</span>
+    <span class="transcript-controls">
+      {% if live %}<label><input type="checkbox" class="follow" checked> follow</label>{% endif %}
+      <button type="button" class="btn btn-ghost btn-sm next-error">next error</button>
+      <span class="dim next-error-status" role="status"></span>
+    </span></div>
+  <div class="panel-body"><ol class="steps">{% include "_session_steps.html" %}</ol></div>
+</div>
