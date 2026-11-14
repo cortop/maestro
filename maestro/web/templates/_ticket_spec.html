@@ -1,0 +1,83 @@
+{# T-262: the Spec tab. Every form posts to /t/<key>/spec/<action> and swaps this whole fragment back. #}
+{% macro err(name) -%}
+{% if spec_error and spec_error.form == name %}<p class="action-error" role="alert">{{ spec_error.msg }}</p>{% endif %}
+{%- endmacro %}
+{% macro open_if(name) %}{{ " open" if spec_error and spec_error.form == name }}{% endmacro %}
+{% macro post(action) %}hx-post="/t/{{ key }}/spec/{{ action }}" hx-target="#panel-spec" hx-swap="innerHTML"{% endmacro %}
+<div id="spec-tab">
+<pre id="spec" class="doc">{{ text or "(none)" }}</pre>
+{% if spec_notice %}<p class="dim" id="spec-notice" role="status">{{ spec_notice }}</p>{% endif %}
+{% if can_write %}
+<div class="panel"><div class="panel-head">Edit spec</div>
+<div class="panel-body">
+  <details class="write"{{ open_if("save") }}>
+    <summary class="btn btn-secondary">Edit spec.md</summary>
+    <form class="act-form" id="spec-editor" {{ post("save") }}>
+      <input type="hidden" name="hash" value="{{ spec_hash }}">
+      <textarea name="text" rows="20" aria-label="spec.md">{{ editor_text }}</textarea>
+      {{ err("save") }}
+      <button type="submit" class="btn btn-primary">Save spec</button>
+    </form>
+  </details>
+  <details class="write"{{ open_if("ac") }}>
+    <summary class="btn btn-secondary">Add acceptance criterion</summary>
+    <form class="act-form" id="spec-add-ac" {{ post("ac") }}>
+      <textarea name="text" rows="3" placeholder="Criterion text, optionally ending (test: path) or (check: command)" aria-label="Acceptance criterion"></textarea>
+      {{ err("ac") }}
+      <button type="submit" class="btn btn-primary">Add criterion</button>
+    </form>
+  </details>
+  <details class="write"{{ open_if("suggest") }}{{ " open" if suggestions is not none or (spec_error and spec_error.form == "suggest/add") }}>
+    <summary class="btn btn-secondary">Suggest ACs</summary>
+    {% if suggestions is none %}
+    <form class="act-form" id="spec-suggest" {{ post("suggest") }}>
+      {{ err("suggest") }}
+      <button type="submit" class="btn btn-primary">Draft suggestions</button>
+    </form>
+    {% else %}
+    <form class="act-form" id="spec-suggest-add" {{ post("suggest/add") }}>
+      <input type="hidden" name="count" value="{{ suggestions|length }}">
+      {% for s in suggestions %}
+      <label><input type="checkbox" name="pick-{{ loop.index0 }}" value="1"> {{ s }}</label>
+      <input type="hidden" name="text-{{ loop.index0 }}" value="{{ s }}">
+      {% endfor %}
+      {{ err("suggest/add") }}
+      <button type="submit" class="btn btn-primary">Add ticked</button>
+    </form>
+    {% endif %}
+  </details>
+  <details class="write"{{ open_if("fields") }}>
+    <summary class="btn btn-secondary">Priority and dependencies</summary>
+    <form class="act-form" id="spec-fields" {{ post("fields") }}>
+      <label>priority <input type="number" min="0" name="priority" value="{{ priority }}"></label>
+      <label>dependsOn <input type="text" name="depends_on" value="{{ depends_on }}" placeholder="T-1, T-2"></label>
+      {{ err("fields") }}
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </details>
+  <details class="write"{{ open_if("runner") }}>
+    <summary class="btn btn-secondary">Runner</summary>
+    <form class="act-form" id="spec-runner" {{ post("runner") }}>
+      <label>runner
+        <select name="runner"><option value="">(unchanged)</option>{% for r in runners %}<option value="{{ r }}"{{ " selected" if r == runner }}>{{ r }}</option>{% endfor %}</select>
+      </label>
+      <label>runner model <input type="text" name="runner_model" value="{{ runner_model }}"></label>
+      {{ err("runner") }}
+      <button type="submit" class="btn btn-primary">Save runner</button>
+    </form>
+  </details>
+  {% if can_post_qa %}
+  <details class="confirm"{{ open_if("post-qa") }}>
+    <summary class="btn btn-danger">Trigger post-QA</summary>
+    <div class="confirm-body"><p>Runs the post-QA skill on this ticket's pull request now, skipping its usual gates.</p>
+      <form class="act-form" id="spec-post-qa" {{ post("post-qa") }}>
+        <input type="hidden" name="confirm" value="1">
+        {{ err("post-qa") }}
+        <button type="submit" class="btn btn-danger">Confirm trigger post-qa</button>
+      </form>
+    </div>
+  </details>
+  {% endif %}
+</div></div>
+{% endif %}
+</div>
