@@ -148,3 +148,14 @@ def outcome_style(outcome: str | None) -> str:
     if any(w in o for w in ("error", "fail", "park", "dead")):
         return "red"
     return "yellow"
+
+
+def sweep_summary(home: Path, key: str, report: disp.DispatchReport) -> str:
+    """One line for a per-key sweep: spawned, or the dispatcher's own reason for skipping."""
+    if key in report.spawned:
+        return f"{key}: spawned"
+    last = next(iter(reversed(load_decisions(home, key))), None)
+    if last and last.get("outcome"):
+        reason = f" — {last['reason']}" if last.get("reason") else ""
+        return f"{key}: skipped, {last['outcome']}{reason}"
+    return f"{key}: not spawned"

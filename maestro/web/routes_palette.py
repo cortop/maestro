@@ -5,6 +5,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .. import fleet, projection, store
+from ..statemachine import TERMINAL_PHASES
 from ..view import board as board_view
 from ..view import ticket as ticket_view
 from . import routes_ticket
@@ -40,6 +41,8 @@ def ticket_entries(shell: Shell, key: str) -> list[dict]:
         out.append(_post(f"Hold {key}", f"/t/{key}/hold", "h"))
     if write and ctx["can_release"]:
         out.append(_post(f"Release {key}", f"/t/{key}/release", "z"))
+    if write and snap.phase not in {p.value for p in TERMINAL_PHASES}:
+        out.append(_go(f"Run a sweep for {key}", f"/t/{key}", "confirm on the ticket"))
     if write and ctx["can_stop"]:
         out.append(_go(f"Stop session of {key}", f"/t/{key}", "confirm on the ticket", "K"))
     return out
