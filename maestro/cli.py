@@ -1504,6 +1504,14 @@ def cmd_backup(args) -> int:
     return 0
 
 
+def cmd_gc_worktrees(args) -> int:
+    """[human] list (default) or with --apply remove the worktrees of finished tickets."""
+    from . import gc_worktrees
+    report = gc_worktrees.gc_worktrees(_cfg(args), apply=args.apply, force=args.force)
+    _print(report) if args.json else print(gc_worktrees.render(report))
+    return 0
+
+
 def cmd_local_backup(args) -> int:
     """[agent] AD-6: back up a mode="local" ticket's target dir before writing in place."""
     cfg = _cfg(args)
@@ -1843,6 +1851,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("backup", cmd_backup, "snapshot events/tickets/inbox/config to a tarball")
     sp.add_argument("--list", action="store_true",
                     help="list existing backups instead of creating one")
+    sp = add("gc-worktrees", cmd_gc_worktrees,
+             "[human] list leftover worktrees of finished tickets; --apply removes them")
+    sp.add_argument("--apply", action="store_true", help="remove them (default: list only)")
+    sp.add_argument("--force", action="store_true",
+                    help="also remove dirty worktrees and non-git leftover dirs")
+    sp.add_argument("--json", action="store_true", help="emit JSON")
     sp = add("local-backup", cmd_local_backup,
              "[agent] back up a mode=\"local\" ticket's target dir before writing in place")
     sp.add_argument("key"); sp.add_argument("--actor", default="reconciler")
