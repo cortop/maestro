@@ -11,7 +11,7 @@
       {% for id, label, url in tabs %}
       <input type="radio" name="tab" id="tab-{{ id }}" class="tab-radio"{{ " checked" if (id == tab if tab else loop.first) }}>
       <label for="tab-{{ id }}" class="tab-label">{{ label }}</label>
-      <div class="tab-panel" id="panel-{{ id }}" hx-get="/t/{{ key }}/{{ url }}" hx-trigger="load{{ '' if id in ('review', 'sessions') else ', sse:ticket:' ~ key }}" hx-swap="innerHTML"></div>
+      <div class="tab-panel" id="panel-{{ id }}" hx-get="/t/{{ key }}/{{ url }}" hx-trigger="load{{ '' if id in ('review', 'sessions') else ', sse:ticket:' ~ key ~ (' [!document.querySelector(\'#spec-tab details[open]\')]' if id == 'spec' and can_write else '') }}" hx-swap="innerHTML"></div>
       {% endfor %}
     </div>
   </section>
