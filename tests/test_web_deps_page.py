@@ -56,7 +56,7 @@ def test_cards_and_edges_follow_the_layout(home, cfg):
     assert '<svg class="dep-edges"' in html
     assert '<div class="dep-lane" style="left: 2px' in html and "one step away" in html
     assert "behind a chain" in html
-    assert re.search(r'dep-frame v-graph" style="height: 300px"', html)
+    assert re.search(r'dep-frame" style="height: 300px"', html)
 
 
 def test_headline_counters_and_alerts_match_the_view(home, cfg):
@@ -179,4 +179,4 @@ def test_stylesheet_is_present_and_page_has_no_extra_inline_style(home):
                              "background-position"}, s
         assert c.get("/deps?view=outline").status_code == 200
         out = c.get("/deps?view=outline").text
-        assert "dep-frame v-outline" in out and 'id="deps"' in out and "dep-edges" not in out
+        assert "dep-frame v-outline" in out and 'class="dep-tree"' in out and "dep-edges" not in out

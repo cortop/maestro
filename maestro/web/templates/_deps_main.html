@@ -7,7 +7,7 @@
 {% endfor %}
 
 <div class="dep-main">
-  <section class="dep-frame v-{{ p.view }}"{% if p.view == "graph" %} style="height: {{ frame_h }}px"{% endif %} aria-label="Dependency graph">
+  <section class="dep-frame{% if p.view == 'outline' %} v-outline{% endif %}"{% if p.view == "graph" %} style="height: {{ frame_h }}px"{% endif %} aria-label="Dependency graph">
     {% if p.view == "graph" %}
     <div class="dep-scroll">
       {% if drawn %}{% include "_deps_graph.html" %}{% else %}
