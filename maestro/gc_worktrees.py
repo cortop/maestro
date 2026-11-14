@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from . import claims, health, repos as repos_mod, store
+from . import claims, health, repos as repos_mod
 from .config import Config
 
 
