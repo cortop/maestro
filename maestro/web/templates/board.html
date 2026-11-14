@@ -7,16 +7,23 @@
     <h1>Tickets</h1>
   </div>
 </section>
-<nav id="filters" aria-label="Ticket filters" hx-get="/tickets?filter={{ view.filter }}" hx-trigger="sse:board" hx-select="#filters" hx-target="#filters" hx-swap="outerHTML">
+<nav id="filters" aria-label="Ticket filters" hx-get="/tickets?{{ query }}" hx-trigger="sse:board" hx-select="#filters" hx-target="#filters" hx-swap="outerHTML">
   {% for f in filters %}
-  <a href="/tickets?filter={{ f }}"{% if f == view.filter %} class="active"{% endif %}>{{ f }}({{ view.counts[f] }})</a>
+  <a href="/tickets?{{ filter_query(f) }}"{% if f == view.filter %} class="active"{% endif %}>{{ f }}({{ view.counts[f] }})</a>
   {% endfor %}
+  <a href="/deps">dependencies</a>
   <span id="needs-you-count" class="needs-you">needs you: {{ view.needs_you }}</span>
 </nav>
+<form id="board-search" method="get" action="/tickets" role="search">
+  <input type="hidden" name="filter" value="{{ view.filter }}">
+  {% if view.sort %}<input type="hidden" name="sort" value="{{ view.sort }}"><input type="hidden" name="dir" value="{{ "desc" if view.desc else "asc" }}">{% endif %}
+  <input type="search" name="q" value="{{ view.search }}" placeholder="Search key or title" aria-label="Search tickets by key or title">
+  <button type="submit">Search</button>
+</form>
 <div class="frame board-frame">
 <table id="board" class="ledger">
-  <thead><tr><th scope="col">Key</th><th scope="col">Phase</th><th scope="col">Title</th><th scope="col">PR</th><th scope="col">CI</th><th scope="col">Fails</th><th scope="col">Doing</th></tr></thead>
-  <tbody id="rows" hx-get="/board/rows?filter={{ view.filter }}" hx-trigger="sse:board" hx-swap="innerHTML">
+  <thead><tr>{% for col, label in columns %}<th scope="col"{% if view.sort == col %} aria-sort="{{ "descending" if view.desc else "ascending" }}"{% endif %}><a href="/tickets?{{ sort_query(col) }}">{{ label }}{% if view.sort == col %} {{ "↓" if view.desc else "↑" }}{% endif %}</a></th>{% endfor %}<th scope="col">Doing</th></tr></thead>
+  <tbody id="rows" hx-get="/board/rows?{{ query }}" hx-trigger="sse:board" hx-swap="innerHTML">
     {% include "_rows.html" %}
   </tbody>
 </table>

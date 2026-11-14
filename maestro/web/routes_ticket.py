@@ -4,13 +4,19 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import claims, fleet, gates, ops, store
+from .. import claims, depgraph, fleet, gates, ops, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import events as ev_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
 from .shell import Shell
+
+
+def blocked_by(home, key: str) -> list[dict]:
+    """The open tickets whose dependsOn names *key* (key order), as ``{key, phase}`` dicts."""
+    g = depgraph.build(home)
+    return [{"key": k, "phase": g.nodes[k].phase} for k in g.dependents.get(key, [])]
 
 
 def head_ctx(shell: Shell, key: str, **extra) -> dict:
@@ -28,7 +34,7 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
             "card": ticket_view.dispatch_card(home, key, tv.snap, cfg, now),
             "can_message": live, "can_hold": live and fleet.hold_state(home, key, now) is None,
             "can_release": fleet.hold_state(home, key, now) is not None,
-            "can_stop": can_stop, **extra}
+            "can_stop": can_stop, "blocks": blocked_by(home, key), **extra}
 
 
 def review_ctx(shell: Shell, key: str, **extra) -> dict:

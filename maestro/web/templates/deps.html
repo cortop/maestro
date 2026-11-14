@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}maestro dependencies{% endblock %}
+{% block body %}
+<section class="hero">
+  <div class="hero-main">
+    <p class="kicker">&gt; tickets // what blocks what, open tickets only</p>
+    <h1>Dependencies</h1>
+  </div>
+</section>
+<div class="frame board-frame">
+<table id="deps" class="ledger">
+  <thead><tr><th scope="col">Ticket</th><th scope="col">Phase</th><th scope="col">Title</th><th scope="col">Blocking depth</th></tr></thead>
+  <tbody>
+  {% for l in lines %}
+  <tr class="row" data-key="{{ l.key }}" data-level="{{ l.level }}">
+    <td class="key">{{ "\u00a0\u00a0\u00a0" * l.level }}{% if l.level %}└ {% endif %}<a href="/t/{{ l.key }}">{{ l.key }}</a>{% if l.repeat %} <span class="dim">↑ shown above</span>{% endif %}{% if l.cycle %} <span class="dim">cycle</span>{% endif %}</td>
+    <td class="phase-{{ l.phase }}">{{ l.phase }}</td>
+    <td class="title">{{ l.title }}{% for m in l.missing %} <span class="dim">missing: {{ m }}</span>{% endfor %}</td>
+    <td class="num">{{ l.depth }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="dim">No open tickets.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
