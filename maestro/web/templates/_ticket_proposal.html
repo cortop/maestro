@@ -1,0 +1,13 @@
+{% import "_actions.html" as act %}
+{% set target = "#panel-proposal" %}
+{% if can_write and open %}
+<div class="card-actions" id="proposal-actions">
+  {% if recommendation %}{{ act.form(key, "proposal", "proposal", target, "Accept recommendation", "btn-primary", {"choice": "accept"}) }}{% endif %}
+  {% for label, title in options if label != "Recommended" %}
+  {{ act.confirm_form(key, "proposal", "proposal", target, "Pick alternative " ~ label, "Approve Alternative " ~ label ~ (": " ~ title if title) ~ "?", fields={"choice": "alternative", "n": label}) }}
+  {% endfor %}
+  {{ act.note_form(key, "proposal", "proposal", target, "Needs more", "Send", "What should the next research round cover?", {"choice": "more"}, cls="btn-secondary") }}
+  {{ act.error(action_error, key) }}
+</div>
+{% endif %}
+<pre id="{{ id }}" class="doc">{{ text or "(none)" }}</pre>

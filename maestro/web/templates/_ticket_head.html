@@ -15,6 +15,23 @@
     {% endif %}
   </div>
   {{ act.error(action_error, key) }}
+  {% if can_write and (questions or can_degraded_act) %}
+  <div class="ticket-decide stack">
+    {% for q in questions %}
+    <article class="card" data-key="{{ key }}" data-qid="{{ q.qid }}">
+      <div class="card-inner">
+        <div class="card-title"><span>question{% if q.total and q.total > 1 %} {{ q.position }}/{{ q.total }}{% endif %}</span></div>
+        <div class="card-body">
+          <p class="card-question">{{ q.body }}</p>
+          {% if q.recommendation %}<p class="card-rec"><span class="rec-label">&gt;&gt; AGENT RECOMMENDS</span> {{ q.recommendation }}</p>{% endif %}
+          <div class="card-actions">{{ act.question_actions(key, q.qid, q.recommendation, "ticket", "#ticket-head") }}</div>
+        </div>
+      </div>
+    </article>
+    {% endfor %}
+    {% if can_degraded_act %}<div class="card-actions">{{ act.degraded_actions(key, "ticket", "#ticket-head") }}</div>{% endif %}
+  </div>
+  {% endif %}
 </div>
 <div class="rail-scroll">
   <ol class="rail" id="phase-rail" aria-hidden="true">
