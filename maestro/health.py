@@ -2088,7 +2088,8 @@ def check_worktree_leftovers(cfg: Config, now: float) -> dict:
     snapshot phase alone; no git runs). `keys` lists them for the TUI check row."""
     keys = worktree_leftover_keys(cfg.home)
     status = "warn" if keys else "ok"
-    detail = (f"{len(keys)} leftover worktree(s) of finished tickets: {', '.join(keys)}"
+    detail = (f"{len(keys)} leftover worktree(s) of finished tickets: {', '.join(keys)}; "
+              "list them with `maestro gc-worktrees`, remove with --apply"
               if keys else "no worktree belongs to a finished ticket")
     return {"name": "worktree_leftovers", "status": status, "detail": detail, "keys": keys}
 

@@ -89,6 +89,7 @@ Guards and budgets:
 - `burn.py` — per-key burn detection. `spend.py` — daily USD meter + ceiling gate.
 - `ratelimit.py` — account-wide spawn gate from `rate_limit_event`s.
 - `claude_guard.py` — installs/verifies the `--settings` file wiring the PreToolUse guard into every claude spawn.
+- `gc_worktrees.py` — `maestro gc-worktrees`: list/remove worktrees of finished tickets.
 - `backup.py` — tarball snapshots/restore. `credentials.py` — per-repo `gh` credentials.
 - `runner_permissions.py` / `pi_guard.py` — destructive-command guard for non-Claude runners.
 
