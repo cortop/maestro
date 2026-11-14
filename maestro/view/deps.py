@@ -84,6 +84,7 @@ class Alert:
     level: str  # fail | warn
     text: str
     keys: list[str]
+    subject: str = ""  # warn: the dependency key that does not exist
 
 
 @dataclass
@@ -277,7 +278,7 @@ def build(home: Path, cfg: Config, now: float | None = None, *,
         for dep in g.nodes[k].missing:
             naming.setdefault(dep, []).append(k)
     for dep, by in naming.items():
-        alerts.append(Alert("warn", f"{dep} does not exist, named by {', '.join(by)}", by))
+        alerts.append(Alert("warn", f"{dep} does not exist, named by {', '.join(by)}", by, dep))
 
     unlinked = [k for k in order
                 if not g.nodes[k].open_deps and not g.dependents[k] and not g.nodes[k].missing

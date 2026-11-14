@@ -1,4 +1,4 @@
-"""Board page routes (`/tickets`, `/board/rows`, `/deps`) of `maestro web`."""
+"""Board page routes (`/tickets`, `/board/rows`) of `maestro web`."""
 from __future__ import annotations
 
 from urllib.parse import urlencode
@@ -6,7 +6,6 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from .. import depgraph
 from ..view import board as board_view
 from .shell import Shell
 
@@ -54,27 +53,3 @@ def register(app: FastAPI, shell: Shell) -> None:
     def board_rows(request: Request, filter: str = "needs-you", q: str = "", sort: str = "",
                    dir: str = "asc"):
         return shell.render(request, "_rows.html", **board_ctx(filter, q, sort, dir))
-
-    @app.get("/deps", response_class=HTMLResponse)
-    def deps(request: Request):
-        """The open-ticket dependency tree; a ticket reachable twice is linked once, then noted."""
-        g = depgraph.build(shell.home)
-        in_cycle = {k for c in g.cycles for k in c}
-        lines: list[dict] = []
-        shown: set[str] = set()
-
-        def walk(key: str, level: int) -> None:
-            node = g.nodes[key]
-            repeat = key in shown
-            lines.append({"key": key, "title": node.title, "phase": node.phase, "level": level,
-                          "depth": g.depth[key], "repeat": repeat, "cycle": key in in_cycle,
-                          "missing": node.missing})
-            if repeat:
-                return
-            shown.add(key)
-            for child in g.dependents[key]:
-                walk(child, level + 1)
-
-        for root in g.roots:
-            walk(root, 0)
-        return shell.render(request, "deps.html", nav="tickets", lines=lines, cycles=g.cycles)

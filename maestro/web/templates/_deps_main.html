@@ -1,0 +1,48 @@
+{% for a in alerts %}
+<div class="{{ a.cls }}" role="status">
+  <span class="dep-alert-tag">{{ a.tag }}</span>
+  <div class="dep-alert-body"><p class="dep-alert-text">{{ a.text }}</p><p class="dep-alert-sub">{{ a.line }}</p></div>
+</div>
+{% endfor %}
+
+<div class="dep-main">
+  <section class="dep-frame v-{{ p.view }}"{% if p.view == "graph" %} style="height: {{ frame_h }}px"{% endif %} aria-label="Dependency graph">
+    {% if p.view == "graph" %}
+    <div class="dep-scroll">
+      {% if drawn %}{% include "_deps_graph.html" %}{% else %}
+      <div class="dep-empty"><img src="/static/logo.svg" alt=""><div><p class="dep-empty-title">{{ empty[0] }}</p><p class="dep-empty-sub">{{ empty[1] }}</p></div></div>
+      {% endif %}
+    </div>
+    {% endif %}
+    <div class="dep-outline">
+      {% include "_deps_outline.html" %}
+    </div>
+  </section>
+</div>
+
+{% if p.view == "graph" and drawn %}
+<div class="dep-keyline">
+  <span class="dep-k"><i class="sw sw-you"></i>needs you</span>
+  <span class="dep-k"><i class="sw sw-run"></i>session live</span>
+  <span class="dep-k"><i class="sw sw-disp"></i>dispatcher has it</span>
+  <span class="dep-k"><i class="sw sw-queued"></i>queued</span>
+  <span class="dep-k"><i class="sw sw-bad"></i>degraded or in a cycle</span>
+  <span class="dep-k"><i class="ln"></i>waits on</span>
+  <span class="dep-k"><i class="ln ln-done"></i>finished</span>
+  <span class="dep-k"><i class="ln ln-missing"></i>no such ticket</span>
+  <span class="dep-k dep-k-hint">Point at a ticket: <b class="gold">gold</b> is what it waits on, <b class="cyan">cyan</b> is what waits on it.</span>
+</div>
+{% endif %}
+
+{% if p.view == "graph" and dv.unlinked %}
+{% from "_labels.html" import phase, chip_class %}
+<section class="dep-tray" aria-labelledby="h-unlinked">
+  <div class="dep-tray-head"><h2 id="h-unlinked" class="section-label">Unlinked · {{ dv.unlinked|length }}</h2><span class="dep-tray-note">no open dependency in either direction</span></div>
+  <div class="dep-tray-grid">
+    {% for k in tray %}{% set t = dv.tickets[k] %}
+    <a class="dep-unlinked" href="/t/{{ k }}" title="{{ k }} · {{ t.phase }} · {{ t.title }}">{% if t.live %}<span class="cursor" aria-hidden="true"></span>{% endif %}<span class="dep-key">{{ k }}</span><span class="chip {% if t.held %}chip-held{% elif t.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(t.phase) }}{% endif %}">{% if t.held %}Held{% else %}{{ phase(t.phase) }}{% endif %}</span><span class="dep-unlinked-title">{{ t.title }}</span></a>
+    {% endfor %}
+    {% if tray_more %}<a class="dep-tray-more" href="{{ tray_all_url }}">Show all {{ dv.unlinked|length }}</a>{% endif %}
+  </div>
+</section>
+{% endif %}

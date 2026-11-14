@@ -1,0 +1,16 @@
+<div class="hero-main">
+  <p class="kicker">&gt; <a href="/tickets">tickets</a> / <b>dependencies</b> // {{ n_open }} open · {{ n_linked }} linked · {{ n_deps }} dependencies</p>
+  <h1 class="dep-title">{{ dv.headline.lead }} <span{% if dv.headline.tone %} class="{{ dv.headline.tone }}"{% endif %}>{{ dv.headline.last }}</span></h1>
+  <p class="lede">{{ lede }}</p>
+  {% if dv.start_here %}
+  <div class="dep-starts">
+    <span class="dep-starts-label">Start here //</span>
+    {% for s in dv.start_here %}
+    <a class="dep-start" href="/t/{{ s.key }}"><span class="dep-start-verb">{{ s.verb }}</span><b>{{ s.key }}</b><span class="dep-start-n">{{ s.behind }} behind it</span></a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+<dl class="counters">
+  {% for label, n in counters %}<div><dt>{{ label }}</dt><dd>{{ "%02d"|format(n) }}</dd></div>{% endfor %}
+</dl>
