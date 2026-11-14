@@ -1832,6 +1832,81 @@ def check_burn(cfg: Config, now: float) -> dict:
     return {"name": "burn", "status": status, "detail": detail, **rpt}
 
 
+_WORKTREE_PROBE_THREADS = 8
+_RUN_PROBES: dict | None = None  # (home -> [(key, _WorktreeProbe)]) while `run_checks` is active
+
+
+class _WorktreeProbe:
+    """One worktree's git probes, each run at most once and memoized (result or
+    `store.MaestroError`). The predicates stay `ops.worktree_health`,
+    `ops.worktree_witness_status` and `ops.worktree_branch`; this only decides
+    who calls them and how often."""
+
+    def __init__(self, wt: Path, timeout: float):
+        self.wt, self.timeout, self._memo = wt, timeout, {}
+
+    def _once(self, name, fn):
+        if name not in self._memo:
+            try:
+                self._memo[name] = (True, fn())
+            except store.MaestroError as exc:
+                self._memo[name] = (False, exc)
+        ok, val = self._memo[name]
+        if not ok:
+            raise val
+        return val
+
+    def has_index(self) -> bool:
+        from . import ops
+        return self._once("index", lambda: ops._worktree_has_index(self.wt, timeout=self.timeout))
+
+    def health(self) -> dict:
+        from . import ops
+        return self._once("health", lambda: ops.worktree_health(
+            self.wt, timeout=self.timeout, index_probe=self.has_index))
+
+    def witness(self) -> dict:
+        from . import ops
+        return self._once("witness", lambda: ops.worktree_witness_status(
+            self.wt, timeout=self.timeout, index_probe=self.has_index))
+
+    def branch(self):
+        from . import ops
+        return self._once("branch", lambda: ops.worktree_branch(self.wt, timeout=self.timeout))
+
+    def run(self, which) -> "_WorktreeProbe":
+        for name in which:
+            try:
+                getattr(self, name)()
+            except store.MaestroError:
+                pass  # memoized; the owning check reports it for this worktree
+        return self
+
+
+def _gather_worktree_probes(cfg: Config, which) -> list[tuple[str, _WorktreeProbe]]:
+    """Probe every ``<home>/worktrees`` dir on a bounded thread pool; sorted by key."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    worktrees_dir = cfg.home / "worktrees"
+    if not worktrees_dir.is_dir():
+        return []
+    dirs = sorted(p for p in worktrees_dir.iterdir() if p.is_dir())
+    probes = [_WorktreeProbe(wt, cfg.worktree_timeout) for wt in dirs]
+    if probes:
+        with ThreadPoolExecutor(max_workers=min(_WORKTREE_PROBE_THREADS, len(probes))) as pool:
+            list(pool.map(lambda p: p.run(which), probes))
+    return [(p.wt.name, p) for p in probes]
+
+
+def _worktree_probes(cfg: Config, which: str) -> list[tuple[str, _WorktreeProbe]]:
+    """Probes for the worktree checks: the pass shared by the active `run_checks`
+    when there is one, else a fresh pass computing just *which* (a lone check)."""
+    shared = _RUN_PROBES
+    if shared is not None and shared["home"] == cfg.home:
+        return shared["probes"]
+    return _gather_worktree_probes(cfg, (which,))
+
+
 def check_worktree_health(cfg: Config, now: float) -> dict:
     """WARN (detective, never blocks a spawn) on any EXISTING worktree dir
     under ``<home>/worktrees`` that fails `ops.worktree_health` -- no index, or
@@ -1849,19 +1924,15 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
     or errors -- that is NOT the same as "unhealthy" (AC5), so this loop
     catches it per-worktree and reports it as its own broken entry rather
     than letting one slow probe crash the rest of `maestro doctor`."""
-    from . import ops
-
-    worktrees_dir = cfg.home / "worktrees"
     broken = []
-    if worktrees_dir.is_dir():
-        for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
-            try:
-                health = ops.worktree_health(wt, timeout=cfg.worktree_timeout)
-            except store.MaestroError as exc:
-                broken.append({"key": wt.name, "reason": f"health probe error: {exc}"})
-                continue
-            if not health["healthy"]:
-                broken.append({"key": wt.name, "reason": health["reason"]})
+    for name, probe in _worktree_probes(cfg, "health"):
+        try:
+            health = probe.health()
+        except store.MaestroError as exc:
+            broken.append({"key": name, "reason": f"health probe error: {exc}"})
+            continue
+        if not health["healthy"]:
+            broken.append({"key": name, "reason": health["reason"]})
     status = "warn" if broken else "ok"
     detail = (", ".join(f"{b['key']}: {b['reason']}" for b in broken)
               if broken else "all existing worktrees have a valid index and clean status")
@@ -1889,21 +1960,17 @@ def check_worktree_branch(cfg: Config, now: float) -> dict:
     heals this. Turning it into a refusal would break the one recovery that
     works.
     """
-    from . import ops
-
-    worktrees_dir = cfg.home / "worktrees"
     detached = []
-    if worktrees_dir.is_dir():
-        for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
-            try:
-                branch = ops.worktree_branch(wt, timeout=cfg.worktree_timeout)
-            except store.MaestroError as exc:
-                detached.append({"key": wt.name, "reason": f"branch probe error: {exc}"})
-                continue
-            if branch is None:
-                detached.append({"key": wt.name, "reason": (
-                    "HEAD is detached -- no branch to commit onto; "
-                    f"`maestro cmd {wt.name} retry` re-adopts it")})
+    for name, probe in _worktree_probes(cfg, "branch"):
+        try:
+            branch = probe.branch()
+        except store.MaestroError as exc:
+            detached.append({"key": name, "reason": f"branch probe error: {exc}"})
+            continue
+        if branch is None:
+            detached.append({"key": name, "reason": (
+                "HEAD is detached -- no branch to commit onto; "
+                f"`maestro cmd {name} retry` re-adopts it")})
     status = "warn" if detached else "ok"
     detail = (", ".join(f"{d['key']}: {d['reason']}" for d in detached)
               if detached else "every worktree is on a branch")
@@ -2016,20 +2083,16 @@ def check_worktree_witness(cfg: Config, now: float) -> dict:
     no index, is `check_worktree_health`'s "no index" warn instead (it's
     genuinely unusable, not merely pre-T-81) -- never double-counted here.
 
-    Lazy `ops` import, same reason as `check_worktree_health` beside it."""
-    from . import ops
-
-    worktrees_dir = cfg.home / "worktrees"
+    Probes come from `_worktree_probes`, like `check_worktree_health` beside it."""
     witness_less = []
-    if worktrees_dir.is_dir():
-        for wt in sorted(p for p in worktrees_dir.iterdir() if p.is_dir()):
-            try:
-                status = ops.worktree_witness_status(wt, timeout=cfg.worktree_timeout)
-            except store.MaestroError as exc:
-                witness_less.append({"key": wt.name, "reason": f"witness probe error: {exc}"})
-                continue
-            if status["backfillable"]:
-                witness_less.append({"key": wt.name, "reason": "no witness (predates T-81)"})
+    for name, probe in _worktree_probes(cfg, "witness"):
+        try:
+            status = probe.witness()
+        except store.MaestroError as exc:
+            witness_less.append({"key": name, "reason": f"witness probe error: {exc}"})
+            continue
+        if status["backfillable"]:
+            witness_less.append({"key": name, "reason": "no witness (predates T-81)"})
     status_ = "warn" if witness_less else "ok"
     detail = (", ".join(f"{w['key']}: {w['reason']}" for w in witness_less)
               if witness_less else "every registered worktree either carries a witness or is new")
@@ -2137,8 +2200,14 @@ _PLIST_AWARE_CHECKS = (check_heartbeat, check_launchd_tools, check_runner_binary
 
 
 def run_checks(cfg: Config, now: float, *, plist=None) -> list[dict]:
-    return [check(cfg, now, plist=plist) if check in _PLIST_AWARE_CHECKS else check(cfg, now)
-            for check in CHECKS]
+    global _RUN_PROBES
+    _RUN_PROBES = {"home": cfg.home,
+                   "probes": _gather_worktree_probes(cfg, ("health", "witness", "branch"))}
+    try:
+        return [check(cfg, now, plist=plist) if check in _PLIST_AWARE_CHECKS else check(cfg, now)
+                for check in CHECKS]
+    finally:
+        _RUN_PROBES = None
 
 
 def report(cfg: Config, now: float, *, plist=None) -> dict:
