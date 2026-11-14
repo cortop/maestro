@@ -606,6 +606,19 @@ def cmd_spec_set(args) -> int:
     return 0
 
 
+def cmd_stack(args) -> int:
+    """[human] Start a ticket on its single unfinished dependency's branch via
+    `human_actions.stack`. Like `cmd_spec_set`, never added to `_AGENT_TOOL_VERBS`."""
+    cfg = _cfg(args)
+    try:
+        result = human_actions.stack(cfg, args.key)
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
 def cmd_add_ac(args) -> int:
     """Append a new `- [ ] <text>` line to a ticket's spec `## Acceptance
     criteria` section -- the CLI counterpart to the TUI's add-AC modal
@@ -1737,6 +1750,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--priority", default=None, help="integer >= 0")
     sp.add_argument("--depends-on", dest="depends_on", default=None,
                     help="comma-separated ticket keys; '' clears the list")
+    sp = add("stack", cmd_stack,
+             "[human] start a ticket on its one unfinished dependency's branch instead of waiting for it")
+    sp.add_argument("key")
     sp = add("add-ac", cmd_add_ac,
              "append a new '- [ ] <text>' acceptance criterion to a ticket's spec")
     sp.add_argument("key")

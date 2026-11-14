@@ -6,9 +6,12 @@ from datetime import datetime
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
-from .. import backup, fleet, human_actions, spend as spend_mod, store
+from .. import backup, dispatcher, fleet, human_actions, projection, ratelimit, spend as spend_mod, store
+from .. import claims as claims_mod
+from ..sessions import DryRunSessions, build_routing_sessions
 from ..view import fleet as fleet_view
 from .shell import Shell
 
@@ -82,6 +85,9 @@ def fleet_ctx(shell: Shell) -> dict:
         "sessions": _safe("sessions", fleet_view.session_rows, home, cfg, now),
         "schedule": _safe("schedule", fleet_view.schedule_rows, cfg, now),
         "backups": _safe("backups", fleet_view.backup_panel, cfg, now),
+        "backup_files": _safe("backup-files", fleet_view.backup_files, cfg),
+        "claims": _safe("claims", fleet_view.claim_rows, cfg),
+        "launchd": _safe("launchd", fleet.status, home),
         "slack": _safe("slack", fleet_view.slack_panel, cfg, now),
         "doctor": doctor, "problems": problems, "passing": passing,
     }
@@ -101,7 +107,13 @@ def _parse_until(value: str) -> float:
         return datetime.fromisoformat(value).timestamp()
 
 
-def register(app: FastAPI, shell: Shell) -> None:
+def _launchd_notice(action: str, out: dict) -> str:
+    """One line for a `fleet up` / `fleet down` result: the exit code and launchd's output."""
+    detail = out.get("stdout") or ""
+    return f"fleet {action}: exit {out.get('rc')}" + (f" · {detail}" if detail else "")
+
+
+def register(app: FastAPI, shell: Shell, sessions_factory=None) -> None:
     @app.get("/fleet", response_class=HTMLResponse)
     def fleet_page(request: Request):
         return shell.render(request, "fleet.html", nav="fleet", **fleet_ctx(shell))
@@ -137,6 +149,61 @@ def register(app: FastAPI, shell: Shell) -> None:
             return panels(request, notice=f"backup failed: {e}")
         return panels(request, notice=f"backup created: {path.name}")
 
+    def _list(label: str, keys) -> str:
+        return f"{label} {', '.join(keys)}" if keys else f"{label} nothing"
+
+    async def fleet_up(request: Request):
+        if (await _form(request)).get("confirm") != "yes":
+            return panels(request, notice="fleet up not confirmed")
+        out = await run_in_threadpool(fleet.up, shell.home, cfg=shell.cfg())
+        return panels(request, notice=_launchd_notice("up", out))
+
+    async def fleet_down(request: Request):
+        if (await _form(request)).get("confirm") != "yes":
+            return panels(request, notice="fleet down not confirmed")
+        out = await run_in_threadpool(fleet.down, shell.home)
+        return panels(request, notice=_launchd_notice("down", out))
+
+    def _sweep(dry_run: bool) -> str:
+        cfg = shell.cfg()
+        if dry_run:
+            sessions = DryRunSessions()
+        else:
+            sessions = sessions_factory() if sessions_factory else build_routing_sessions(cfg)
+        report = dispatcher.dispatch(cfg, sessions, store.now_epoch(), dry_run=dry_run)
+        if not dry_run:
+            projection.write(cfg.home)
+        if dry_run:
+            return ("dry run: " + _list("would mint", report.would_mint) + "; "
+                    + _list("would spawn", report.spawned))
+        return "sweep: " + _list("spawned", report.spawned) + "; " + _list("minted", report.minted)
+
+    async def sweep(request: Request):
+        try:
+            return panels(request, notice=await run_in_threadpool(_sweep, False))
+        except store.MaestroError as e:
+            return panels(request, notice=f"sweep failed: {e}")
+
+    async def dry_run(request: Request):
+        try:
+            return panels(request, notice=await run_in_threadpool(_sweep, True))
+        except store.MaestroError as e:
+            return panels(request, notice=f"dry run failed: {e}")
+
+    async def clear_rate_limit(request: Request):
+        if ratelimit.paused_until(shell.home, store.now_epoch()) is None:
+            return panels(request, notice="fleet is not rate-limited")
+        ratelimit.clear(shell.home)
+        return panels(request, notice="rate limit cleared")
+
+    async def purge_claims(request: Request):
+        cfg = shell.cfg()
+        rows = claims_mod.describe_claims(cfg.home, max_age=cfg.unverified_claim_max_age)
+        dropped = [r["key"] for r in rows if not r["claimed"]]
+        for key in dropped:
+            claims_mod.release(cfg.home, key)
+        return panels(request, notice=_list("purged stale claims:", dropped))
+
     @app.get("/fleet/stop/{key}", response_class=HTMLResponse)
     def stop_confirm(request: Request, key: str):
         return shell.render(request, "_fleet_stop_confirm.html", nav="fleet", key=key)
@@ -156,3 +223,9 @@ def register(app: FastAPI, shell: Shell) -> None:
     guard.post(app, "/fleet/doctor", doctor, response_class=HTMLResponse)
     guard.post(app, "/fleet/backup", backup_now, response_class=HTMLResponse)
     guard.post(app, "/fleet/stop/{key}", stop, response_class=HTMLResponse)
+    guard.post(app, "/fleet/up", fleet_up, response_class=HTMLResponse)
+    guard.post(app, "/fleet/down", fleet_down, response_class=HTMLResponse)
+    guard.post(app, "/fleet/sweep", sweep, response_class=HTMLResponse)
+    guard.post(app, "/fleet/dry-run", dry_run, response_class=HTMLResponse)
+    guard.post(app, "/fleet/clear-rate-limit", clear_rate_limit, response_class=HTMLResponse)
+    guard.post(app, "/fleet/purge-claims", purge_claims, response_class=HTMLResponse)

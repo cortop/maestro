@@ -180,6 +180,26 @@ resource-constrained workflow net (a Petri net) — a lens, not a maintained art
 control). The reconciler records the gate + a `next_requeue_at`, then exits. The
 dispatcher re-wakes the ticket when: the inbox has a new command, the requeue timer
 elapses, or the spec hash changed.
+### Stacking on a dependency
+
+A ticket whose single unfinished dependency is acceptable to build on can skip the wait:
+`maestro stack <KEY>` appends `TicketStacked {dep}` (idempotent; it refuses, appending
+nothing, unless the ticket has exactly one unfinished `dependsOn`, no worktree, an
+implementation kind in a git binding, and the same repo as the dependency). This is
+cross-ticket stacking, separate from the intra-ticket `pr_stack` split.
+
+- **Start.** The `blocked-dep` gate treats the dependency as met once its branch is pushed to
+  origin; before that the ticket stays blocked, as does any unstacked ticket.
+- **While the dependency is open.** `repos.resolve` reports the dependency's branch as
+  `base_branch`, so the worktree, `sync-base`, `open-pr`, the QA diff and base-drift sync all
+  target it. The PR is never undrafted in this window.
+- **Dependency merged.** `stacking.sync` (a sweep hook) retargets the PR to the repo base branch
+  (`set_base`; it does not rely on GitHub's own retarget), records `StackResolved`, and routes the
+  ticket to `implementing` as a base-drift round that merges the base branch (never a force-push,
+  since squash merges leave the dependency's original commits on the stacked branch).
+- **Dependency ended unmerged.** The ticket moves to `awaiting-human` with a question naming
+  the dependency.
+
 A fresh reconciler resumes by replaying the log — resumability comes from the event log we
 already have, not a separate journal.
 

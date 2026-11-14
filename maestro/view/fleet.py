@@ -85,6 +85,23 @@ def backup_panel(cfg: Config, now: float | None = None) -> dict:
             "retention": cfg.backup_retention}
 
 
+def backup_files(cfg: Config) -> list[dict]:
+    """Each backup tarball, newest first: name, filename-derived epoch and size in bytes."""
+    rows = []
+    for path in reversed(backup.list_backups(cfg)):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        rows.append({"name": path.name, "epoch": backup._epoch_from_name(path.name), "size": size})
+    return rows
+
+
+def claim_rows(cfg: Config) -> list[dict]:
+    """Each claim with key, pid, age and verdict (``claims.describe_claims``)."""
+    return claims.describe_claims(cfg.home, max_age=cfg.unverified_claim_max_age)
+
+
 def schedule_rows(cfg: Config, now: float | None = None) -> list[dict]:
     """Each scheduled task with its last-fired and next-due epochs (``schedule.next_due``)."""
     now = store.now_epoch() if now is None else now
