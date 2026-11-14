@@ -51,6 +51,7 @@ _CULPRITS: dict[str, Callable[[dict], list[str]]] = {
     "unknown_repo_bindings": _unknown_repo,
     "burn": lambda c: _real(c.get("flagged") or []),
     "watchdog_loops": lambda c: sorted(c.get("counts") or {}),
+    "worktree_leftovers": lambda c: _real(c.get("keys") or []),
     "phantom_keys": lambda c: _real(c.get("keys") or []),
     "unresolvable_spec_hints": lambda c: _real(c.get("keys") or []),
     "ac_annotation_parse": lambda c: list(dict.fromkeys(

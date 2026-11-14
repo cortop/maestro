@@ -1883,14 +1883,29 @@ class _WorktreeProbe:
         return self
 
 
-def _gather_worktree_probes(cfg: Config, which) -> list[tuple[str, _WorktreeProbe]]:
-    """Probe every ``<home>/worktrees`` dir on a bounded thread pool; sorted by key."""
-    from concurrent.futures import ThreadPoolExecutor
+def worktree_is_leftover(home: Path, key: str) -> bool:
+    """True when *key*'s folded phase is terminal: its worktree dir is a leftover.
+    A key with no snapshot folds to a fresh non-terminal default, so it is unknown, not done."""
+    return Phase(snap_mod.load(home, key).phase) in TERMINAL_PHASES
 
-    worktrees_dir = cfg.home / "worktrees"
+
+def _worktree_dirs(home: Path) -> list[Path]:
+    worktrees_dir = home / "worktrees"
     if not worktrees_dir.is_dir():
         return []
-    dirs = sorted(p for p in worktrees_dir.iterdir() if p.is_dir())
+    return sorted(p for p in worktrees_dir.iterdir() if p.is_dir())
+
+
+def worktree_leftover_keys(home: Path) -> list[str]:
+    """Sorted names of the ``<home>/worktrees`` dirs whose ticket is terminal; runs no git."""
+    return [p.name for p in _worktree_dirs(home) if worktree_is_leftover(home, p.name)]
+
+
+def _gather_worktree_probes(cfg: Config, which) -> list[tuple[str, _WorktreeProbe]]:
+    """Probe every non-leftover ``<home>/worktrees`` dir on a bounded thread pool; sorted by key."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    dirs = [p for p in _worktree_dirs(cfg.home) if not worktree_is_leftover(cfg.home, p.name)]
     probes = [_WorktreeProbe(wt, cfg.worktree_timeout) for wt in dirs]
     if probes:
         with ThreadPoolExecutor(max_workers=min(_WORKTREE_PROBE_THREADS, len(probes))) as pool:
@@ -2068,6 +2083,16 @@ def check_home_structure(cfg: Config, now: float) -> dict:
             "state": state, "missing_paths": board["missing_paths"]}
 
 
+def check_worktree_leftovers(cfg: Config, now: float) -> dict:
+    """WARN, in one line, on worktree dirs whose ticket is terminal (decided from the
+    snapshot phase alone; no git runs). `keys` lists them for the TUI check row."""
+    keys = worktree_leftover_keys(cfg.home)
+    status = "warn" if keys else "ok"
+    detail = (f"{len(keys)} leftover worktree(s) of finished tickets: {', '.join(keys)}"
+              if keys else "no worktree belongs to a finished ticket")
+    return {"name": "worktree_leftovers", "status": status, "detail": detail, "keys": keys}
+
+
 def check_worktree_witness(cfg: Config, now: float) -> dict:
     """T-95: WARN (report-only, never writes -- doctor checks must not mutate
     state) on any EXISTING worktree under ``<home>/worktrees`` that is a real,
@@ -2190,6 +2215,7 @@ CHECKS = (
     check_watchdog_loops,
     check_worktree_branch,
     check_worktree_health,
+    check_worktree_leftovers,
     check_worktree_witness,
 )
 
