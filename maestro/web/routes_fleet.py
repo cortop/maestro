@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from urllib.parse import parse_qs
 
@@ -27,6 +28,57 @@ def _safe(label: str, fn, *args):
         return None
 
 
+DOCTOR_TTL_S = 30.0
+
+
+class DoctorCache:
+    """The doctor rows of one server process: served as last computed, refreshed off the request
+    path once older than ``ttl``, and recomputed on demand by ``refresh``."""
+
+    def __init__(self, ttl: float = DOCTOR_TTL_S) -> None:
+        self.ttl = ttl
+        self._lock = threading.Lock()
+        self._rows: list[dict] | None = None
+        self._at: float | None = None
+        self._failed = False
+        self._thread: threading.Thread | None = None
+
+    def snapshot(self, cfg, now: float) -> dict:
+        """Cached rows, their epoch, whether a run is in flight and whether the last one failed;
+        starts a background run when there is no fresh result."""
+        with self._lock:
+            stale = self._at is None or now - self._at >= self.ttl
+            if stale and (self._thread is None or not self._thread.is_alive()):
+                self._thread = threading.Thread(target=self._run, args=(cfg,), daemon=True,
+                                                name="fleet-doctor")
+                self._thread.start()
+            running = self._thread is not None and self._thread.is_alive()
+            return {"rows": self._rows, "at": self._at, "running": running,
+                    "failed": self._failed and self._rows is None}
+
+    def refresh(self, cfg) -> None:
+        """Run the checks now, in the caller's thread, and cache the result."""
+        self._run(cfg)
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for an in-flight background run (tests)."""
+        t = self._thread
+        if t is not None:
+            t.join(timeout)
+
+    def _run(self, cfg) -> None:
+        try:
+            rows = fleet_view.doctor_rows(cfg, store.now_epoch())
+        except Exception:  # noqa: BLE001 -- a broken doctor degrades its panel, never the page
+            log.warning("fleet panel doctor unreadable", exc_info=True)
+            with self._lock:
+                self._failed = True
+                self._at = store.now_epoch()
+            return
+        with self._lock:
+            self._rows, self._at, self._failed = rows, store.now_epoch(), False
+
+
 def _spend_panel(home, pulse: dict | None) -> dict:
     """Spend against ceiling, or ``known: False`` when the meter is unavailable or unreadable."""
     sp = (pulse or {}).get("spend") or {}
@@ -42,12 +94,15 @@ def _spend_panel(home, pulse: dict | None) -> dict:
             "over": bool(known and ceiling and today >= ceiling)}
 
 
-def fleet_ctx(shell: Shell) -> dict:
+def fleet_ctx(shell: Shell, doctor_cache: DoctorCache) -> dict:
     now = store.now_epoch()
     home, cfg = shell.home, shell.cfg()
     pulse = _safe("pulse", fleet_view.pulse, home, cfg, now)
     hb = (pulse or {}).get("heartbeat") or {}
-    doctor = _safe("doctor", fleet_view.doctor_rows, cfg, now)
+    cached = doctor_cache.snapshot(cfg, now)
+    doctor = cached["rows"]
+    doctor_running = doctor is None and cached["running"]
+    doctor_age = None if cached["at"] is None or doctor is None else max(0.0, now - cached["at"])
     problems = [r for r in doctor or [] if r.get("status") in ("fail", "warn")]
     passing = [r for r in doctor or [] if r.get("status") not in ("fail", "warn")]
     paused = _safe("pause", fleet.pause_state, home, now)
@@ -64,7 +119,7 @@ def fleet_ctx(shell: Shell) -> dict:
         attention.append("daily spend ceiling reached")
     if not spend["known"]:
         attention.append("spend meter unknown")
-    if doctor is None:
+    if doctor is None and not doctor_running:
         attention.append("doctor unavailable")
     if problems:
         attention.append(f"{len(problems)} doctor check(s) need attention")
@@ -89,7 +144,8 @@ def fleet_ctx(shell: Shell) -> dict:
         "claims": _safe("claims", fleet_view.claim_rows, cfg),
         "launchd": _safe("launchd", fleet.status, home),
         "slack": _safe("slack", fleet_view.slack_panel, cfg, now),
-        "doctor": doctor, "problems": problems, "passing": passing,
+        "doctor": doctor, "doctor_running": doctor_running, "doctor_age": doctor_age,
+        "doctor_refreshing": doctor is not None and cached["running"], "problems": problems, "passing": passing,
     }
 
 
@@ -114,16 +170,21 @@ def _launchd_notice(action: str, out: dict) -> str:
 
 
 def register(app: FastAPI, shell: Shell, sessions_factory=None) -> None:
+    doctor_cache = app.state.fleet_doctor = DoctorCache()
+
+    def ctx() -> dict:
+        return fleet_ctx(shell, doctor_cache)
+
     @app.get("/fleet", response_class=HTMLResponse)
     def fleet_page(request: Request):
-        return shell.render(request, "fleet.html", nav="fleet", **fleet_ctx(shell))
+        return shell.render(request, "fleet.html", nav="fleet", **ctx())
 
     @app.get("/fleet/panels", response_class=HTMLResponse)
     def fleet_panels(request: Request):
-        return shell.render(request, "_fleet_panels.html", nav="fleet", **fleet_ctx(shell))
+        return shell.render(request, "_fleet_panels.html", nav="fleet", **ctx())
 
     def panels(request: Request, **extra):
-        return shell.render(request, "_fleet_panels.html", nav="fleet", **fleet_ctx(shell), **extra)
+        return shell.render(request, "_fleet_panels.html", nav="fleet", **ctx(), **extra)
 
     async def pause(request: Request):
         form = await _form(request)
@@ -140,6 +201,7 @@ def register(app: FastAPI, shell: Shell, sessions_factory=None) -> None:
         return panels(request, notice="fleet resumed")
 
     async def doctor(request: Request):
+        doctor_cache.refresh(shell.cfg())
         return panels(request, notice="doctor re-run")
 
     async def backup_now(request: Request):

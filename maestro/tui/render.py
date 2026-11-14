@@ -142,7 +142,8 @@ def _find_check(doctor: dict, name: str) -> dict:
     return {}
 
 
-def _render_fleet(status: dict, doctor: dict) -> str:
+def _render_fleet(status: dict, doctor: dict, doctor_note: str = "") -> str:
+    """The fleet panel text; *doctor_note* labels the doctor part (its age, or "running")."""
     loaded = "[green]yes[/green]" if status.get("loaded") else "[red]no[/red]"
     age = _fmt_age(status.get("heartbeat_age_s"))
     interval = status.get("interval")
@@ -150,7 +151,7 @@ def _render_fleet(status: dict, doctor: dict) -> str:
     label = status.get("label", "—")
     dead = doctor.get("dead_letters", [])
     stale = doctor.get("stale", False)
-    stale_str = "[yellow]yes[/yellow]" if stale else "no"
+    stale_str = "—" if stale is None else "[yellow]yes[/yellow]" if stale else "no"
     dead_str = (", ".join(dead) if dead else "—")
     rate = doctor.get("spawns_last_hour") or {}
     spawns_total = rate.get("total", 0)
@@ -194,7 +195,9 @@ def _render_fleet(status: dict, doctor: dict) -> str:
     # on the provider / check this machine's connection) is unambiguous.
     provider = _find_check(doctor, "provider_availability")
     provider_state = provider.get("state", "ok")
-    if provider_state == "no_network":
+    if "checks" not in doctor:
+        provider_str = "—"
+    elif provider_state == "no_network":
         provider_str = f"[red bold]NO NETWORK[/red bold] -- {provider.get('detail', '')}"
     elif provider_state == "erroring":
         provider_str = f"[yellow bold]ERRORING[/yellow bold] -- {provider.get('detail', '')}"
@@ -217,7 +220,7 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         lines.append(f"    reason:        {reason}")
     lines += [
         "",
-        "[bold]Doctor[/bold]",
+        "[bold]Doctor[/bold]" + (f"  [dim]{doctor_note}[/dim]" if doctor_note else ""),
         "",
         f"  Stale:           {stale_str}",
         f"  Dead letters:    {dead_str}",
@@ -233,6 +236,17 @@ def _render_fleet(status: dict, doctor: dict) -> str:
         until_str = time.strftime("%H:%M", time.localtime(until_ts)) if until_ts else "?"
         lines.append(f"  Rate limit:      [red bold]paused until {until_str}[/red bold]")
     return "\n".join(lines)
+
+
+def _render_fleet_painted(status: dict, quick: dict, cache: tuple[dict, float] | None,
+                          pending: bool, now: float) -> str:
+    """`_render_fleet` over the last doctor report (*cache* = report, epoch) when there is one,
+    else over the probe-free *quick* payload, labelled with the report's age or "running"."""
+    if cache is None:
+        return _render_fleet(status, quick, "running…" if pending else "")
+    report, at = cache
+    note = f"checks from {_fmt_age(max(0, round(now - at)))}" + (", refreshing…" if pending else "")
+    return _render_fleet(status, {**quick, **report}, note)
 
 
 def _render_env(cfg: config_mod.Config) -> str:
