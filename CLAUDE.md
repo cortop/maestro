@@ -89,6 +89,7 @@ Guards and budgets:
 - `burn.py` — per-key burn detection. `spend.py` — daily USD meter + ceiling gate.
 - `ratelimit.py` — account-wide spawn gate from `rate_limit_event`s.
 - `claude_guard.py` — installs/verifies the `--settings` file wiring the PreToolUse guard into every claude spawn.
+- `gc_worktrees.py` — `maestro gc-worktrees`: list/remove worktrees of finished tickets.
 - `backup.py` — tarball snapshots/restore. `credentials.py` — per-repo `gh` credentials.
 - `runner_permissions.py` / `pi_guard.py` — destructive-command guard for non-Claude runners.
 
@@ -113,7 +114,7 @@ Supporting:
   `decisions[...]["outcome"] = "..."` assignments and a few exact source lines in
   `dispatcher.py` — keep them literal when refactoring.
 - `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).
-- `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, evidence, rounds, why, fleet)
+- `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, evidence, rounds, why, fleet, deps, deps_layout)
   shared by the TUI and the web UI; the TUI wraps them in Rich, the web UI in HTML.
 - `web/` — `maestro web`: FastAPI + Jinja2 + htmx server-rendered UI with `/stream` SSE
   (`web` extra; core never imports it, `tests/test_import_graph.py` enforces it).
