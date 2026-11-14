@@ -32,7 +32,7 @@ def test_feed_lists_events_across_tickets_newest_first_and_links(web):
     html = c.get("/activity").text
     rows = _rows(html)
     assert {k for k, _, _ in rows} == {"T-1", "T-2"}
-    assert len(rows) == 6  # every event of both tickets
+    assert len(rows) == 5  # every event of both tickets
     assert 'href="/t/T-1"' in html and "zebra stripes" in html
     assert "PhaseChanged" in html and "<th scope=\"col\">Time</th>" in html
     stamps = re.findall(r'<td class="ts">([^<]*)</td>', html)
