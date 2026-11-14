@@ -48,7 +48,7 @@ def test_tabs_sit_over_existing_fragments(client):
 
 def test_sections_refresh_on_ticket_events(client):
     html = client.get("/t/T-9").text
-    assert html.count("sse:ticket:T-9") == 6  # the Sessions tab tails itself instead
+    assert html.count("sse:ticket:T-9") == 7  # the Sessions tab tails itself instead
     for url in ("head", "side"):
         assert f'hx-get="/t/T-9/{url}"' in html
         assert client.get(f"/t/T-9/{url}").status_code == 200

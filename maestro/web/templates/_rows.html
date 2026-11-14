@@ -12,5 +12,5 @@
   <td class="doing">{% if r.running %}<span class="cursor" aria-hidden="true"></span>{% endif %}{{ r.now }}</td>
 </tr>
 {% else %}
-<tr><td colspan="7" class="dim">No tickets match this filter.</td></tr>
+<tr><td colspan="7" class="dim">No tickets match this filter{% if view.search %} and search{% endif %}.</td></tr>
 {% endfor %}
