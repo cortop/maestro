@@ -137,7 +137,7 @@ def test_read_only_renders_no_controls_and_refuses_every_post(home):
     app = create_app(home, nudge_on_action=False, read_only=True)
     with TestClient(app) as c:
         html = c.get("/t/T-1/spec").text
-        assert "<pre" in html and "<form" not in html and "<textarea" not in html
+        assert "<h2>Intent</h2>" in html and "<form" not in html and "<textarea" not in html
         assert "Edit spec" not in c.get("/palette", params={"key": "T-1"}).text
         c.headers[TOKEN_HEADER] = app.state.guard.token
         for action in ("save", "ac", "fields", "runner", "suggest", "suggest/add", "post-qa"):
