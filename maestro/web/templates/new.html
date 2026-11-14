@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}maestro new{% endblock %}
+{% block body %}
+<section class="hero">
+  <div class="hero-main">
+    <p class="kicker">&gt; start // queue a ticket, review a PR, import an issue</p>
+    <h1>New</h1>
+  </div>
+</section>
+{% if can_write %}
+<div id="new-result" aria-live="polite"></div>
+<section class="panel" id="new-ticket">
+  <div class="panel-head">New ticket</div>
+  <div class="panel-body">
+    <form class="act-form" hx-post="/new/create" hx-target="#new-result" hx-swap="innerHTML">
+      <input type="text" name="title" placeholder="Title" aria-label="Title">
+      <input type="number" name="priority" value="3" min="0" aria-label="Priority">
+      <button type="submit" class="btn btn-primary">Queue ticket</button>
+    </form>
+  </div>
+</section>
+<section class="panel" id="new-review">
+  <div class="panel-head">Review a PR</div>
+  <div class="panel-body">
+    <form class="act-form" hx-post="/new/review" hx-target="#new-result" hx-swap="innerHTML">
+      <input type="text" name="url" placeholder="GitHub pull request URL" aria-label="PR URL">
+      <button type="submit" class="btn btn-primary">Start review</button>
+    </form>
+  </div>
+</section>
+<section class="panel" id="new-import">
+  <div class="panel-head">Import from Linear</div>
+  <div class="panel-body">
+    <form class="act-form" hx-post="/new/import" hx-target="#new-result" hx-swap="innerHTML">
+      <input type="text" name="ref" placeholder="Linear URL or identifier (ABC-123)" aria-label="Linear URL or identifier">
+      <button type="submit" class="btn btn-primary">Import issue</button>
+    </form>
+  </div>
+</section>
+{% else %}
+<p class="dim">Writes are disabled on this server.</p>
+{% endif %}
+{% endblock %}
