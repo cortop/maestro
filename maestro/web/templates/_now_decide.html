@@ -35,7 +35,7 @@
         {{ act.confirm_form(c.key, "discard", "now", "#now-decide", "Discard", "Discard " ~ c.key ~ "? The ticket is closed.") }}
         {% else %}
         {% if c.recommendation %}{{ act.form(c.key, "answer", "now", "#now-decide", "Accept recommendation", "btn-primary", {"qid": c.qid, "accept": "1"}) }}{% endif %}
-        {{ act.note_form(c.key, "answer", "now", "#now-decide", "Write an answer", "Send answer", "Your answer", {"qid": c.qid}, cls="btn-ghost" if c.recommendation else "btn-secondary") }}
+        {{ act.modal_button(c.key, "answer", "now", c.qid, "Write an answer", cls="btn-ghost" if c.recommendation else "btn-secondary") }}
         {% endif %}
         {% endif %}
         {{ act.error(action_error, c.key) }}

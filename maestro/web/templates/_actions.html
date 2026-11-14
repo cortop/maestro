@@ -26,3 +26,8 @@
 {% macro error(err, key) -%}
 {% if err and err.key == key %}<p class="action-error" role="alert">{{ err.msg }}</p>{% endif %}
 {%- endmacro %}
+
+{# T-259: answer/message open a modal fetched into #modal-host (outside every swapped region). #}
+{% macro modal_button(key, action, ctx, qid, label, cls="btn-secondary") -%}
+<button type="button" class="btn {{ cls }}" hx-get="/t/{{ key }}/modal/{{ action }}?ctx={{ ctx }}{% if qid %}&qid={{ qid|urlencode }}{% endif %}" hx-target="#modal-host" hx-swap="innerHTML">{{ label }}</button>
+{%- endmacro %}

@@ -430,3 +430,10 @@ details.write[open] .act-form .btn { align-self: flex-start; }
   #rounds-rows td:nth-child(2) { width: auto; }
   .palette { padding-top: 16px; }
 }
+
+dialog.modal { width: min(640px, 92vw); padding: 20px; border: 1px solid var(--magenta, #888); background: var(--bg, #111); color: inherit; }
+dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); }
+.modal-form { display: flex; flex-direction: column; gap: 12px; }
+.modal-form h2 { margin: 0; font-size: 1.1rem; }
+.modal-form textarea { width: 100%; min-height: 12em; box-sizing: border-box; }
+.modal-actions { display: flex; gap: 8px; }
