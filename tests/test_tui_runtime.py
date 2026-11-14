@@ -91,6 +91,8 @@ def test_filter_bar_marks_active_filter_unambiguously(seeded_home):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
+            await pilot.pause()
             bar = app.query_one("#filter-bar", Static)
 
             for expected_idx, (fname, _phases) in enumerate(_FILTERS):

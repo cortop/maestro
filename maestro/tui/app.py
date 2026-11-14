@@ -820,6 +820,12 @@ class MaestroTUI(App):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._refresh_bindings()
 
+    def _active_tab(self) -> str:
+        try:
+            return self.query_one("#tabs", TabbedContent).active
+        except NoMatches:
+            return "tab-now"
+
     def _on_board(self) -> bool:
         return len(self._base_stack()) <= 1
 
@@ -839,6 +845,8 @@ class MaestroTUI(App):
             return False
         if action == "answer" and self._review_card() is not None:
             return False  # the brief's own question is answered by creating the review
+        if action in ("cycle_filter", "filter_query") and self._active_tab() != "tab-tickets":
+            return False  # the filter controls live in the Tickets tab only
         if action == "filter_query" and self._query_input_shown():
             return False  # let a typed "/" reach the already-open Input
         if action == "clear_query" and not (self._query or self._query_input_shown()):
@@ -879,12 +887,6 @@ class MaestroTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static("", id="filter-bar")
-        qi = Input(placeholder="filter: words, phase: ci: pr: repo: deps: q: is: (! negates)",
-                   id="query-bar")
-        qi.display = False
-        qi.can_focus = False  # hidden: must not steal the initial focus from the table
-        yield qi
         yield Static("", id="pulse")
         yield Static("", id="fleet-badge")
         with TabbedContent(initial="tab-now", id="tabs"):
@@ -897,6 +899,12 @@ class MaestroTUI(App):
                     with VerticalScroll(id="now-right"):
                         yield Static("[dim]Select a needs-you row[/dim]", id="now-detail")
             with TabPane("Tickets", id="tab-tickets"):
+                yield Static("", id="filter-bar")
+                qi = Input(placeholder="filter: words, phase: ci: pr: repo: deps: q: is: (! negates)",
+                           id="query-bar")
+                qi.display = False
+                qi.can_focus = False  # hidden: must not steal the initial focus from the table
+                yield qi
                 with Horizontal():
                     yield DataTable(id="tickets")
                     with Vertical(id="right"):

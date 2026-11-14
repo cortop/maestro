@@ -105,6 +105,8 @@ def test_existing_keys_still_work_with_filtered_footer(home):
     _seed(home)
 
     async def body(app, pilot):
+        await pilot.press("2")  # T-258: filters live in the Tickets tab
+        await pilot.pause()
         from maestro.tui import SpecScreen
         await pilot.press("s")
         await pilot.pause()
