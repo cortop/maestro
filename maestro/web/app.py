@@ -16,7 +16,7 @@ from .. import config as config_mod
 from .. import store
 from ..config import Config
 from ..view import events as ev_view
-from . import (routes_actions, routes_board, routes_fleet, routes_new, routes_now, routes_palette,
+from . import (routes_actions, routes_activity, routes_board, routes_fleet, routes_new, routes_now, routes_palette,
                 routes_spec, routes_ticket)
 from .guard import WriteGuard
 from .shell import Shell
@@ -68,6 +68,7 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     routes_now.register(app, shell)
     routes_ticket.register(app, shell)
     routes_fleet.register(app, shell, (lambda: sessions) if sessions is not None else None)
+    routes_activity.register(app, shell)
     routes_palette.register(app, shell)
     nudge = routes_actions.default_nudge(shell) if nudge_on_action else None
     routes_actions.register(app, shell, nudge, vcs, sweep)

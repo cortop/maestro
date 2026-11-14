@@ -1069,13 +1069,13 @@ def test_fleet_screen_load_status_detects_dead_letters(home):
         return P()
 
     with mock.patch("subprocess.run", fake_launchctl):
-        _status, doctor = screen._load_status()
+        doctor, _at = screen._load_doctor()
 
     assert "DEAD-1" in doctor["dead_letters"]
 
 
 def test_fleet_screen_stale_when_old_heartbeat(home):
-    """_load_status marks stale=True when heartbeat is older than 1800s."""
+    """_load_doctor marks stale=True when heartbeat is older than 1800s."""
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"epoch": store.now_epoch() - 2000})
 
@@ -1088,13 +1088,13 @@ def test_fleet_screen_stale_when_old_heartbeat(home):
         return P()
 
     with mock.patch("subprocess.run", fake_launchctl):
-        _status, doctor = screen._load_status()
+        doctor, _at = screen._load_doctor()
 
     assert doctor["stale"] is True
 
 
 def test_fleet_screen_not_stale_with_recent_heartbeat(home):
-    """_load_status marks stale=False when heartbeat is recent."""
+    """_load_doctor marks stale=False when heartbeat is recent."""
     store.write_json(home / "derived" / ".heartbeat.json",
                      {"epoch": store.now_epoch() - 60})
 
@@ -1107,7 +1107,7 @@ def test_fleet_screen_not_stale_with_recent_heartbeat(home):
         return P()
 
     with mock.patch("subprocess.run", fake_launchctl):
-        _status, doctor = screen._load_status()
+        doctor, _at = screen._load_doctor()
 
     assert doctor["stale"] is False
 
