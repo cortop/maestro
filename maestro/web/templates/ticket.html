@@ -7,7 +7,7 @@
 <div class="cols ticket-grid">
   <section class="col col-wide ticket-main" aria-label="Ticket history">
     <div class="tabs" role="tablist">
-      {% set tabs = (("story","Story","rounds"),) + ((("review","Review","review"),) if t.snap.kind == "review" else ()) + (("spec","Spec","spec"),("proposal","Proposal","proposal"),("events","Events","events"),("sessions","Sessions","logs")) %}
+      {% set tabs = (("story","Story","rounds"),) + ((("review","Review","review"),) if t.snap.kind == "review" else ()) + (("spec","Spec","spec"),("proposal","Proposal","proposal"),("events","Events","events"),("diff","Diff","diff"),("sessions","Sessions","logs")) %}
       {% for id, label, url in tabs %}
       <input type="radio" name="tab" id="tab-{{ id }}" class="tab-radio"{{ " checked" if (id == tab if tab else loop.first) }}>
       <label for="tab-{{ id }}" class="tab-label">{{ label }}</label>

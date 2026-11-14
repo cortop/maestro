@@ -63,6 +63,7 @@ from ..dispatcher import spec_runner
 from ..sessions import list_pruned
 from ..sessions import list_sessions
 from ..statemachine import Phase
+from ..view import evidence as evidence_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
@@ -2144,17 +2145,7 @@ class ReviewScreen(Screen):
         snap = self._snap()
         if snap is None:
             return
-        blocks = []
-        for e in event_log.read(self._home, snap.key):
-            if e["type"] != "CiObserved":
-                continue
-            p = e["payload"]
-            line = f"{e.get('ts', '?')}  {p.get('state', '?')}"
-            if p.get("failing_checks"):
-                line += "  failing: " + ", ".join(p["failing_checks"])
-            if p.get("failure_excerpt"):
-                line += "\n" + p["failure_excerpt"].rstrip()
-            blocks.append(line)
+        blocks = evidence_view.ci_timeline_text(event_log.read(self._home, snap.key))
         self.app.push_screen(_TextViewModal(f"{snap.key}: CI timeline",
                                             "\n\n".join(blocks) or "(no CI observations)"))
 
