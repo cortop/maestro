@@ -68,6 +68,7 @@ class Node:
     open_deps: list[str]            # deps that are themselves open, spec order
     done_deps: int = 0              # deps finished (or archived) -- ignored for depth
     missing: list[str] = field(default_factory=list)  # deps that never existed
+    done_keys: list[str] = field(default_factory=list)  # finished deps' keys, spec order
 
     @property
     def blocked(self) -> bool:
@@ -97,6 +98,7 @@ def build(home: Path) -> DepGraph:
                 node.open_deps.append(dep)
             elif dep in raw or key_exists_anywhere(home, dep):
                 node.done_deps += 1
+                node.done_keys.append(dep)
             else:
                 node.missing.append(dep)
 
