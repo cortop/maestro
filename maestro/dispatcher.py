@@ -1981,6 +1981,11 @@ def sync_vcs(cfg: Config, now: float) -> dict:
     return {"checked": checked, "worktree_removal_errors": worktree_removal_errors}
 
 
+def _sync_stacks(cfg: Config, now: float) -> dict:
+    from . import stacking  # lazy: stacking imports this module
+    return stacking.sync(cfg, now)
+
+
 def sync_review_pending(cfg: Config, now: float) -> dict:
     """T-253: finish a review ticket whose pending GitHub review the human has handled.
 
@@ -2412,6 +2417,9 @@ def _maybe_undraft(cfg: Config, key: str, status: dict, vcs, *, repo_slug: str |
         return
     if status.get("ci_state") != "passing":
         return
+    from . import repos  # lazy: repos imports us at module load time
+    if repos.stacked_dep(cfg.home, key):
+        return  # stacked on an unfinished dependency: stays draft until that merges
     fresh = snap_mod.rebuild(cfg.home, key)
     if Phase(fresh.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
         return  # routed away by a sibling observation earlier this tick
@@ -3569,16 +3577,23 @@ def _allow_spawn(cfg: Config, key: str, observed_seq: int, attempts: dict) -> bo
     return True
 
 
-def _has_unmet_deps(home: Path, key: str) -> bool:
-    """Return True if any dependsOn entry for *key* is not yet done."""
+def _has_unmet_deps(home: Path, key: str, cfg: Config | None = None) -> bool:
+    """Return True if any dependsOn entry for *key* is not yet done.
+
+    With *cfg*, a dependency *key* is stacked on counts as met once its branch is pushed.
+    """
+    from . import stacking
     spec_file = store.spec_path(home, key)
     if not spec_file.exists():
         return False
     deps = parse_depends_on(spec_file.read_text(encoding="utf-8"))
     for dep in deps:
         dep_snap = snap_mod.load(home, dep)
-        if Phase(dep_snap.phase) not in TERMINAL_PHASES:
-            return True
+        if Phase(dep_snap.phase) in TERMINAL_PHASES:
+            continue
+        if cfg is not None and stacking.satisfies(cfg, key, dep):
+            continue
+        return True
     return False
 
 
@@ -3969,6 +3984,7 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     # call just queued -- same detached-subprocess shape as `sync_test_runs`
     # below, so it needs its own hook run.
     _run_hook("sync_restacks", hook_errors, sync_restacks, cfg, now, default={})
+    _run_hook("sync_stacks", hook_errors, _sync_stacks, cfg, now, default={})
     _run_hook("sync_review_pending", hook_errors, sync_review_pending, cfg, now, default={})
     _run_hook("sync_test_runs", hook_errors, sync_test_runs, cfg, now, default={})
     # The one hook that needs `sessions`: it spawns the post-QA skill itself.
@@ -4012,7 +4028,7 @@ def _active_agent_keys(sessions: SessionManager, home: Path) -> set[str]:
                       if c.get("kind") in ("testrun", "restack")}
 
 
-def due_check(home: Path, key: str, snap, now: float) -> DueResult:
+def due_check(home: Path, key: str, snap, now: float, cfg: Config | None = None) -> DueResult:
     """Read-only due verdict for *key* -- the one place the sweep and the TUI's
     Why screen both compute it, so they cannot drift."""
     if Phase(snap.phase) in TERMINAL_PHASES:
@@ -4020,11 +4036,11 @@ def due_check(home: Path, key: str, snap, now: float) -> DueResult:
     return is_due(home, key, snap,
                   inbox_pending=inbox.has_pending(home, key),
                   current_spec_hash=spec_hash_on_disk(home, key),
-                  now=now, blocked_dep=_has_unmet_deps(home, key))
+                  now=now, blocked_dep=_has_unmet_deps(home, key, cfg))
 
 
-def _due_check(home: Path, key: str, snap, now: float) -> DueResult:
-    return due_check(home, key, snap, now)
+def _due_check(home: Path, key: str, snap, now: float, cfg: Config | None = None) -> DueResult:
+    return due_check(home, key, snap, now, cfg)
 
 
 def _start_review_round(cfg: Config, key: str, snap) -> str | None:
@@ -4104,7 +4120,7 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
             if started:
                 decisions[key] = {"outcome": "review_round_started", "reason": started}
         return None
-    res = due_check(home, key, snap, now)
+    res = due_check(home, key, snap, now, sweep.cfg)
     if not res.due:
         decisions[key] = {"outcome": "not_due", "reason": res.reason}
         return None
@@ -4207,7 +4223,7 @@ def _route_answer_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> b
             # "on" and decides the key itself (e.g. straight on to
             # `implementing`), no `ready` reconciler spawns at all; when it's
             # "off" (or can't decide), this falls back to today's queueing.
-            res = _due_check(home, key, refreshed, now)
+            res = _due_check(home, key, refreshed, now, sweep.cfg)
             if res.due and not _route_ready_fast_path(sweep, key, refreshed, res.reason):
                 sweep.due.append((key, res.reason))
             return True
@@ -4295,7 +4311,7 @@ def _route_ready_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bo
         # folds it instead.
         return False
 
-    if _has_unmet_deps(home, key):
+    if _has_unmet_deps(home, key, cfg):
         # The wake that got us here (inbox/spec-changed) is already consumed
         # by `observe_spec` above -- no requeue needed, the next sweep's own
         # `is_due` returns "blocked-dep" directly.
@@ -4359,7 +4375,7 @@ def _route_ready_fast_path(sweep: _Sweep, key: str, snap, due_reason: str) -> bo
     refreshed = snap_mod.load(home, key)
     sweep.observed_seq[key] = refreshed.observed_seq
     sweep.phase[key] = refreshed.phase
-    res = _due_check(home, key, refreshed, sweep.now)
+    res = _due_check(home, key, refreshed, sweep.now, cfg)
     if res.due:
         sweep.due.append((key, res.reason))
     return True
@@ -4451,7 +4467,7 @@ def _route_allowlist_answer(sweep: _Sweep, key: str, snap, due_reason: str) -> b
     sweep.phase[key] = refreshed.phase
     decisions = sweep.decisions
     decisions[key] = {"outcome": "allowlist_answered", "reason": reason, "qid": qids}
-    res = _due_check(home, key, refreshed, sweep.now)
+    res = _due_check(home, key, refreshed, sweep.now, sweep.cfg)
     if res.due:
         sweep.due.append((key, res.reason))
     return True

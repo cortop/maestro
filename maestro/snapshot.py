@@ -312,6 +312,11 @@ class Snapshot:
     # [repos.<name>] this ticket is bound to, from TicketCreated.repo. None = no
     # explicit binding -- repos.resolve() falls back to the implicit default.
     repo: str | None = None
+    # Cross-ticket stacking: the dependency this ticket was told to start on top of
+    # (TicketStacked), and the outcome once that dependency is done (StackResolved:
+    # "merged" or "unmerged"; None while the stack is live).
+    stacked_on: str | None = None
+    stack_outcome: str | None = None
     # tree_key -> {"command", "exit_code", "passed"}, from TestRunCaptured events
     # (RB-12) -- maestro's own captured proof, never an agent's self-attestation.
     # tree_key is "<HEAD sha>:<hash of the dirty tree>", so a record only ever
@@ -841,6 +846,16 @@ def _fold_finalized(s: Snapshot, p: dict, seq, t: str) -> None:
     s.next_requeue_at = None
 
 
+def _fold_ticket_stacked(s: Snapshot, p: dict, seq, t: str) -> None:
+    s.stacked_on = p.get("dep")
+    s.stack_outcome = None
+
+
+def _fold_stack_resolved(s: Snapshot, p: dict, seq, t: str) -> None:
+    if p.get("dep") == s.stacked_on:
+        s.stack_outcome = p.get("outcome")
+
+
 _FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
     E.TICKET_CREATED: _fold_ticket_created,
     E.REVIEW_ROUND_STARTED: _fold_review_round_started,
@@ -855,6 +870,8 @@ _FOLDERS: dict[str, Callable[[Snapshot, dict, object, str], None]] = {
     E.PR_UPDATED: _fold_pr_updated,
     E.RESTACK_QUEUED: _fold_restack_queued,
     E.RESTACK_COMPLETED: _fold_restack_completed,
+    E.TICKET_STACKED: _fold_ticket_stacked,
+    E.STACK_RESOLVED: _fold_stack_resolved,
     E.CI_OBSERVED: _fold_ci_observed,
     E.CI_RERUN_REQUESTED: _fold_ci_rerun_requested,
     E.REVIEW_FEEDBACK_RECEIVED: _fold_review_feedback_received,
