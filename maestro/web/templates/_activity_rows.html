@@ -1,0 +1,5 @@
+{% for r in rows %}
+<tr class="event" data-key="{{ r.key }}" data-seq="{{ r.seq }}" data-cat="{{ r.cat }}"><td class="ts">{{ r.ts[:19] }}</td><td class="key"><a href="/t/{{ r.key }}">{{ r.key }}</a></td><td class="mono">{{ r.type }}</td><td class="now">{{ r.summary }}</td></tr>
+{% else %}
+<tr><td colspan="4">no events match</td></tr>
+{% endfor %}

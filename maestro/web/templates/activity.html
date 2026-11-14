@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}maestro activity{% endblock %}
+{% block body %}
+<section class="hero">
+  <div class="hero-main">
+    <p class="kicker">&gt; activity // recent events across every ticket, newest first</p>
+    <h1>Activity</h1>
+  </div>
+</section>
+<nav id="filters" aria-label="Activity categories">
+  {% for t in toggles %}
+  <a href="/activity{% if t.qs %}?{{ t.qs }}{% endif %}" data-cat="{{ t.n }}"{% if t.on %} class="active" aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>{{ t.name }}</a>
+  {% endfor %}
+</nav>
+<form id="activity-filter" method="get" action="/activity">
+  {% for n in cats|sort %}{% if cats|length != toggles|length %}<input type="hidden" name="cat" value="{{ n }}">{% endif %}{% endfor %}
+  <input type="search" name="q" value="{{ q }}" placeholder="filter by key, type or summary" aria-label="Filter text">
+  <button type="submit" class="btn btn-sm btn-secondary">Filter</button>
+  <button type="button" id="activity-pause" class="btn btn-sm btn-ghost" data-pause-label="Pause" data-resume-label="Resume" aria-pressed="false">Pause</button>
+</form>
+<div class="frame board-frame">
+<table id="activity" class="ledger">
+  <thead><tr><th scope="col">Time</th><th scope="col">Ticket</th><th scope="col">Type</th><th scope="col">Summary</th></tr></thead>
+  <tbody id="activity-rows" hx-get="/activity/rows{% if qs %}?{{ qs }}{% endif %}" hx-trigger="sse:board[!window.maestroActivityPaused]" hx-swap="innerHTML">
+    {% include "_activity_rows.html" %}
+  </tbody>
+</table>
+</div>
+<script src="/static/activity.js" defer></script>
+{% endblock %}

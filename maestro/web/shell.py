@@ -13,7 +13,7 @@ from ..config import Config
 from ..view import board as board_view
 from .guard import WriteGuard
 
-NAV = (("now", "Now", "/"), ("tickets", "Tickets", "/tickets"), ("fleet", "Fleet", "/fleet"))
+NAV = (("now", "Now", "/"), ("tickets", "Tickets", "/tickets"), ("activity", "Activity", "/activity"), ("fleet", "Fleet", "/fleet"))
 
 
 class Shell:
@@ -57,6 +57,7 @@ class Shell:
                        "now": {"count": needs, "alert": needs > 0,
                                "sub": f"{needs} need you" if needs != 1 else "1 needs you"},
                        "tickets": {"count": st["tickets"], "alert": False, "sub": f"{st['tickets']} tickets"},
+                       "activity": {"count": 0, "alert": False, "sub": "recent events"},
                        "fleet": {"count": 0, "alert": False, "sub": st["state"]}},
                    **ctx}
         ctx = {"home": str(self.home.resolve()), "nav": nav, "nav_items": NAV,
