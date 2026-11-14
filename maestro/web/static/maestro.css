@@ -289,6 +289,26 @@ nav#filters #needs-you-count { margin-left: auto; align-self: center; font: 700 
 .live-round { margin-top: 14px; }
 .doc { margin: 16px 0 0; padding: 16px; background: var(--panel); border: 1px solid var(--line-2); color: var(--soft);
   font: 500 13px/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.doc.md { font: 500 15px/1.55 var(--font-ui); white-space: normal; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.4em 0 .5em; color: var(--text); font: 700 1.15em/1.25 var(--font-display); }
+.md h1 { font-size: 1.5em; color: var(--gold); }
+.md h2 { font-size: 1.25em; color: var(--cyan); padding-bottom: 4px; border-bottom: 1px solid var(--line-2); }
+.md p, .md ul, .md ol, .md blockquote, .md table, .md pre { margin: 0 0 .9em; }
+.md ul, .md ol { padding-left: 1.6em; }
+.md li { margin: .2em 0; }
+.md li.task { list-style: none; margin-left: -1.3em; }
+.md li.task input { margin-right: .5em; accent-color: var(--cyan); }
+.md code { padding: 1px 5px; background: var(--strip); border: 1px solid var(--line); color: var(--gold); font-size: .9em; }
+.md pre { padding: 12px; overflow-x: auto; background: var(--ground); border: 1px solid var(--line-2); }
+.md pre code { padding: 0; border: 0; background: none; color: var(--soft); font-size: 13px; }
+.md blockquote { padding-left: 12px; border-left: 3px solid var(--line-3); color: var(--dim); }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md th, .md td { padding: 6px 12px; border: 1px solid var(--line-2); text-align: left; }
+.md th { background: var(--strip); color: var(--text); }
+.md a { color: var(--cyan); overflow-wrap: anywhere; }
+.md hr { border: 0; border-top: 1px solid var(--line-2); margin: 1.2em 0; }
 #events { font: 500 12px var(--font-mono); }
 #events td { padding: 8px 10px; overflow-wrap: anywhere; }
 #events td:nth-child(1), #events td:nth-child(2) { color: var(--dim); white-space: nowrap; }

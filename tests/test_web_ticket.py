@@ -28,7 +28,7 @@ def test_detail_has_ac_matrix_spec_proposal_and_dwell(client):
     assert 'id="ac-matrix"' in html and 'id="phase-rail"' in html
     assert "implementing" in html
     assert 'sse:ticket:T-7"' in html
-    assert "## Intent" in client.get("/t/T-7/spec").text
+    assert "<h2>Intent</h2>" in client.get("/t/T-7/spec").text
     assert "the proposal" in client.get("/t/T-7/proposal").text
 
 

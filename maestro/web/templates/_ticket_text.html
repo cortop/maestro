@@ -1,1 +1,1 @@
-<pre id="{{ id }}" class="doc">{{ text or "(none)" }}</pre>
+<div id="{{ id }}" class="doc md">{% if text and text.strip() %}{{ text|markdown }}{% else %}(none){% endif %}</div>

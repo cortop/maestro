@@ -5,7 +5,7 @@
 {% macro open_if(name) %}{{ " open" if spec_error and spec_error.form == name }}{% endmacro %}
 {% macro post(action) %}hx-post="/t/{{ key }}/spec/{{ action }}" hx-target="#panel-spec" hx-swap="innerHTML"{% endmacro %}
 <div id="spec-tab">
-<pre id="spec" class="doc">{{ text or "(none)" }}</pre>
+<div id="spec" class="doc md">{% if text and text.strip() %}{{ text|markdown }}{% else %}(none){% endif %}</div>
 {% if spec_notice %}<p class="dim" id="spec-notice" role="status">{{ spec_notice }}</p>{% endif %}
 {% if can_write %}
 <div class="panel"><div class="panel-head">Edit spec</div>

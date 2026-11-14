@@ -39,7 +39,7 @@ def test_tabs_sit_over_existing_fragments(client):
                        ("Events", "events"), ("Sessions", "logs")):
         assert f">{label}</label>" in html
         assert f'hx-get="/t/T-9/{url}"' in html
-    assert "## Intent" in client.get("/t/T-9/spec").text
+    assert "<h2>Intent</h2>" in client.get("/t/T-9/spec").text
     assert "prop &lt;i&gt;x&lt;/i&gt;" in client.get("/t/T-9/proposal").text
     assert 'id="event-rows"' in client.get("/t/T-9/events").text
     assert client.get("/t/T-9/logs").status_code == 200
