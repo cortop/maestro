@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import claims, event_log, fleet, gates, ops, steplog, store
+from .. import claims, depgraph, event_log, fleet, gates, ops, steplog, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import events as ev_view
 from ..view import evidence as evidence_view
@@ -18,6 +18,12 @@ from ..view import ticket as ticket_view
 from ..view import why as why_view
 from . import routes_spec
 from .shell import Shell
+
+
+def blocked_by(home, key: str) -> list[dict]:
+    """The open tickets whose dependsOn names *key* (key order), as ``{key, phase}`` dicts."""
+    g = depgraph.build(home)
+    return [{"key": k, "phase": g.nodes[k].phase} for k in g.dependents.get(key, [])]
 
 
 def head_ctx(shell: Shell, key: str, **extra) -> dict:
@@ -42,6 +48,7 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
             "can_release": fleet.hold_state(home, key, now) is not None,
             "can_stop": can_stop, "threads": rounds_view.review_threads(events),
             "ci_timeline": evidence_view.ci_timeline(events), "questions": questions,
+            "blocks": blocked_by(home, key),
             "can_degraded_act": snap.phase == "degraded", **extra}
 
 
