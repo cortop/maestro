@@ -40,6 +40,25 @@ def pulse(home: Path, cfg: Config, now: float | None = None) -> dict:
 
 
 
+def quick_report(home: Path, cfg: Config, now: float | None = None) -> dict:
+    """The doctor-payload fields that cost no probe (spawn rate, spend, heartbeat, dead letters),
+    shaped like `health.report` but without ``checks`` and with ``stale`` unknown (``None``)."""
+    now = store.now_epoch() if now is None else now
+    rate = health.spawn_rate(home, now)
+    budget = health.spawn_budget(cfg)
+    sp = spend_mod.status(cfg, now)
+    dl_dir = home / "tickets" / "_deadletter"
+    dead = sorted(p.stem for p in dl_dir.glob("*.md")) if dl_dir.exists() else []
+    return {
+        "spawns_last_hour": rate, "spawn_rate_unit": health.SPAWN_RATE_UNIT,
+        "spawn_budget_per_hour": budget, "spawn_floor_s": dispatcher.spawn_floor(cfg),
+        "runaway": bool(budget) and rate["total"] > budget,
+        "spend_today_usd": sp["today_usd"], "spend_ceiling_usd": sp["ceiling_usd"],
+        "spend_unavailable": sp["unavailable"], "dead_letters": dead, "stale": None,
+        "rate_limit": ratelimit.status(home, now),
+    }
+
+
 def session_rows(home: Path, cfg: Config, now: float | None = None) -> list[dict]:
     """One row per live claim: key, round label, live tool line, runner, pid, age and the
     session's cost. ``cost`` is ``None`` (absent, never zero) until its log carries a result."""

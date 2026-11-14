@@ -62,6 +62,7 @@ from ..dispatcher import spec_runner
 from ..sessions import list_pruned
 from ..sessions import list_sessions
 from ..statemachine import Phase
+from ..view import fleet as fleet_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
@@ -109,7 +110,7 @@ from .render import _fmt_epoch
 from .render import _nudge_toast
 from .render import _render_dep_header
 from .render import _render_env
-from .render import _render_fleet
+from .render import _render_fleet_painted
 from .render import _render_mask_logo
 
 
@@ -697,6 +698,8 @@ class FleetScreen(Screen):
         self._home = home
         self._status: dict = {}
         self._doctor: dict = {}
+        self._quick: dict = {}
+        self._doctor_pending = False
         self._show_ok = False
         self._rows: dict[str, dict] = {}  # check name -> check, as last rendered
 
@@ -712,32 +715,56 @@ class FleetScreen(Screen):
         table = self.query_one("#fleet-checks", DataTable)
         table.add_columns("Status", "Check", "Detail")
         table.focus()
-        self._refresh_worker()
+        cache = getattr(self.app, "_doctor_cache", None)
+        if cache is not None:
+            self._doctor = cache[0]
+            self._populate_checks()
+        self._refresh_worker(force_doctor=True)
         # health.report() shells out to gh/launchctl/worktree probes and can run past
-        # 10s; a shorter interval than that keeps cancelling it via exclusive=True
-        # before it ever reaches SUCCESS, so #fleet-status never leaves "Loading…".
+        # 10s; the interval tick leaves a still-running doctor worker alone so it reaches
+        # SUCCESS, while the status part repaints on its own, fast worker.
         self.set_interval(20.0, self._refresh_worker)
 
     # --- workers (run in threads so the event loop stays free) ---------------
 
-    def _refresh_worker(self) -> None:
+    def _refresh_worker(self, force_doctor: bool = False) -> None:
+        """Status and the probe-free doctor fields land first; the doctor run follows."""
         self.run_worker(self._load_status, thread=True, group="refresh", exclusive=True,
                         name="fleet-refresh")
+        if force_doctor or not self._doctor_pending:
+            self._doctor_pending = True
+            self.run_worker(self._load_doctor, thread=True, group="refresh-doctor",
+                            exclusive=True, name="fleet-doctor")
 
     def _load_status(self) -> tuple[dict, dict]:
         status = fleet_mod.status(self._home)
+        cfg = config_mod.load(str(self._home))
+        return status, fleet_view.quick_report(self._home, cfg)
+
+    def _load_doctor(self) -> tuple[dict, float]:
         now = store.now_epoch()
         doctor = health.report(config_mod.load(str(self._home)), now)
         doctor["rate_limit"] = ratelimit.status(self._home, now)
-        return status, doctor
+        return doctor, now
+
+    def _paint_status(self) -> None:
+        if not self._status:
+            return
+        cache = getattr(self.app, "_doctor_cache", None)
+        self.query_one("#fleet-status", Static).update(_render_fleet_painted(
+            self._status, self._quick, cache, self._doctor_pending, store.now_epoch()))
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.state == WorkerState.SUCCESS:
             if event.worker.name == "fleet-refresh":
-                self._status, self._doctor = event.worker.result
-                self.query_one("#fleet-status", Static).update(
-                    _render_fleet(self._status, self._doctor)
-                )
+                self._status, self._quick = event.worker.result
+                self._paint_status()
+                self.refresh_bindings()
+            elif event.worker.name == "fleet-doctor":
+                self._doctor_pending = False
+                self._doctor, _at = event.worker.result
+                self.app._doctor_cache = event.worker.result
+                self._paint_status()
                 self._populate_checks()
                 self.refresh_bindings()
             elif event.worker.name in self._MUTATIONS:
@@ -751,6 +778,8 @@ class FleetScreen(Screen):
                 self._log(f"backup written: {rich_escape(str(event.worker.result))}")
                 self._refresh_worker()
         elif event.state == WorkerState.ERROR:
+            if event.worker.name == "fleet-doctor":
+                self._doctor_pending = False
             self._log(f"[red]{event.worker.name} failed: {rich_escape(str(event.worker.error))}[/red]")
             if event.worker.name in self._MUTATIONS:
                 self._after_mutation()
@@ -918,7 +947,7 @@ class FleetScreen(Screen):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "clear_rate_limit":
-            return bool((self._doctor.get("rate_limit") or {}).get("paused"))
+            return bool((self._quick.get("rate_limit") or self._doctor.get("rate_limit") or {}).get("paused"))
         return True
 
     def action_clear_rate_limit(self) -> None:
@@ -940,7 +969,7 @@ class FleetScreen(Screen):
     # --- key actions ---------------------------------------------------------
 
     def action_refresh_status(self) -> None:
-        self._refresh_worker()
+        self._refresh_worker(force_doctor=True)
 
     def action_backups(self) -> None:
         self.app.push_screen(BackupsScreen(self._home))

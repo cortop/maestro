@@ -91,8 +91,9 @@
 
   <div class="col fleet-col">
     <div class="panel">
-      <div class="panel-head split"><h2 class="panel-title">Doctor</h2><span class="panel-note">problems first</span></div>
-      {% if doctor is none %}<div class="panel-body"><p class="mono" id="doctor-unknown">unknown</p></div>
+      <div class="panel-head split"><h2 class="panel-title">Doctor</h2><span class="panel-note" id="doctor-age"{% if doctor_refreshing %} hx-get="/fleet/panels" hx-trigger="load delay:2s" hx-target="#fleet" hx-swap="innerHTML"{% endif %}>{% if doctor_age is not none %}checked {{ doctor_age|dur }} ago{% if doctor_refreshing %} · refreshing…{% endif %} · {% endif %}problems first</span></div>
+      {% if doctor_running %}<div class="panel-body"><p class="mono" id="doctor-running" hx-get="/fleet/panels" hx-trigger="load delay:2s" hx-target="#fleet" hx-swap="innerHTML">doctor run in progress…</p></div>
+      {% elif doctor is none %}<div class="panel-body"><p class="mono" id="doctor-unknown">unknown</p></div>
       {% else %}
       <ul class="checks" id="doctor-problems">
         {% for r in problems %}<li class="check-{{ r.status }}"><span class="tag">{{ r.status }}</span><span class="check-body"><b>{{ r.name }}</b> <span class="detail">{{ r.detail }}</span></span></li>{% endfor %}

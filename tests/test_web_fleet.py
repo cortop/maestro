@@ -29,6 +29,8 @@ def _heartbeat(home):
 
 def _get(home, path="/fleet"):
     with TestClient(create_app(home)) as c:
+        c.get(path)  # starts the off-request doctor run
+        c.app.state.fleet_doctor.join()
         return c.get(path)
 
 
