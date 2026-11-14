@@ -78,6 +78,12 @@ CI_RERUN_REQUESTED = "CiRerunRequested"  # {head_sha, run_ids, at}
 RESTACK_QUEUED = "RestackQueued"        # {stack_index}
 RESTACK_COMPLETED = "RestackCompleted"  # {stack_index, retargeted: [{number, base}, ...]}
 
+# Cross-ticket stacking: `maestro stack` records that a ticket starts on its single
+# unfinished dependency's branch; `dispatcher.sync_stacks` records the resolution once
+# that dependency is done (merged -> retarget + sync, otherwise -> ask a human).
+TICKET_STACKED = "TicketStacked"        # {dep}
+STACK_RESOLVED = "StackResolved"        # {dep, outcome: "merged"|"unmerged", retargeted?}
+
 # Self-review
 AC_VERIFIED = "AcVerified"              # {ac_hash, ac_index, ac_text, evidence}  evidence: {what, where, result}; content-hash keyed
 
@@ -185,4 +191,5 @@ CHECKED = "Checked"                     # {}  reconciler ran to completion, corr
 
 # Side-effecting events whose presence (by step_id) means the external action
 # already happened — used to make re-spawn after a crash idempotent.
-SIDE_EFFECTING = frozenset({PR_OPENED, PR_UPDATED, FINALIZED, QUESTION_ASKED, RESTACK_COMPLETED})
+SIDE_EFFECTING = frozenset({PR_OPENED, PR_UPDATED, FINALIZED, QUESTION_ASKED, RESTACK_COMPLETED,
+                            STACK_RESOLVED})

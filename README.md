@@ -95,6 +95,13 @@ maestro answer T-1                 # scope to one ticket
 maestro ans T-1 "yes, go ahead"    # non-interactive: answer by key+text directly
 ```
 
+Start a ticket now instead of waiting for its one unfinished dependency; it branches from the
+dependency's branch (once pushed) and opens its PR against it, stays a draft until the dependency
+merges, then retargets to the base branch and syncs by merging it:
+```bash
+maestro stack T-2
+```
+
 ## Guarantees (all covered by tests)
 
 - **Idempotent:** two reconcilers racing on the same log produce one event (content-derived step-ids).

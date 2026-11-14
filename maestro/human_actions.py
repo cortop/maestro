@@ -1,4 +1,4 @@
-"""Human actions (answer, message, retry, discard, hold, release, stop, pause, resume, create-pending-review) shared by the TUI, CLI and web UI."""
+"""Human actions (answer, message, retry, discard, hold, release, stop, pause, resume, create-pending-review, stack) shared by the TUI, CLI and web UI."""
 from __future__ import annotations
 
 import re
@@ -103,6 +103,12 @@ def pause(home: Path, *, until: float | None = None, reason: str | None = None) 
 def resume(home: Path) -> dict:
     """Resume a paused fleet."""
     return fleet.resume(home)
+
+
+def stack(cfg: Config, key: str) -> dict:
+    """Start *key* on its single unfinished dependency's branch; idempotent, refuses with a reason."""
+    from . import stacking
+    return stacking.stack(cfg, key)
 
 
 def create_pending_review(cfg: Config, key: str, findings: list[dict], *, vcs=None) -> dict:
