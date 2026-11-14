@@ -1,6 +1,8 @@
 """Command palette fragment of `maestro web`: the entries valid right now, grouped for the script."""
 from __future__ import annotations
 
+import re
+
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 
@@ -18,8 +20,8 @@ def _go(label: str, href: str, hint: str = "", keys: str = "") -> dict:
     return {"label": label, "href": href, "hint": hint, "tui": keys, "text": f"{label} {keys}"}
 
 
-def _post(label: str, url: str, keys: str = "") -> dict:
-    return {"label": label, "post": url, "tui": keys, "hint": "", "text": label}
+def _post(label: str, url: str, keys: str = "", aliases: str = "") -> dict:
+    return {"label": label, "post": url, "tui": keys, "hint": "", "text": f"{label} {aliases}".strip()}
 
 
 def ticket_entries(shell: Shell, key: str) -> list[dict]:
@@ -66,15 +68,33 @@ def new_entries(shell: Shell) -> list[dict]:
             _go("Import from Linear", "/new#new-import", "import an issue", "L")]
 
 
+def _natural_key(key: str) -> tuple:
+    """Sort key splitting digit runs so `T-10` orders after `T-9`."""
+    return tuple((0, int(part), "") if part.isdigit() else (1, 0, part)
+                 for part in re.findall(r"\d+|\D+", key))
+
+
+def ticket_jump_entries(shell: Shell) -> list[dict]:
+    """Ticket jumps: every non-terminal ticket, then terminal ones up to `MAX_TICKETS`; natural key descending."""
+    terminal = {p.value for p in TERMINAL_PHASES}
+    snaps = sorted(projection.load_snapshots(shell.home), key=lambda s: _natural_key(s.key), reverse=True)
+    live = [s for s in snaps if s.phase not in terminal]
+    done = [s for s in snaps if s.phase in terminal]
+    snaps = live + done[:max(0, MAX_TICKETS - len(live))]
+    return [_go(f"{s.key} {s.title}", f"/t/{s.key}", s.phase) for s in snaps]
+
+
 def goto_entries(shell: Shell, current: str | None) -> list[dict]:
     home = shell.home
-    out = [_go("Go to needs you", "/tickets?filter=needs-you", keys="f")]
+    out = [_go("Now", "/", "the board"), _go("Tickets", "/tickets", "all tickets")]
+    for name in board_view.FILTER_NAMES:
+        if name == "needs-you":
+            out.append(_go("Go to needs you", f"/tickets?filter={name}", keys="f"))
+        else:
+            out.append(_go(f"Tickets: {name}", f"/tickets?filter={name}", "board filter"))
     running = sorted(board_view.running_keys(home, shell.cfg()) - {current})
     if running:
         out.append(_go(f"Go to next running ticket ({running[0]})", f"/t/{running[0]}", keys="j"))
-    snaps = sorted(projection.load_snapshots(home), key=lambda s: s.key)[:MAX_TICKETS]
-    for s in snaps:
-        out.append(_go(f"{s.key} {s.title}", f"/t/{s.key}", s.phase))
     return out
 
 
@@ -86,8 +106,8 @@ def fleet_entries(shell: Shell) -> list[dict]:
         out.append(_post("Pause fleet", "/fleet/pause", "P"))
     else:
         out.append(_post("Resume fleet", "/fleet/resume", "P"))
-    out.append(_post("Re-run doctor", "/fleet/doctor"))
-    out.append(_post("Back up now", "/fleet/backup"))
+    out.append(_post("Re-run doctor", "/fleet/doctor", aliases="health check"))
+    out.append(_post("Back up now", "/fleet/backup", aliases="backup snapshot"))
     out.append(_go("Fleet up", "/fleet#fleet-actions", "confirm on the Fleet page"))
     out.append(_go("Fleet down", "/fleet#fleet-actions", "confirm on the Fleet page"))
     out.append(_post("Sweep now", "/fleet/sweep"))
@@ -108,7 +128,7 @@ def register(app: FastAPI, shell: Shell) -> None:
         groups = []
         if on_ticket:
             groups.append((f"{key} actions", ticket_entries(shell, key)))
-        groups.append(("New", new_entries(shell)))
-        groups.append(("Go to", goto_entries(shell, key if on_ticket else None)))
+        groups.append(("Go to", goto_entries(shell, key if on_ticket else None) + new_entries(shell)))
         groups.append(("Fleet", fleet_entries(shell)))
+        groups.append(("Tickets", ticket_jump_entries(shell)))
         return shell.render(request, "_palette.html", groups=[g for g in groups if g[1]])
