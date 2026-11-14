@@ -15,6 +15,7 @@ from ..view import proposal as proposal_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
+from ..view import why as why_view
 from . import routes_spec
 from .shell import Shell
 
@@ -36,6 +37,7 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
     return {"t": tv, "key": key, "priority": gates.spec_priority(home, key),
             "repo": tv.snap.repo or "default", "runner": runner,
             "card": ticket_view.dispatch_card(home, key, tv.snap, cfg, now),
+            "decisions": list(reversed(why_view.load_decisions(home, key))),
             "can_message": live, "can_hold": live and fleet.hold_state(home, key, now) is None,
             "can_release": fleet.hold_state(home, key, now) is not None,
             "can_stop": can_stop, "threads": rounds_view.review_threads(events),

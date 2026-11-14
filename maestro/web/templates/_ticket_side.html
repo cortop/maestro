@@ -1,3 +1,4 @@
+{% import "_actions.html" as act %}
 {% macro verdict(v) -%}
 <span class="verdict{% if v != "—" %} v-{{ v|lower|replace(" ", "-") }}{% endif %}">{{ v }}</span>
 {%- endmacro %}
@@ -32,6 +33,24 @@
     <dt>Throttle</dt><dd>{{ card.throttle }}</dd>
     <dt>Depends on</dt><dd>{% for d in card.open_deps %}<a href="/t/{{ d.key }}">{{ d.key }}</a> ({{ d.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
   </dl></div>
+  {% if sweep_result %}<div class="panel-body"><p id="sweep-result" role="status">{{ sweep_result }}</p></div>{% endif %}
+  {% if can_write %}<div class="panel-body">
+  {{ act.error(action_error, key) }}
+  <details class="confirm">
+    <summary class="btn btn-secondary">Run a sweep for this ticket</summary>
+    <div class="confirm-body"><p>Run a real dispatch sweep for {{ key }} only? It may spawn a session.</p>
+    <form class="act-form" hx-post="/t/{{ key }}/sweep" hx-target="#ticket-side" hx-swap="innerHTML">
+      <input type="hidden" name="confirm" value="1">
+      <button type="submit" class="btn btn-primary">Confirm sweep</button>
+    </form></div>
+  </details></div>{% endif %}
+</div>
+<div class="panel" id="decision-history">
+  <div class="panel-head">Recent dispatcher decisions</div>
+  <ul class="rows">
+    {% for d in decisions %}<li class="meta"><span>{{ ((d.ts or "")[:19])|replace("T", " ") }}</span> <span class="grow">{{ d.outcome }}{% if d.reason %} — {{ d.reason }}{% endif %}{% if d.hook_errors %} · hook errors: {% for n, e in d.hook_errors.items() %}{{ n }}: {{ e }}{{ "; " if not loop.last }}{% endfor %}{% endif %}</span></li>
+    {% else %}<li class="meta dim">no dispatcher decisions recorded</li>{% endfor %}
+  </ul>
 </div>
 {% set pr_link = t.snap.pr_url and t.snap.pr_url.startswith("https:") %}
 <div class="panel" id="pr-card">
