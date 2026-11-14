@@ -41,7 +41,7 @@ def test_cards_and_edges_follow_the_layout(home, cfg):
     lay = deps_layout.layout(deps_view.build(home, cfg).graph)
     cards = re.findall(r'<a class="dep-node ([^"]*)" href="[^"]*" hx-get="[^"]*" hx-target="#deps-page" '
                        r'hx-select="#deps-page" hx-swap="outerHTML" hx-push-url="true" '
-                       r'data-key="([^"]+)" '
+                       r'data-key="([^"]+)" [^>]*?'
                        r'style="left: ([\d.]+)px;[^"]*"', html)
     assert [k for _, k, _ in cards] == [c.key for c in lay.cards] == ["T-1", "T-2", "T-3"]
     for (cls, key, left), card in zip(cards, lay.cards):
@@ -50,7 +50,7 @@ def test_cards_and_edges_follow_the_layout(home, cfg):
     assert re.search(r'data-key="T-1".*?<span class="chip chip-you">Needs you</span>', html, re.S)
     assert re.search(r'data-key="T-2".*?<span class="chip chip-queued">Queued</span>', html, re.S)
     assert '<span class="dep-out">2</span>' in html  # T-1 has two tickets behind it
-    paths = re.findall(r'<g class="dep-edge k-(\w+)"><path class="dep-edge-line" d="([^"]+)">'
+    paths = re.findall(r'<g class="dep-edge k-(\w+)" data-s="[^"]*" data-t="[^"]*"><path class="dep-edge-line" d="([^"]+)">'
                        r'</path><path class="dep-edge-head" d="([^"]+)">', html)
     assert paths == [(e.kind, e.d, e.head) for e in lay.edges] and len(paths) == 2
     assert '<svg class="dep-edges"' in html

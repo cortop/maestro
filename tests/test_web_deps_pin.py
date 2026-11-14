@@ -47,7 +47,7 @@ def drawn(html, key):
 
 
 def edge_classes(html):
-    return re.findall(r'<g class="dep-edge k-\w+ ?([^"]*)">', html)
+    return re.findall(r'<g class="dep-edge k-\w+ ?([^"]*)" data-s=', html)
 
 
 def query(href):

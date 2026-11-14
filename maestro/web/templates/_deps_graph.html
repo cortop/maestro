@@ -10,25 +10,25 @@
     <div class="dep-stage" style="height: {{ '%g'|format(stage_h) }}px; background-size: {{ bg_w }}px 100%; background-position: {{ '%g'|format(bg_x) }}px 0">
       <svg class="dep-edges" width="{{ '%g'|format(lay.width) }}" height="{{ '%g'|format(stage_h) }}" aria-hidden="true">
         {% for e, ecls in edges %}
-        <g class="dep-edge k-{{ e.kind }}{% if ecls %} {{ ecls }}{% endif %}"><path class="dep-edge-line" d="{{ e.d }}"></path><path class="dep-edge-head" d="{{ e.head }}"></path></g>
+        <g class="dep-edge k-{{ e.kind }}{% if ecls %} {{ ecls }}{% endif %}" data-s="{{ e.source }}" data-t="{{ e.target }}"><path class="dep-edge-line" d="{{ e.d }}"></path><path class="dep-edge-head" d="{{ e.head }}"></path></g>
         {% endfor %}
       </svg>
       {% for c in lay.ghosts %}
       {% if c.kind == "missing" %}
-      <a class="dep-ghost k-missing{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.pin(c.id)) }} style="{{ box(c) }}"><span class="dep-key">{{ c.key }}</span><span class="dep-ghost-note">no such ticket</span></a>
+      <a class="dep-ghost k-missing{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.pin(c.id)) }} data-id="{{ c.id }}" data-deps="" style="{{ box(c) }}"><span class="dep-key">{{ c.key }}</span><span class="dep-ghost-note">no such ticket</span></a>
       {% else %}
-      <a class="dep-ghost k-done{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.pin(c.id)) }} style="{{ box(c) }}"><svg class="dep-check" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 L5 9.5 L10 3"></path></svg><span class="dep-key">{{ c.key }}</span><span class="dep-ghost-note">{{ "archived" if archived.get(c.key) else "done" }}</span></a>
+      <a class="dep-ghost k-done{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.pin(c.id)) }} data-id="{{ c.id }}" data-deps="" style="{{ box(c) }}"><svg class="dep-check" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 L5 9.5 L10 3"></path></svg><span class="dep-key">{{ c.key }}</span><span class="dep-ghost-note">{{ "archived" if archived.get(c.key) else "done" }}</span></a>
       {% endif %}
       {% endfor %}
       {% for c in lay.stacks %}
       {% if c.kind == "fold" %}
-      <a class="dep-stack k-fold{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.url(open=p.open|reject("equalto", c.parent)|list)) }} style="{{ box(c) }}"><b>Fold</b><span class="dep-stack-sub">{{ c.keys|length }} wait only on {{ c.parent }}</span></a>
+      <a class="dep-stack k-fold{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.url(open=p.open|reject("equalto", c.parent)|list)) }} data-id="{{ c.id }}" data-deps="{{ c.parent }}" data-find="{% for k in c.keys %}{{ k }} {{ dv.tickets[k].title }} {% endfor %}" style="{{ box(c) }}"><b>Fold</b><span class="dep-stack-sub">{{ c.keys|length }} wait only on {{ c.parent }}</span></a>
       {% else %}
-      <a class="dep-stack k-{{ c.kind }}{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.url(open=p.open + (c.parent,))) }} style="{{ box(c) }}"><b>+{{ c.keys|length }} more</b><span class="dep-stack-sub">wait only on {{ c.parent }}</span></a>
+      <a class="dep-stack k-{{ c.kind }}{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.url(open=p.open + (c.parent,))) }} data-id="{{ c.id }}" data-deps="{{ c.parent }}" data-find="{% for k in c.keys %}{{ k }} {{ dv.tickets[k].title }} {% endfor %}" style="{{ box(c) }}"><b>+{{ c.keys|length }} more</b><span class="dep-stack-sub">wait only on {{ c.parent }}</span></a>
       {% endif %}
       {% endfor %}
       {% for c in lay.cards %}{% set t = dv.tickets[c.key] %}
-      <a class="dep-node g-{{ t.group }}{% if t.in_cycle %} is-cycle{% endif %}{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.pin(c.id)) }} data-key="{{ c.key }}" style="{{ box(c) }}" title="{{ c.key }} · {{ t.phase }} · {{ t.title }}">
+      <a class="dep-node g-{{ t.group }}{% if t.in_cycle %} is-cycle{% endif %}{% if compact %} is-compact{% endif %}{% if state.get(c.id) %} {{ state[c.id] }}{% endif %}" {{ p.link(p.pin(c.id)) }} data-key="{{ c.key }}" data-id="{{ c.id }}" data-deps="{{ deps_of[c.id]|join(' ') }}" data-lane="{{ c.lane }}" data-row="{{ rows[c.key] }}" style="{{ box(c) }}" title="{{ c.key }} · {{ t.phase }} · {{ t.title }}">
         <span class="dep-node-in">
           <span class="dep-node-top">
             {% if t.in_cycle %}<svg class="dep-loop" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 7 A5 5 0 0 0 4 4.5 M3 9 A5 5 0 0 0 12 11.5 M4 1.5 V4.5 H7 M12 14.5 V11.5 H9"></path></svg>{% endif %}
