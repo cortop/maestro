@@ -20,6 +20,24 @@
     {% else %}
     <button class="btn btn-primary" hx-post="/fleet/resume" hx-target="#fleet" hx-swap="innerHTML">Resume fleet</button>
     {% endif %}
+    <details class="write">
+      <summary class="btn btn-secondary">Fleet up…</summary>
+      <form hx-post="/fleet/up" hx-target="#fleet" hx-swap="innerHTML" id="up-form">
+        <input type="hidden" name="confirm" value="yes">
+        <p class="dim">Installs and loads the launchd agent for this home.</p>
+        <button class="btn btn-primary" type="submit">Confirm fleet up</button>
+      </form>
+    </details>
+    <details class="write">
+      <summary class="btn btn-danger">Fleet down…</summary>
+      <form hx-post="/fleet/down" hx-target="#fleet" hx-swap="innerHTML" id="down-form">
+        <input type="hidden" name="confirm" value="yes">
+        <p class="dim">Unloads the launchd agent; no further sweeps run on a timer.</p>
+        <button class="btn btn-danger" type="submit">Confirm fleet down</button>
+      </form>
+    </details>
+    <button class="btn btn-primary" hx-post="/fleet/sweep" hx-target="#fleet" hx-swap="innerHTML">Sweep now</button>
+    <button class="btn btn-secondary" hx-post="/fleet/dry-run" hx-target="#fleet" hx-swap="innerHTML">Dry run</button>
     <button class="btn btn-secondary" hx-post="/fleet/doctor" hx-target="#fleet" hx-swap="innerHTML">Run doctor</button>
     <button class="btn btn-secondary" hx-post="/fleet/backup" hx-target="#fleet" hx-swap="innerHTML">Back up now</button>
   {% endif %}</div>
@@ -58,8 +76,10 @@
       {% if not pulse %}<div class="big">unknown</div>
       {% elif pulse.paused_until is not none %}<div class="big bad">limited</div><p class="note">resets in {{ (pulse.paused_until - now)|dur }}</p>
       {% else %}<div class="big ok">clear</div><p class="note">Spawning is open for every runner.</p>{% endif %}
+      {% if can_write and pulse and pulse.paused_until is not none %}<button class="btn btn-secondary btn-sm" id="clear-rate-limit" hx-post="/fleet/clear-rate-limit" hx-target="#fleet" hx-swap="innerHTML">Clear rate limit</button>{% endif %}
       <dl class="kv">
         <dt>Dispatch</dt><dd>{% if paused is not none %}paused{% if paused.get("reason") %}: {{ paused.get("reason") }}{% endif %}{% else %}running{% endif %}</dd>
+        <dt>Launchd</dt><dd id="launchd-state">{% if launchd is none %}unknown{% elif launchd.loaded %}loaded{% else %}not loaded{% endif %}</dd>
         <dt>Heartbeat</dt><dd>{% if hb.get("epoch") %}{{ ago(hb.get("epoch")) }}{% else %}unknown{% endif %}</dd>
       </dl>
     </div>
@@ -143,9 +163,24 @@
         {% if backups is none %}<p class="mono">unknown</p>
         {% else %}
         <p id="backups" class="mono">{{ backups.count }} kept · last {{ ago(backups.last) if backups.last is not none else "never" }}{% if backups.next is not none %} · next in {{ [backups.next - now, 0]|max|dur }}{% endif %}</p>
+        {% if backup_files %}
+        <ul class="rows" id="backup-files">
+          {% for b in backup_files %}<li><span class="grow mono">{{ b.name }}</span><span class="meta dim">{{ ago(b.epoch) if b.epoch is not none else "unknown" }}</span><span class="meta">{% if b.size is none %}—{% else %}{{ "%.1f"|format(b.size / 1024) }} KiB{% endif %}</span></li>{% endfor %}
+        </ul>
+        {% endif %}
         <p class="dim">Restore is deliberate: run <code class="mono" id="restore-cmd">maestro restore</code> on the command line.</p>
         {% endif %}
       </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head split"><h2 class="panel-title">Claims</h2>{% if can_write and claims %}{% if claims|rejectattr("claimed")|list %}<button class="btn btn-secondary btn-sm" id="purge-claims" hx-post="/fleet/purge-claims" hx-target="#fleet" hx-swap="innerHTML">Purge stale</button>{% endif %}{% endif %}</div>
+      {% if claims is none %}<div class="panel-body"><p class="mono" id="claims-unknown">unknown</p></div>
+      {% elif claims %}
+      <ul class="rows" id="claims">
+        {% for c in claims %}<li data-key="{{ c.key }}"><span class="grow key"><a href="/t/{{ c.key }}">{{ c.key }}</a></span><span class="meta mono">pid {{ c.pid if c.pid is not none else "—" }}</span><span class="meta dim">{{ c.age_s|dur if c.age_s is not none else "—" }}</span><span class="meta">{{ c.verdict }}</span></li>{% endfor %}
+      </ul>
+      {% else %}<div class="panel-body"><p class="dim" id="claims-empty">No claims.</p></div>{% endif %}
     </div>
 
     <div class="panel">
