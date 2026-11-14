@@ -6,7 +6,7 @@ import subprocess
 import pytest
 from conftest import add_worktree, git, make_origin_and_repo, seed_phase
 
-from maestro import health, ops
+from maestro import health
 from maestro.config import Config
 from maestro.statemachine import Phase
 from maestro.tui import checks as tui_checks
