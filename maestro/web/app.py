@@ -16,8 +16,8 @@ from .. import config as config_mod
 from .. import store
 from ..config import Config
 from ..view import events as ev_view
-from . import (markdown, routes_actions, routes_activity, routes_board, routes_deps, routes_fleet,
-                routes_new, routes_now, routes_palette, routes_spec, routes_ticket)
+from . import (markdown, routes_actions, routes_activity, routes_board, routes_deps, routes_fleet, routes_new,
+                 routes_now, routes_palette, routes_spec, routes_ticket)
 from .guard import WriteGuard
 from .shell import Shell
 from .stream import Hub
