@@ -172,6 +172,8 @@ def test_pulse_strip_does_not_collapse_filter_bar(seeded_home, no_probe):
         app = _make_app(seeded_home)
         async with app.run_test(size=(120, 40)) as pilot:
             await _pulse_tick(app, pilot)
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
+            await pilot.pause()
             bar = app.query_one("#filter-bar", Static)
             pulse = app.query_one("#pulse", Static)
             header = app.query_one("Header")

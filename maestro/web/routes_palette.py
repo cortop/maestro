@@ -54,6 +54,15 @@ def ticket_entries(shell: Shell, key: str) -> list[dict]:
     return out
 
 
+def new_entries(shell: Shell) -> list[dict]:
+    """Entries that start work; only offered when writes are enabled."""
+    if not shell.guard.writes_enabled:
+        return []
+    return [_go("New ticket", "/new#new-ticket", "queue a ticket", "n"),
+            _go("Review a PR", "/new#new-review", "start a review", "V"),
+            _go("Import from Linear", "/new#new-import", "import an issue", "L")]
+
+
 def goto_entries(shell: Shell, current: str | None) -> list[dict]:
     home = shell.home
     out = [_go("Go to needs you", "/tickets?filter=needs-you", keys="f")]
@@ -89,6 +98,7 @@ def register(app: FastAPI, shell: Shell) -> None:
         groups = []
         if on_ticket:
             groups.append((f"{key} actions", ticket_entries(shell, key)))
+        groups.append(("New", new_entries(shell)))
         groups.append(("Go to", goto_entries(shell, key if on_ticket else None)))
         groups.append(("Fleet", fleet_entries(shell)))
         return shell.render(request, "_palette.html", groups=[g for g in groups if g[1]])

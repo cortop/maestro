@@ -1,0 +1,15 @@
+{# T-259: the answer/message modal. Lives in #modal-host, which no SSE/htmx refresh swaps. #}
+<dialog class="modal" id="action-modal" aria-labelledby="modal-title">
+  <form class="modal-form" hx-post="/t/{{ key }}/{{ action }}" hx-target="{{ target }}" hx-swap="innerHTML">
+    <h2 id="modal-title">{{ title }}</h2>
+    <input type="hidden" name="ctx" value="{{ ctx }}">
+    <input type="hidden" name="modal" value="1">
+    {% if qid %}<input type="hidden" name="qid" value="{{ qid }}">{% endif %}
+    <textarea name="text" rows="10" placeholder="{{ placeholder }}" aria-label="{{ placeholder }}" autofocus>{{ text }}</textarea>
+    {% if error %}<p class="action-error" role="alert">{{ error }}</p>{% endif %}
+    <div class="modal-actions">
+      <button type="submit" class="btn btn-primary">{{ label }}</button>
+      <button type="button" class="btn btn-secondary" data-modal-cancel>Cancel</button>
+    </div>
+  </form>
+</dialog>

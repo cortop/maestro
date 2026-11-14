@@ -16,7 +16,8 @@ from .. import config as config_mod
 from .. import store
 from ..config import Config
 from ..view import events as ev_view
-from . import routes_actions, routes_board, routes_fleet, routes_now, routes_palette, routes_spec, routes_ticket
+from . import (routes_actions, routes_board, routes_fleet, routes_new, routes_now, routes_palette,
+                routes_spec, routes_ticket)
 from .guard import WriteGuard
 from .shell import Shell
 from .stream import Hub
@@ -34,12 +35,12 @@ def _cfg(home: Path) -> Config:
 def create_app(home: Path | str, *, poll_interval: float = 1.0,
                stream_limit: int | None = None, host: str = "127.0.0.1",
                read_only: bool = False, allow_remote_writes: bool = False,
-               nudge_on_action: bool = True, vcs=None,
+               nudge_on_action: bool = True, vcs=None, tracker=None,
                sessions=None, suggest_run=None) -> FastAPI:
     """Build the app over *home*. *stream_limit* ends each `/stream` after that many events
     (tests; a browser stream is unbounded). *nudge_on_action* False skips the dispatch
     sweep an answered or retried ticket otherwise triggers (tests: a live nudge spawns a reconciler).
-    *vcs* replaces the configured VCS provider for the pending-review action (tests).
+    *vcs* replaces the configured VCS provider for the pending-review action (tests). *tracker* replaces the Linear tracker for the import action (tests).
     *sessions* (a session manager) and *suggest_run* (the `claude -p` runner) replace the real
     spawn and model call behind the Spec tab's post-QA and suggest-ACs actions (tests)."""
     home = Path(home)
@@ -68,7 +69,9 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     routes_ticket.register(app, shell)
     routes_fleet.register(app, shell)
     routes_palette.register(app, shell)
-    routes_actions.register(app, shell, routes_actions.default_nudge(shell) if nudge_on_action else None, vcs)
+    nudge = routes_actions.default_nudge(shell) if nudge_on_action else None
+    routes_actions.register(app, shell, nudge, vcs)
+    routes_new.register(app, shell, nudge, vcs, tracker)
     routes_spec.register(app, shell, (lambda: sessions) if sessions is not None else None, suggest_run)
 
     @app.get("/stream", response_class=EventSourceResponse)
