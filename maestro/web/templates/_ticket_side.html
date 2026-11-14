@@ -1,3 +1,4 @@
+{% import "_actions.html" as act %}
 {% macro verdict(v) -%}
 <span class="verdict{% if v != "—" %} v-{{ v|lower|replace(" ", "-") }}{% endif %}">{{ v }}</span>
 {%- endmacro %}
@@ -9,7 +10,12 @@
     <thead><tr><th scope="col">Criterion</th><th scope="col">Agent</th><th scope="col">QA</th><th scope="col">Check</th></tr></thead>
     <tbody>
     {% for a in t.acs %}
-    <tr><td>{{ a.index }}. {{ a.text }}</td>
+    <tr><td><details class="ac-evidence"><summary>{{ a.index }}. {{ a.text }}</summary>
+      <dl class="kv">
+        <dt>Agent</dt><dd>{% if a.self %}what: {{ a.self.what }}<br>where: {{ a.self.where }}<br>result: {{ a.self.result }}{% else %}none{% endif %}</dd>
+        <dt>QA</dt><dd>{% if a.qa_spec %}{{ a.qa_spec.verdict }}<p class="review-text">{{ a.qa_spec.evidence }}</p>{% else %}none{% endif %}</dd>
+        <dt>Check</dt><dd>{% if a.check %}<span class="mono">{{ a.check.command }}</span><br>{{ "passed" if a.check.passed else "failed" }}, exit {{ a.check.exit_code }} · {{ "current" if a.check.current else "stale" }}{% if a.check.failure_excerpt %}<p class="review-text mono">{{ a.check.failure_excerpt }}</p>{% endif %}{% else %}no captured check{% endif %}</dd>
+      </dl></details></td>
       <td>{{ verdict("yes" if a.self else "—") }}</td>
       <td>{{ verdict((a.qa_spec or {}).get("verdict", "—")) }}</td>
       <td>{% if a.check %}{{ verdict(a.check.get("status") or a.check.get("result") or "run") }}{{ "" if a.check.current else " (stale)" }}{% else %}{{ verdict("—") }}{% endif %}</td></tr>
@@ -28,6 +34,24 @@
     <dt>Depends on</dt><dd>{% for d in card.open_deps %}<a href="/t/{{ d.key }}">{{ d.key }}</a> ({{ d.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
     <dt>Blocks</dt><dd id="blocks">{% for b in blocks %}<a href="/t/{{ b.key }}">{{ b.key }}</a> ({{ b.phase }}){{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
   </dl></div>
+  {% if sweep_result %}<div class="panel-body"><p id="sweep-result" role="status">{{ sweep_result }}</p></div>{% endif %}
+  {% if can_write %}<div class="panel-body">
+  {{ act.error(action_error, key) }}
+  <details class="confirm">
+    <summary class="btn btn-secondary">Run a sweep for this ticket</summary>
+    <div class="confirm-body"><p>Run a real dispatch sweep for {{ key }} only? It may spawn a session.</p>
+    <form class="act-form" hx-post="/t/{{ key }}/sweep" hx-target="#ticket-side" hx-swap="innerHTML">
+      <input type="hidden" name="confirm" value="1">
+      <button type="submit" class="btn btn-primary">Confirm sweep</button>
+    </form></div>
+  </details></div>{% endif %}
+</div>
+<div class="panel" id="decision-history">
+  <div class="panel-head">Recent dispatcher decisions</div>
+  <ul class="rows">
+    {% for d in decisions %}<li class="meta"><span>{{ ((d.ts or "")[:19])|replace("T", " ") }}</span> <span class="grow">{{ d.outcome }}{% if d.reason %} — {{ d.reason }}{% endif %}{% if d.hook_errors %} · hook errors: {% for n, e in d.hook_errors.items() %}{{ n }}: {{ e }}{{ "; " if not loop.last }}{% endfor %}{% endif %}</span></li>
+    {% else %}<li class="meta dim">no dispatcher decisions recorded</li>{% endfor %}
+  </ul>
 </div>
 {% set pr_link = t.snap.pr_url and t.snap.pr_url.startswith("https:") %}
 <div class="panel" id="pr-card">
@@ -38,5 +62,10 @@
     {% for c in t.snap.failing_checks %}<li class="meta forced"><span class="grow">{{ c }}</span>{{ verdict("fail") }}</li>{% endfor %}
     <li class="meta"><span class="grow">unresolved reviews</span><span>{{ t.snap.unresolved_reviews }}</span></li>
   </ul>
+  <div class="panel-body" id="pr-threads"><h3 class="panel-title">Review threads</h3>
+    {% for b in threads %}<p class="review-text">{{ b }}</p>{% else %}<p class="dim">no review feedback</p>{% endfor %}</div>
+  <div class="panel-body" id="ci-timeline"><h3 class="panel-title">CI timeline</h3>
+    {% for c in ci_timeline %}<p class="review-text"><span class="mono">{{ c.ts }}</span> {{ verdict(c.state) }}{% if c.failing_checks %} failing: {{ c.failing_checks|join(", ") }}{% endif %}{% if c.failure_excerpt %}
+{{ c.failure_excerpt }}{% endif %}</p>{% else %}<p class="dim">no CI observations</p>{% endfor %}</div>
   {% else %}<div class="panel-body"><p class="dim">no pull request yet</p></div>{% endif %}
 </div>

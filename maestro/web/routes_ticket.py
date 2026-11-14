@@ -6,14 +6,16 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import claims, depgraph, fleet, gates, ops, steplog, store
+from .. import claims, depgraph, event_log, fleet, gates, ops, steplog, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import events as ev_view
+from ..view import evidence as evidence_view
 from ..view import now as now_view
 from ..view import proposal as proposal_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
+from ..view import why as why_view
 from . import routes_spec
 from .shell import Shell
 
@@ -30,6 +32,8 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
     now = store.now_epoch()
     cfg = shell.cfg()
     tv = ticket_view.ticket(home, key, now)
+    events = event_log.read(home, key)
+    tv.acs = ticket_view.ac_matrix(home, key, tv.snap, tv.spec, evidence_view.tree_key(home, key))
     runner = gates.spec_runner(home, key)[0] or cfg.runner
     live = tv.snap.phase not in {p.value for p in TERMINAL_PHASES}
     snap = tv.snap
@@ -39,9 +43,12 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
     return {"t": tv, "key": key, "priority": gates.spec_priority(home, key),
             "repo": tv.snap.repo or "default", "runner": runner,
             "card": ticket_view.dispatch_card(home, key, tv.snap, cfg, now),
+            "decisions": list(reversed(why_view.load_decisions(home, key))),
             "can_message": live, "can_hold": live and fleet.hold_state(home, key, now) is None,
             "can_release": fleet.hold_state(home, key, now) is not None,
-            "can_stop": can_stop, "questions": questions, "blocks": blocked_by(home, key),
+            "can_stop": can_stop, "threads": rounds_view.review_threads(events),
+            "ci_timeline": evidence_view.ci_timeline(events), "questions": questions,
+            "blocks": blocked_by(home, key),
             "can_degraded_act": snap.phase == "degraded", **extra}
 
 
@@ -109,6 +116,12 @@ def register(app: FastAPI, shell: Shell) -> None:
         """The brief and drafted findings of a review ticket; edits live in the browser until sent."""
         require(key)
         return shell.render(request, "_ticket_review.html", **review_ctx(shell, key))
+
+    @app.get("/t/{key}/diff", response_class=HTMLResponse)
+    def ticket_diff(request: Request, key: str):
+        """The branch diff against origin/<base>; a plain `def` route runs in the threadpool, off the event loop."""
+        require(key)
+        return shell.render(request, "_ticket_diff.html", d=evidence_view.branch_diff(home, key))
 
     @app.get("/t/{key}/proposal", response_class=HTMLResponse)
     def ticket_proposal(request: Request, key: str):

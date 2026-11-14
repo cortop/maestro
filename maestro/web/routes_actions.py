@@ -9,11 +9,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
+from ..config import Config
 from .. import human_actions, ops, store
 from .. import snapshot as snap_mod
 from ..view import now as now_view
 from ..view import proposal as proposal_view
 from ..view import ticket as ticket_view
+from ..view import why as why_view
 from . import routes_now, routes_ticket
 from .shell import Shell
 
@@ -21,6 +23,7 @@ MODALS = {"answer": ("Answer", "Send answer", "Your answer"),
           "message": ("Message the agent", "Send message", "Message for the agent")}
 
 Nudge = Callable[[str | None], object]
+Sweep = Callable[[Config, str], object]  # runs one real sweep restricted to a key, returns its report
 
 
 def default_nudge(shell: Shell) -> Nudge:
@@ -38,6 +41,13 @@ def default_nudge(shell: Shell) -> Nudge:
     return _nudge
 
 
+def default_sweep(cfg: Config, key: str):
+    """One real dispatch sweep restricted to *key*, over the configured runner backends."""
+    from .. import dispatcher
+    from ..sessions import build_routing_sessions
+    return dispatcher.dispatch(cfg, build_routing_sessions(cfg), store.now_epoch(), key_filter=[key])
+
+
 class Refused(store.MaestroError):
     """An action the current state or input does not allow (answered 409)."""
 
@@ -46,7 +56,8 @@ def _form(body: bytes) -> dict[str, str]:
     return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
 
 
-def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
+def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None,
+             sweep: Sweep | None = None) -> None:
     home = shell.home
 
     def need_text(f: dict, name: str = "text") -> str:
@@ -210,6 +221,27 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
 
     shell.guard.post(app, "/t/{key}/review/pending", create_pending_handler, response_class=HTMLResponse)
 
+    def run_sweep(request: Request, key: str, body: bytes) -> HTMLResponse:
+        """A confirmed sweep of this one ticket; the side column comes back with its outcome."""
+        f = _form(body)
+        error = result = None
+        try:
+            if not ticket_exists(key):
+                raise Refused(f"no such ticket: {key}")
+            need_confirm(f, "sweep")
+            try:
+                report = (sweep or default_sweep)(shell.cfg(), key)
+            except store.MaestroError as e:
+                raise Refused(f"sweep: {e}")
+            result = why_view.sweep_summary(home, key, report)
+        except store.MaestroError as e:
+            error = {"key": key, "msg": str(e)}
+        resp = shell.render(request, "_ticket_side.html",
+                            **routes_ticket.head_ctx(shell, key, action_error=error, sweep_result=result))
+        if error:
+            resp.status_code = 409
+        return resp
+
     def accept_all(request: Request, body: bytes) -> HTMLResponse:
         """Answer every question card that carries a recommendation; the others stay open."""
         f = _form(body)
@@ -229,6 +261,11 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
         if error:
             resp.status_code = 409
         return resp
+
+    async def sweep_handler(request: Request, key: str) -> HTMLResponse:
+        return await run_in_threadpool(run_sweep, request, key, await request.body())
+
+    shell.guard.post(app, "/t/{key}/sweep", sweep_handler, response_class=HTMLResponse)
 
     async def accept_all_handler(request: Request) -> HTMLResponse:
         return await run_in_threadpool(accept_all, request, await request.body())
