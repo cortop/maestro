@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
-from .. import backup, dispatcher, fleet, human_actions, projection, ratelimit, spend as spend_mod, store
+from .. import backup, dispatcher, fleet, human_actions, ops, projection, ratelimit, spend as spend_mod, store
 from .. import claims as claims_mod
 from ..sessions import DryRunSessions, build_routing_sessions
 from ..view import fleet as fleet_view
@@ -211,6 +211,56 @@ def register(app: FastAPI, shell: Shell, sessions_factory=None) -> None:
             return panels(request, notice=f"backup failed: {e}")
         return panels(request, notice=f"backup created: {path.name}")
 
+    def sched_err(request: Request, form: str, name: str, e: Exception, values: dict | None = None):
+        """Re-render the panels with *e* shown inline on schedule form *form*; nothing was written."""
+        return panels(request, schedule_error={"form": form, "name": name, "msg": str(e),
+                                               "fields": values or {}})
+
+    def _task_fields(form: dict[str, str]) -> dict:
+        """The editable text fields of a task form; blank ones become ``None``."""
+        return {f: (form.get(f, "").strip() or None) for f in ("prompt", "every", "cron", "tz")}
+
+    async def schedule_add(request: Request):
+        form = await _form(request)
+        name = form.get("name", "").strip()
+        task = {"name": name, **_task_fields(form), "kind": "implementation",
+                "priority": 3, "enabled": True}
+        try:
+            ops.schedule_add(shell.cfg(), task)
+        except store.MaestroError as e:
+            return sched_err(request, "add", "", e, form)
+        return panels(request, notice=f"scheduled task {name} added")
+
+    async def schedule_edit(request: Request):
+        form = await _form(request)
+        name = form.get("name", "").strip()
+        fields = _task_fields(form)
+        try:
+            if not fields["prompt"]:
+                raise store.MaestroError("schedule edit: 'prompt' is required")
+            ops.schedule_edit(shell.cfg(), name, fields)
+        except store.MaestroError as e:
+            return sched_err(request, "edit", name, e, form)
+        return panels(request, notice=f"scheduled task {name} updated")
+
+    async def schedule_remove(request: Request):
+        name = (await _form(request)).get("name", "").strip()
+        try:
+            ops.schedule_remove(shell.cfg(), name)
+        except store.MaestroError as e:
+            return sched_err(request, "remove", name, e)
+        return panels(request, notice=f"scheduled task {name} removed")
+
+    def _toggle(enabled: bool):
+        async def handler(request: Request):
+            name = (await _form(request)).get("name", "").strip()
+            try:
+                ops.schedule_set_enabled(shell.cfg(), name, enabled)
+            except store.MaestroError as e:
+                return sched_err(request, "toggle", name, e)
+            return panels(request, notice=f"scheduled task {name} {'enabled' if enabled else 'disabled'}")
+        return handler
+
     def _list(label: str, keys) -> str:
         return f"{label} {', '.join(keys)}" if keys else f"{label} nothing"
 
@@ -285,6 +335,11 @@ def register(app: FastAPI, shell: Shell, sessions_factory=None) -> None:
     guard.post(app, "/fleet/doctor", doctor, response_class=HTMLResponse)
     guard.post(app, "/fleet/backup", backup_now, response_class=HTMLResponse)
     guard.post(app, "/fleet/stop/{key}", stop, response_class=HTMLResponse)
+    guard.post(app, "/fleet/schedule/add", schedule_add, response_class=HTMLResponse)
+    guard.post(app, "/fleet/schedule/edit", schedule_edit, response_class=HTMLResponse)
+    guard.post(app, "/fleet/schedule/remove", schedule_remove, response_class=HTMLResponse)
+    guard.post(app, "/fleet/schedule/enable", _toggle(True), response_class=HTMLResponse)
+    guard.post(app, "/fleet/schedule/disable", _toggle(False), response_class=HTMLResponse)
     guard.post(app, "/fleet/up", fleet_up, response_class=HTMLResponse)
     guard.post(app, "/fleet/down", fleet_down, response_class=HTMLResponse)
     guard.post(app, "/fleet/sweep", sweep, response_class=HTMLResponse)
