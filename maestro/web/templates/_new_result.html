@@ -1,0 +1,10 @@
+{# Inline outcome of one /new/* POST: an error, a no-op, or a link to the ticket it started. #}
+{% if result.error %}<p class="action-error" role="alert">{{ result.error }}</p>
+{% elif result.kind == "create" %}<p class="panel-note">queued: {{ result.title }} (priority {{ result.priority }})</p>
+{% elif result.kind == "review" %}
+  {% if result.started %}<p class="panel-note">review started: <a href="/t/{{ result.key }}">{{ result.key }}</a></p>
+  {% else %}<p class="panel-note warn" role="alert"><a href="/t/{{ result.key }}">{{ result.key }}</a>: no new review round ({{ result.reason }})</p>{% endif %}
+{% elif result.kind == "import" %}
+  {% if result.minted %}<p class="panel-note">imported: <a href="/t/{{ result.key }}">{{ result.key }}</a></p>
+  {% else %}<p class="panel-note warn" role="alert"><a href="/t/{{ result.key }}">{{ result.key }}</a> already imported; nothing to do</p>{% endif %}
+{% endif %}

@@ -8,7 +8,7 @@ from .. import fleet, projection, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import board as board_view
 from ..view import ticket as ticket_view
-from . import routes_ticket
+from . import routes_spec, routes_ticket
 from .shell import Shell
 
 MAX_TICKETS = 300
@@ -37,6 +37,15 @@ def ticket_entries(shell: Shell, key: str) -> list[dict]:
     if write and snap.kind == "review" and snap.phase == "awaiting-human" and snap.review_brief:
         out.append(_go(f"Create pending review for {key}", f"/t/{key}?tab=review",
                        "edit, then create on the Review tab"))
+    if write:
+        spec = f"/t/{key}?tab=spec"
+        out.append(_go(f"Edit spec of {key}", spec, "editor on the Spec tab", "E"))
+        out.append(_go(f"Add acceptance criterion to {key}", spec, "add-AC form", "A"))
+        out.append(_go(f"Suggest acceptance criteria for {key}", spec, "suggest on the Spec tab", "g"))
+        out.append(_go(f"Set priority or dependencies of {key}", spec, "form on the Spec tab", "M"))
+        out.append(_go(f"Set runner of {key}", spec, "form on the Spec tab", "o"))
+        if routes_spec.spec_ctx(shell, key)["can_post_qa"]:
+            out.append(_go(f"Trigger post-QA for {key}", spec, "confirm on the Spec tab", "Q"))
     if write and ctx["can_hold"]:
         out.append(_post(f"Hold {key}", f"/t/{key}/hold", "h"))
     if write and ctx["can_release"]:
@@ -46,6 +55,15 @@ def ticket_entries(shell: Shell, key: str) -> list[dict]:
     if write and ctx["can_stop"]:
         out.append(_go(f"Stop session of {key}", f"/t/{key}", "confirm on the ticket", "K"))
     return out
+
+
+def new_entries(shell: Shell) -> list[dict]:
+    """Entries that start work; only offered when writes are enabled."""
+    if not shell.guard.writes_enabled:
+        return []
+    return [_go("New ticket", "/new#new-ticket", "queue a ticket", "n"),
+            _go("Review a PR", "/new#new-review", "start a review", "V"),
+            _go("Import from Linear", "/new#new-import", "import an issue", "L")]
 
 
 def goto_entries(shell: Shell, current: str | None) -> list[dict]:
@@ -83,6 +101,7 @@ def register(app: FastAPI, shell: Shell) -> None:
         groups = []
         if on_ticket:
             groups.append((f"{key} actions", ticket_entries(shell, key)))
+        groups.append(("New", new_entries(shell)))
         groups.append(("Go to", goto_entries(shell, key if on_ticket else None)))
         groups.append(("Fleet", fleet_entries(shell)))
         return shell.render(request, "_palette.html", groups=[g for g in groups if g[1]])

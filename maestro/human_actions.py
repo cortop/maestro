@@ -186,3 +186,26 @@ def create_pending_review(cfg: Config, key: str, findings: list[dict], *, vcs=No
     ops.set_phase(cfg, key, Phase.AWAITING_CI, reason="pending review created; waiting for submit",
                   actor="human")
     return payload
+
+
+def queue_ticket(cfg: Config, title: str, *, priority: int = 3, nudge: Nudge | None = None) -> dict:
+    """Queue a create-ticket request exactly as `maestro create <title> --priority N`; refuses an empty title or a non-board home."""
+    title = (title or "").strip()
+    if not title:
+        raise store.MaestroError("title must not be empty")
+    board = store.board_state(cfg.home)
+    if board["state"] in ("missing", "uninitialized", "partial"):
+        raise store.MaestroError(f"{cfg.home} is not a maestro board ({board['state']}); run `maestro init` first")
+    entry = inbox.append_new(cfg.home, title, args={"priority": int(priority)})
+    _fire(nudge, None)
+    return entry
+
+
+def start_review(cfg: Config, pr_url: str, *, source: str | None = None, vcs=None) -> dict:
+    """Start (or advance) a review of someone else's PR; raises on a malformed URL, returns ``ops.start_review``'s result."""
+    return ops.start_review(cfg, pr_url, source=source, vcs=vcs)
+
+
+def import_linear(cfg: Config, url_or_id: str, *, tracker=None) -> dict:
+    """Mint a ticket from a Linear URL or identifier; ``minted`` is False for an already-imported key."""
+    return ops.import_linear(cfg, url_or_id, tracker=tracker)
