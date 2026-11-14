@@ -10,6 +10,7 @@ from ..view import events as ev_view
 from ..view import logs as logs_view
 from ..view import rounds as rounds_view
 from ..view import ticket as ticket_view
+from . import routes_spec
 from .shell import Shell
 
 
@@ -75,8 +76,7 @@ def register(app: FastAPI, shell: Shell) -> None:
     @app.get("/t/{key}/spec", response_class=HTMLResponse)
     def ticket_spec(request: Request, key: str):
         require(key)
-        return shell.render(request, "_ticket_text.html", id="spec",
-                            text=ticket_view.read_text(store.spec_path(home, key)))
+        return shell.render(request, "_ticket_spec.html", **routes_spec.spec_ctx(shell, key))
 
     @app.get("/t/{key}/review", response_class=HTMLResponse)
     def ticket_review(request: Request, key: str):
