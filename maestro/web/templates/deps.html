@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}maestro dependencies{% endblock %}
 {% block body %}
+<div id="deps-page">
 <section id="deps-headline" class="hero" hx-get="{{ p.url('/deps/headline') }}" hx-trigger="sse:board" hx-swap="innerHTML">
   {% include "_deps_headline.html" %}
 </section>
@@ -11,6 +12,7 @@
     <a class="dep-tab{% if p.view == 'outline' %} active{% endif %}" href="{{ p.url(view='outline') }}">Outline</a>
   </div>
   <div class="dep-tools">
+    {% if only %}<a class="dep-pill" {{ p.link(p.url(only="")) }}>Only {{ only }} and its chain <span aria-hidden="true">&times;</span></a>{% endif %}
     <a class="dep-toggle{% if p.finished %} on{% endif %}" href="{{ p.url(finished=not p.finished) }}" aria-pressed="{{ 'true' if p.finished else 'false' }}">Finished <span>{{ n_finished }}</span></a>
     <a class="dep-toggle t-compact{% if p.compact %} on{% endif %}" href="{{ p.url(compact=not p.compact) }}" aria-pressed="{{ 'true' if p.compact else 'false' }}">Compact</a>
   </div>
@@ -18,5 +20,6 @@
 
 <div id="deps-main" hx-get="{{ p.url('/deps/main') }}" hx-trigger="sse:board" hx-swap="innerHTML">
   {% include "_deps_main.html" %}
+</div>
 </div>
 {% endblock %}

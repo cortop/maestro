@@ -2,6 +2,7 @@
 <div class="{{ a.cls }}" role="status">
   <span class="dep-alert-tag">{{ a.tag }}</span>
   <div class="dep-alert-body"><p class="dep-alert-text">{{ a.text }}</p><p class="dep-alert-sub">{{ a.line }}</p></div>
+  <a class="btn btn-sm btn-ghost" {{ p.link(a.href) }}>Show in graph</a>
 </div>
 {% endfor %}
 
@@ -18,6 +19,7 @@
       {% include "_deps_outline.html" %}
     </div>
   </section>
+  {% if panel %}{% include "_deps_panel.html" %}{% endif %}
 </div>
 
 {% if p.view == "graph" and drawn %}
@@ -34,13 +36,13 @@
 </div>
 {% endif %}
 
-{% if p.view == "graph" and dv.unlinked %}
+{% if p.view == "graph" and dv.unlinked and not only %}
 {% from "_labels.html" import phase, chip_class %}
 <section class="dep-tray" aria-labelledby="h-unlinked">
   <div class="dep-tray-head"><h2 id="h-unlinked" class="section-label">Unlinked · {{ dv.unlinked|length }}</h2><span class="dep-tray-note">no open dependency in either direction</span></div>
   <div class="dep-tray-grid">
     {% for k in tray %}{% set t = dv.tickets[k] %}
-    <a class="dep-unlinked" href="/t/{{ k }}" title="{{ k }} · {{ t.phase }} · {{ t.title }}">{% if t.live %}<span class="cursor" aria-hidden="true"></span>{% endif %}<span class="dep-key">{{ k }}</span><span class="chip {% if t.held %}chip-held{% elif t.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(t.phase) }}{% endif %}">{% if t.held %}Held{% else %}{{ phase(t.phase) }}{% endif %}</span><span class="dep-unlinked-title">{{ t.title }}</span></a>
+    <a class="dep-unlinked{% if state.get(k) %} {{ state[k] }}{% endif %}" {{ p.link(p.pin(k)) }} title="{{ k }} · {{ t.phase }} · {{ t.title }}">{% if t.live %}<span class="cursor" aria-hidden="true"></span>{% endif %}<span class="dep-key">{{ k }}</span><span class="chip {% if t.held %}chip-held{% elif t.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(t.phase) }}{% endif %}">{% if t.held %}Held{% else %}{{ phase(t.phase) }}{% endif %}</span><span class="dep-unlinked-title">{{ t.title }}</span></a>
     {% endfor %}
     {% if tray_more %}<a class="dep-tray-more" href="{{ tray_all_url }}">Show all {{ dv.unlinked|length }}</a>{% endif %}
   </div>

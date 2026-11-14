@@ -1,0 +1,36 @@
+{% from "_labels.html" import phase, chip_class %}
+{% macro chip(r) -%}<span class="chip {% if r.cls == 's-missing' %}chip-degraded{% elif r.phase == 'awaiting-human' %}chip-you{% elif r.cls == 's-done' %}chip-done{% else %}{{ chip_class(r.phase) }}{% endif %}">{% if r.cls == "s-missing" %}No such ticket{% elif r.cls == "s-done" %}Done{% else %}{{ phase(r.phase) }}{% endif %}</span>{%- endmacro %}
+{% macro rows(list) %}
+    <ul class="dep-list">
+      {% for r in list %}
+      <li><a class="dep-li {{ r.cls }}" {{ p.link(r.href) }}><b>{{ r.key }}</b>{{ chip(r) }}<span class="dep-li-title">{{ r.title }}</span></a></li>
+      {% endfor %}
+    </ul>
+{% endmacro %}
+<aside class="dep-side panel" aria-label="Selected ticket">
+  <div class="panel-head split"><h2 class="panel-title">{{ panel.key }} {% if panel.ghost %}<span class="chip {{ 'chip-degraded' if panel.kind == 'missing' else 'chip-done' }}">{{ panel.chip }}</span>{% else %}<span class="chip {% if panel.held %}chip-held{% elif panel.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(panel.phase) }}{% endif %}">{% if panel.held %}Held{% else %}{{ phase(panel.phase) }}{% endif %}</span>{% endif %}</h2><a class="dep-x" {{ p.link(panel.close) }}>Close</a></div>
+  <div class="dep-side-body">
+    <h3 class="dep-side-title">{{ panel.title }}</h3>
+    {% if panel.ghost %}
+    {% if panel.rows %}
+    <h4 class="dep-group">{{ panel.group }}</h4>
+    {{ rows(panel.rows) }}
+    {% endif %}
+    {% else %}
+    <p class="dep-side-line">{{ panel.sentences[0] }}</p>
+    <p class="dep-side-line">{{ panel.sentences[1] }}</p>
+    <dl class="dep-facts">
+      {% for label, value in panel.facts %}<div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}
+    </dl>
+    {% for g in panel.groups %}
+    <h4 class="{{ g.cls }}">{{ g.label }}</h4>
+    {{ rows(g.rows) }}
+    {% endfor %}
+    <div class="dep-side-actions">
+      <a class="btn btn-primary btn-sm" href="{{ panel.open_href }}">Open {{ panel.key }}</a>
+      <a class="btn btn-secondary btn-sm" {{ p.link(panel.only_href) }}>{{ panel.only_label }}</a>
+    </div>
+    <p class="dep-cmd"><span class="dep-cmd-label">change its dependencies</span>{{ panel.cmd }}</p>
+    {% endif %}
+  </div>
+</aside>
