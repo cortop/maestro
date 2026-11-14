@@ -32,10 +32,15 @@
 {% if rec %}{{ form(key, "answer", ctx, target, "Accept recommendation", "btn-primary", {"qid": qid, "accept": "1"}) }}{% endif %}
 {{ form(key, "answer", ctx, target, "Approve", "btn-light", {"qid": qid, "text": "approve"}) }}
 {{ form(key, "answer", ctx, target, "Reject", "btn-light", {"qid": qid, "text": "reject"}) }}
-{{ note_form(key, "answer", ctx, target, "Write an answer", "Send answer", "Your answer", {"qid": qid}, cls="btn-ghost" if rec else "btn-secondary") }}
+{{ modal_button(key, "answer", ctx, qid, "Write an answer", cls="btn-ghost" if rec else "btn-secondary") }}
 {%- endmacro %}
 
 {% macro degraded_actions(key, ctx, target) -%}
 {{ note_form(key, "retry", ctx, target, "Retry with a note", "Retry", "Optional note for the next attempt", cls="btn-light") }}
 {{ confirm_form(key, "discard", ctx, target, "Discard", "Discard " ~ key ~ "? The ticket is closed.") }}
+{%- endmacro %}
+
+{# T-259: answer/message open a modal fetched into #modal-host (outside every swapped region). #}
+{% macro modal_button(key, action, ctx, qid, label, cls="btn-secondary") -%}
+<button type="button" class="btn {{ cls }}" hx-get="/t/{{ key }}/modal/{{ action }}?ctx={{ ctx }}{% if qid %}&qid={{ qid|urlencode }}{% endif %}" hx-target="#modal-host" hx-swap="innerHTML">{{ label }}</button>
 {%- endmacro %}

@@ -8,7 +8,7 @@
   </div>
   <div class="title-actions" id="ticket-actions">
     {% if can_write %}
-    {% if can_message %}{{ act.note_form(key, "message", "ticket", "#ticket-head", "Message agent", "Send message", "Message for the agent", cls="btn-primary") }}{% endif %}
+    {% if can_message %}{{ act.modal_button(key, "message", "ticket", none, "Message agent", cls="btn-primary") }}{% endif %}
     {% if can_hold %}{{ act.form(key, "hold", "ticket", "#ticket-head", "Hold") }}{% endif %}
     {% if can_release %}{{ act.form(key, "release", "ticket", "#ticket-head", "Release") }}{% endif %}
     {% if can_stop %}{{ act.confirm_form(key, "stop", "ticket", "#ticket-head", "Stop session", "Stop the live session of " ~ key ~ "?") }}{% endif %}

@@ -34,6 +34,8 @@ def test_slash_filter_phase_query(home):
         app = _make_app(home)
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
+            await pilot.pause()
             app._filter_idx = _filter_idx("all")
             app._populate()
             assert len(_table_keys(app)) == 3
@@ -50,6 +52,8 @@ def test_slash_filter_input_swallows_app_keys(seeded_home):
     async def _inner():
         app = _make_app(seeded_home)
         async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
             await pilot.pause()
             idx = app._filter_idx
             await _type_query(pilot, "q")
@@ -69,6 +73,8 @@ def test_slash_filter_enter_keeps_esc_clears(home):
     async def _inner():
         app = _make_app(home)
         async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
             app._populate()
@@ -98,6 +104,8 @@ def test_slash_filter_combines_with_preset(home):
         app = _make_app(home)
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
+            await pilot.pause()
             assert _FILTERS[app._filter_idx][0] == "needs-you"
             assert sorted(_table_keys(app)) == ["S-1", "S-2"]
             await _type_query(pilot, "!q:open")
@@ -114,6 +122,8 @@ def test_slash_filter_empty_and_invalid(home):
     async def _inner():
         app = _make_app(home)
         async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
             await pilot.pause()
             app._filter_idx = _filter_idx("all")
             app._populate()
@@ -137,6 +147,8 @@ def test_slash_filter_board_only(seeded_home):
     async def _inner():
         app = _make_app(seeded_home)
         async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("2")  # T-258: filters live in the Tickets tab
             await pilot.pause()
             table = app.query_one("#tickets", DataTable)
             table.focus()

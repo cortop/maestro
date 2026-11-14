@@ -5,7 +5,7 @@ import threading
 from typing import Callable
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
@@ -16,6 +16,9 @@ from ..view import proposal as proposal_view
 from ..view import ticket as ticket_view
 from . import routes_now, routes_ticket
 from .shell import Shell
+
+MODALS = {"answer": ("Answer", "Send answer", "Your answer"),
+          "message": ("Message the agent", "Send message", "Message for the agent")}
 
 Nudge = Callable[[str | None], object]
 
@@ -134,6 +137,12 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
             actions[name](key, f)
         except store.MaestroError as e:
             error = {"key": key, "msg": str(e)}
+        if error and f.get("modal") == "1" and name in MODALS:
+            resp = modal_response(request, key, name, f, error["msg"], f.get("text", ""))
+            resp.headers["HX-Retarget"] = "#modal-host"
+            resp.headers["HX-Reswap"] = "innerHTML"
+            resp.status_code = 409
+            return resp
         extra = {"action_error": error}
         if f.get("ctx") == "now":
             resp = shell.render(request, "_now_decide.html", **routes_now.now_ctx(shell, **extra))
@@ -146,6 +155,24 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
         if error:
             resp.status_code = 409
         return resp
+
+    def modal_response(request: Request, key: str, name: str, f: dict, error: str | None,
+                       text: str) -> HTMLResponse:
+        ctx = "now" if f.get("ctx") == "now" else "ticket"
+        title, label, placeholder = MODALS[name]
+        return shell.render(request, "_modal.html", key=key, action=name, ctx=ctx,
+                            target="#now-decide" if ctx == "now" else "#ticket-head",
+                            qid=f.get("qid", ""), title=f"{title} — {key}", label=label,
+                            placeholder=placeholder, error=error, text=text)
+
+    async def modal_handler(request: Request, key: str, name: str) -> HTMLResponse:
+        if name not in MODALS or not ticket_exists(key):
+            raise HTTPException(status_code=404, detail=f"no such modal: {name} {key}")
+        q = dict(request.query_params)
+        return modal_response(request, key, name, q, None, "")
+
+    if shell.guard.writes_enabled:
+        app.get("/t/{key}/modal/{name}", response_class=HTMLResponse)(modal_handler)
 
     def make(name: str):
         async def handler(request: Request, key: str) -> HTMLResponse:
