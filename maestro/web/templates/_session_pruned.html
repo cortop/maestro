@@ -1,0 +1,6 @@
+<div class="panel transcript" id="transcript-{{ sess.session_id }}">
+  <div class="panel-head">{{ sess.session_id }}</div>
+  <div class="panel-body"><p class="dim">The raw log of this session is gone (pruned); only its digest remains.</p>
+  <pre class="digest">{% for line in lines %}{{ line }}
+{% endfor %}</pre></div>
+</div>

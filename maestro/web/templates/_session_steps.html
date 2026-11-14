@@ -1,0 +1,5 @@
+{% set base = "/t/" ~ key ~ "/logs/" ~ sess.session_id ~ "/steps" %}
+{% if mode == "before" and page.earlier %}<li class="load-earlier"><a href="#" hx-get="{{ base }}?before={{ page.earlier }}" hx-target="closest li" hx-swap="outerHTML">load earlier ({{ page.earlier }} more)</a></li>{% endif %}
+{% for s in page.steps %}<li class="step" data-index="{{ s.index }}"{% if s.error %} data-error="1"{% endif %}>{% if s.error %}<span class="verdict v-error">error</span> {% endif %}{{ s.text }}</li>
+{% endfor %}
+{% if mode == "after" or live %}<li class="tail" hx-get="{{ base }}?after={{ page.total }}" hx-trigger="sse:ticket:{{ key }}, every 3s" hx-swap="outerHTML"></li>{% endif %}

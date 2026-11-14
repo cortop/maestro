@@ -1,10 +1,12 @@
 """Ticket detail routes (`/t/{key}` and its fragments) of `maestro web`."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import claims, fleet, gates, ops, store
+from .. import claims, fleet, gates, ops, steplog, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import events as ev_view
 from ..view import logs as logs_view
@@ -106,5 +108,47 @@ def register(app: FastAPI, shell: Shell) -> None:
     @app.get("/t/{key}/logs", response_class=HTMLResponse)
     def ticket_logs(request: Request, key: str):
         require(key)
-        return shell.render(request, "_logs.html", lg=logs_view.build(home, key),
+        lg = logs_view.build(home, key)
+        return shell.render(request, "_logs.html", lg=lg, key=key,
+                            page=logs_view.step_page(lg.live) if lg.live else None,
+                            head=session_head(lg.live) if lg.live else "", mode="before", live_id=live_id(lg),
                             detail=lambda p: logs_view.detail_lines(home, key, p))
+
+    def live_id(lg) -> str | None:
+        return lg.live["session_id"] if lg.live else None
+
+    def session_head(sess: dict) -> str:
+        info = sess if "outcome" in sess else {**sess, **steplog.session_outcome(Path(sess["path"])),
+                                              **steplog.session_model(Path(sess["path"]))}
+        return steplog.format_session_header(sess, info.get("outcome", "unknown"),
+                                             {"runner": info.get("runner", "unknown"),
+                                              "model": info.get("model", "unknown")})
+
+    @app.get("/t/{key}/logs/{session_id}", response_class=HTMLResponse)
+    def ticket_session(request: Request, key: str, session_id: str):
+        """One session as a transcript: its newest steps, or the digest of a pruned one."""
+        require(key)
+        sess = logs_view.find_any_session(home, key, session_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail=f"no such session: {session_id}")
+        if sess.get("pruned"):
+            d = rounds_view.session_digest(home, key, sess)
+            return shell.render(request, "_session_pruned.html", key=key, sess=sess,
+                                lines=steplog.format_session_digest(d))
+        lg = logs_view.build(home, key)
+        live = live_id(lg) == session_id
+        return shell.render(request, "_session_transcript.html", key=key, sess=sess, live=live,
+                            head=session_head(sess), page=logs_view.step_page(sess), mode="before")
+
+    @app.get("/t/{key}/logs/{session_id}/steps", response_class=HTMLResponse)
+    def ticket_session_steps(request: Request, key: str, session_id: str,
+                             before: int | None = Query(None), after: int | None = Query(None)):
+        """Earlier steps (``before``) or the steps added since ``after``; at most one page each."""
+        require(key)
+        sess = logs_view.find_session(home, key, session_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail=f"no such session: {session_id}")
+        live = live_id(logs_view.build(home, key)) == session_id
+        page = logs_view.step_page(sess, before=before, after=after)
+        return shell.render(request, "_session_steps.html", key=key, sess=sess, page=page,
+                            live=live, mode="after" if after is not None else "before")
