@@ -6,7 +6,7 @@
   <div class="dep-starts">
     <span class="dep-starts-label">Start here //</span>
     {% for s in dv.start_here %}
-    <a class="dep-start" href="/t/{{ s.key }}"><span class="dep-start-verb">{{ s.verb }}</span><b>{{ s.key }}</b><span class="dep-start-n">{{ s.behind }} behind it</span></a>
+    <a class="dep-start" {{ p.link(p.pin(s.key)) }}><span class="dep-start-verb">{{ s.verb }}</span><b>{{ s.key }}</b><span class="dep-start-n">{{ s.behind }} behind it</span></a>
     {% endfor %}
   </div>
   {% endif %}

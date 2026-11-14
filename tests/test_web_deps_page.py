@@ -39,7 +39,9 @@ def test_cards_and_edges_follow_the_layout(home, cfg):
     with client(home) as c:
         html = c.get("/deps").text
     lay = deps_layout.layout(deps_view.build(home, cfg).graph)
-    cards = re.findall(r'<a class="dep-node ([^"]*)" href="/t/([^"]+)" data-key="[^"]+" '
+    cards = re.findall(r'<a class="dep-node ([^"]*)" href="[^"]*" hx-get="[^"]*" hx-target="#deps-page" '
+                       r'hx-select="#deps-page" hx-swap="outerHTML" hx-push-url="true" '
+                       r'data-key="([^"]+)" '
                        r'style="left: ([\d.]+)px;[^"]*"', html)
     assert [k for _, k, _ in cards] == [c.key for c in lay.cards] == ["T-1", "T-2", "T-3"]
     for (cls, key, left), card in zip(cards, lay.cards):
@@ -86,7 +88,7 @@ def test_cycle_and_missing_alerts(home):
     assert '<div class="dep-alert warn"' in html
     assert "T-3, T-4 depend on T-77, which does not exist" in html
     assert "Blocked until the spec names a real ticket: maestro spec-set T-3 --depends-on &lt;KEY&gt;" in html
-    assert '<span class="dep-ghost k-missing' in html and "no such ticket" in html
+    assert '<a class="dep-ghost k-missing' in html and "no such ticket" in html
     assert "is-cycle" in html and "dep-loop" in html
     assert 'class="dep-title">2 can never <span class="bad">start.</span>' in html or "can never" in html
     assert "A cycle or a dependency that does not exist." in html
@@ -121,9 +123,9 @@ def test_finished_and_compact_params_are_kept_by_every_link(home):
         assert "dep-ghost k-done" not in plain and "is-compact" not in plain
         assert "Finished <span>1</span>" in plain
         fin = c.get("/deps?finished=1&compact=1").text
-        assert 'class="dep-ghost k-done is-compact" href="/t/T-50"' in fin
+        assert 'class="dep-ghost k-done is-compact" href="/deps?finished=1&amp;compact=1&amp;select=done:T-50"' in fin
         assert ">finished</span><i>1</i>" in fin
-        assert re.search(r'dep-node g-\w+ is-compact" href="/t/T-1"', fin)
+        assert re.search(r'dep-node g-\w+ is-compact" href="[^"]*select=T-1"', fin)
         tab_out = re.search(r'class="dep-tab" href="([^"]+)"', fin).group(1)
         assert tab_out == "/deps?view=outline&amp;finished=1&amp;compact=1"
         assert 'class="dep-toggle on" href="/deps?compact=1" aria-pressed="true">Finished' in fin
