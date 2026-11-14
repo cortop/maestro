@@ -4,7 +4,8 @@ from __future__ import annotations
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import fleet, projection, store
+from .. import fleet, projection, ratelimit, store
+from ..statemachine import TERMINAL_PHASES
 from ..view import board as board_view
 from ..view import ticket as ticket_view
 from . import routes_spec, routes_ticket
@@ -49,6 +50,8 @@ def ticket_entries(shell: Shell, key: str) -> list[dict]:
         out.append(_post(f"Hold {key}", f"/t/{key}/hold", "h"))
     if write and ctx["can_release"]:
         out.append(_post(f"Release {key}", f"/t/{key}/release", "z"))
+    if write and snap.phase not in {p.value for p in TERMINAL_PHASES}:
+        out.append(_go(f"Run a sweep for {key}", f"/t/{key}", "confirm on the ticket"))
     if write and ctx["can_stop"]:
         out.append(_go(f"Stop session of {key}", f"/t/{key}", "confirm on the ticket", "K"))
     return out
@@ -65,7 +68,8 @@ def new_entries(shell: Shell) -> list[dict]:
 
 def goto_entries(shell: Shell, current: str | None) -> list[dict]:
     home = shell.home
-    out = [_go("Go to needs you", "/tickets?filter=needs-you", keys="f")]
+    out = [_go("Go to needs you", "/tickets?filter=needs-you", keys="f"),
+           _go("Open dependency view", "/deps", "open-ticket tree", "D")]
     running = sorted(board_view.running_keys(home, shell.cfg()) - {current})
     if running:
         out.append(_go(f"Go to next running ticket ({running[0]})", f"/t/{running[0]}", keys="j"))
@@ -85,6 +89,13 @@ def fleet_entries(shell: Shell) -> list[dict]:
         out.append(_post("Resume fleet", "/fleet/resume", "P"))
     out.append(_post("Re-run doctor", "/fleet/doctor"))
     out.append(_post("Back up now", "/fleet/backup"))
+    out.append(_go("Fleet up", "/fleet#fleet-actions", "confirm on the Fleet page"))
+    out.append(_go("Fleet down", "/fleet#fleet-actions", "confirm on the Fleet page"))
+    out.append(_post("Sweep now", "/fleet/sweep"))
+    out.append(_post("Dry run", "/fleet/dry-run"))
+    if ratelimit.paused_until(shell.home, store.now_epoch()) is not None:
+        out.append(_post("Clear rate limit", "/fleet/clear-rate-limit"))
+    out.append(_post("Purge stale claims", "/fleet/purge-claims"))
     return out
 
 

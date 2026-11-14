@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import claims, fleet as fleet_mod, projection, snapshot as snap_mod, steplog, store
+from ..dispatcher import split_key
 from ..config import Config
 from ..statemachine import ACTIVE_PHASES, Phase
 
@@ -39,6 +40,11 @@ FILTERS: list[tuple[str, Predicate | None]] = [
 FILTER_NAMES = tuple(name for name, _ in FILTERS)
 
 
+# Sortable columns in table order; the numeric ones sort descending on their first click.
+SORT_COLUMNS = ("key", "phase", "title", "pr", "ci", "fails")
+NUMERIC_SORT = frozenset({"pr", "fails"})
+
+
 @dataclass(frozen=True)
 class BoardRow:
     key: str
@@ -50,6 +56,8 @@ class BoardRow:
     held: bool = False
     running: bool = False
     now: str = ""
+    pr_number: int = 0
+    failure_count: int = 0
 
 
 @dataclass
@@ -57,6 +65,9 @@ class BoardView:
     filter: str
     rows: list[BoardRow]
     counts: dict[str, int] = field(default_factory=dict)
+    search: str = ""
+    sort: str = ""
+    desc: bool = False
 
     @property
     def needs_you(self) -> int:
@@ -104,8 +115,30 @@ def select(home: Path, snaps: list[snap_mod.Snapshot], name: str,
     return [s for s in snaps if pred(home, s)]
 
 
-def board(home: Path, cfg: Config, name: str = "needs-you") -> BoardView:
-    """Rows for filter *name* (table order) plus every filter's count."""
+def matches_search(row: BoardRow, needle: str) -> bool:
+    """Case-insensitive substring match on the row's key or title; a blank needle matches all."""
+    needle = needle.strip().lower()
+    return not needle or needle in row.key.lower() or needle in row.title.lower()
+
+
+def sort_rows(rows: list[BoardRow], column: str, desc: bool) -> list[BoardRow]:
+    """Stable sort of *rows* by one of `SORT_COLUMNS`; an unknown column raises ValueError."""
+    if column not in SORT_COLUMNS:
+        raise ValueError(f"unknown sort column {column!r}; expected one of {', '.join(SORT_COLUMNS)}")
+    keyfn = {
+        "key": lambda r: split_key(r.key),
+        "phase": lambda r: projection._PHASE_RANK.get(r.phase, 99),
+        "title": lambda r: r.title.lower(),
+        "pr": lambda r: r.pr_number,
+        "ci": lambda r: r.ci.lower(),
+        "fails": lambda r: r.failure_count,
+    }[column]
+    return sorted(rows, key=keyfn, reverse=desc)
+
+
+def board(home: Path, cfg: Config, name: str = "needs-you", search: str = "",
+          sort: str = "", desc: bool = False) -> BoardView:
+    """Rows for filter *name* (table order, or by *sort*) matching *search*, plus every filter's count."""
     snaps = projection.load_snapshots(home)
     running = running_keys(home, cfg)
     counts = {n: len(select(home, snaps, n, running)) for n in FILTER_NAMES}
@@ -115,8 +148,14 @@ def board(home: Path, cfg: Config, name: str = "needs-you") -> BoardView:
     rows = []
     for cells in projection.rows_from_snapshots(home, [s for s in snaps if s.key in shown]):
         key = cells[-1]
-        rows.append(BoardRow(key=key, phase=cells[1], title=cells[2], pr=cells[3], ci=cells[4],
-                             fails=cells[5], held=held(home, snap_mod.load(home, key)),
-                             running=key in running,
-                             now=live_lines(live.get(key), now)[0]))
-    return BoardView(filter=name, rows=rows, counts=counts)
+        snap = snap_mod.load(home, key)
+        row = BoardRow(key=key, phase=cells[1], title=cells[2], pr=cells[3], ci=cells[4],
+                       fails=cells[5], held=held(home, snap), running=key in running,
+                       now=live_lines(live.get(key), now)[0],
+                       pr_number=snap.pr_number or 0, failure_count=snap.failure_count)
+        if matches_search(row, search):
+            rows.append(row)
+    if sort:
+        rows = sort_rows(rows, sort, desc)
+    return BoardView(filter=name, rows=rows, counts=counts, search=search.strip(), sort=sort,
+                     desc=desc)
