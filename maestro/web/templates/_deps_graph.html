@@ -1,0 +1,42 @@
+{% from "_labels.html" import phase, chip_class %}
+{% macro box(c) %}left: {{ '%g'|format(c.x) }}px; top: {{ '%g'|format(c.y) }}px; width: {{ '%g'|format(c.w) }}px; height: {{ '%g'|format(c.h) }}px{% endmacro %}
+<div class="dep-sizer" style="width: {{ '%g'|format(lay.width) }}px; height: {{ '%g'|format(stage_h + 34) }}px">
+  <div class="dep-canvas" style="width: {{ '%g'|format(lay.width) }}px">
+    <div class="dep-lanes">
+      {% for ln in lanes %}
+      <div class="dep-lane{% if ln.done %} is-done{% endif %}" style="left: {{ '%g'|format(ln.x) }}px; width: {{ '%g'|format(ln.w) }}px">{% if not ln.done %}<b>{{ ln.n }}</b>{% endif %}<span>{{ ln.label }}</span><i>{{ ln.count }}</i></div>
+      {% endfor %}
+    </div>
+    <div class="dep-stage" style="height: {{ '%g'|format(stage_h) }}px; background-size: {{ bg_w }}px 100%; background-position: {{ '%g'|format(bg_x) }}px 0">
+      <svg class="dep-edges" width="{{ '%g'|format(lay.width) }}" height="{{ '%g'|format(stage_h) }}" aria-hidden="true">
+        {% for e in lay.edges %}
+        <g class="dep-edge k-{{ e.kind }}"><path class="dep-edge-line" d="{{ e.d }}"></path><path class="dep-edge-head" d="{{ e.head }}"></path></g>
+        {% endfor %}
+      </svg>
+      {% for c in lay.ghosts %}
+      {% if c.kind == "missing" %}
+      <span class="dep-ghost k-missing{% if compact %} is-compact{% endif %}" style="{{ box(c) }}"><span class="dep-key">{{ c.key }}</span><span class="dep-ghost-note">no such ticket</span></span>
+      {% else %}
+      <a class="dep-ghost k-done{% if compact %} is-compact{% endif %}" href="/t/{{ c.key }}" style="{{ box(c) }}"><svg class="dep-check" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 L5 9.5 L10 3"></path></svg><span class="dep-key">{{ c.key }}</span><span class="dep-ghost-note">{{ "archived" if archived.get(c.key) else "done" }}</span></a>
+      {% endif %}
+      {% endfor %}
+      {% for c in lay.stacks %}
+      <span class="dep-stack k-{{ c.kind }}{% if compact %} is-compact{% endif %}" style="{{ box(c) }}"><b>+{{ c.keys|length }} more</b><span class="dep-stack-sub">wait only on {{ c.parent }}</span></span>
+      {% endfor %}
+      {% for c in lay.cards %}{% set t = dv.tickets[c.key] %}
+      <a class="dep-node g-{{ t.group }}{% if t.in_cycle %} is-cycle{% endif %}{% if compact %} is-compact{% endif %}" href="/t/{{ c.key }}" data-key="{{ c.key }}" style="{{ box(c) }}" title="{{ c.key }} · {{ t.phase }} · {{ t.title }}">
+        <span class="dep-node-in">
+          <span class="dep-node-top">
+            {% if t.in_cycle %}<svg class="dep-loop" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 7 A5 5 0 0 0 4 4.5 M3 9 A5 5 0 0 0 12 11.5 M4 1.5 V4.5 H7 M12 14.5 V11.5 H9"></path></svg>{% endif %}
+            {% if t.live %}<span class="cursor" aria-hidden="true"></span>{% endif %}
+            {% if t.held %}<span class="dep-held" aria-hidden="true"></span>{% endif %}
+            <span class="dep-key">{{ c.key }}</span><span class="chip {% if t.held %}chip-held{% elif t.phase == 'awaiting-human' %}chip-you{% else %}{{ chip_class(t.phase) }}{% endif %}">{% if t.held %}Held{% else %}{{ phase(t.phase) }}{% endif %}</span>
+          </span>
+          <span class="dep-node-title">{{ t.title or "(no title)" }}</span>
+        </span>
+        {% if t.downstream >= 2 %}<span class="dep-out">{{ t.downstream }}</span>{% endif %}
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+</div>
