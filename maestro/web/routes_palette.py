@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import fleet, projection, store
+from .. import fleet, projection, ratelimit, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import board as board_view
 from ..view import ticket as ticket_view
@@ -88,6 +88,13 @@ def fleet_entries(shell: Shell) -> list[dict]:
         out.append(_post("Resume fleet", "/fleet/resume", "P"))
     out.append(_post("Re-run doctor", "/fleet/doctor"))
     out.append(_post("Back up now", "/fleet/backup"))
+    out.append(_go("Fleet up", "/fleet#fleet-actions", "confirm on the Fleet page"))
+    out.append(_go("Fleet down", "/fleet#fleet-actions", "confirm on the Fleet page"))
+    out.append(_post("Sweep now", "/fleet/sweep"))
+    out.append(_post("Dry run", "/fleet/dry-run"))
+    if ratelimit.paused_until(shell.home, store.now_epoch()) is not None:
+        out.append(_post("Clear rate limit", "/fleet/clear-rate-limit"))
+    out.append(_post("Purge stale claims", "/fleet/purge-claims"))
     return out
 
 
