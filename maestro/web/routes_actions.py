@@ -11,6 +11,8 @@ from fastapi.responses import HTMLResponse
 
 from .. import human_actions, ops, store
 from .. import snapshot as snap_mod
+from ..view import now as now_view
+from ..view import proposal as proposal_view
 from ..view import ticket as ticket_view
 from . import routes_now, routes_ticket
 from .shell import Shell
@@ -69,6 +71,32 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
         else:
             human_actions.answer(home, key, need_text(f), qid=qid, nudge=nudge)
 
+    def do_proposal(key: str, f: dict) -> None:
+        """Answer the research-approval ask with the same text the TUI Proposal screen sends."""
+        qid = proposal_view.qid(key)
+        snap = snap_mod.load(home, key)
+        if qid not in snap.open_questions:
+            raise Refused(f"{key}: no research approval is open")
+        choice = f.get("choice")
+        if choice == "accept":
+            rec = ops.parse_round_question(snap.open_questions[qid])[3]
+            if not rec:
+                raise Refused(f"{key}: this question carries no recommendation to accept")
+            human_actions.answer(home, key, rec, qid=qid, accepted_recommendation=True, nudge=nudge)
+        elif choice == "alternative":
+            n = f.get("n", "")
+            options = proposal_view.parse_proposal_options(
+                ticket_view.read_text(store.ticket_dir(home, key) / "proposal.md") or "")
+            if not n.isdigit() or n not in {label for label, _ in options}:
+                raise Refused(f"no ## Alternative {n} in this proposal")
+            need_confirm(f, "picking an alternative")
+            human_actions.answer(home, key, f"{proposal_view.ANSWER_ALTERNATIVE} {n}", qid=qid, nudge=nudge)
+        elif choice == "more":
+            human_actions.answer(home, key, f"{proposal_view.ANSWER_NEEDS_MORE}: {need_text(f)}",
+                                 qid=qid, nudge=nudge)
+        else:
+            raise Refused("unknown proposal choice")
+
     def do_message(key: str, f: dict) -> None:
         human_actions.message(home, key, need_text(f), nudge=nudge)
 
@@ -92,7 +120,7 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
         need_confirm(f, "stop")
         human_actions.stop(shell.cfg(), key)
 
-    actions = {"answer": do_answer, "message": do_message, "retry": do_retry,
+    actions = {"answer": do_answer, "proposal": do_proposal, "message": do_message, "retry": do_retry,
                "discard": do_discard, "hold": do_hold, "release": do_release, "stop": do_stop}
 
     def ticket_exists(key: str) -> bool:
@@ -118,6 +146,9 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
         extra = {"action_error": error}
         if f.get("ctx") == "now":
             resp = shell.render(request, "_now_decide.html", **routes_now.now_ctx(shell, **extra))
+        elif f.get("ctx") == "proposal":
+            resp = shell.render(request, "_ticket_proposal.html",
+                                **routes_ticket.proposal_ctx(shell, key, **extra))
         else:
             resp = shell.render(request, "_ticket_head.html",
                                 **routes_ticket.head_ctx(shell, key, **extra))
@@ -178,3 +209,28 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
         return await run_in_threadpool(create_pending, request, key, await request.body())
 
     shell.guard.post(app, "/t/{key}/review/pending", create_pending_handler, response_class=HTMLResponse)
+
+    def accept_all(request: Request, body: bytes) -> HTMLResponse:
+        """Answer every question card that carries a recommendation; the others stay open."""
+        f = _form(body)
+        error = None
+        try:
+            need_confirm(f, "accepting all recommendations")
+            cards = now_view.build(home, shell.cfg(), store.now_epoch()).needs_you
+            for c in cards:
+                if isinstance(c, now_view.QuestionCard) and c.recommendation:
+                    human_actions.answer(home, c.key, c.recommendation, qid=c.qid,
+                                         accepted_recommendation=True)
+            if nudge is not None:
+                nudge(None)
+        except store.MaestroError as e:
+            error = {"key": "*", "msg": str(e)}
+        resp = shell.render(request, "_now_decide.html", **routes_now.now_ctx(shell, action_error=error))
+        if error:
+            resp.status_code = 409
+        return resp
+
+    async def accept_all_handler(request: Request) -> HTMLResponse:
+        return await run_in_threadpool(accept_all, request, await request.body())
+
+    shell.guard.post(app, "/now/accept-all", accept_all_handler, response_class=HTMLResponse)

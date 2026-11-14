@@ -1,6 +1,6 @@
 {# T-243: per-ticket action forms. Each posts urlencoded fields to /t/<key>/<action>; ctx picks the fragment that comes back. #}
-{% macro form(key, action, ctx, target, label, cls="btn-secondary", fields=none, confirm=false, text=none) -%}
-<form class="act-form" hx-post="/t/{{ key }}/{{ action }}" hx-target="{{ target }}" hx-swap="innerHTML">
+{% macro form(key, action, ctx, target, label, cls="btn-secondary", fields=none, confirm=false, text=none, url=none) -%}
+<form class="act-form" hx-post="{{ url or '/t/' ~ key ~ '/' ~ action }}" hx-target="{{ target }}" hx-swap="innerHTML">
   <input type="hidden" name="ctx" value="{{ ctx }}">
   {% if confirm %}<input type="hidden" name="confirm" value="1">{% endif %}
   {% for name, value in (fields or {}).items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
@@ -9,10 +9,10 @@
 </form>
 {%- endmacro %}
 
-{% macro confirm_form(key, action, ctx, target, label, prompt) -%}
+{% macro confirm_form(key, action, ctx, target, label, prompt, fields=none, url=none) -%}
 <details class="confirm">
   <summary class="btn btn-danger">{{ label }}</summary>
-  <div class="confirm-body"><p>{{ prompt }}</p>{{ form(key, action, ctx, target, "Confirm " ~ label|lower, "btn-danger", confirm=true) }}</div>
+  <div class="confirm-body"><p>{{ prompt }}</p>{{ form(key, action, ctx, target, "Confirm " ~ label|lower, "btn-danger", fields=fields, confirm=true, url=url) }}</div>
 </details>
 {%- endmacro %}
 
@@ -25,6 +25,19 @@
 
 {% macro error(err, key) -%}
 {% if err and err.key == key %}<p class="action-error" role="alert">{{ err.msg }}</p>{% endif %}
+{%- endmacro %}
+
+{# T-263: the decision controls of one open question; shared by the Now card and the ticket page. #}
+{% macro question_actions(key, qid, rec, ctx, target) -%}
+{% if rec %}{{ form(key, "answer", ctx, target, "Accept recommendation", "btn-primary", {"qid": qid, "accept": "1"}) }}{% endif %}
+{{ form(key, "answer", ctx, target, "Approve", "btn-light", {"qid": qid, "text": "approve"}) }}
+{{ form(key, "answer", ctx, target, "Reject", "btn-light", {"qid": qid, "text": "reject"}) }}
+{{ modal_button(key, "answer", ctx, qid, "Write an answer", cls="btn-ghost" if rec else "btn-secondary") }}
+{%- endmacro %}
+
+{% macro degraded_actions(key, ctx, target) -%}
+{{ note_form(key, "retry", ctx, target, "Retry with a note", "Retry", "Optional note for the next attempt", cls="btn-light") }}
+{{ confirm_form(key, "discard", ctx, target, "Discard", "Discard " ~ key ~ "? The ticket is closed.") }}
 {%- endmacro %}
 
 {# T-259: answer/message open a modal fetched into #modal-host (outside every swapped region). #}
