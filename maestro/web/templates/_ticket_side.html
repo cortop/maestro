@@ -64,7 +64,7 @@
     <li class="meta"><span class="grow">unresolved reviews</span><span>{{ t.snap.unresolved_reviews }}</span></li>
   </ul>
   <div class="panel-body" id="pr-threads"><h3 class="panel-title">Review threads</h3>
-    {% for b in threads %}<p class="review-text">{{ b }}</p>{% else %}<p class="dim">no review feedback</p>{% endfor %}</div>
+    {% for th in threads %}<div class="thread"><p class="mono thread-head">{{ th.header }}</p><div class="md thread-body">{{ th.body|markdown }}</div>{% for r in th.replies %}<div class="md thread-reply">{{ r|markdown }}</div>{% endfor %}</div>{% else %}<p class="dim">no review feedback</p>{% endfor %}</div>
   <div class="panel-body" id="ci-timeline"><h3 class="panel-title">CI timeline</h3>
     {% for c in ci_timeline %}<p class="review-text"><span class="mono">{{ c.ts }}</span> {{ verdict(c.state) }}{% if c.failing_checks %} failing: {{ c.failing_checks|join(", ") }}{% endif %}{% if c.failure_excerpt %}
 {{ c.failure_excerpt }}{% endif %}</p>{% else %}<p class="dim">no CI observations</p>{% endfor %}</div>

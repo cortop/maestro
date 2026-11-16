@@ -76,26 +76,39 @@ def round_label(home: Path, key: str) -> str:
 _MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
 
 
-def review_threads(events: list[dict]) -> list[str]:
-    """One text block per ReviewFeedbackReceived: author, state, location, body and the
-    replies posted for its comment id. Markdown images keep their alt text only."""
+@dataclass(frozen=True)
+class ReviewThread:
+    header: str            # "author [state] path:line"
+    body: str
+    replies: tuple[str, ...] = ()
+
+
+def review_thread_parts(events: list[dict]) -> list[ReviewThread]:
+    """One ReviewThread per ReviewFeedbackReceived: header, body and the reply bodies
+    posted for its comment id. Markdown images keep their alt text only."""
     replies: dict[str, list[dict]] = {}
     for e in events:
         if e["type"] == E.REVIEW_REPLY_POSTED:
             replies.setdefault(e["payload"].get("comment_id"), []).append(e["payload"])
-    blocks = []
+    threads = []
     for e in events:
         if e["type"] != E.REVIEW_FEEDBACK_RECEIVED:
             continue
         p = e["payload"]
         where = f" {p['path']}:{p['line']}" if p.get("path") and p.get("line") else \
             (f" {p['path']}" if p.get("path") else "")
-        body = _MD_IMAGE.sub(r"\1", (p.get("body") or "")).strip()
-        lines = [f"{p.get('author', '?')} [{p.get('state', '?')}]{where}", body]
-        for r in replies.get(p.get("comment_id"), []):
-            lines.append("  ↳ reply: " + _MD_IMAGE.sub(r"\1", (r.get("body") or "")).strip())
-        blocks.append("\n".join(lines))
-    return blocks
+        threads.append(ReviewThread(
+            f"{p.get('author', '?')} [{p.get('state', '?')}]{where}",
+            _MD_IMAGE.sub(r"\1", (p.get("body") or "")).strip(),
+            tuple(_MD_IMAGE.sub(r"\1", (r.get("body") or "")).strip()
+                  for r in replies.get(p.get("comment_id"), []))))
+    return threads
+
+
+def review_threads(events: list[dict]) -> list[str]:
+    """One text block per thread: header, body, then `↳ reply:` lines."""
+    return ["\n".join([t.header, t.body, *("  ↳ reply: " + r for r in t.replies)])
+            for t in review_thread_parts(events)]
 
 
 # --- per-ticket round history -------------------------------------------------

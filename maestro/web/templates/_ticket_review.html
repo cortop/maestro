@@ -3,11 +3,11 @@
 <div id="review" data-key="{{ key }}" data-head="{{ snap.review_head_sha or '' }}" data-round="{{ snap.review_round }}">
   <p class="crumb mono dim">{% if (snap.review_url or "").startswith("https://") %}<a href="{{ snap.review_url }}">{{ snap.review_url }}</a>{% else %}{{ snap.review_url or "no PR url" }}{% endif %}{% if snap.review_author %} · by {{ snap.review_author }}{% endif %}</p>
   {% if brief %}
-  <div class="panel"><div class="panel-head">What the PR does</div><div class="panel-body"><p class="review-text">{{ brief.summary }}</p></div></div>
-  <div class="panel"><div class="panel-head">What was checked</div><div class="panel-body"><p class="review-text">{{ brief.checked }}</p></div></div>
-  <div class="panel"><div class="panel-head">Decisions for you</div><div class="panel-body"><p class="review-text">{{ brief.decisions }}</p></div></div>
-  <div class="panel"><div class="panel-head">Suggested verdict</div><div class="panel-body"><p class="review-text">{{ brief.verdict }}</p></div></div>
-  <div class="panel"><div class="panel-head">Reading order</div><div class="panel-body"><p class="review-text">{{ brief.reading_order }}</p></div></div>
+  <div class="panel"><div class="panel-head">What the PR does</div><div class="panel-body"><div class="md">{{ (brief.summary or "")|markdown }}</div></div></div>
+  <div class="panel"><div class="panel-head">What was checked</div><div class="panel-body"><div class="md">{{ (brief.checked or "")|markdown }}</div></div></div>
+  <div class="panel"><div class="panel-head">Decisions for you</div><div class="panel-body"><div class="md">{{ (brief.decisions or "")|markdown }}</div></div></div>
+  <div class="panel"><div class="panel-head">Suggested verdict</div><div class="panel-body"><div class="md">{{ (brief.verdict or "")|markdown }}</div></div></div>
+  <div class="panel"><div class="panel-head">Reading order</div><div class="panel-body"><div class="md">{{ (brief.reading_order or "")|markdown }}</div></div></div>
   {% else %}<p class="dim">No brief yet: the review is still being checked.</p>{% endif %}
   <div class="panel"><div class="panel-head">Findings</div>
   <div class="panel-body">

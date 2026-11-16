@@ -199,3 +199,14 @@ def test_review_screen_uses_shared_join():
     src = (Path(__file__).parent.parent / "maestro" / "tui" / "screens.py").read_text(encoding="utf-8")
     assert "rounds_view.review_threads(" in src
     assert 'e["type"] == "ReviewReplyPosted"' not in src.split("def action_threads")[1].split("def action_ci_timeline")[0]
+
+
+def test_review_thread_parts_split_header_body_replies():
+    events = [
+        {"type": "ReviewFeedbackReceived", "seq": 1,
+         "payload": {"comment_id": "a", "author": "dave", "state": "COMMENTED", "path": "f.py",
+                     "line": 3, "body": "tidy"}},
+        {"type": "ReviewReplyPosted", "seq": 2, "payload": {"comment_id": "a", "body": "ok"}},
+    ]
+    assert rounds_view.review_thread_parts(events) == [
+        rounds_view.ReviewThread("dave [COMMENTED] f.py:3", "tidy", ("ok",))]

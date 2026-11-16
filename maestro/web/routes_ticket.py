@@ -46,7 +46,7 @@ def head_ctx(shell: Shell, key: str, **extra) -> dict:
             "decisions": list(reversed(why_view.load_decisions(home, key))),
             "can_message": live, "can_hold": live and fleet.hold_state(home, key, now) is None,
             "can_release": fleet.hold_state(home, key, now) is not None,
-            "can_stop": can_stop, "threads": rounds_view.review_threads(events),
+            "can_stop": can_stop, "threads": rounds_view.review_thread_parts(events),
             "ci_timeline": evidence_view.ci_timeline(events), "questions": questions,
             "blocks": blocked_by(home, key),
             "can_degraded_act": snap.phase == "degraded", **extra}
