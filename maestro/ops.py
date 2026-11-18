@@ -452,7 +452,7 @@ def local_write_backup(cfg: Config, key: str, *, actor: str = "reconciler",
 # function below.
 # ---------------------------------------------------------------------------
 
-_FETCH_TIMEOUT = 60     # seconds; a hung `git fetch` must never wedge a reconciler
+_FETCH_TIMEOUT = 120    # seconds; a hung `git fetch` must never wedge a reconciler
 _GIT_TIMEOUT = 30       # seconds; fast rev-parse/status plumbing calls only -- NOT
                         # `worktree add`/adopt itself, see `worktree_timeout` (MTO-1: a
                         # ~230k-file monorepo checkout measured ~56s, well past this)
