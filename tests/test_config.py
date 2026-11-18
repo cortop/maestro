@@ -103,6 +103,7 @@ _OVERRIDE_SAMPLES = {
     "runner": "opencode",
     "runner_model": "m",
     "test_command": "make check",
+    "worktree_fetch_timeout": 4,
     "worktree_timeout": 5,
 }
 

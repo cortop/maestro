@@ -452,7 +452,6 @@ def local_write_backup(cfg: Config, key: str, *, actor: str = "reconciler",
 # function below.
 # ---------------------------------------------------------------------------
 
-_FETCH_TIMEOUT = 120    # seconds; a hung `git fetch` must never wedge a reconciler
 _GIT_TIMEOUT = 30       # seconds; fast rev-parse/status plumbing calls only -- NOT
                         # `worktree add`/adopt itself, see `worktree_timeout` (MTO-1: a
                         # ~230k-file monorepo checkout measured ~56s, well past this)
@@ -694,7 +693,7 @@ def _is_empty_branch(repo: str, branch: str, base: str, *, timeout: int) -> bool
 
 
 def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch: str, base: str,
-                              *, timeout: int) -> None:
+                              *, timeout: int, fetch_timeout: int) -> None:
     """Create *wt* on a fresh branch off ``origin/<base>``, or adopt *branch*
     if it already exists -- the same create-then-fallback the old ready.md
     prose did. Raises loudly (never a silent no-op) if both attempts fail.
@@ -739,11 +738,12 @@ def _worktree_create_or_adopt(cfg: Config, key: str, repo: str, wt: Path, branch
     crash/timeout anywhere above leaves no witness behind (T-81)."""
     try:
         fetch = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", base],
-                               capture_output=True, text=True, timeout=_FETCH_TIMEOUT)
+                               capture_output=True, text=True, timeout=fetch_timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise store.MaestroError(
-            f"git fetch origin {base!r} in {repo} did not complete within {_FETCH_TIMEOUT}s "
-            f"({exc})") from exc
+            f"git fetch origin {base!r} in {repo} did not complete within {fetch_timeout}s "
+            f"({exc}) -- raise `worktree_fetch_timeout` in config.toml if this repo's fetch "
+            f"legitimately takes longer") from exc
     if fetch.returncode != 0:
         raise store.MaestroError(
             f"git fetch origin {base!r} in {repo} failed (rc={fetch.returncode}): "
@@ -1045,7 +1045,8 @@ def worktree_ensure(cfg: Config, key: str, *, prime_timeout: int | None = None) 
             _cleanup_partial_worktree(repo, wt, branch=branch, base=binding.base_branch,
                                       timeout=worktree_timeout)
         _worktree_create_or_adopt(cfg, key, repo, wt, branch, binding.base_branch,
-                                  timeout=worktree_timeout)
+                                  timeout=worktree_timeout,
+                                  fetch_timeout=binding.worktree_fetch_timeout)
         created = True
     else:
         health = worktree_health(wt, timeout=worktree_timeout)
