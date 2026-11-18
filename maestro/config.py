@@ -156,6 +156,9 @@ class Config:
     # honored via raw pid liveness before it is released with no kill/no event.
     # Generously large so it never races T-13's max_session_seconds watchdog.
     unverified_claim_max_age: int = 24 * 3600
+    # Bounds `worktree ensure`'s `git fetch origin <base>`; a large monorepo's remote can
+    # be slow to start upload-pack.
+    worktree_fetch_timeout: int = 240
     # MTO-1: `git worktree add`/adopt's own timeout (worktree_ensure), separate from every
     # other short git plumbing call in ops.py (those stay on the internal 30s _GIT_TIMEOUT).
     # A monorepo checkout (~230k tracked files) measured ~56s; 30s killed it mid-checkout,
@@ -1000,6 +1003,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("prime_timeout", _int, per_repo=True),
     Knob("provider_probe_interval_s", _int),
     Knob("unverified_claim_max_age", _int),
+    Knob("worktree_fetch_timeout", _int, per_repo=True),
     Knob("worktree_timeout", _int, per_repo=True),
     # --- CI & review ---
     Knob("base_drift_policy", _choice(_BASE_DRIFT_POLICIES), per_repo=True),
@@ -1379,6 +1383,8 @@ prime_timeout = 600              # T-90: bounds the `prime` command below/[repos
                                   # many seconds per host instead of re-probing every sweep (0 disables caching)
 # unverified_claim_max_age = 86400  # ceiling (s) for honoring an unverifiable ("unknown"
                                     # identity) claim by raw pid liveness before releasing it
+# worktree_fetch_timeout = 240    # `worktree ensure`'s `git fetch origin <base>` timeout.
+                                  # Per-[repos.<name>] override wins.
 worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1); raise this
                                   # for a monorepo whose checkout legitimately takes longer --
                                   # never scale it down, a killed-mid-checkout worktree looks
@@ -1740,6 +1746,8 @@ implementer = "claude_skill"
                                      # above -- unset inherits the board-wide default. Bounds
                                      # ONLY `git worktree add`/adopt; has no effect on
                                      # prime_timeout above.
+# worktree_fetch_timeout = 300      # this repo's override of [maestro] worktree_fetch_timeout
+                                     # above -- unset inherits the board-wide default.
 # post_qa_skill = "/my-pr-polish"   # T-115: this repo's override of [maestro] post_qa_skill
                                      # above -- unset inherits the board-wide default. See that
                                      # key's own comment for the trigger point and shape.

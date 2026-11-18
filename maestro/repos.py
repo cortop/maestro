@@ -81,6 +81,7 @@ class RepoBinding:
     # [maestro] prime_timeout/worktree_timeout defaults -- same resolution shape as
     # base_drift_policy (table value wins, unset inherits the board-wide one).
     prime_timeout: int = 600
+    worktree_fetch_timeout: int = 240
     worktree_timeout: int = 600
 
     # --- CI & review ---
