@@ -134,19 +134,3 @@ def test_review_session_cannot_edit_merge_or_post(board):
     assert "Bash(gh pr comment:*)" not in disp.phase_denylist("qa")
     granted = disp.phase_verb_grant("qa", "review")
     assert "Bash(maestro review-brief:*)" in granted and "Bash(maestro set-phase:*)" not in granted
-
-
-def test_large_diff_asks_before_spending_a_round(board):
-    home, sha = board
-    cfg_path = home / "config.toml"
-    cfg_path.write_text(cfg_path.read_text().replace('[maestro]\n', '[maestro]\npr_split_threshold = 1\n'))
-    wt = store.worktree_path(home, KEY)
-    (wt / "big.txt").write_text("\n".join(f"line {i}" for i in range(20)))
-    import subprocess
-    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "big"],
-                   cwd=wt, check=True)
-    _sweep(home, 1000)
-    snap = snap_mod.load(home, KEY)
-    assert snap.phase == "awaiting-human" and snap.open_questions
-    assert snap.review_comments == [] and not snap.test_runs

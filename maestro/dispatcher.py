@@ -4047,9 +4047,8 @@ def _start_review_round(cfg: Config, key: str, snap) -> str | None:
     """T-251: start a pending review round on a `ready` review ticket.
 
     A round already briefed at the current head is left alone (the human's answer
-    wakes the ticket back to `ready`; it must not loop). A diff above the resolved
-    `pr_split_threshold` asks the human first (qid per head SHA, so an answer for
-    this head passes straight through). Otherwise the ticket enters `verifying` when
+    wakes the ticket back to `ready`; it must not loop). Diff size is never
+    evaluated for a review. The ticket enters `verifying` when
     a `test_command` resolves (`sync_test_runs` runs it, `_route_test_run` hands on
     to `qa`), else `qa` directly. Returns what it did, or None."""
     from . import ops
@@ -4057,15 +4056,6 @@ def _start_review_round(cfg: Config, key: str, snap) -> str | None:
     head = snap.review_head_sha or ""
     if not head or (snap.review_brief or {}).get("head_sha") == head:
         return None
-    size = ops.pr_size(cfg, key)
-    qid = f"review-size-{key}-{head[:12]}"
-    if size["exceeds"] and not _question_answered(cfg.home, key, qid):
-        ops.ask(cfg, key,
-                f"{key}: this PR is {size['lines_changed']} lines changed (threshold "
-                f"{size['threshold']}). Reviewing it costs a full round -- answer to go ahead "
-                "with the review, or say to skip it.",
-                qid=qid, actor="dispatcher")
-        return "diff over pr_split_threshold: asked the human first"
     binding = repos_mod.resolve(cfg, cfg.home, key)
     dest = Phase.VERIFYING if binding.test_command and binding.mode != "local" else Phase.QA
     try:
