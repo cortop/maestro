@@ -2562,6 +2562,30 @@ def suggest_acs(cfg: Config, key: str, *, run=subprocess.run) -> list[str]:
     return cleaned
 
 
+_suggest_run = subprocess.run  # the model boundary for `auto_suggest_acs`
+
+
+def auto_suggest_acs(cfg: Config, key: str, *, run=None) -> dict:
+    """[human] Write `suggest_acs` drafts into a freshly created *key*'s spec when it has no ACs.
+
+    Never raises and never blocks creation: a spec that already has ACs is left
+    verbatim (``skipped``), and a failed or timed-out model call leaves the
+    empty placeholder in place and returns ``warning``.
+    """
+    spec_file = store.spec_path(cfg.home, key)
+    if not cfg.auto_suggest_acs or not spec_file.exists():
+        return {"added": 0, "skipped": True}
+    if snap_mod.has_acs(spec_file.read_text(encoding="utf-8")):
+        return {"added": 0, "skipped": True}
+    try:
+        suggestions = suggest_acs(cfg, key, run=run or _suggest_run)
+    except store.MaestroError as e:
+        return {"added": 0, "warning": f"{key}: could not auto-generate acceptance criteria: {e}"}
+    for text in suggestions[:6]:
+        add_ac(cfg, key, text)
+    return {"added": min(len(suggestions), 6)}
+
+
 def observe_spec(cfg: Config, key: str, *, actor: str = "reconciler") -> str | None:
     h = spec_hash_on_disk(cfg.home, key)
     if h is None:

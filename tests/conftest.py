@@ -194,6 +194,16 @@ def _no_real_spawns(request, monkeypatch):
         monkeypatch.setattr(cls, "spawn", _boom)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_ac_suggestion(monkeypatch):
+    """Minting a human-created ticket drafts ACs through `claude -p`; no test reaches the real binary."""
+    from maestro import ops
+
+    def _absent(cmd, **kw):
+        raise FileNotFoundError("claude (blocked in tests)")
+    monkeypatch.setattr(ops, "_suggest_run", _absent)
+
+
 def seed_ticket(home, key, title, *, phase=None, questions=None, pr=None, tier=1):
     """Append events for one ticket and fold its snapshot, mimicking the real flow.
 

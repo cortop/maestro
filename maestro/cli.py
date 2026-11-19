@@ -330,7 +330,7 @@ def cmd_create(args) -> int:
         # flag form already gives you. Set the runner via `maestro runner <KEY>`
         # (before implementation starts) or `--runner`/`--runner-model` on the
         # flag form instead.
-        a: dict = {"priority": priority}
+        a: dict = {"priority": priority, "auto_acs": True}
         if intent:
             a["intent"] = intent
         inbox.append_new(cfg.home, title, key=key, args=a)
@@ -345,7 +345,10 @@ def cmd_create(args) -> int:
               file=sys.stderr)
         return 2
 
-    a = {"priority": args.priority}
+    a = {"priority": args.priority, "auto_acs": True}
+    acs = [x for x in (getattr(args, "ac", None) or []) if x.strip()]
+    if acs:
+        a["acs"] = acs
     if args.intent:
         a["intent"] = args.intent
     if getattr(args, "kind", None):
@@ -384,10 +387,8 @@ def cmd_create(args) -> int:
         # UX-1 AC4: never gates creation on a model being locally installed/reachable
         # -- WARN only, after the ticket is already minted.
         _warn_runner_model(cfg.home, runner, runner_model, cfg=cfg)
-        # T-80: same WARN-only posture -- read back the spec `mint_one` just wrote,
-        # since `a` never carries acceptance criteria (there's no `--ac` flag; a
-        # fresh mint always seeds the same dangling "- [ ] " until a human fills
-        # it in).
+        # T-80: same WARN-only posture -- read back the spec `mint_one` just wrote;
+        # it still lacks ACs when auto-generation failed.
         _warn_missing_acs(store.spec_path(cfg.home, key).read_text(encoding="utf-8"))
         if not args.no_nudge and cfg.nudge_on_human_input:
             _nudge(cfg)
@@ -1706,6 +1707,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model", default=None, help="model override for this ticket's reconciler")
     sp.add_argument("--effort", default=None, help="effort override (low/medium/high/xhigh/max)")
     sp.add_argument("--notes", default=None, help="text for the ## Notes section")
+    sp.add_argument("--ac", action="append", default=None, metavar="TEXT",
+                    help="an acceptance criterion, kept verbatim (repeatable); "
+                         "without one, ACs are drafted automatically")
     sp.add_argument("--depends-on", dest="depends_on", nargs="+", default=None,
                     metavar="KEY", help="ticket keys this ticket depends on")
     sp.add_argument("--repo", default=None,

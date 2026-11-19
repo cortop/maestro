@@ -361,6 +361,7 @@ class Config:
     ready_fast_path: str = "off"
 
     # --- runners & models ---
+    auto_suggest_acs: bool = True  # draft ACs via `ops.suggest_acs` when a human-created ticket is minted
     default_effort: str | None = None  # global effort default; None = omit --effort entirely
     permission_mode: str = "acceptEdits"   # claude permission mode for reconcilers
     # GA-10: board-wide --allowedTools additions beyond the maestro-verb grant (cli.py's
@@ -1030,6 +1031,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("nudge_on_human_input", _bool),
     Knob("ready_fast_path", _choice(_READY_FAST_PATH_MODES)),
     # --- runners & models ---
+    Knob("auto_suggest_acs", _bool),
     Knob("default_effort", _opt_str),
     Knob("permission_mode", _str),
     Knob("reconcile_allowed_tools", _list),
@@ -1530,6 +1532,7 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
                                   # _READY_FAST_PATH_MODES).
 
 # --- runners & models ---
+# auto_suggest_acs = true       # draft 3-6 ACs (via `ops.suggest_acs`) into a human-created ticket with none
 # default_effort = "high"      # global --effort default for spawned sessions (unset = omit --effort)
 # permission_mode = "acceptEdits"   # claude --permission-mode for spawned reconcilers
 # reconcile_allowed_tools = ["Bash(npm test:*)"]   # board-wide --allowedTools additions, unioned

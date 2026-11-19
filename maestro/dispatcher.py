@@ -22,6 +22,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -1027,6 +1028,19 @@ def _mint_ticket(home: Path, key: str, title: str, ticket_args: dict, *,
     snap_mod.rebuild(home, key)
 
 
+def _auto_acs(cfg: Config, key: str, ticket_args: dict) -> None:
+    """Draft ACs for a just-minted human-created ticket (``auto_acs`` in its create args).
+
+    Runs outside the mint lock (a model round-trip) and only warns on failure.
+    """
+    if not ticket_args.get("auto_acs"):
+        return
+    from . import ops
+    res = ops.auto_suggest_acs(cfg, key)
+    if res.get("warning"):
+        print(f"warning: {res['warning']}", file=sys.stderr)
+
+
 def mint_one(cfg: Config, *, key: str | None, prefix: str | None, title: str,
              ticket_args: dict, actor: str = "reconciler") -> str:
     """Synchronously mint exactly one ticket -- the ``create --json`` counterpart
@@ -1055,7 +1069,8 @@ def mint_one(cfg: Config, *, key: str | None, prefix: str | None, title: str,
         if event_log.last_seq(home, resolved) > 0:
             return resolved  # already minted -- idempotent no-op
         _mint_ticket(home, resolved, title, ticket_args, actor=actor, source="cli/create --json")
-        return resolved
+    _auto_acs(cfg, resolved, ticket_args)
+    return resolved
 
 
 def mint_new_tickets(cfg: Config) -> list[str]:
@@ -1115,6 +1130,7 @@ def mint_new_tickets(cfg: Config) -> list[str]:
                 continue
             title = entry.get("title") or key
             _mint_ticket(home, key, title, ticket_args, actor="dispatcher", source="inbox/_new")
+        _auto_acs(cfg, key, ticket_args)
         minted.append(key)
         if dedup:
             minted_dedup[dedup] = key
@@ -1204,7 +1220,11 @@ def _seed_spec(key: str, title: str, args: dict) -> str:
         lines.append(args["notes"])
     lines.append("")
     lines.append("## Acceptance criteria")
-    lines.append("- ")
+    acs = [str(a).strip() for a in (args.get("acs") or []) if str(a).strip()]
+    if acs:
+        lines.extend(f"- [ ] {a}" for a in acs)
+    else:
+        lines.append("- ")
     return "\n".join(lines) + "\n"
 
 
