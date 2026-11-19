@@ -3275,6 +3275,47 @@ def import_linear(cfg: Config, url_or_id: str, *, tracker: object | None = None)
 _REVIEW_PR_URL_RE = re.compile(r"^https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[/?#].*)?$")
 
 
+REVIEW_SLUG_MAX = 40
+
+
+def review_title_slug(title: str | None, limit: int = REVIEW_SLUG_MAX) -> str:
+    """Lowercase ASCII hyphen slug of a PR title, cut at a word boundary within *limit*; '' if nothing survives."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode()
+    words = re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
+    slug = ""
+    for w in words:
+        nxt = f"{slug}-{w}" if slug else w
+        if len(nxt) > limit:
+            break
+        slug = nxt
+    return slug
+
+
+def review_key(number: int, title: str | None) -> str | None:
+    """`R-<number>-<slug>` for a titled PR, or None when the title yields no slug."""
+    slug = review_title_slug(title)
+    return store.validate_key(f"R-{number}-{slug}") if slug else None
+
+
+def _existing_review_key(cfg: Config, owner: str, name: str, number: int) -> str | None:
+    """The key already minted for this PR (legacy or slug-style), matched by `external_id`."""
+    legacy = f"REVIEW-{owner}-{name}-{number}".lower()
+    want = f"{owner}/{name}#{number}".lower()
+    candidates = [legacy] + sorted(
+        p.stem for p in (cfg.home / "events").glob(f"R-{number}-*.jsonl")
+        if not p.name.endswith(".archive.jsonl"))
+    for k in candidates:
+        try:
+            store.validate_key(k)
+            if event_log.last_seq(cfg.home, k) > 0 and \
+                    (snap_mod.load(cfg.home, k).external_id or "").lower() == want:
+                return k
+        except store.MaestroError:
+            continue
+    return None
+
+
 def _review_binding(cfg: Config, slug: str) -> str | None:
     """The `[repos.<name>]` name whose slug is *slug* (case-insensitive), if any."""
     for name, table in cfg.repos.items():
@@ -3337,9 +3378,10 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
         raise store.MaestroError(f"not a GitHub pull request URL: {pr_url!r}")
     owner, name, number = m.group(1), m.group(2), int(m.group(3))
     slug = f"{owner}/{name}"
-    key = store.validate_key(f"REVIEW-{owner}-{name}-{number}".lower())
+    legacy_key = store.validate_key(f"REVIEW-{owner}-{name}-{number}".lower())
+    key = _existing_review_key(cfg, owner, name, number)
     url = f"https://github.com/{slug}/pull/{number}"
-    snap = snap_mod.load(cfg.home, key) if event_log.last_seq(cfg.home, key) > 0 else None
+    snap = snap_mod.load(cfg.home, key) if key else None
     if snap is not None and snap.open_questions:
         return {"key": key, "minted": False, "started": False, "reason": "question open"}
 
@@ -3359,13 +3401,16 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
         head = vcs.pr_head(number, slug, env=env)
         if head.get("error") or not head.get("head_sha"):
             raise store.MaestroError(
-                f"{key}: cannot read PR head for {url} ({head.get('error') or 'no head sha'})")
+                f"{key or legacy_key}: cannot read PR head for {url} ({head.get('error') or 'no head sha'})")
         if head.get("is_fork"):
             refusal = ("fork", f"{url} comes from a fork; reviews only check out branches in "
                                f"{slug} itself. Dismiss this ticket, or review it by hand.")
 
     minted = snap is None
     if minted:
+        key = review_key(number, head.get("title"))
+        if key is None or event_log.last_seq(cfg.home, key) > 0:
+            key = legacy_key  # no usable title, or another repo's PR owns the slug key
         mint_one(cfg, key=key, prefix=None, title=f"Review {slug}#{number}",
                  ticket_args={"intent": f"Review {url} (someone else's pull request).",
                               "kind": "review", "repo": repo_name,
