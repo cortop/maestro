@@ -208,7 +208,7 @@ def open_pr(cfg: Config, key: str, *, title: str, body: str, stack: list[dict] |
     if not stack:
         _must(["git", "-C", w, "push", "-q", "-u", "origin", branch], "git push")
         info = _adopt_or_create(binding, wt, env, head=branch, base=base, title=title, body=body)
-        recorded = _record(cfg, key, info, stack=None, sid=f"pr-{key}", actor=actor)
+        recorded = _record(cfg, key, info, stack=None, sid=f"pr-{key}-{info['number']}", actor=actor)
         return {"opened": [info], "recorded": recorded}
 
     total = len(stack)
