@@ -118,13 +118,15 @@ def _repo_args(binding) -> list[str]:
 
 
 def _pr_info(binding, branch: str, env, cwd: Path) -> dict | None:
-    p = _run(["gh", "pr", "view", branch, *_repo_args(binding), "--json", "number,url"], cwd=cwd, env=env)
+    p = _run(["gh", "pr", "view", branch, *_repo_args(binding), "--json", "number,url,state"], cwd=cwd, env=env)
     if p.returncode != 0 or not p.stdout.strip():
         return None
     try:
         data = json.loads(p.stdout)
     except json.JSONDecodeError:
         return None
+    if data.get("state") in ("MERGED", "CLOSED"):
+        return None  # a finished PR on a reused branch name is not this ticket's PR
     return data if data.get("number") else None
 
 
