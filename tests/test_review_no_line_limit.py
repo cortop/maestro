@@ -4,7 +4,7 @@ Real git, real CLI and real dispatcher sweeps; only the code-host read and the
 `claude -p` spawn are faked.
 """
 from conftest import git, make_origin_and_repo
-from test_review_kind import KEY, URL, FakeVCS, _review
+from test_review_kind import KEY, FakeVCS, _review
 from maestro import config, dispatcher as disp, event_log, snapshot as snap_mod
 from maestro.sessions import DryRunSessions
 

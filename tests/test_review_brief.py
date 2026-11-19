@@ -9,7 +9,7 @@ import pytest
 
 from conftest import make_origin_and_repo
 from test_review_kind import KEY, URL, FakeVCS, _push_pr_head, _review
-from maestro import claims, cli, dispatcher as disp, event_log, ops, snapshot as snap_mod, store
+from maestro import claims, cli, dispatcher as disp, event_log, ops, snapshot as snap_mod
 from maestro import config
 from maestro.sessions import DryRunSessions
 
