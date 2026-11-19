@@ -1987,12 +1987,13 @@ def _sync_stacks(cfg: Config, now: float) -> dict:
 
 
 def sync_review_pending(cfg: Config, now: float) -> dict:
-    """T-253: finish a review ticket whose pending GitHub review the human has handled.
+    """T-253 / M-4: finish a `review`-kind ticket whose review is already handled on the host.
 
-    A `review`-kind ticket in `awaiting-ci` with a created pending review is polled with the
+    A `review`-kind ticket in `qa`, `awaiting-human` or `awaiting-ci` is polled with the
     same cursor-gated, pure-Python shape as `sync_vcs` (no reconciler spawns). It is done once
-    the review is no longer pending (submitted, or deleted on GitHub) or its PR is merged or
-    closed; the review checkout is removed. maestro never edits the pending review."""
+    its pull request is merged or closed, or -- with a created pending review -- once that
+    review is no longer pending (submitted, or deleted on GitHub); the review checkout is
+    removed. maestro never edits the pending review."""
     home = cfg.home
     vcs_name = cfg.providers.get("vcs", "none")
     if vcs_name in (None, "", "none"):
@@ -2009,31 +2010,39 @@ def sync_review_pending(cfg: Config, now: float) -> dict:
     vcs = providers.get_vcs(cfg)
     cache: dict = {}
     checked = 0
+    watched = (Phase.QA.value, Phase.AWAITING_HUMAN.value, Phase.AWAITING_CI.value)
     for key in list_keys(home):
         snap = snap_mod.load(home, key)
         pending = snap.review_pending
-        if snap.kind != "review" or snap.phase != Phase.AWAITING_CI.value or not pending:
+        if snap.kind != "review" or snap.phase not in watched:
+            continue
+        m = re.match(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)", snap.review_url or "")
+        if not m and not pending:
             continue
         checked += 1
         cred = resolve_credential(repos.resolve(cfg, home, key), cache)
         if not cred.ok:
             continue
-        m = re.match(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/", snap.review_url or "")
         slug = m.group(1) if m else None
-        number = pending["pr_number"]
+        number = pending["pr_number"] if pending else int(m.group(2))
         reason = None
-        state = vcs.review_state(number, pending["review_id"], repo=slug, env=cred.env)
-        if state.get("ok") and state.get("state") != "PENDING":
-            reason = f"review {str(state.get('state')).lower()} on GitHub"
-        else:
+        if pending and snap.phase == Phase.AWAITING_CI.value:
+            state = vcs.review_state(number, pending["review_id"], repo=slug, env=cred.env)
+            if state.get("ok") and state.get("state") != "PENDING":
+                reason = f"review {str(state.get('state')).lower()} on GitHub"
+        if reason is None:
             status = vcs.pr_status(number, repo=slug, env=cred.env)
             if status.get("state") in ("MERGED", "CLOSED"):
                 reason = f"pull request {status['state'].lower()}"
         if reason is None:
             continue
         try:
-            ops.set_phase(cfg, key, Phase.DONE, reason=reason, actor="dispatcher",
-                          expect=snap.observed_seq)
+            expect = snap.observed_seq
+            if snap.phase == Phase.QA.value:  # qa -> done is not an edge; park first
+                ops.set_phase(cfg, key, Phase.AWAITING_HUMAN, reason=reason,
+                              actor="dispatcher", expect=expect)
+                expect = snap_mod.load(home, key).observed_seq
+            ops.set_phase(cfg, key, Phase.DONE, reason=reason, actor="dispatcher", expect=expect)
         except event_log.StaleAppendError:
             continue
         wt = store.worktree_path(home, key)

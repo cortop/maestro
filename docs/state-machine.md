@@ -24,6 +24,7 @@ stateDiagram-v2
     triaging --> terminating
     awaiting_human --> awaiting_ci
     awaiting_human --> degraded
+    awaiting_human --> done
     awaiting_human --> implementing
     awaiting_human --> ready
     awaiting_human --> researching
