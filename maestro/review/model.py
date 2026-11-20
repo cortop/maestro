@@ -66,6 +66,9 @@ class Review:
     additions: int | None = None
     deletions: int | None = None
     changed_files: int | None = None
+    closed_at: str | None = None
+    review_state: str | None = None
+    previous_key: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -171,12 +174,13 @@ def _where_label(via, where) -> str | None:
     return where.get("surface") or via
 
 
-def _log_facts(home: Path, key: str) -> tuple[str | None, bool, str | None, list[dict], dict]:
-    """(requested_at, inferred, last PhaseChanged reason, requests, last PR observation)
-    from one pass over the log."""
+def _log_facts(home: Path, key: str) -> tuple[str | None, bool, str | None, list[dict], dict, dict]:
+    """(requested_at, inferred, last PhaseChanged reason, requests, last PR observation,
+    last `ReviewClosed` as {outcome, review_state, ts}) from one pass over the log."""
     created = None
     requests: list[dict] = []
     pr_obs: dict = {}
+    closed: dict = {}
     first_round_seen = False
     requested = None
     last_reason = None
@@ -200,12 +204,15 @@ def _log_facts(home: Path, key: str) -> tuple[str | None, bool, str | None, list
             requests.append(p)
         elif t == E.REVIEW_PR_OBSERVED:
             pr_obs = p
+        elif t == E.REVIEW_CLOSED:
+            closed = {"outcome": p.get("outcome"), "review_state": p.get("review_state"),
+                      "ts": e.get("ts")}
     first_ts = requests[0].get("requested_ts") if requests else None
     if first_ts:
-        return first_ts, False, last_reason, requests, pr_obs
+        return first_ts, False, last_reason, requests, pr_obs, closed
     if requested:
-        return requested, False, last_reason, requests, pr_obs
-    return created, True, last_reason, requests, pr_obs
+        return requested, False, last_reason, requests, pr_obs, closed
+    return created, True, last_reason, requests, pr_obs, closed
 
 
 def _outcome(reason) -> str:
@@ -229,7 +236,7 @@ def _counts(snap) -> dict:
 def build(home: Path, snap) -> Review:
     status = status_of(snap)
     slug, number = _slug_number(snap)
-    requested_at, inferred, reason, requests, pr = _log_facts(home, snap.key)
+    requested_at, inferred, reason, requests, pr, closed = _log_facts(home, snap.key)
     needs = needs_you_of(snap, status)
     brief = snap.review_brief or {}
     first = requests[0] if requests else {}
@@ -243,14 +250,17 @@ def build(home: Path, snap) -> Review:
         pending=snap.review_pending, source=snap.review_source,
         requested_at=requested_at, requested_at_inferred=inferred,
         requested_by=_who(first.get("requester")),
-        outcome=_outcome(reason) if status == ReviewStatus.CLOSED else None,
+        outcome=((closed.get("outcome") or _outcome(reason))
+                 if status == ReviewStatus.CLOSED else None),
         requests=tuple(requests), via=first.get("via"),
         where_label=_where_label(first.get("via"), where) if first else None,
         where_url=where.get("permalink"),
         last_request=requests[-1] if requests else None, request_count=len(requests),
         title=pr.get("title"), pr_state=pr.get("state"), draft=pr.get("draft"),
         additions=pr.get("additions"), deletions=pr.get("deletions"),
-        changed_files=pr.get("changed_files"))
+        changed_files=pr.get("changed_files"),
+        closed_at=closed.get("ts") if status == ReviewStatus.CLOSED else None,
+        review_state=closed.get("review_state"), previous_key=first.get("previous_key"))
 
 
 def load(home: Path, key: str) -> Review:

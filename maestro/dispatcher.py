@@ -15,6 +15,7 @@ No global lock, no wave barrier. Different keys are wholly independent.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -1043,7 +1044,7 @@ def _auto_acs(cfg: Config, key: str, ticket_args: dict) -> None:
 
 
 def mint_one(cfg: Config, *, key: str | None, prefix: str | None, title: str,
-             ticket_args: dict, actor: str = "reconciler") -> str:
+             ticket_args: dict, actor: str = "reconciler", locked: bool = False) -> str:
     """Synchronously mint exactly one ticket -- the ``create --json`` counterpart
     to the batch ``_new``-inbox drain ``mint_new_tickets`` performs on a sweep.
     Bypasses the inbox entirely, so the caller learns the assigned key
@@ -1055,10 +1056,11 @@ def mint_one(cfg: Config, *, key: str | None, prefix: str | None, title: str,
     ``MaestroError`` on an invalid or case-colliding explicit key. A key that
     already has events is treated as an idempotent no-op (retry-safe, exactly
     like ``mint_new_tickets``' own crash-safety semantics) and its existing key
-    is returned unchanged rather than re-minted.
+    is returned unchanged rather than re-minted. A caller that already holds the mint
+    lock passes ``locked=True`` (the lock is not reentrant).
     """
     home = cfg.home
-    with store.file_lock(_mint_lock_target(home)):
+    with (contextlib.nullcontext() if locked else store.file_lock(_mint_lock_target(home))):
         resolved = key or _auto_key(home, prefix=prefix or "T")
         store.validate_key(resolved)
         collision = _case_collision(home, resolved)
@@ -2058,14 +2060,17 @@ def sync_review_pending(cfg: Config, now: float) -> dict:
         slug = m.group(1) if m else None
         number = pending["pr_number"] if pending else int(m.group(2))
         reason = None
+        outcome, review_state = None, None
         if pending and snap.phase == Phase.AWAITING_CI.value:
             state = vcs.review_state(number, pending["review_id"], repo=slug, env=cred.env)
             if state.get("ok") and state.get("state") != "PENDING":
                 reason = f"review {str(state.get('state')).lower()} on GitHub"
+                outcome, review_state = "submitted", state.get("state")
         if reason is None:
             status = vcs.pr_status(number, repo=slug, env=cred.env)
             if status.get("state") in ("MERGED", "CLOSED"):
                 reason = f"pull request {status['state'].lower()}"
+                outcome = f"pr-{status['state'].lower()}"
         if reason is None:
             continue
         try:
@@ -2074,20 +2079,29 @@ def sync_review_pending(cfg: Config, now: float) -> dict:
                 ops.set_phase(cfg, key, Phase.AWAITING_HUMAN, reason=reason,
                               actor="dispatcher", expect=expect)
                 expect = snap_mod.load(home, key).observed_seq
+            ops.record_review_closed(cfg, key, outcome, review_state=review_state,
+                                     actor="dispatcher")
+            expect = snap_mod.load(home, key).observed_seq
             ops.set_phase(cfg, key, Phase.DONE, reason=reason, actor="dispatcher", expect=expect)
         except event_log.StaleAppendError:
             continue
-        wt = store.worktree_path(home, key)
-        binding = repos.resolve(cfg, home, key)
-        if wt.exists() and binding.path:
-            try:
-                subprocess.run(["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
-                               capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                pass  # the worktree stays; `maestro gc-worktrees` reclaims it
+        remove_review_worktree(cfg, key)
     cursor["review_pending"] = now
     store.write_json(cursor_path, cursor)
     return {"checked": checked}
+
+
+def remove_review_worktree(cfg: Config, key: str) -> None:
+    """Remove a review's checkout from its repo's worktree list; a timeout leaves it for gc."""
+    from . import repos
+    wt = store.worktree_path(cfg.home, key)
+    binding = repos.resolve(cfg, cfg.home, key)
+    if wt.exists() and binding.path:
+        try:
+            subprocess.run(["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
+                           capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            pass  # the worktree stays; `maestro gc-worktrees` reclaims it
 
 
 def _still_polled(cfg: Config, key: str) -> bool:
