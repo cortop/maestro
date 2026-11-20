@@ -144,8 +144,9 @@ def test_intake_files_reviews_for_direct_mentions_only(home, monkeypatch):
     slack.post("1700000006.000100", f"hey <@{UID}|me> <{PR2}|PR 8> thanks")
     code, out = _intake_cli(home, slack.since("0"), monkeypatch)
     assert code == 0
-    assert [f["pr_url"] for f in out["filed"]] == [PR, PR2]
+    assert [q["links"] for q in out["queued"]] == [[PR], [PR2]]
     assert out["cursor"] == "1700000006.000100"
+    slack_watcher.drain(_cfg(home))
     key = "review-acme-widgets-7"
     assert event_log.last_seq(home, key) > 0
     snap = snap_mod.load(home, key)
@@ -155,26 +156,28 @@ def test_intake_files_reviews_for_direct_mentions_only(home, monkeypatch):
 def test_review_source_is_the_permalink_built_from_the_workspace_url(home):
     cfg, seen = _cfg(home), []
 
-    def fake_review(cfg, url, source=None):
+    def fake_review(cfg, url, source=None, **_kw):
         seen.append((url, source))
         return {"key": "k", "minted": True, "started": True}
 
     slack = FakeSlack()
     slack.post("1700000001.000100", f"<@{UID}> {PR}")
-    slack_watcher.intake(cfg, slack.msgs, 1.0, start_review=fake_review)
+    slack_watcher.intake(cfg, slack.msgs, 1.0)
+    slack_watcher.drain(cfg, start_review=fake_review)
     assert seen == [(PR, "https://chat.example/archives/C0SYNTH/p1700000001000100")]
 
 
 def test_a_ping_is_filed_without_a_workspace_url(home):
     cfg, seen = _cfg(home, slack_workspace_url=None), []
 
-    def fake_review(cfg, url, source=None):
+    def fake_review(cfg, url, source=None, **_kw):
         seen.append((url, source))
         return {"key": "k", "minted": True, "started": True}
 
     slack = FakeSlack()
     slack.post("1700000001.000100", f"<@{UID}> {PR}")
-    out = slack_watcher.intake(cfg, slack.msgs, 1.0, start_review=fake_review)
+    out = slack_watcher.intake(cfg, slack.msgs, 1.0)
+    slack_watcher.drain(cfg, start_review=fake_review)
     assert seen == [(PR, None)] and out["skipped"] == 0
 
 
@@ -183,15 +186,15 @@ def test_cursor_prevents_reprocessing(home, monkeypatch):
     slack = FakeSlack()
     slack.post("1700000001.000100", f"<@{UID}> {PR}")
     _, first = _intake_cli(home, slack.since("0"), monkeypatch)
-    assert len(first["filed"]) == 1
-    # The same history re-delivered: nothing is filed twice.
+    assert len(first["queued"]) == 1
+    # The same history re-delivered: nothing is queued twice.
     _, again = _intake_cli(home, slack.msgs, monkeypatch)
-    assert again["filed"] == []
+    assert again["queued"] == []
     # Only the new message is filed.
     slack.post("1700000009.000100", f"<@{UID}> {PR2}")
     cursor = slack_watcher.load_state(home)["cursor"]
     _, third = _intake_cli(home, slack.since(cursor), monkeypatch)
-    assert [f["pr_url"] for f in third["filed"]] == [PR2]
+    assert [q["links"] for q in third["queued"]] == [[PR2]]
 
 
 def test_first_spawn_starts_the_cursor_at_now_never_history(home):
@@ -204,16 +207,17 @@ def test_failed_filing_is_retried_then_dropped(home):
     cfg = _cfg(home)
     calls = []
 
-    def boom(cfg, url, source=None):
+    def boom(cfg, url, source=None, **_kw):
         calls.append(url)
         raise store.MaestroError("code host unreachable")
 
     msg = {"ts": "1700000001.000100", "text": f"<@{UID}> {PR}", "permalink": "https://chat.example/p1"}
-    out = slack_watcher.intake(cfg, [msg], 1.0, start_review=boom)
-    assert out["errors"] and slack_watcher.load_state(home)["retry"]
-    slack_watcher.intake(cfg, [], 2.0, start_review=boom)
-    slack_watcher.intake(cfg, [], 3.0, start_review=boom)
-    assert slack_watcher.load_state(home)["retry"] == []
+    slack_watcher.intake(cfg, [msg], 1.0)
+    out = slack_watcher.drain(cfg, start_review=boom)
+    assert out["failed"] and slack_watcher.load_state(home)["queue"]
+    slack_watcher.drain(cfg, start_review=boom)
+    slack_watcher.drain(cfg, start_review=boom)
+    assert slack_watcher.load_state(home)["queue"] == []
     assert len(calls) == slack_watcher.MAX_INTAKE_ATTEMPTS
 
 
