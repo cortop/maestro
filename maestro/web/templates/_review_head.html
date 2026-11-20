@@ -1,0 +1,31 @@
+{% macro act(verb, label, cls) -%}
+<form class="act-form" hx-post="/reviews/{{ key }}/{{ verb }}" hx-target="#review-head" hx-swap="innerHTML">
+  <input type="hidden" name="page" value="detail"><button type="submit" class="btn {{ cls }}">{{ label }}</button>
+</form>
+{%- endmacro %}
+<section class="hero">
+  <div class="hero-main">
+    <p class="kicker">&gt; <a href="/reviews">reviews</a> / <span class="keep">{{ row.repo }} #{{ row.number }}</span> <span class="chip chip-agent">{{ row.status|replace("-", " ") }}</span></p>
+    <h1 class="ticket-title">{{ row.title }}</h1>
+    <p class="status-sentence">{{ row.status_sentence }}</p>
+    <p class="review-ask">{% if row.author %}by {{ row.author }} · {% endif %}{% if row.requested_by %}asked by <b>{{ row.requested_by }}</b> {{ when(row.requested_at, now) }}{% if row.where_label %} in {{ row.where_label }}{% endif %}{% else %}asked by <b class="dim">not recorded</b>{% endif %}</p>
+    {% if error %}<p class="action-error" role="alert">{{ error }}</p>{% elif msg %}<p class="mono dim" role="status">{{ msg }}</p>{% endif %}
+  </div>
+  <div class="title-actions">
+    {% if row.url %}<a class="btn btn-secondary" href="{{ row.url }}">Open PR</a>{% endif %}
+    {% if row.where_url %}<a class="btn btn-ghost" href="{{ row.where_url }}">Open Slack message</a>{% endif %}
+    {% if can_write %}
+    {% if can_rereview %}{{ act("rereview", "Re-review", "btn-secondary") }}{% endif %}
+    {% if can_retry %}{{ act("retry", "Retry", "btn-secondary") }}{% endif %}
+    {% if row.status != "closed" %}{{ act("dismiss", "Mark reviewed", "btn-ghost") }}{% endif %}
+    {% endif %}
+  </div>
+</section>
+<div class="rail-scroll">
+  <ol class="rail" aria-hidden="true">
+    {% for s in rail %}<li class="{{ 'visited' if s.visited }}{{ ' by-dispatcher' if s.dispatcher }}{{ ' current' if s.current }}"></li>{% endfor %}
+  </ol>
+  <ol class="rail-times">
+    {% for s in rail %}<li class="{{ 'visited' if s.visited }}{{ ' current' if s.current }}"><span class="rail-label">{{ s.label }}</span><span class="rail-time">{{ s.time }}{% if s.span %} · {{ s.span }}{% endif %}</span></li>{% endfor %}
+  </ol>
+</div>

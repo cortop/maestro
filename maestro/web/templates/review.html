@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ row.title }}{% endblock %}
+{% block body %}
+<div id="review-head" hx-get="/reviews/{{ key }}/head" hx-trigger="sse:ticket:{{ key }}" hx-swap="innerHTML">
+{% include "_review_head.html" %}
+</div>
+<div class="cols ticket-grid">
+  <div class="col col-wide">
+    <div id="panel-review" hx-get="/t/{{ key }}/review" hx-trigger="load" hx-swap="innerHTML"></div>
+  </div>
+  <div class="col">
+    <div class="panel"><div class="panel-head">Request</div><div class="panel-body">
+      <dl class="kv">
+        {% if requests %}
+        {% set q = requests[0] %}
+        <dt>Asked by</dt><dd>{{ q.by or "not recorded" }}</dd>
+        <dt>Asked</dt><dd>{{ clock(q.at) }}{% if q.at %} · {{ when(q.at, now) }}{% endif %}</dd>
+        <dt>Where</dt><dd>{% if q.url %}<a href="{{ q.url }}">{{ q.label or "Slack" }}</a>{% else %}{{ q.label or "not recorded" }}{% endif %}</dd>
+        {% for q in requests[1:] %}
+        <dt>Asked again</dt><dd>{{ q.by or "not recorded" }} · {{ clock(q.at) }}{% if q.url %} · <a href="{{ q.url }}">{{ q.label or "Slack" }}</a>{% elif q.label %} · {{ q.label }}{% endif %}</dd>
+        {% endfor %}
+        {% else %}
+        <dt>Asked by</dt><dd class="dim">not recorded</dd>
+        <dt>Asked</dt><dd class="dim">not recorded</dd>
+        <dt>Where</dt><dd class="dim">not recorded</dd>
+        {% endif %}
+      </dl>
+    </div></div>
+    <div class="panel"><div class="panel-head">Pull request</div><div class="panel-body">
+      <dl class="kv">
+        <dt>Repository</dt><dd>{% if row.url %}<a href="{{ row.url }}">{{ row.repo }} #{{ row.number }}</a>{% else %}{{ row.repo }} #{{ row.number }}{% endif %}</dd>
+        <dt>Author</dt><dd>{{ row.author or "unknown" }}</dd>
+        <dt>State</dt><dd>{{ r.pr_state or "unknown" }}</dd>
+        <dt>Size</dt><dd>{% if row.size %}{% if row.size.additions is not none %}+{{ row.size.additions }} −{{ row.size.deletions }}{% endif %}{% if row.size.changed_files is not none %} · {{ row.size.changed_files }} files{% endif %}{% else %}unknown{% endif %}</dd>
+        <dt>Reviewed at</dt><dd class="mono">{{ (row.head_sha or "")[:7] or "unknown" }} · round {{ row.round }}</dd>
+      </dl>
+    </div></div>
+    <div class="panel"><div class="panel-head">Timeline</div>
+      <ul class="rows">
+        {% for t in timeline %}<li><span class="grow">{{ t.text }}</span><span class="meta dim">{{ t.time }}{% if t.after %} · +{{ t.after }}{% endif %}</span></li>
+        {% else %}<li><span class="grow dim">No events yet</span></li>{% endfor %}
+      </ul>
+    </div>
+    <div class="panel"><div class="panel-head">More</div>
+      <ul class="rows">
+        <li><span class="grow"><a href="/t/{{ key }}">Events and sessions</a></span><span class="meta dim">{{ key }}</span></li>
+        {% if r.previous_key %}<li><span class="grow"><a href="/reviews/{{ r.previous_key }}">Previous review of this PR</a></span><span class="meta dim">{{ r.previous_key }}</span></li>{% endif %}
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}

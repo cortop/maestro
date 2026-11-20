@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ t.key }}{% endblock %}
 {% block body %}
+{% if t.snap.kind == "review" %}<p class="panel-note review-section">Raw ticket view. <a href="/reviews/{{ key }}">Open the review page</a></p>{% endif %}
 <section id="ticket-head" hx-get="/t/{{ key }}/head" hx-trigger="sse:ticket:{{ key }}" hx-swap="innerHTML">
   {% include "_ticket_head.html" %}
 </section>
