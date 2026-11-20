@@ -8,7 +8,7 @@ import os
 import sys
 
 from maestro import snapshot as snap_mod
-from maestro import cli, claims, dispatcher as disp, ops, slack_watcher, store
+from maestro import cli, claims, dispatcher as disp, ops, slack_watcher
 from maestro.config import Config
 from maestro.sessions import DryRunSessions
 from tests.conftest import seed_phase
