@@ -22,7 +22,7 @@ maestro handoff "$KEY" --summary "<what you did, what you addressed or declined,
 The verb labels branches `<PREFIX>$KEY-1`.. with the last entry at `<PREFIX>$KEY`, pushes and
 opens them oldest-first (each based on the previous entry), and records them root-first, so a
 crash-and-respawn never double-opens a PR. On a gt-managed stack the root entry bases on the
-closest pushed branch beneath it and the verb records the split in the Graphite graph
-afterwards -- best-effort, never blocking the PRs on it.
+closest pushed `<PREFIX>` branch beneath it (else `<BASE>`) and the verb records the split in
+the Graphite graph afterwards -- best-effort, never blocking the PRs on it.
 
 Push normally — never force-push. Then exit; the next sweep spawns the independent `qa` reconciler.
