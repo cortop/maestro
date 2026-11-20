@@ -1177,10 +1177,15 @@ def _would_mint_keys(home: Path) -> list[str]:
 
 
 def _auto_key(home: Path, prefix: str = "T") -> str:
-    n = 1
-    while (home / "tickets" / f"{prefix}-{n}").exists():
-        n += 1
-    return f"{prefix}-{n}"
+    """One above the highest existing number for *prefix*; never fills a gap."""
+    top = 0
+    tickets = home / "tickets"
+    if tickets.is_dir():
+        for d in tickets.iterdir():
+            head, sep, num = d.name.rpartition("-")
+            if sep and head == prefix and num.isdigit():
+                top = max(top, int(num))
+    return f"{prefix}-{top + 1}"
 
 
 def _seed_spec(key: str, title: str, args: dict) -> str:

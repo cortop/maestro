@@ -118,25 +118,39 @@ def _repo_args(binding) -> list[str]:
 
 
 def _pr_info(binding, branch: str, env, cwd: Path) -> dict | None:
-    p = _run(["gh", "pr", "view", branch, *_repo_args(binding), "--json", "number,url,state"], cwd=cwd, env=env)
+    p = _run(["gh", "pr", "view", branch, *_repo_args(binding), "--json", "number,url,state,headRefOid"],
+             cwd=cwd, env=env)
     if p.returncode != 0 or not p.stdout.strip():
         return None
     try:
         data = json.loads(p.stdout)
     except json.JSONDecodeError:
         return None
-    if data.get("state") in ("MERGED", "CLOSED"):
-        return None  # a finished PR on a reused branch name is not this ticket's PR
-    return data if data.get("number") else None
+    return data if isinstance(data, dict) and data.get("number") else None
+
+
+def _branch_head(wt: Path, branch: str) -> str:
+    p = _run(["git", "-C", str(wt), "rev-parse", branch])
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def _adoptable(info: dict | None, head_sha: str) -> bool:
+    """OPEN is adopted; MERGED only at the branch head; CLOSED never (a reused key's stale PR)."""
+    if not info:
+        return False
+    state = info.get("state")
+    if state == "MERGED":
+        return bool(head_sha) and info.get("headRefOid") == head_sha
+    return state in (None, "OPEN")
 
 
 def _adopt_or_create(binding, wt: Path, env, *, head: str, base: str, title: str, body: str) -> dict:
     info = _pr_info(binding, head, env, wt)
-    if info is None:
+    if not _adoptable(info, _branch_head(wt, head)):
         _must(["gh", "pr", "create", *_repo_args(binding), "--base", base, "--head", head, "--draft",
                "--title", title, "--body", body], f"gh pr create ({head})", cwd=wt, env=env)
         info = _pr_info(binding, head, env, wt)
-        if info is None:
+        if info is None or info.get("state") not in (None, "OPEN"):
             raise store.MaestroError(f"gh pr create ({head}) succeeded but the PR cannot be read back")
     return info
 
