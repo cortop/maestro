@@ -1,0 +1,93 @@
+{% macro ask(r) -%}
+{% if r.requested_by %}asked by <b>{{ r.requested_by }}</b> · {{ when(r.requested_at, now) }}{% if r.where_url %} · <a href="{{ r.where_url }}">in {{ r.where_label or "Slack" }}</a>{% elif r.where_label %} · {{ r.where_label }}{% endif %}{% else %}asked by <b class="dim">not recorded</b> · noticed {{ when(r.requested_at, now) }}{% endif %}
+{%- endmacro %}
+{% macro size(r) -%}
+{% if r.size %}{% if r.size.additions is not none %}+{{ r.size.additions }} −{{ r.size.deletions }}{% endif %}{% if r.size.changed_files is not none %} · {{ r.size.changed_files }} files{% endif %}{% endif %}
+{%- endmacro %}
+{% macro findings(r) -%}
+{% set f = r.findings %}{% set parts = [] %}
+{%- for sev in ("blocking", "question", "nit") %}{% if f.get(sev) %}{% set _ = parts.append(f[sev] ~ " " ~ sev) %}{% endif %}{% endfor -%}
+{{ parts|join(" · ") }}
+{%- endmacro %}
+{% macro act(r, verb, label, cls) -%}
+<form class="act-form" hx-post="/reviews/{{ r.key }}/{{ verb }}" hx-target="#reviews-live" hx-swap="innerHTML">
+  <input type="hidden" name="filter" value="{{ filter }}"><button type="submit" class="btn {{ cls }}">{{ label }}</button>
+</form>
+{%- endmacro %}
+{% if error %}<p class="action-error review-section" role="alert">{{ error }}</p>{% elif msg %}<p class="mono dim review-section" role="status">{{ msg }}</p>{% endif %}
+<nav id="filters" aria-label="Review filters">
+  {% for name, label in (("open", "open"), ("needs", "needs you"), ("progress", "in progress"), ("github", "on github"), ("history", "history")) %}
+  <a href="/reviews?filter={{ name }}"{% if name == filter %} class="active"{% endif %}>{{ label }}({{ counts[name] }})</a>
+  {% endfor %}
+</nav>
+{% set total = view.needs_you|length + view.in_progress|length + view.on_github|length + view.history|length %}
+{% if not total %}
+<div class="empty"><img src="/static/logo.svg" alt=""><p>No review requests. Mention you with a PR link in the watched channel, or paste a PR URL above.</p></div>
+{% endif %}
+{% if show_needs and view.needs_you %}
+<p class="section-label gold review-section">Needs you</p>
+<div class="review-cards">
+  {% for r in view.needs_you %}
+  <article class="card{% if r.status == 'brief-ready' %} review{% endif %}" data-key="{{ r.key }}" data-status="{{ r.status }}">
+    <div class="card-inner">
+      <div class="card-title"><span>{{ r.status|replace("-", " ")|capitalize }}{% if r.round %} // round {{ r.round }}{% endif %}</span>{% if r.waiting_s is not none %}<span class="waiting">waiting {{ r.waiting_s|dur }}</span>{% endif %}</div>
+      <div class="card-body">
+        <p class="card-question">{{ r.title }}</p>
+        <p class="card-ticket keep">{% if r.url %}<a href="{{ r.url }}">{{ r.repo }} #{{ r.number }}</a>{% else %}{{ r.repo }} #{{ r.number }}{% endif %}{% if r.author %} · by {{ r.author }}{% endif %}{% if size(r) %} · {{ size(r) }}{% endif %}</p>
+        <p class="review-ask">{{ ask(r) }}</p>
+        {% if findings(r) or r.verdict %}<p class="card-counts">{{ findings(r) }}{% if r.verdict %}{% if findings(r) %} · {% endif %}suggested: {{ r.verdict }}{% endif %}</p>{% endif %}
+        {% if r.status != 'brief-ready' %}<p class="card-rec">{{ r.status_sentence }}</p>{% endif %}
+        <div class="card-actions">
+          <a class="btn btn-primary" href="/reviews/{{ r.key }}">Open the review</a>
+          {% if can_write %}{% if r.status == 'blocked' %}{{ act(r, "retry", "Retry", "btn-secondary") }}{% endif %}
+          {{ act(r, "dismiss", "Mark reviewed" if r.status == "brief-ready" else "Dismiss", "btn-ghost") }}{% endif %}
+        </div>
+      </div>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}
+{% if show_table and table_rows %}
+<p class="section-label review-section">In progress and on GitHub</p>
+<div class="frame board-frame">
+<table id="reviews" class="ledger">
+  <thead><tr><th scope="col">Status</th><th scope="col">Pull request</th><th scope="col">Author</th><th scope="col">Asked by</th><th scope="col">Asked</th><th scope="col">Where</th><th scope="col">Findings</th><th scope="col">Doing</th></tr></thead>
+  <tbody>
+    {% for r in table_rows %}
+    <tr data-key="{{ r.key }}" data-status="{{ r.status }}">
+      <td><span class="chip {{ 'chip-dispatcher' if r.status == 'pending-on-github' else 'chip-agent' }}">{{ "on github" if r.status == "pending-on-github" else r.status }}</span></td>
+      <td class="title"><a href="/reviews/{{ r.key }}">{{ r.title }}</a><span class="review-sub">{{ r.repo }} #{{ r.number }}{% if size(r) %} · {{ size(r) }}{% endif %}</span></td>
+      <td class="mono">{{ r.author or "" }}</td>
+      <td class="who">{% if r.requested_by %}<b>{{ r.requested_by }}</b>{% else %}<span class="dim">not recorded</span>{% endif %}{% if r.via == "web" %}<span class="review-sub">pasted in the web UI</span>{% endif %}</td>
+      <td class="ts{% if not r.requested_by %} dim{% endif %}">{% if r.requested_by %}{{ when(r.requested_at, now) }}{% else %}noticed {{ when(r.requested_at, now) }}{% endif %}</td>
+      <td class="mono">{% if r.where_url %}<a href="{{ r.where_url }}">{{ r.where_label or "Slack" }}</a>{% else %}{{ r.where_label or r.via or "" }}{% endif %}</td>
+      <td class="mono{% if not findings(r) %} dim{% endif %}">{{ findings(r) or "not yet" }}</td>
+      <td class="now">{% if r.status == "pending-on-github" and r.url %}<a href="{{ r.url }}">Submit your pending review on GitHub</a>{% else %}{{ r.status_sentence }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% if show_history and view.history %}
+<p class="section-label review-section">Recently closed</p>
+<div class="frame board-frame">
+<table class="ledger">
+  <thead><tr><th scope="col">Outcome</th><th scope="col">Pull request</th><th scope="col">Author</th><th scope="col">Asked by</th><th scope="col">Asked</th><th scope="col">Closed</th><th scope="col">Ask to brief</th></tr></thead>
+  <tbody>
+    {% for r in view.history %}
+    <tr data-key="{{ r.key }}" data-status="closed">
+      <td><span class="chip {{ 'chip-kind' if r.outcome == 'submitted' else 'chip-done' }}">{{ r.outcome or "closed" }}</span></td>
+      <td class="title"><a href="/reviews/{{ r.key }}">{{ r.title }}</a><span class="review-sub">{{ r.repo }} #{{ r.number }}</span></td>
+      <td class="mono">{{ r.author or "" }}</td>
+      <td{% if not r.requested_by %} class="dim"{% endif %}>{{ r.requested_by or "not recorded" }}</td>
+      <td class="ts{% if not r.requested_by %} dim{% endif %}">{% if r.requested_by %}{{ when(r.requested_at, now) }}{% else %}noticed {{ when(r.requested_at, now) }}{% endif %}</td>
+      <td class="ts">{{ when(r.closed_at, now) }}</td>
+      <td class="mono{% if ask_to_brief(r) == 'n/a' %} dim{% endif %}">{{ ask_to_brief(r) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}

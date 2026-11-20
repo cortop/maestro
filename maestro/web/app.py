@@ -17,7 +17,7 @@ from .. import store
 from ..config import Config
 from ..view import events as ev_view
 from . import (markdown, routes_actions, routes_activity, routes_board, routes_deps, routes_fleet, routes_new,
-                 routes_now, routes_palette, routes_spec, routes_ticket)
+                 routes_now, routes_palette, routes_reviews, routes_spec, routes_ticket)
 from .guard import WriteGuard
 from .shell import Shell
 from .stream import Hub
@@ -75,6 +75,7 @@ def create_app(home: Path | str, *, poll_interval: float = 1.0,
     nudge = routes_actions.default_nudge(shell) if nudge_on_action else None
     routes_actions.register(app, shell, nudge, vcs, sweep)
     routes_new.register(app, shell, nudge, vcs, tracker)
+    routes_reviews.register(app, shell, nudge, vcs)
     routes_spec.register(app, shell, (lambda: sessions) if sessions is not None else None, suggest_run)
 
     @app.get("/stream", response_class=EventSourceResponse)

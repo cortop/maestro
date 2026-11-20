@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}maestro reviews{% endblock %}
+{% block body %}
+{% set c = view.counts %}
+<section class="hero">
+  <div class="hero-main">
+    <p class="kicker">&gt; reviews // pull requests you were asked to review</p>
+    <h1>Reviews</h1>
+    <p class="lede">{{ c.needs_you }} need you · {{ c.in_progress }} in progress · {{ c.on_github }} to submit on GitHub</p>
+    {% set s = view.slack %}
+    <p class="review-fresh">{% if s.enabled %}<a href="/fleet">Slack checked {% if s.last_poll is not none %}{{ (now - s.last_poll)|dur }} ago{% else %}never{% endif %} · every {{ s.effective_interval }}s · {{ s.polls_today }}{% if s.cap %} / {{ s.cap }}{% endif %} polls today</a>{% else %}<a href="/fleet">Slack watcher is off</a>{% endif %}</p>
+  </div>
+  {% if can_write %}
+  <form class="review-start" id="new-review" hx-post="/reviews/start" hx-target="#reviews-live" hx-swap="innerHTML">
+    <input type="hidden" name="filter" value="{{ filter }}">
+    <input type="url" name="url" placeholder="Pull request URL" aria-label="Pull request URL">
+    <button type="submit" class="btn btn-secondary">Review this PR</button>
+  </form>
+  {% endif %}
+</section>
+<div id="reviews-live" hx-get="/reviews/rows?filter={{ filter }}" hx-trigger="sse:board" hx-swap="innerHTML">
+{% include "_reviews_rows.html" %}
+</div>
+{% endblock %}

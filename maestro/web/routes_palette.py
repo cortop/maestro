@@ -93,6 +93,7 @@ def goto_entries(shell: Shell, current: str | None) -> list[dict]:
         else:
             out.append(_go(f"Tickets: {name}", f"/tickets?filter={name}", "board filter"))
     out.append(_go("Open activity", "/activity", "recent events across every ticket", "T"))
+    out.append(_go("Open reviews", "/reviews", "pull requests you were asked to review"))
     out.append(_go("Open dependency view", "/deps", "open-ticket tree", "D"))
     running = sorted(board_view.running_keys(home, shell.cfg()) - {current})
     if running:
