@@ -1021,7 +1021,7 @@ def cmd_slack_cursor(args) -> int:
 
 
 def cmd_slack_intake(args) -> int:
-    """[agent] T-255: file reviews from Slack messages (a JSON list on stdin or --file);
+    """[agent] T-255: queue reviews from Slack messages (a JSON list on stdin or --file);
     the keep/ignore decision is made here in Python, never by the calling session."""
     raw = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
     try:

@@ -3485,8 +3485,6 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
     no_output_timeout = cfg.no_output_timeout
     turn_wallclock = cfg.max_turn_wallclock_seconds
     kill = kill or _killpg_best_effort
-    if not max_seconds and not no_output_timeout and not turn_wallclock:
-        return []
     reaped: list[str] = []
     # T-89 (AC5): computed lazily, at most once per sweep -- only once a reap
     # actually happens (most sweeps reap nothing) -- and reused across every
@@ -3518,6 +3516,10 @@ def run_watchdog(cfg: Config, now: float, *, kill=None) -> list[str]:
             if (max_seconds and isinstance(epoch, (int, float))
                     and now - epoch > max_seconds):
                 reason = f"session exceeded {max_seconds}s"
+        if reason is None and key == slack_watcher.WATCHER_KEY:
+            epoch = claim.get("epoch")
+            if isinstance(epoch, (int, float)) and now - epoch > slack_watcher.WATCHER_MAX_SECONDS:
+                reason = f"watcher session exceeded {slack_watcher.WATCHER_MAX_SECONDS}s"
         if reason is None:
             continue
         pid = claim.get("pid")
@@ -4019,6 +4021,8 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     out = _HookResults()
     if filter_keys is None:
         out.minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
+    # T-292: file queued Slack pings before the poll, whether or not the poll is due or skipped.
+    _run_hook("slack_drain", hook_errors, slack_watcher.drain, cfg, now, default={})
     # T-288: right after minting, so a slow worktree/VCS sync cannot delay the poll.
     _run_hook("slack_watcher", hook_errors, slack_watcher.sync, cfg, sessions, now, default={})
     _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
