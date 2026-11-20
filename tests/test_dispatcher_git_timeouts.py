@@ -4,7 +4,7 @@ import ast
 import subprocess
 from pathlib import Path
 
-from maestro import dispatcher as disp, event_log, snapshot as snap_mod, store
+from maestro import dispatcher as disp
 from maestro.sessions import DryRunSessions
 from maestro.statemachine import Phase
 
