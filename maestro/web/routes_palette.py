@@ -6,7 +6,7 @@ import re
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 
-from .. import fleet, projection, ratelimit, store
+from .. import fleet, projection, ratelimit, review, store
 from ..statemachine import TERMINAL_PHASES
 from ..view import board as board_view
 from ..view import ticket as ticket_view
@@ -81,7 +81,8 @@ def ticket_jump_entries(shell: Shell) -> list[dict]:
     live = [s for s in snaps if s.phase not in terminal]
     done = [s for s in snaps if s.phase in terminal]
     snaps = live + done[:max(0, MAX_TICKETS - len(live))]
-    return [_go(f"{s.key} {s.title}", f"/t/{s.key}", s.phase) for s in snaps]
+    return [_go(f"{s.key} {s.title}", f"{'/reviews/' if review.is_review(s) else '/t/'}{s.key}", s.phase)
+            for s in snaps]
 
 
 def goto_entries(shell: Shell, current: str | None) -> list[dict]:

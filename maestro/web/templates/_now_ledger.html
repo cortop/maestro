@@ -5,7 +5,7 @@
   <tbody data-group="in-flight-{{ group }}">
     {% for r in rows %}
     <tr data-key="{{ r.key }}">
-      <td class="key"><a href="/t/{{ r.key }}">{{ r.key }}</a></td>
+      <td class="key"><a href="{{ "/reviews/" if r.kind == "review" else "/t/" }}{{ r.key }}">{{ r.key }}</a></td>
       <td class="title">{{ r.title }}</td>
       <td><span class="chip chip-{{ group }}">{{ phase(r.phase) }}</span>{% if r.kind == "review" %} <span class="chip chip-kind">review</span>{% endif %}</td>
       <td class="now">{% if group == "agent" %}<span class="cursor" aria-hidden="true"></span>{% endif %}{{ r.doing or ("working" if group == "agent" else "waiting on " ~ phase(r.phase)|lower) }}{% if r.tool_line %}<div class="tool">{{ r.tool_line }}</div>{% endif %}</td>

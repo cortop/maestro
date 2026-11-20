@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .model import (Review, ReviewStatus, is_review, list_reviews, load,
-                    needs_you_of, split, status_of)
+                    needs_you_of, review_keys, split, status_of)
 
 __all__ = ["Review", "ReviewStatus", "is_review", "list_reviews", "load",
-           "needs_you_of", "split", "status_of"]
+           "needs_you_of", "review_keys", "split", "status_of"]

@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import fleet, projection, ratelimit, spend, store
+from .. import fleet, projection, ratelimit, review, spend, store
 from ..config import Config
 from ..view import board as board_view
 from ..view import reviews as reviews_view
@@ -44,7 +44,7 @@ class Shell:
         snaps = projection.load_snapshots(self.home)
         return {"state": state, "spend": sp["today_usd"], "ceiling": sp["ceiling_usd"],
                 "spend_unavailable": sp["unavailable"],
-                "sessions": len(board_view.running_keys(self.home, cfg)), "tickets": len(snaps),
+                "sessions": len(board_view.running_keys(self.home, cfg)), "tickets": len(review.split(snaps)[0]),
                 "needs": sum(1 for s in snaps if board_view.needs_you(self.home, s))}
 
     def render(self, request: Request, name: str, *, nav: str = "now", **ctx) -> HTMLResponse:

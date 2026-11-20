@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import (backup, claims, dispatcher, health, ratelimit, sessions, slack_watcher,
+from .. import (backup, claims, dispatcher, health, ratelimit, review, sessions, slack_watcher,
                 spend as spend_mod, steplog, store)
 from ..config import Config
 from . import rounds as rounds_view
@@ -63,13 +63,14 @@ def session_rows(home: Path, cfg: Config, now: float | None = None) -> list[dict
     """One row per live claim: key, round label, live tool line, runner, pid, age and the
     session's cost. ``cost`` is ``None`` (absent, never zero) until its log carries a result."""
     now = store.now_epoch() if now is None else now
+    review_keys = review.review_keys(home)
     rows = []
     for c in claims.describe_claims(home, max_age=cfg.unverified_claim_max_age):
         if not c["claimed"]:
             continue
         key = c["key"]
         row = {"key": key, "round": "", "tool": "", "runner": None, "pid": c["pid"],
-               "age_s": c["age_s"], "cost": None}
+               "age_s": c["age_s"], "cost": None, "review": key in review_keys}
         try:
             row["round"] = rounds_view.round_label(home, key)
             logs = sessions.list_sessions(home, key)

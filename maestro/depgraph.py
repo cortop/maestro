@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatcher, snapshot as snap_mod, store
+from . import dispatcher, review, snapshot as snap_mod, store
 from .statemachine import TERMINAL_PHASES, Phase
 
 
@@ -89,6 +89,8 @@ def build(home: Path) -> DepGraph:
     nodes: dict[str, Node] = {}
     for key, deps in raw.items():
         snap = snap_mod.load(home, key)
+        if review.is_review(snap):
+            continue
         if Phase(snap.phase) in TERMINAL_PHASES:
             continue
         nodes[key] = Node(key, snap_mod.display_title(home, snap), snap.phase, [])

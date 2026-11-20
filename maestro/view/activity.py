@@ -4,7 +4,7 @@ from __future__ import annotations
 import json as _json
 from pathlib import Path
 
-from .. import store
+from .. import review, store
 from .events import CATEGORY_NAMES, category_of, event_summary
 
 TAIL_BYTES = 64 * 1024
@@ -40,7 +40,7 @@ def _tail_events(path: Path, per_key: int) -> list[dict]:
 
 def recent(home: Path, *, cats: set[int] | None = None, text: str = "",
            limit: int = LIMIT, per_key: int = PER_KEY) -> list[dict]:
-    """Newest-first rows ``{key, seq, ts, type, actor, summary, cat}`` over the recent window of
+    """Newest-first rows ``{key, seq, ts, type, actor, summary, cat, review}`` over the recent window of
     every ticket. *cats* keeps only those category numbers (``None`` keeps all); *text* keeps rows
     whose key, type or summary contains it, case-insensitively."""
     d = Path(home) / "events"
@@ -51,6 +51,7 @@ def recent(home: Path, *, cats: set[int] | None = None, text: str = "",
     except OSError:
         return []
     needle = text.strip().lower()
+    review_keys = review.review_keys(home)
     rows: list[dict] = []
     for name in names:
         key = name[: -len(".jsonl")]
@@ -59,7 +60,8 @@ def recent(home: Path, *, cats: set[int] | None = None, text: str = "",
             if cats is not None and cat not in cats:
                 continue
             row = {"key": key, "seq": e["seq"], "ts": e.get("ts") or "", "type": str(e.get("type", "")),
-                   "actor": str(e.get("actor", "")), "summary": event_summary(e), "cat": cat}
+                   "actor": str(e.get("actor", "")), "summary": event_summary(e), "cat": cat,
+                   "review": key in review_keys}
             if needle and needle not in f"{key} {row['type']} {row['summary']}".lower():
                 continue
             rows.append(row)

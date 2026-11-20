@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from . import event_log, events as E, fleet, snapshot as snap_mod, store
+from . import event_log, events as E, fleet, review, snapshot as snap_mod, store
 from .dispatcher import list_keys, split_key
 from .statemachine import Phase
 
@@ -144,7 +144,7 @@ def _query_term(field: str, val: str) -> QueryPredicate:
         if val == "burning":
             return lambda s, t, d: bool(s.burning)
         if val == "review":
-            return lambda s, t, d: s.phase in _REVIEW_PHASES
+            return lambda s, t, d: s.phase in _REVIEW_PHASES and not review.is_review(s)
         raise ValueError(f"is: expects 'burning' or 'review', got {val!r}")
     raise ValueError(f"unknown filter field {field!r}")
 
@@ -202,7 +202,7 @@ def ticket_rows(home: Path, phases: frozenset | None = None, *,
     frozenset of `Phase`, back-compat with every existing caller) filters by
     phase membership. Neither given returns every ticket.
     """
-    snaps = load_snapshots(home)
+    snaps = review.split(load_snapshots(home))[0]
     if predicate is None and phases is not None:
         predicate = phase_predicate(phases)
     if predicate is not None:
@@ -218,7 +218,7 @@ def open_question_queue(home: Path) -> list[dict]:
     rows: list[dict] = []
     for key in sorted(list_keys(home), key=split_key):
         s = snap_mod.load(home, key)
-        if s.phase not in (Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value):
+        if review.is_review(s) or s.phase not in (Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value):
             continue
         parsed = [(qid, text, *parse_round_question(text)) for qid, text in s.open_questions.items()]
         parsed.sort(key=lambda p: p[2] or float("inf"))
@@ -260,7 +260,8 @@ def _recent_fast_path_routes(home: Path, now_epoch: float) -> list[tuple[str, st
 
 
 def render(home: Path) -> dict[str, str]:
-    snaps = [snap_mod.load(home, k) for k in list_keys(home)]
+    all_snaps = [snap_mod.load(home, k) for k in list_keys(home)]
+    snaps, review_snaps = review.split(all_snaps)
     by_phase: dict[str, list[snap_mod.Snapshot]] = {}
     for s in snaps:
         by_phase.setdefault(s.phase, []).append(s)
@@ -287,6 +288,11 @@ def render(home: Path) -> dict[str, str]:
     lines.append(f"\n**{len(snaps)} tickets** — "
                  + ", ".join(f"{p.value}:{len(by_phase.get(p.value, []))}"
                              for p in order if by_phase.get(p.value)) + "\n")
+    if review_snaps:
+        open_reviews = [s for s in review_snaps if review.status_of(s) != review.ReviewStatus.CLOSED]
+        lines.append(f"\n{len(open_reviews)} open reviews, "
+                     f"{sum(1 for s in open_reviews if review.needs_you_of(s))} need you "
+                     "— `maestro reviews`\n")
     lines.append("\n| Key | Phase | Title | PR | CI | Fails |")
     lines.append("|-----|-------|-------|----|----|-------|")
     for p in order:
@@ -324,7 +330,10 @@ def render(home: Path) -> dict[str, str]:
     has_blockers = bool(blocked or runner_blockers or repo_blockers or hook_errors)
 
     held = fleet.list_holds(home, store.now_epoch())
-    if not awaiting and not degraded and not burning and not has_blockers and not held:
+    needs_reviews = sorted((s for s in review_snaps if review.needs_you_of(s)),
+                           key=lambda x: split_key(x.key))
+    if (not awaiting and not degraded and not burning and not has_blockers and not held
+            and not needs_reviews):
         nlines.append("\nNothing is waiting on you. 🎉\n")
     if has_blockers:
         age = ""
@@ -366,6 +375,12 @@ def render(home: Path) -> dict[str, str]:
             for qid, text in s.open_questions.items():
                 nlines.append(f"- **{s.key}** — {text}")
                 nlines.append(f"  - answer: `maestro ans {s.key} \"...\"`  (qid: {qid})")
+    if needs_reviews:
+        nlines.append("\n## Reviews\n")
+        for s in needs_reviews:
+            nlines.append(f"- **{s.key}** — {review.status_of(s).value}"
+                          + (f" · {s.review_url}" if s.review_url else ""))
+            nlines.append("  - act: `maestro reviews` or the Reviews page")
     if burning:
         nlines.append("\n## Burning (parked -- no progress, repeated identical failures)\n")
         for s in sorted(burning, key=lambda x: split_key(x.key)):

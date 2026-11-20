@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .. import claims, fleet as fleet_mod, projection, snapshot as snap_mod, steplog, store
+from .. import claims, fleet as fleet_mod, projection, review, snapshot as snap_mod, steplog, store
 from ..dispatcher import split_key
 from ..config import Config
 from ..statemachine import ACTIVE_PHASES, Phase
@@ -13,6 +13,7 @@ from ..statemachine import ACTIVE_PHASES, Phase
 NEEDS_YOU_PHASES = frozenset({Phase.AWAITING_HUMAN, Phase.DEGRADED})
 NEEDS_YOU_PHASE_VALUES = {p.value for p in NEEDS_YOU_PHASES}
 _REVIEW_PHASES = frozenset({Phase.AWAITING_CI, Phase.IN_REVIEW})
+_REVIEW_PHASE_VALUES = {p.value for p in _REVIEW_PHASES}
 
 Predicate = Callable[[Path, snap_mod.Snapshot], bool]
 
@@ -32,7 +33,7 @@ def held(home: Path, s: snap_mod.Snapshot) -> bool:
 FILTERS: list[tuple[str, Predicate | None]] = [
     ("needs-you", needs_you),
     ("active", projection.phase_predicate(ACTIVE_PHASES)),
-    ("review", projection.phase_predicate(_REVIEW_PHASES)),
+    ("review", lambda home, s: not review.is_review(s) and s.phase in _REVIEW_PHASE_VALUES),
     ("held", held),
     ("running", None),
     ("all", None),
@@ -139,7 +140,7 @@ def sort_rows(rows: list[BoardRow], column: str, desc: bool) -> list[BoardRow]:
 def board(home: Path, cfg: Config, name: str = "needs-you", search: str = "",
           sort: str = "", desc: bool = False) -> BoardView:
     """Rows for filter *name* (table order, or by *sort*) matching *search*, plus every filter's count."""
-    snaps = projection.load_snapshots(home)
+    snaps, _ = review.split(projection.load_snapshots(home))
     running = running_keys(home, cfg)
     counts = {n: len(select(home, snaps, n, running)) for n in FILTER_NAMES}
     shown = {s.key for s in select(home, snaps, name, running)}
