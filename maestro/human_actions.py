@@ -194,6 +194,21 @@ def create_pending_review(cfg: Config, key: str, findings: list[dict], *, vcs=No
     return payload
 
 
+def mark_reviewed(cfg: Config, key: str) -> dict:
+    """Record that the human already reviewed a `review`-kind ticket and move it to `done`.
+
+    Idempotent: a ticket already `done` is returned unchanged. Refuses any other kind."""
+    snap = snap_mod.load(cfg.home, key)
+    if snap.kind != "review":
+        raise store.MaestroError(f"{key}: only a review ticket can be marked reviewed")
+    reason = "marked reviewed by the human"
+    if snap.phase == Phase.QA.value:  # qa -> done is not an edge; park first
+        ops.set_phase(cfg, key, Phase.AWAITING_HUMAN, reason=reason, actor="human")
+    if snap.phase != Phase.DONE.value:
+        ops.set_phase(cfg, key, Phase.DONE, reason=reason, actor="human")
+    return {"key": key, "phase": Phase.DONE.value}
+
+
 def queue_ticket(cfg: Config, title: str, *, priority: int = 3, nudge: Nudge | None = None) -> dict:
     """Queue a create-ticket request exactly as `maestro create <title> --priority N`; refuses an empty title or a non-board home."""
     title = (title or "").strip()

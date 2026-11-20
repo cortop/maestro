@@ -118,13 +118,15 @@ def _repo_args(binding) -> list[str]:
 
 
 def _pr_info(binding, branch: str, env, cwd: Path) -> dict | None:
-    p = _run(["gh", "pr", "view", branch, *_repo_args(binding), "--json", "number,url"], cwd=cwd, env=env)
+    p = _run(["gh", "pr", "view", branch, *_repo_args(binding), "--json", "number,url,state"], cwd=cwd, env=env)
     if p.returncode != 0 or not p.stdout.strip():
         return None
     try:
         data = json.loads(p.stdout)
     except json.JSONDecodeError:
         return None
+    if data.get("state") in ("MERGED", "CLOSED"):
+        return None  # a finished PR on a reused branch name is not this ticket's PR
     return data if data.get("number") else None
 
 
@@ -206,7 +208,7 @@ def open_pr(cfg: Config, key: str, *, title: str, body: str, stack: list[dict] |
     if not stack:
         _must(["git", "-C", w, "push", "-q", "-u", "origin", branch], "git push")
         info = _adopt_or_create(binding, wt, env, head=branch, base=base, title=title, body=body)
-        recorded = _record(cfg, key, info, stack=None, sid=f"pr-{key}", actor=actor)
+        recorded = _record(cfg, key, info, stack=None, sid=f"pr-{key}-{info['number']}", actor=actor)
         return {"opened": [info], "recorded": recorded}
 
     total = len(stack)

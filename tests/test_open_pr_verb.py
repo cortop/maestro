@@ -99,6 +99,23 @@ def test_open_pr_idempotent(home, env, capsys):
     assert gout("ls-remote", "--heads", "origin", BRANCH, cwd=wt).strip()
 
 
+def test_open_pr_ignores_merged_pr_on_reused_branch(home, env, capsys):
+    wt, state = env
+    _commit(wt, "a.txt")
+    pr_file = state / f"pr-{BRANCH.replace('/', '_')}"
+    pr_file.write_text(json.dumps({"number": 4, "url": "https://github.com/o/r/pull/4", "state": "OPEN"}))
+    argv = ["--home", str(home), "open-pr", KEY, "--title", "T-1: thing", "--body", "why"]
+    assert cli.main(argv) == 0
+    capsys.readouterr()
+    assert snap_mod.load(home, KEY).pr_number == 4
+    pr_file.write_text(json.dumps({"number": 4, "url": "https://github.com/o/r/pull/4", "state": "MERGED"}))
+    assert cli.main(argv) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["recorded"] is True and out["opened"][0]["number"] != 4
+    assert len(_gh_calls(state, "create")) == 1
+    assert snap_mod.load(home, KEY).pr_number == out["opened"][0]["number"]
+
+
 def test_open_pr_stack_root_first(home, env, capsys):
     wt, state = env
     c1 = _commit(wt, "a.txt")

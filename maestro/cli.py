@@ -842,6 +842,17 @@ def cmd_stop(args) -> int:
     return 0
 
 
+def cmd_reviewed(args) -> int:
+    """[human] mark a review-kind ticket as already reviewed: moves it to `done` (never an agent verb)."""
+    cfg = _cfg(args)
+    try:
+        _print(human_actions.mark_reviewed(cfg, args.key))
+    except store.MaestroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_unhold(args) -> int:
     """[human] release a ticket's hold (never an agent verb)."""
     home = _cfg(args).home
@@ -1929,6 +1940,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--until", default=None, help="bare epoch or ISO-8601 timestamp")
     sp.add_argument("--reason", default=None)
     sp = add("unhold", cmd_unhold, "[human] release a ticket's hold"); sp.add_argument("key")
+
+    sp = add("reviewed", cmd_reviewed,
+             "[human] mark a review ticket as already reviewed: moves it to done")
+    sp.add_argument("key")
 
     sp = add("stop", cmd_stop,
              "[human] SIGTERM a key's live session (no Failed event; refuses unless the claim's "
