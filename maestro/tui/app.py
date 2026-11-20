@@ -57,6 +57,7 @@ from ..statemachine import Phase
 from ..view import board as board_view
 from ..view import fleet as fleet_view
 from ..view import now as now_view
+from ..view import reviews as reviews_view
 from ..view import rounds as rounds_mod
 from . import worktree_open
 from .commands import ActionProvider
@@ -91,7 +92,10 @@ from .render import _render_fleet_painted
 from .render import _render_now
 from .render import _render_now_detail
 from .render import _render_pulse
+from .render import _render_review_detail
+from .render import _render_reviews
 from .render import _styled_row
+from .render import review_rows
 from .screens import AcScreen
 from .screens import ActivityScreen
 from .screens import BackupsScreen
@@ -284,6 +288,29 @@ class _NowList(Static, can_focus=True):
         self.app.action_now_prev()
 
 
+class _ReviewList(Static, can_focus=True):
+    """The Reviews tab's list: focused, it owns the up/down review and left/right finding keys."""
+
+    BINDINGS = [
+        Binding("down", "reviews_next", "Next", show=False),
+        Binding("left", "review_prev", "Previous finding", show=False),
+        Binding("right", "review_next", "Next finding", show=False),
+        Binding("up", "reviews_prev", "Previous", show=False),
+    ]
+
+    def action_review_next(self) -> None:
+        self.app.action_review_next()
+
+    def action_review_prev(self) -> None:
+        self.app.action_review_prev()
+
+    def action_reviews_next(self) -> None:
+        self.app.action_reviews_next()
+
+    def action_reviews_prev(self) -> None:
+        self.app.action_reviews_prev()
+
+
 class _ContextFooter(Footer):
     """Footer listing only `MaestroTUI.footer_actions()`, then help and the palette key."""
 
@@ -337,6 +364,9 @@ class MaestroTUI(App):
     #now-groups { width: 1fr; height: auto; padding: 0 1; }
     #now-logo { display: none; }
     #now-right { width: 1fr; height: 1fr; padding: 0 1; }
+    #reviews-body { height: 1fr; }
+    #reviews-left { width: 1fr; height: 1fr; }
+    #reviews-right { width: 1fr; height: 1fr; padding: 0 1; }
     #tickets { width: 2fr; height: 1fr; }
     #right   { width: 1fr; height: 1fr; }
     #detail  { width: 1fr; height: 1fr; padding: 0 1; }
@@ -356,6 +386,7 @@ class MaestroTUI(App):
         Binding("1", "tab_now", "Now tab", show=False),
         Binding("2", "tab_tickets", "Tickets tab", show=False),
         Binding("3", "tab_fleet", "Fleet tab", show=False),
+        Binding("4", "tab_reviews", "Reviews tab", show=False),
         Binding("<", "flip_sort", "Sort direction", show=False),
         Binding(">", "cycle_sort", "Sort column", show=False),
         Binding("A", "add_ac", "Add AC", show=False),
@@ -375,7 +406,10 @@ class MaestroTUI(App):
         Binding("Q", "trigger_post_qa", "Post-QA", show=False),
         Binding("S", "schedule_panel", "Schedule", show=False),
         Binding("T", "activity_panel", "Activity", show=False),
+        Binding("U", "review_rereview", "Re-review", show=False),
         Binding("V", "review_pr", "Review a PR", show=False),
+        Binding("X", "review_mark_reviewed", "Mark reviewed", show=False),
+        Binding("Y", "review_open_slack", "Open Slack message", show=False),
         Binding("b", "blockers", "Blockers", show=False),
         Binding("colon", "command_palette", "Palette", show=False),
         Binding("ctrl+d", "discard", "Discard", show=False),
@@ -443,6 +477,9 @@ class MaestroTUI(App):
         "retry",
         "review_create",
         "review_edit",
+        "review_mark_reviewed",
+        "review_open_slack",
+        "review_rereview",
         "review_toggle",
         "rounds_panel",
         "runner",
@@ -453,6 +490,19 @@ class MaestroTUI(App):
         "view_inbox",
         "view_logs",
         "why_panel",
+    })
+    # Ticket actions that stay available on the Reviews tab.
+    # sorted-registry
+    _REVIEW_TAB_ACTIONS = frozenset({
+        "open_pr",
+        "review_create",
+        "review_edit",
+        "review_mark_reviewed",
+        "review_open_slack",
+        "review_rereview",
+        "review_toggle",
+        "view_events",
+        "view_logs",
     })
     # Board-only actions: meaningless once any other screen is pushed.
     # sorted-registry
@@ -497,6 +547,9 @@ class MaestroTUI(App):
         self._fleet_tab_state: dict = {}  # fleet tab: status, quick payload, doctor_pending
         self._now_key: str | None = None  # key last handed to _selected_key by the Now cursor
         self._now_idx: int = 0  # needs-you cursor on the Now tab
+        self._reviews_result: dict | None = None  # Reviews-tab payload of the now-tab worker
+        self._reviews_idx = 0  # cursor over review_rows(view)
+        self._reviews_key: str | None = None  # key under the Reviews cursor
         self._review_edits: dict[str, dict] = {}  # review key -> {head, excluded, comments, cursor}
         self._vcs = None  # VCS provider for the pending-review action (tests inject a fake)
         self._badge_result: dict | None = None
@@ -577,6 +630,11 @@ class MaestroTUI(App):
                 return screen._current_key()
             except NoMatches:
                 return None
+        if self._on_board():
+            tab = self._active_tab()
+            if tab == "tab-reviews":
+                row = self._reviews_row()
+                return row.key if row is not None else None
         return self._selected_key
 
     def _now_card(self):
@@ -594,7 +652,9 @@ class MaestroTUI(App):
         self._now_idx = min(self._now_idx, max(0, len(cards) - 1))
         card = self._now_card()
         if card is not None and card.key != self._now_key:
-            self._selected_key = self._now_key = card.key  # actions target the Now cursor
+            self._now_key = card.key
+            if self._active_tab() == "tab-now":
+                self._selected_key = card.key  # actions target the Now cursor
         status, groups = _render_now(r["view"], r["pulse"], r["sessions"], r["fleet"], r["now"],
                                      self._now_idx if card is not None else None)
         try:
@@ -624,20 +684,46 @@ class MaestroTUI(App):
         self._now_idx = max(0, self._now_idx - 1)
         self._paint_now()
 
+    def _reviews_rows(self) -> list:
+        view = (self._reviews_result or {}).get("view")
+        return review_rows(view) if view is not None else []
+
+    def _reviews_row(self):
+        """The row under the Reviews cursor, or None."""
+        rows = self._reviews_rows()
+        if not rows:
+            return None
+        return rows[min(self._reviews_idx, len(rows) - 1)]
+
+    def _review_data(self, card) -> dict | None:
+        """The loaded brief, findings and head of *card* from its own tab's payload."""
+        src = self._reviews_result if isinstance(card, reviews_view.ReviewRow) else self._now_result
+        return ((src or {}).get("reviews") or {}).get(getattr(card, "key", None))
+
+    def _repaint_review(self) -> None:
+        """Repaint every tab that shows a review's edit state."""
+        self._paint_now()
+        self._paint_reviews()
+
     def _review_card(self):
-        """The review card under the Now cursor while the Now tab shows the board, else None."""
+        """The brief-ready review under the active tab's cursor (a Now card or a Reviews row), else None."""
         try:
-            if self.query_one("#tabs", TabbedContent).active != "tab-now" or not self._on_board():
+            tab = self.query_one("#tabs", TabbedContent).active
+            if tab not in ("tab-now", "tab-reviews") or not self._on_board():
                 return None
         except (NoMatches, ScreenStackError):
             return None
+        if tab == "tab-reviews":
+            row = self._reviews_row()
+            data = self._review_data(row) if row is not None else None
+            return row if data and data["brief"] and row.needs_you else None
         card = self._now_card()
         return card if card is not None and hasattr(card, "counts") else None
 
     def _review_state(self, card) -> dict | None:
         """The loaded brief and findings of a review card plus the edits not yet sent."""
-        data = (self._now_result or {}).get("reviews", {}).get(getattr(card, "key", None))
-        if not data or not hasattr(card, "counts"):
+        data = self._review_data(card)
+        if not data or not (hasattr(card, "counts") or isinstance(card, reviews_view.ReviewRow)):
             return None
         edits = self._review_edits.get(card.key)
         if edits is None or edits["head"] != data["head"]:  # a new round drops the old edits
@@ -654,17 +740,50 @@ class MaestroTUI(App):
             return None, None, 0
         return card, self._review_edits[card.key], len(state["findings"])
 
+    def _paint_reviews(self) -> None:
+        r = self._reviews_result
+        if r is None:
+            return
+        view = r["view"]
+        rows = review_rows(view)
+        self._reviews_idx = min(self._reviews_idx, max(0, len(rows) - 1))
+        row = self._reviews_row()
+        self._reviews_key = row.key if row is not None else None
+        status, groups = _render_reviews(view, r["now"], self._reviews_idx if row is not None else None)
+        try:
+            self.query_one("#reviews-status", Static).update(status)
+            self.query_one("#reviews-list", Static).update(groups)
+            self.query_one("#reviews-detail", Static).update(
+                _render_review_detail(row, self._review_state(row) if row is not None else None,
+                                      r["now"], r.get("detail")))
+            n = view.counts.get("needs_you", 0)
+            self.query_one("#tabs", TabbedContent).get_tab("tab-reviews").label = (
+                f"Reviews ({n})" if n else "Reviews")
+        except NoMatches:  # app is tearing down
+            pass
+        self._refresh_bindings()
+
+    def action_reviews_next(self) -> None:
+        self._reviews_idx = min(self._reviews_idx + 1, max(0, len(self._reviews_rows()) - 1))
+        self._paint_reviews()
+        self._refresh_now_tab()
+
+    def action_reviews_prev(self) -> None:
+        self._reviews_idx = max(0, self._reviews_idx - 1)
+        self._paint_reviews()
+        self._refresh_now_tab()
+
     def action_review_next(self) -> None:
         card, edits, n = self._review_edit_state()
         if edits is not None and n:
             edits["cursor"] = min(edits["cursor"] + 1, n - 1)
-            self._paint_now()
+            self._repaint_review()
 
     def action_review_prev(self) -> None:
         card, edits, n = self._review_edit_state()
         if edits is not None:
             edits["cursor"] = max(0, edits["cursor"] - 1)
-            self._paint_now()
+            self._repaint_review()
 
     def action_review_toggle(self) -> None:
         """Include or exclude the finding under the cursor from the pending review."""
@@ -672,7 +791,7 @@ class MaestroTUI(App):
         if edits is None or not n:
             return
         edits["excluded"] ^= {edits["cursor"]}
-        self._paint_now()
+        self._repaint_review()
 
     def action_review_edit(self) -> None:
         """Edit the comment of the finding under the cursor in the text modal."""
@@ -680,7 +799,7 @@ class MaestroTUI(App):
         if edits is None or not n:
             return
         i = edits["cursor"]
-        finding = self._now_result["reviews"][card.key]["findings"][i]
+        finding = self._review_data(card)["findings"][i]
         current = edits["comments"].get(i, finding.get("comment", ""))
 
         def _on_dismiss(text: str | None) -> None:
@@ -690,7 +809,7 @@ class MaestroTUI(App):
                 edits["comments"].pop(i, None)
             else:
                 edits["comments"][i] = text
-            self._paint_now()
+            self._repaint_review()
 
         self.push_screen(_InboxModal(card.key, current, title=f"edit the comment on {finding.get('file')}:{finding.get('line')}",
                                      hint="Only this finding changes; the original is kept until you create the review.",
@@ -701,7 +820,7 @@ class MaestroTUI(App):
         card, edits, n = self._review_edit_state()
         if edits is None:
             return
-        data = self._now_result["reviews"][card.key]
+        data = self._review_data(card)
         kept = [{"index": i, "comment": edits["comments"].get(i, f.get("comment", ""))}
                 for i, f in enumerate(data["findings"]) if i not in edits["excluded"]]
         if not kept:
@@ -743,6 +862,63 @@ class MaestroTUI(App):
             self.notify(f"Pending review created for {key} ({detail})")
         self._refresh_now_tab()
 
+    def _reviews_tab_row(self):
+        """The Reviews-tab row under the cursor while that tab shows the board, else None."""
+        if self._active_tab() != "tab-reviews" or not self._on_board():
+            return None
+        return self._reviews_row()
+
+    def action_review_mark_reviewed(self) -> None:
+        """X: mark the selected review reviewed (it moves to done), after a confirm."""
+        row = self._reviews_tab_row()
+        if row is None or row.status == "closed":
+            return
+        key = row.key
+
+        def _on_confirm(ok: bool | None) -> None:
+            if not ok:
+                return
+            try:
+                human_actions.mark_reviewed(config_mod.load(str(self._home)), key)
+            except store.MaestroError as exc:
+                self.notify(str(exc), severity="error")
+                return
+            self._review_edits.pop(key, None)
+            self.notify(f"{key} marked reviewed")
+            self._refresh_now_tab()
+
+        self.push_screen(_ConfirmModal(
+            f"Mark {escape(key)} as reviewed? It moves to done and its worktree is removed."), _on_confirm)
+
+    def action_review_open_slack(self) -> None:
+        """Y: open the Slack message that asked for the selected review."""
+        row = self._reviews_tab_row()
+        if row is None:
+            return
+        if not row.where_url:
+            self.notify(f"No Slack message recorded for {row.key}", severity="warning")
+            return
+        self.open_url(row.where_url)
+
+    def action_review_rereview(self) -> None:
+        """U: start a new round for a stale review (or retry a blocked one)."""
+        row = self._reviews_tab_row()
+        if row is None:
+            return
+        if not (row.stale or row.status == "blocked"):
+            self.notify(f"{row.key}: nothing to re-review", severity="warning")
+            return
+        key, verb = row.key, ("rereview" if row.stale else "retry_review")
+        try:
+            getattr(ops_mod, verb)(config_mod.load(str(self._home)), key, vcs=self._vcs)
+        except store.MaestroError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.notify(f"{key}: new review round started")
+        self._review_edits.pop(key, None)
+        self._nudge(key)
+        self._refresh_now_tab()
+
     def action_review_pr(self) -> None:
         """Paste a GitHub PR URL to start a review of it (the same verb as `maestro review`)."""
         def _on_dismiss(url: str | None) -> None:
@@ -756,7 +932,8 @@ class MaestroTUI(App):
                 return
             self.notify(f"Review started: {made.get('key') or url}")
             self._nudge(made.get("key"))
-            self._refresh_now_tab()
+            self._reviews_key = made.get("key")
+            self._show_tab("tab-reviews")
 
         self.push_screen(_InboxModal("", title="Review a pull request",
                                      hint="Paste the GitHub pull request URL.",
@@ -797,6 +974,20 @@ class MaestroTUI(App):
         out: list[str] = []
         if tab == "tab-fleet":
             out += ["refresh", "fleet_panel"]
+        elif tab == "tab-reviews":
+            row = self._reviews_row()
+            if self._review_card() is not None:
+                out += ["review_toggle", "review_edit", "review_create"]
+            if row is not None:
+                if row.stale or row.status == "blocked":
+                    out.append("review_rereview")
+                if row.status != "closed":
+                    out.append("review_mark_reviewed")
+                if row.url:
+                    out.append("open_pr")
+                if row.where_url:
+                    out.append("review_open_slack")
+            out.append("review_pr")
         else:
             key = self._target_key()
             phase, open_qs = self._snap_cache.get(key or "", (None, 0))
@@ -821,6 +1012,8 @@ class MaestroTUI(App):
         return tuple(out)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if self._active_tab() != "tab-now":
+            self._now_key = None  # the next Now paint re-targets the Now cursor
         self._refresh_bindings()
 
     def _active_tab(self) -> str:
@@ -846,6 +1039,19 @@ class MaestroTUI(App):
         if action in ("review_create", "review_edit", "review_next", "review_prev",
                       "review_toggle") and self._review_card() is None:
             return False
+        if action in ("review_mark_reviewed", "review_open_slack", "review_rereview"):
+            row = self._reviews_tab_row()
+            if row is None or (action == "review_mark_reviewed" and row.status == "closed"):
+                return False
+            if action == "review_open_slack" and not row.where_url:
+                return False
+            if action == "review_rereview" and not (row.stale or row.status == "blocked"):
+                return False
+        if action in ("reviews_next", "reviews_prev") and self._active_tab() != "tab-reviews":
+            return False
+        if (self._active_tab() == "tab-reviews" and self._on_board() and action in self._TICKET_ACTIONS
+                and action not in self._REVIEW_TAB_ACTIONS):
+            return False  # ticket-only actions (hold, discard, stop, spec, ...) never act on a review
         if action == "answer" and self._review_card() is not None:
             return False  # the brief's own question is answered by creating the review
         if action in ("cycle_filter", "filter_query") and self._active_tab() != "tab-tickets":
@@ -915,6 +1121,13 @@ class MaestroTUI(App):
                         yield RichLog(id="events", highlight=True, markup=True)
             with TabPane("Fleet", id="tab-fleet"):
                 yield Static("[dim]Loading…[/dim]", id="fleet-tab")
+            with TabPane("Reviews", id="tab-reviews"):
+                yield Static("", id="reviews-status")
+                with Horizontal(id="reviews-body"):
+                    with VerticalScroll(id="reviews-left"):
+                        yield _ReviewList("[dim]Loading…[/dim]", id="reviews-list")
+                    with VerticalScroll(id="reviews-right"):
+                        yield Static("[dim]Select a review[/dim]", id="reviews-detail")
         yield _ContextFooter()
 
     def on_mount(self) -> None:
@@ -1041,7 +1254,8 @@ class MaestroTUI(App):
         self.run_worker(_load, thread=True, group="pulse", exclusive=True, name="pulse")
 
     def _refresh_now_tab(self) -> None:
-        """Load the Now tab (view/now groups + status row) off the UI thread."""
+        """Load the Now tab (view/now groups + status row) and the Reviews tab off the UI thread."""
+        selected = self._reviews_key
         def _load() -> dict:
             cfg = config_mod.load(str(self._home))
             now = store.now_epoch()
@@ -1055,6 +1269,7 @@ class MaestroTUI(App):
                         rows = ()
                     history[card.key] = [f"{r.when}  {r.label}  {r.outcome}".rstrip()
                                          for r in rows[-5:]]
+            reviews_tab = self._load_reviews_tab(cfg, now, selected)
             reviews = {}
             for card in view.needs_you:
                 if hasattr(card, "counts") and card.key not in reviews:
@@ -1062,12 +1277,25 @@ class MaestroTUI(App):
                     reviews[card.key] = {"brief": snap.review_brief or {},
                                          "findings": list(snap.review_comments),
                                          "head": snap.review_head_sha or ""}
-            return {"view": view, "history": history, "reviews": reviews,
+            return {"view": view, "history": history, "reviews": reviews, "reviews_tab": reviews_tab,
                     "pulse": fleet_view.pulse(self._home, cfg, now),
                     "sessions": len(fleet_view.session_rows(self._home, cfg, now)),
                     "fleet": fleet_mod.status(self._home), "now": now}
         self.run_worker(_load, thread=True, group="now-tab", exclusive=True,
                         name="now-tab", exit_on_error=False)
+
+    def _load_reviews_tab(self, cfg, now: float, selected: str | None) -> dict:
+        """Worker thread: the reviews view, each row's brief and findings, and the selected detail."""
+        view = reviews_view.build(self._home, cfg, now)
+        rows = review_rows(view)
+        data = {}
+        for row in rows:
+            snap = snap_mod.load(self._home, row.key)
+            data[row.key] = {"brief": snap.review_brief or {}, "findings": list(snap.review_comments),
+                             "head": snap.review_head_sha or ""}
+        key = selected if selected in data else (rows[0].key if rows else None)
+        detail = reviews_view.detail(self._home, cfg, key, now) if key else None
+        return {"view": view, "reviews": data, "detail": detail, "now": now}
 
     def _refresh_fleet_tab(self) -> None:
         """Paint status and the probe-free doctor fields at once, then the doctor part when it lands."""
@@ -1102,6 +1330,9 @@ class MaestroTUI(App):
             self.query_one("#tickets", DataTable).focus()
         elif tab == "tab-fleet":
             self._refresh_fleet_tab()
+        elif tab == "tab-reviews":
+            self._refresh_now_tab()
+            self.query_one("#reviews-list").focus(scroll_visible=False)
         else:
             self._refresh_now_tab()
             self.query_one("#now-groups").focus(scroll_visible=False)
@@ -1114,6 +1345,9 @@ class MaestroTUI(App):
 
     def action_tab_fleet(self) -> None:
         self._show_tab("tab-fleet")
+
+    def action_tab_reviews(self) -> None:
+        self._show_tab("tab-reviews")
 
     def _refresh_badge(self) -> None:
         # T-89 (AC1): the header badge is the one always-visible surface, so
@@ -1141,7 +1375,9 @@ class MaestroTUI(App):
             self._paint_badge()
         elif event.worker.name == "now-tab" and event.state == WorkerState.SUCCESS:
             self._now_result = event.worker.result
+            self._reviews_result = event.worker.result["reviews_tab"]
             self._paint_now()
+            self._paint_reviews()
         elif event.worker.name == "now-tab" and event.state == WorkerState.ERROR:
             try:
                 self.query_one("#now-groups", Static).update(f"[red]now: {event.worker.error}[/red]")
@@ -1679,7 +1915,8 @@ class MaestroTUI(App):
         if key is None:
             self.notify("Select a ticket first", severity="warning")
             return
-        url = snap_mod.load(self._home, key).pr_url
+        snap = snap_mod.load(self._home, key)
+        url = snap.pr_url or snap.review_url
         if not url:
             self.notify(f"No PR for {key}", severity="warning")
             return

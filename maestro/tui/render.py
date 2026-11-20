@@ -478,6 +478,96 @@ def _review_lines(card, review: dict | None) -> list[str]:
     return lines
 
 
+_REVIEW_GROUPS = (("needs_you", "NEEDS YOU"), ("in_progress", "IN PROGRESS"),
+                  ("on_github", "ON GITHUB"), ("history", "RECENT"))
+
+
+def review_rows(view) -> list:
+    """Every row of a reviews view in display order (the cursor index runs over this list)."""
+    return [r for g, _ in _REVIEW_GROUPS for r in getattr(view, g)]
+
+
+def _review_age(row, now: float) -> str:
+    try:
+        ts = datetime.fromisoformat(row.requested_at)
+    except (TypeError, ValueError):
+        return "-"
+    ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    return _fmt_wait(now - ts.timestamp())
+
+
+def _review_counts(row) -> str:
+    f = row.findings or {}
+    return " ".join(f"{f[k]}{k[0].upper()}" for k in ("blocking", "question", "nit") if f.get(k))
+
+
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "\u2026"
+
+
+def _render_reviews(view, now: float, selected: int | None = None) -> tuple[str, str]:
+    """The Reviews tab: ``(status row, grouped list)`` as Rich markup; *selected* is the
+    cursor index over `review_rows(view)`."""
+    gold, muted = "#EBCB55", "#9A9AA8"
+    c = view.counts
+    open_n = sum(c.get(g, 0) for g in ("needs_you", "in_progress", "on_github"))
+    status = (f"{c.get('needs_you', 0)} need you \u00b7 {c.get('in_progress', 0)} in progress "
+              f"\u00b7 {c.get('on_github', 0)} on GitHub")
+    last = (view.slack or {}).get("last_poll")
+    if last:
+        status += f"    Slack checked {_fmt_wait(now - last)} ago"
+    if open_n == 0 and not c.get("history"):
+        return status, f"[{muted}]No reviews yet. Press V to review a pull request.[/]"
+    lines: list[str] = []
+    i = 0
+    for group, label in _REVIEW_GROUPS:
+        rows = getattr(view, group)
+        if lines:
+            lines.append("")
+        lines.append(f"[bold {gold}]{label} ({len(rows)})[/]")
+        for r in rows:
+            sel = i == selected
+            mark = f"[bold {gold}]\u25b8 " if sel else "  "
+            end = "[/]" if sel else ""
+            num = f"#{r.number}" if r.number is not None else "-"
+            who = escape(r.requested_by or "-")
+            lines.append(f"{mark}{escape(_clip(r.status, 12)):<12} {escape(num):<5} "
+                         f"{escape(_clip(r.title, 30))}  {escape(r.repo or '-')}  < {who}  "
+                         f"{_review_age(r, now)}  {_review_counts(r)}{end}")
+            i += 1
+    return status, "\n".join(lines)
+
+
+def _render_review_detail(row, review: dict | None, now: float, detail=None) -> str:
+    """The Reviews tab's right pane: who asked, when and where, the status, then the brief."""
+    gold, muted = "#EBCB55", "#9A9AA8"
+    if row is None:
+        return f"[{muted}]Select a review[/]"
+    slug = escape(row.repo or "-")
+    num = f"#{row.number}" if row.number is not None else ""
+    author = f" by {escape(row.author)}" if row.author else ""
+    size = ""
+    if row.size:
+        size = (f" \u00b7 +{row.size.get('additions') or 0} -{row.size.get('deletions') or 0}"
+                f" \u00b7 {row.size.get('changed_files') or 0} files")
+    asked = f"asked by {escape(row.requested_by or '-')}"
+    if row.requested_at:
+        asked += f" {_review_age(row, now)} ago ({escape(row.requested_at)})"
+    if row.where_label:
+        asked += f" in {escape(row.where_label)}"
+    head = f" @ {escape(row.head_sha[:7])}" if row.head_sha else ""
+    lines = [f"[bold {gold}]{escape(row.title)}[/]", f"{slug}{escape(num)}{author}{size}", asked,
+             f"round {row.round}{head} \u00b7 {escape(row.status_sentence)}", ""]
+    if row.stale:
+        lines += ["[bold #FF7FA6]The PR has new commits: press U to re-review.[/]", ""]
+    if review:
+        lines += _review_lines(row, review)
+    if detail is not None and detail.row.key == row.key and detail.timeline:
+        lines += ["", "[bold]Timeline[/]"] + [
+            f"  {escape(str(t.get('ts') or ''))}  {escape(t['label'])}" for t in detail.timeline]
+    return "\n".join(lines)
+
+
 def _render_now_detail(card, history: list[str], now: float, review: dict | None = None) -> str:
     """The Now tab's right pane for the selected needs-you card, as Rich markup."""
     gold, muted = "#EBCB55", "#9A9AA8"
