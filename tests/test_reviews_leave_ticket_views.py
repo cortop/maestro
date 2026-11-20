@@ -1,7 +1,6 @@
 """T-301: reviews stay off every ticket surface (board, counts, graph, scorecard, status, queues)."""
 from __future__ import annotations
 
-import io
 import json
 import tarfile
 
@@ -13,7 +12,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from conftest import seed_review_ticket, seed_ticket  # noqa: E402
 from maestro import cli, depgraph, outcomes, projection, store  # noqa: E402
 from maestro import backup
-from maestro import dispatcher as disp, snapshot as snap_mod  # noqa: E402
+from maestro import dispatcher as disp  # noqa: E402
 from maestro.config import Config
 from maestro.sessions import DryRunSessions  # noqa: E402
 from maestro.view import board as board_view  # noqa: E402

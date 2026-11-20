@@ -33,8 +33,8 @@ from . import outcomes
 from . import pr_flow
 from . import projection
 from . import ratelimit
-from . import review as review_mod
 from . import repos as repos_mod
+from . import review as review_mod
 from . import schedule
 from . import skills_install
 from . import slack_watcher
