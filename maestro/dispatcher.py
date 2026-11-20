@@ -40,6 +40,7 @@ from . import fleet
 from . import inbox
 from . import notify
 from . import ratelimit
+from . import review as review_mod
 from . import schedule
 from . import slack_watcher
 from . import snapshot as snap_mod
@@ -1692,6 +1693,8 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
         snap = snap_mod.load(home, key)
         if Phase(snap.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
             continue
+        if review_mod.is_review(snap):
+            continue  # T-294: someone else's PR; no drift routing
         binding = repos_mod.resolve(cfg, home, key)
         group = _group_for(binding)
         if group is None:
@@ -2757,6 +2760,8 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
         snap = snap_mod.load(home, key)
         if Phase(snap.phase) not in (Phase.AWAITING_CI, Phase.IN_REVIEW):
             continue
+        if review_mod.is_review(snap):
+            continue  # T-294: a review has no ACs; it passes qa_all_passing vacuously
         if fleet.hold_state(home, key, now) is not None:
             continue  # held keys are never spawned, post-QA skill included
         binding = repos_mod.resolve(cfg, home, key)
@@ -4116,6 +4121,54 @@ def _start_review_round(cfg: Config, key: str, snap) -> str | None:
     return f"review round started ({dest.value})"
 
 
+_BRIEF_ANSWER_COMMANDS = frozenset({"ans", "answer", "msg"})
+
+
+def _is_brief_answer_only(home: Path, key: str, snap) -> bool:
+    """True when every open question is a `review-brief-*` one and every pending inbox
+    command is an answer or message aimed at it (no qid, or a brief qid)."""
+    qids = [q for q in (snap.open_questions or {}) if isinstance(q, str)]
+    if not qids or not all(q.startswith("review-brief-") for q in qids):
+        return False
+    pend = inbox.pending(home, key)
+    if not pend:
+        return False
+    for cmd in pend:
+        if cmd.get("command") not in _BRIEF_ANSWER_COMMANDS:
+            return False
+        target = (cmd.get("args") or {}).get("qid")
+        if target and not str(target).startswith("review-brief-"):
+            return False
+    return True
+
+
+def _consume_brief_answer(home: Path, key: str) -> None:
+    """Record a Note for the pending brief answer(s), then advance the inbox cursor."""
+    total = len(store.read_jsonl(store.inbox_path(home, key)))
+    event_log.append(
+        home, key, E.NOTE,
+        {"text": "answers and messages do not resolve a review brief; use the review "
+                 "actions (create the pending review, mark reviewed)"},
+        actor="dispatcher", step_id=f"review-brief-answer-{key}-{total}")
+    inbox.ack(home, key)
+    snap_mod.rebuild(home, key)
+
+
+def _reask_review_brief(cfg: Config, key: str, snap) -> str | None:
+    """Re-ask a stranded review's brief under a fresh qid (the original is resolved);
+    once per head -- a second stranding at the same head is left alone."""
+    from . import ops
+    head = snap.review_head_sha or ""
+    qid = f"review-brief-{key}-{head[:12]}-reask"
+    if not head or qid in ops._resolved_qids(cfg, key):
+        return None
+    brief = snap.review_brief or {}
+    text = (f"{key}: review brief ready for {snap.review_url or key} -- suggested verdict "
+            f"{brief.get('verdict')}. Read {brief.get('path')}, then decide.")
+    ops.ask(cfg, key, text, qid=qid, actor="dispatcher")
+    return "stranded review re-asked its brief"
+
+
 def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
     """Fold *key* and run the pre-spawn checks that can end its sweep early
     (never minted, fold error, not due, no ACs, already claimed), recording
@@ -4148,6 +4201,24 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
     if held is not None:
         decisions[key] = {"outcome": "held",
                           "reason": "held by a human" + (f": {held['reason']}" if held.get("reason") else "")}
+        return None
+    # T-294: a stranded review (ready, brief at the current head, no open question) is
+    # re-asked under a fresh qid, once per head, so it is awaiting-human again.
+    if (review_mod.is_review(snap) and review_mod.status_of(snap) == review_mod.ReviewStatus.STRANDED
+            and not dry_run):
+        reasked = _run_hook(f"review-reask:{key}", hook_errors, _reask_review_brief,
+                            sweep.cfg, key, snap)
+        if reasked:
+            decisions[key] = {"outcome": "review_brief_reasked", "reason": reasked}
+            return None
+    # T-294: a typed answer or message to a review's brief question gets no session; the
+    # brief is handled with the review actions, so the command is consumed and the question stays open.
+    if (review_mod.is_review(snap) and snap.phase == Phase.AWAITING_HUMAN.value
+            and _is_brief_answer_only(home, key, snap)):
+        if not dry_run:
+            _run_hook(f"review-brief-answer:{key}", hook_errors, _consume_brief_answer, home, key)
+        decisions[key] = {"outcome": "review_brief_answer_ignored",
+                          "reason": "answer to a review brief: use the review actions instead"}
         return None
     # T-250: a review-kind ticket's pending round (`ready`) has no reconciler yet.
     if snap.kind == "review" and snap.phase in (Phase.TRIAGING.value, Phase.READY.value):

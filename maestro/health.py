@@ -24,6 +24,7 @@ from . import backup as backup_mod
 from . import claims, credentials, depgraph, dispatcher, event_log, fleet, pi_guard, runner_permissions, skills_install, slack_watcher, spend as spend_mod, store
 from . import config as config_mod
 from . import sessions as sessions_mod, steplog
+from . import review as review_mod
 from . import snapshot as snap_mod
 from .config import Config
 from .gates import spec_runner
@@ -404,8 +405,9 @@ def check_missing_acs(cfg: Config, now: float) -> dict:
     home = cfg.home
     flagged = []
     for key in dispatcher.list_keys(home):
-        if Phase(snap_mod.load(home, key).phase) in TERMINAL_PHASES:
-            continue
+        snap = snap_mod.load(home, key)
+        if Phase(snap.phase) in TERMINAL_PHASES or review_mod.is_review(snap):
+            continue  # T-294: a review has no acceptance criteria by design
         spec_file = store.spec_path(home, key)
         if not spec_file.exists():
             continue
@@ -1954,6 +1956,14 @@ def check_worktree_health(cfg: Config, now: float) -> dict:
     return {"name": "worktree_health", "status": status, "detail": detail, "broken": broken}
 
 
+def _is_review_key(cfg: Config, key: str) -> bool:
+    """True when *key* names a review-kind ticket (False for a leftover or unknown dir)."""
+    try:
+        return review_mod.is_review(snap_mod.load(cfg.home, key))
+    except Exception:  # noqa: BLE001 - an unreadable snapshot is not a review
+        return False
+
+
 def check_worktree_branch(cfg: Config, now: float) -> dict:
     """WARN on a worktree whose HEAD is DETACHED -- it has no branch to commit
     onto, so the reconciler it is handed to cannot finish its step.
@@ -1977,6 +1987,8 @@ def check_worktree_branch(cfg: Config, now: float) -> dict:
     """
     detached = []
     for name, probe in _worktree_probes(cfg, "branch"):
+        if _is_review_key(cfg, name):
+            continue  # T-294: a review checkout is always a detached HEAD
         try:
             branch = probe.branch()
         except store.MaestroError as exc:
