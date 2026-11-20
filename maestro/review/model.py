@@ -69,6 +69,7 @@ class Review:
     closed_at: str | None = None
     review_state: str | None = None
     previous_key: str | None = None
+    stale: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -254,7 +255,9 @@ def build(home: Path, snap) -> Review:
         additions=pr.get("additions"), deletions=pr.get("deletions"),
         changed_files=pr.get("changed_files"),
         closed_at=closed.get("ts") if status == ReviewStatus.CLOSED else None,
-        review_state=closed.get("review_state"), previous_key=first.get("previous_key"))
+        review_state=closed.get("review_state"), previous_key=first.get("previous_key"),
+        stale=bool(pr.get("head_sha") and snap.review_head_sha
+                   and pr["head_sha"] != snap.review_head_sha and status != ReviewStatus.CLOSED))
 
 
 def load(home: Path, key: str) -> Review:
