@@ -473,7 +473,14 @@ def cmd_cmd(args) -> int:
 def _review_line(r) -> str:
     where = f"{r.slug}#{r.number}" if r.slug else r.key
     flag = " *" if r.needs_you else ""
-    return f"{r.key}  {r.status.value}{flag}  {where}  round {r.round}"
+    line = f"{r.key}  {r.status.value}{flag}  {where}  round {r.round}"
+    if r.title:
+        line += f"  {r.title!r}"
+    if r.requested_by:
+        line += f"  asked by {r.requested_by}"
+    if r.requested_at and not r.requested_at_inferred:
+        line += f"  at {r.requested_at}"
+    return line
 
 
 def cmd_reviews(args) -> int:
@@ -1595,7 +1602,8 @@ def cmd_import_linear(args) -> int:
 def cmd_review(args) -> int:
     """[human] T-250: mint (or advance) a review ticket for someone else's PR."""
     cfg = _cfg(args)
-    result = ops.start_review(cfg, args.pr_url, source=args.source)
+    result = human_actions.start_review(cfg, args.pr_url, source=args.source, via="cli",
+                                        requested_by=args.requested_by)
     _print(result)
     if not result["started"]:
         print(f"{result['key']}: no new review round ({result['reason']})", file=sys.stderr)
@@ -1926,6 +1934,7 @@ def build_parser() -> argparse.ArgumentParser:
              "[human] mint a review ticket for someone else's PR and check its head out")
     sp.add_argument("pr_url", metavar="PR_URL", help="https://github.com/<owner>/<repo>/pull/<n>")
     sp.add_argument("--source", default=None, help="optional link to where the PR was raised (e.g. a chat permalink)")
+    sp.add_argument("--requested-by", default=None, metavar="NAME", help="who asked for the review")
     sp = add("review-finding", cmd_review_finding,
              "[agent] record one drafted review comment on a review ticket's PR head")
     sp.add_argument("key")

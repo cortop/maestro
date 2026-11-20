@@ -222,9 +222,11 @@ def queue_ticket(cfg: Config, title: str, *, priority: int = 3, nudge: Nudge | N
     return entry
 
 
-def start_review(cfg: Config, pr_url: str, *, source: str | None = None, vcs=None) -> dict:
+def start_review(cfg: Config, pr_url: str, *, source: str | None = None, vcs=None,
+                 via: str = "web", requested_by: str | None = None) -> dict:
     """Start (or advance) a review of someone else's PR; raises on a malformed URL, returns ``ops.start_review``'s result."""
-    return ops.start_review(cfg, pr_url, source=source, vcs=vcs)
+    requester = {"id": None, "name": requested_by} if requested_by else None
+    return ops.start_review(cfg, pr_url, source=source, vcs=vcs, via=via, requester=requester)
 
 
 def import_linear(cfg: Config, url_or_id: str, *, tracker=None) -> dict:

@@ -240,7 +240,8 @@ class GitHubCliVCS:
                 env: dict | None = None) -> dict:
         repo = repo or (self.repos[0] if self.repos else None)
         cmd = ["gh", "pr", "view", str(pr_number), "--json",
-               "headRefOid,headRefName,isCrossRepository,state,title,author"]
+               "headRefOid,headRefName,isCrossRepository,state,title,author,"
+               "isDraft,baseRefName,additions,deletions,changedFiles"]
         if repo:
             cmd += ["--repo", repo]
         rc, out, err = _run(cmd, env=env)
@@ -251,7 +252,10 @@ class GitHubCliVCS:
         return {"head_sha": data.get("headRefOid"), "head_ref": data.get("headRefName"),
                 "is_fork": bool(data.get("isCrossRepository")),
                 "state": data.get("state", "unknown"), "title": data.get("title"),
-                "author": (data.get("author") or {}).get("login")}
+                "author": (data.get("author") or {}).get("login"),
+                "draft": data.get("isDraft"), "base_ref": data.get("baseRefName"),
+                "additions": data.get("additions"), "deletions": data.get("deletions"),
+                "changed_files": data.get("changedFiles")}
 
     def review_feedback(self, pr_number: int, repo: str | None = None,
                         env: dict | None = None) -> list[dict]:

@@ -3385,8 +3385,77 @@ def _review_checkout(cfg: Config, key: str, binding: repos_mod.RepoBinding, numb
     return wt
 
 
+_REVIEW_TITLE_CAP = 200
+_REVIEW_NAME_CAP = 80
+_REVIEW_VIAS = ("slack", "cli", "web", "tui")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+
+
+def _clean_display(value, cap: int) -> str | None:
+    """Other people's text as display data: control characters become spaces, then capped."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(_CONTROL_RE.sub(" ", value).split())[:cap].strip()
+    return text or None
+
+
+def _record_review_request(cfg: Config, key: str, *, via: str, requested_ts: str | None,
+                           requester: dict | None, where: dict | None, slug: str, number: int,
+                           url: str, head_sha: str | None) -> None:
+    """Append one `ReviewRequested`: who asked, when and where. Idempotent per Slack message ts,
+    or per `via` plus head sha for the other surfaces."""
+    clean = None
+    if isinstance(requester, dict):
+        rid = _clean_display(requester.get("id"), _REVIEW_NAME_CAP)
+        rname = _clean_display(requester.get("name"), _REVIEW_NAME_CAP)
+        clean = {"id": rid, "name": rname} if (rid or rname) else None
+    where = dict(where) if where else {"surface": via}
+    payload = {"via": via, "requested_ts": requested_ts or store.iso_now(), "requester": clean,
+               "where": where, "pr": {"slug": slug, "number": number, "url": url}}
+    if head_sha:
+        payload["head_sha"] = head_sha
+    anchor = where.get("message_ts") if via == "slack" and where.get("message_ts") else \
+        f"{via}-{head_sha or 'nohead'}"
+    _append(cfg, key, E.REVIEW_REQUESTED, payload, actor="human",
+            sid=f"review-requested-{key}-{anchor}")
+
+
+def _record_review_pr(cfg: Config, key: str, head: dict) -> None:
+    """Append `ReviewPrObserved` when the PR's title, state or size differs from the last record."""
+    def num(name):
+        v = head.get(name)
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+    payload = {"title": _clean_display(head.get("title"), _REVIEW_TITLE_CAP),
+               "author": _clean_display(head.get("author"), _REVIEW_NAME_CAP),
+               "state": head.get("state"), "draft": head.get("draft"),
+               "head_sha": head.get("head_sha"), "base_ref": head.get("base_ref"),
+               "additions": num("additions"), "deletions": num("deletions"),
+               "changed_files": num("changed_files")}
+    last = None
+    for e in event_log.read(cfg.home, key):
+        if e.get("type") == E.REVIEW_PR_OBSERVED:
+            last = e.get("payload")
+    if last == payload:
+        return
+    _append(cfg, key, E.REVIEW_PR_OBSERVED, payload, actor="human",
+            sid=f"review-pr-observed-{key}-{content_hash(json.dumps(payload, sort_keys=True))[:16]}")
+
+
+def _read_pr_head(cfg: Config, slug: str, number: int, vcs: object | None) -> dict:
+    """One `vcs.pr_head` call for a bound repo, under that repo's credential."""
+    repo_name = _review_binding(cfg, slug)
+    binding = repos_mod._binding_from_table(cfg, repo_name, cfg.repos[repo_name])
+    if vcs is None:
+        from .providers import get_vcs
+        vcs = get_vcs(cfg)
+    from .dispatcher import resolve_credential
+    env = resolve_credential(binding, {}).env or None
+    return vcs.pr_head(number, slug, env=env)
+
+
 def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
-                 vcs: object | None = None) -> dict:
+                 vcs: object | None = None, via: str = "cli", requested_ts: str | None = None,
+                 requester: dict | None = None, where: dict | None = None) -> dict:
     """[human] T-250: turn someone else's PR into a `review`-kind ticket (never
     `implementing`), keyed by the PR, with its head checked out in the ticket's
     own worktree.
@@ -3398,8 +3467,13 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
     `[repos.<name>]` slug match, or a PR whose head is in a fork, mints the
     ticket but checks nothing out and asks a needs-you question instead.
 
-    The PR's title and body are never read here: other people's text stays out
-    of the ticket. *vcs* is a test-only injection point for the VCS boundary."""
+    Every call records a `ReviewRequested` (who, when, where; *via* is one of
+    `slack`/`cli`/`web`/`tui`) and, when the head is read, a `ReviewPrObserved`
+    (title, state, size). The PR title and the requester are display data kept in
+    the log only -- cleaned and capped, never in `spec.md` or the ticket title --
+    and the PR body is never read. *vcs* is a test-only injection point for the VCS boundary."""
+    if via not in _REVIEW_VIAS:
+        raise store.MaestroError(f"via must be one of {', '.join(_REVIEW_VIAS)} (got {via!r})")
     m = _REVIEW_PR_URL_RE.match((pr_url or "").strip())
     if not m:
         raise store.MaestroError(f"not a GitHub pull request URL: {pr_url!r}")
@@ -3410,6 +3484,17 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
     url = f"https://github.com/{slug}/pull/{number}"
     snap = snap_mod.load(cfg.home, key) if key else None
     if snap is not None and snap.open_questions:
+        seen: dict = {}
+        if _review_binding(cfg, slug) is not None:
+            try:  # best effort: a failed read only costs the head sha on this record
+                seen = _read_pr_head(cfg, slug, number, vcs)
+            except Exception:
+                seen = {}
+        _record_review_request(cfg, key, via=via, requested_ts=requested_ts, requester=requester,
+                               where=where, slug=slug, number=number, url=url,
+                               head_sha=seen.get("head_sha"))
+        if seen.get("head_sha"):
+            _record_review_pr(cfg, key, seen)
         return {"key": key, "minted": False, "started": False, "reason": "question open"}
 
     repo_name = _review_binding(cfg, slug)
@@ -3420,12 +3505,7 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
                               f"config.toml then re-run `maestro review {url}`, or dismiss this ticket.")
     else:
         binding = repos_mod._binding_from_table(cfg, repo_name, cfg.repos[repo_name])
-        if vcs is None:
-            from .providers import get_vcs
-            vcs = get_vcs(cfg)
-        from .dispatcher import resolve_credential
-        env = resolve_credential(binding, {}).env or None
-        head = vcs.pr_head(number, slug, env=env)
+        head = _read_pr_head(cfg, slug, number, vcs)
         if head.get("error") or not head.get("head_sha"):
             raise store.MaestroError(
                 f"{key or legacy_key}: cannot read PR head for {url} ({head.get('error') or 'no head sha'})")
@@ -3443,6 +3523,11 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
                               "kind": "review", "repo": repo_name,
                               "external_source": "github-pr", "external_id": f"{slug}#{number}"})
         snap = snap_mod.load(cfg.home, key)
+    _record_review_request(cfg, key, via=via, requested_ts=requested_ts, requester=requester,
+                           where=where, slug=slug, number=number, url=url,
+                           head_sha=head.get("head_sha"))
+    if head.get("head_sha"):
+        _record_review_pr(cfg, key, head)
     if refusal is not None:
         qid = f"review-{refusal[0]}-{key}"
         if qid not in _resolved_qids(cfg, key):
