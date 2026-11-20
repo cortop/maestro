@@ -91,6 +91,12 @@ def split(snaps) -> tuple[list, list]:
     return tickets, reviews
 
 
+def review_keys(home: Path) -> frozenset[str]:
+    """Every review key of *home*, from snapshots alone (one pass)."""
+    from ..dispatcher import list_keys  # lazy: dispatcher imports much of the package
+    return frozenset(k for k in list_keys(home) if is_review(snap_mod.load(home, k)))
+
+
 def _open_qids(snap) -> list[str]:
     return [q for q in (snap.open_questions or {}) if isinstance(q, str)]
 

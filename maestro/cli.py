@@ -33,6 +33,7 @@ from . import outcomes
 from . import pr_flow
 from . import projection
 from . import ratelimit
+from . import review as review_mod
 from . import repos as repos_mod
 from . import schedule
 from . import skills_install
@@ -431,6 +432,8 @@ def cmd_answer(args) -> int:
     queue: list[tuple[str, str, str]] = []  # (key, qid, question_text)
     for key in sorted(keys, key=disp.split_key):
         s = snap_mod.load(cfg.home, key)
+        if review_mod.is_review(s):
+            continue
         if s.phase in waiting_phases and s.open_questions:
             for qid, text in s.open_questions.items():
                 queue.append((key, qid, text))
@@ -491,7 +494,6 @@ def _review_line(r) -> str:
 
 def cmd_reviews(args) -> int:
     """[human] list inbound reviews, or `reviews show|rereview|retry <key>` for one."""
-    from . import review as review_mod
     cfg = _cfg(args)
     rest = list(args.rest or [])
     if rest and rest[0] == "show":
@@ -531,14 +533,29 @@ def cmd_reviews(args) -> int:
     return 0
 
 
+def _reviews_status(review_snaps) -> dict:
+    """The `reviews` block of `maestro status`: open count, needs-you count, open reviews by status."""
+    by_status: dict[str, int] = {}
+    needs = 0
+    for s in review_snaps:
+        st = review_mod.status_of(s)
+        if st == review_mod.ReviewStatus.CLOSED:
+            continue
+        by_status[st.value] = by_status.get(st.value, 0) + 1
+        needs += review_mod.needs_you_of(s, st)
+    return {"open": sum(by_status.values()), "needs_you": needs, "by_status": by_status}
+
+
 def cmd_status(args) -> int:
     cfg = _cfg(args)
     board = store.board_state(cfg.home)
     keys = disp.list_keys(cfg.home)
     counts: dict[str, int] = {}
     waiting = []
-    for k in keys:
-        s = snap_mod.load(cfg.home, k)
+    snaps = [snap_mod.load(cfg.home, k) for k in keys]
+    ticket_snaps, review_snaps = review_mod.split(snaps)
+    for s in ticket_snaps:
+        k = s.key
         counts[s.phase] = counts.get(s.phase, 0) + 1
         if s.phase == Phase.DEGRADED.value and s.burning:
             # RB-11: a burn-parked key is NOT "quietly waiting on a human" the
@@ -554,7 +571,8 @@ def cmd_status(args) -> int:
     # 2026-08-20 incident). `board["missing_paths"]` is already populated by
     # `store.board_state` for a non-"ok" state, so it needs no repeating here.
     _print({"home": str(cfg.home), "board": board,
-            "tickets": len(keys), "by_phase": counts, "needs_you": waiting})
+            "tickets": len(ticket_snaps), "by_phase": counts, "needs_you": waiting,
+            "reviews": _reviews_status(review_snaps)})
     if board["state"] in ("missing", "uninitialized"):
         hint = store.find_did_you_mean(cfg.home)
         msg = (f"error: {cfg.home} is not a maestro board ({board['state']}) -- "

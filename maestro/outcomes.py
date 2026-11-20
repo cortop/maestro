@@ -11,7 +11,8 @@ import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import event_log
+from . import event_log, review
+from . import snapshot as snap_mod
 from . import events as E
 from . import repos as repos_mod
 from .config import Config
@@ -185,7 +186,8 @@ def _group_metrics(tickets: list[dict]) -> dict:
 def scorecard(cfg: Config, *, cutoff: datetime | None = None) -> dict:
     """Per-repo, per-month outcome figures over every ticket log. Read-only."""
     tickets = [t for k in list_keys(cfg.home)
-               if (t := fold_ticket(cfg, cfg.home, k, cutoff)) is not None]
+               if not review.is_review(snap_mod.load(cfg.home, k))
+               and (t := fold_ticket(cfg, cfg.home, k, cutoff)) is not None]
     groups: dict[tuple[str, str], list[dict]] = {}
     for t in tickets:
         groups.setdefault((t["repo"], t["month"]), []).append(t)

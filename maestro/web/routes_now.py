@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
-from .. import projection, store
+from .. import projection, review, store
 from ..statemachine import Phase
 from ..view import now as now_view
 from .shell import Shell
@@ -15,7 +15,7 @@ from .shell import Shell
 
 def _landed_today(shell: Shell, now: float) -> int:
     midnight = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    return sum(1 for s in projection.load_snapshots(shell.home)
+    return sum(1 for s in review.split(projection.load_snapshots(shell.home))[0]
                if s.phase == Phase.DONE.value and (store.iso_to_epoch(s.updated_ts) or 0) >= midnight)
 
 

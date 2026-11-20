@@ -65,7 +65,7 @@ def test_minted_key_event_and_listings(board, monkeypatch, capsys):
     assert cli.main(["status"]) == 0
     from maestro.view import board as board_vm
     view = board_vm.board(home, Config(home=home), "all")
-    assert key in [r.key for r in view.rows]
+    assert key not in [r.key for r in view.rows]  # T-301: reviews leave the ticket board
     assert cli.main(["dispatch", "--key", key]) == 0
 
 
