@@ -22,6 +22,7 @@ def gout(*args, cwd):
 
 KEY = "T-1"
 BRANCH = f"maestro/{KEY}"
+DEP = "maestro/T-0"  # a dependency ticket's pushed PR branch
 
 GH_STUB = r'''#!{py}
 import json, os, sys
@@ -176,12 +177,12 @@ def _gt_lines(gt_log):
 def test_open_pr_stack_gt_bases_on_closest_pushed_branch_and_tracks_graph(home, gt_env, capsys):
     """The gt split path never runs `gt create` (a leaf-only append) or `gt
     submit` (a trunk-to-current force push): it branches per entry, pushes and
-    PRs them directly -- entry 0 based on the closest pushed branch underneath
-    the stack -- and records the split in the Graphite graph afterwards."""
+    PRs them directly -- entry 0 based on the closest pushed ticket branch
+    underneath the stack -- and records the split in the Graphite graph afterwards."""
     wt, state, gt_log, refuse = gt_env
-    git("checkout", "-q", "-b", "dep", cwd=wt)
+    git("checkout", "-q", "-b", DEP, cwd=wt)
     _commit(wt, "dep.txt")
-    git("push", "-q", "-u", "origin", "dep", cwd=wt)
+    git("push", "-q", "-u", "origin", DEP, cwd=wt)
     git("checkout", "-q", "-b", BRANCH, cwd=wt)  # the ticket stacks on dep
     c1 = _commit(wt, "a.txt")
     _commit(wt, "b.txt")
@@ -193,13 +194,13 @@ def test_open_pr_stack_gt_bases_on_closest_pushed_branch_and_tracks_graph(home, 
     assert out["gt_tracked"] is True
     creates = _gh_calls(state, "create")
     assert [c[c.index("--head") + 1] for c in creates] == [f"{BRANCH}-1", BRANCH]
-    assert [c[c.index("--base") + 1] for c in creates] == ["dep", f"{BRANCH}-1"]
+    assert [c[c.index("--base") + 1] for c in creates] == [DEP, f"{BRANCH}-1"]
     assert all("--draft" in c for c in creates)
     lines = _gt_lines(gt_log)
-    assert any(f"track {BRANCH}-1 --parent dep" in l for l in lines)
+    assert any(f"track {BRANCH}-1 --parent {DEP}" in l for l in lines)
     assert any(f"track {BRANCH} --parent {BRANCH}-1" in l for l in lines)
     assert not any((" create " in l) or (" submit " in l) for l in lines)
-    assert [e["payload"]["stack"]["base"] for e in _opened(home)] == ["dep", f"{BRANCH}-1"]
+    assert [e["payload"]["stack"]["base"] for e in _opened(home)] == [DEP, f"{BRANCH}-1"]
     # the push is scoped to the split, and HEAD never moved
     assert gout("ls-tree", "--name-only", f"origin/{BRANCH}-1", cwd=wt).split() == [
         "README.md", "a.txt", "dep.txt"]
@@ -222,6 +223,23 @@ def test_open_pr_stack_gt_plain_ticket_bases_on_trunk(home, gt_env, capsys):
     assert cli.main(["--home", str(home), "open-pr", KEY, "--stack", json.dumps(stack)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["gt_tracked"] is True
+    creates = _gh_calls(state, "create")
+    assert [c[c.index("--base") + 1] for c in creates] == ["main", f"{BRANCH}-1"]
+    assert any(f"track {BRANCH}-1 --parent main" in l for l in _gt_lines(gt_log))
+
+
+def test_open_pr_stack_gt_ignores_a_trailing_shared_branch(home, gt_env, capsys):
+    """A pushed non-ticket branch underneath the stack -- a CI-passing `green`
+    that trails trunk -- is not a base: the root entry still bases on trunk."""
+    wt, state, gt_log, refuse = gt_env
+    git("push", "-q", "origin", "HEAD:refs/heads/green", cwd=wt)
+    git("checkout", "-q", "-b", BRANCH, cwd=wt)
+    c1 = _commit(wt, "a.txt")
+    _commit(wt, "b.txt")
+    stack = [{"title": "T-1: part a (1/2)", "body": "body a", "sha": c1},
+             {"title": "T-1: part b (2/2)", "body": "body b"}]
+    assert cli.main(["--home", str(home), "open-pr", KEY, "--stack", json.dumps(stack)]) == 0
+    capsys.readouterr()
     creates = _gh_calls(state, "create")
     assert [c[c.index("--base") + 1] for c in creates] == ["main", f"{BRANCH}-1"]
     assert any(f"track {BRANCH}-1 --parent main" in l for l in _gt_lines(gt_log))

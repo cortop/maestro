@@ -181,16 +181,19 @@ def _gt_track_split(w: str, branches: list[str], root_parent: str) -> bool:
     return True
 
 
-def _stack_root_base(wt: Path, first_sha: str, fallback: str) -> str:
-    """The branch a stack's root entry builds on: the closest pushed origin
-    head among its ancestors -- a dependency's PR branch on a stacked ticket
-    -- else the repo base.
+def _stack_root_base(wt: Path, first_sha: str, fallback: str, prefix: str) -> str:
+    """The branch a stack's root entry builds on: the closest pushed ticket
+    branch (``origin/<prefix>*``) among its ancestors -- a dependency's PR
+    branch on a stacked ticket -- else the repo base.
 
+    Only ticket branches qualify: a shared ref that trails trunk (a CI-passing
+    ``green``) is nearly always an ancestor of the entry, and closer than trunk.
     Derived from commit topology, not Graphite metadata: a base branch
     restacked locally (tip rewritten, unpushed) is no longer in the entry's
     history, but the pushed branch the PR must diff against still is.
     """
-    heads = _run(["git", "-C", str(wt), "branch", "-r", "--merged", first_sha])
+    heads = _run(["git", "-C", str(wt), "branch", "-r", "--merged", first_sha,
+                  "--list", f"origin/{prefix}*"])
     best: tuple[int, str] | None = None
     for name in (ln.strip() for ln in heads.stdout.splitlines()):
         if not name or " -> " in name:
@@ -238,7 +241,7 @@ def open_pr(cfg: Config, key: str, *, title: str, body: str, stack: list[dict] |
         # trunk-to-current, force-pushing every ancestor with it, so neither can open a
         # mid-stack split. Branch per entry instead, push and PR each one directly, and
         # record the graph with `gt track` once the PRs are open.
-        bases = [_stack_root_base(wt, stack[0]["sha"], base), *branches[:-1]]
+        bases = [_stack_root_base(wt, stack[0]["sha"], base, prefix), *branches[:-1]]
     else:
         bases = [base, *branches[:-1]]
     opened, recorded = [], []
