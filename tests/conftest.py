@@ -291,7 +291,8 @@ def skill_text(path) -> str:
 
 def seed_review_ticket(home, key="T-60", *, brief=True, phase="awaiting-human", author="octo-reviewer",
                        findings=(("src/a.py", 3, "blocking", "Please guard the empty case."),
-                                 ("src/b.py", 9, "nit", "Rename `x`."))):
+                                 ("src/b.py", 9, "nit", "Rename `x`.")),
+                       requester=None, requested_ts=None, via="slack", title=None):
     """A synthetic `review`-kind ticket folded from events, as the review round leaves it."""
     store.atomic_write(store.spec_path(home, key), f"# {key}\n\n## Intent\nReview a PR.\n")
     event_log.append(home, key, "TicketCreated",
@@ -300,6 +301,17 @@ def seed_review_ticket(home, key="T-60", *, brief=True, phase="awaiting-human", 
     event_log.append(home, key, "ReviewRoundStarted",
                      {"head_sha": "a" * 40, "url": "https://github.com/acme/widgets/pull/7",
                       "author": author}, actor="human")
+    if requester or requested_ts:
+        event_log.append(home, key, "ReviewRequested",
+                         {"via": via, "requested_ts": requested_ts or "2026-01-02T03:04:05+00:00",
+                          "requester": {"id": "U1", "name": requester} if requester else None,
+                          "where": {"surface": via},
+                          "pr": {"slug": "acme/widgets", "number": 7,
+                                 "url": "https://github.com/acme/widgets/pull/7"}}, actor="human")
+    if title:
+        event_log.append(home, key, "ReviewPrObserved",
+                         {"title": title, "state": "OPEN", "draft": False, "additions": 3,
+                          "deletions": 1, "changed_files": 2}, actor="human")
     event_log.append(home, key, "PhaseChanged", {"phase": "ready", "reason": ""}, actor="r")
     for f, line, sev, comment in findings:
         event_log.append(home, key, "ReviewFindingRecorded",

@@ -35,6 +35,9 @@ CI_OBSERVED = "CiObserved"              # {state, failing_checks, detail, head_s
                                          # routes to `implementing` after a ci_auto_rerun rerun -- see
                                          # dispatcher._observe_ci and CiRerunRequested below.
 # T-250: one inbound-review round on a `review`-kind ticket (someone else's PR).
+# T-293: one request for a review (who, when, where) and the PR's title/state/size as last read.
+REVIEW_REQUESTED = "ReviewRequested"  # {via, requested_ts, requester, where, pr, head_sha?}  idempotent per Slack ts, else via+head
+REVIEW_PR_OBSERVED = "ReviewPrObserved"  # {title, author, state, draft, head_sha, base_ref, additions, deletions, changed_files}  per content
 REVIEW_ROUND_STARTED = "ReviewRoundStarted"  # {round, head_sha, url, source?, author?}  idempotent per head_sha
 # T-251: one drafted review comment (a finding) and the round's brief, both recorded
 # through `maestro review-finding` / `maestro review-brief` -- never per-session events.

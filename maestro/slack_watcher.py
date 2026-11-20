@@ -286,6 +286,15 @@ def _mutate(cfg: Config, ts, fn) -> dict | None:
         return out
 
 
+def _ts_iso(ts) -> str | None:
+    """ISO time of a Slack message ts (``<epoch>.<seq>``), or None when it is not one."""
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def drain(cfg: Config, now: float | None = None, *, start_review: Callable[..., dict] | None = None,
           budget: float = DRAIN_BUDGET_SECONDS) -> dict:
     """File the queued requests through ``ops.start_review``, one attempt each per call.
@@ -316,7 +325,13 @@ def drain(cfg: Config, now: float | None = None, *, start_review: Callable[..., 
         error = None
         for link in links:
             try:
-                result = start_review(cfg, link, source=item.get("permalink"))
+                result = start_review(
+                    cfg, link, source=item.get("permalink"), via="slack",
+                    requested_ts=_ts_iso(ts),
+                    requester=({"id": item.get("user"), "name": item.get("user_name")}
+                               if item.get("user") or item.get("user_name") else None),
+                    where={"channel": item.get("channel"), "message_ts": str(ts),
+                           "permalink": item.get("permalink")})
             except store.MaestroError as exc:
                 error = f"{link}: {exc}"
                 continue

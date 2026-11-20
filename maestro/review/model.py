@@ -52,11 +52,24 @@ class Review:
     source: str | None
     requested_at: str | None
     requested_at_inferred: bool
-    requester: str | None
+    requested_by: str | None
     outcome: str | None
+    requests: tuple = ()
+    via: str | None = None
+    where_label: str | None = None
+    where_url: str | None = None
+    last_request: dict | None = None
+    request_count: int = 0
+    title: str | None = None
+    pr_state: str | None = None
+    draft: bool | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    changed_files: int | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d["requests"] = list(d["requests"])
         d["status"] = self.status.value
         return d
 
@@ -135,9 +148,25 @@ def _permalink_time(source) -> str | None:
     return dt.replace(microsecond=int(digits[10:])).isoformat()
 
 
-def _log_facts(home: Path, key: str) -> tuple[str | None, bool, str | None]:
-    """(requested_at, inferred, last PhaseChanged reason) from one pass over the log."""
+def _who(requester) -> str | None:
+    if not isinstance(requester, dict):
+        return None
+    return requester.get("name") or requester.get("id") or None
+
+
+def _where_label(via, where) -> str | None:
+    where = where if isinstance(where, dict) else {}
+    if via == "slack":
+        return f"Slack #{where['channel']}" if where.get("channel") else "Slack"
+    return where.get("surface") or via
+
+
+def _log_facts(home: Path, key: str) -> tuple[str | None, bool, str | None, list[dict], dict]:
+    """(requested_at, inferred, last PhaseChanged reason, requests, last PR observation)
+    from one pass over the log."""
     created = None
+    requests: list[dict] = []
+    pr_obs: dict = {}
     first_round_seen = False
     requested = None
     last_reason = None
@@ -157,9 +186,16 @@ def _log_facts(home: Path, key: str) -> tuple[str | None, bool, str | None]:
             requested = _permalink_time(p.get("source"))
         elif t == E.PHASE_CHANGED:
             last_reason = p.get("reason")
+        elif t == E.REVIEW_REQUESTED:
+            requests.append(p)
+        elif t == E.REVIEW_PR_OBSERVED:
+            pr_obs = p
+    first_ts = requests[0].get("requested_ts") if requests else None
+    if first_ts:
+        return first_ts, False, last_reason, requests, pr_obs
     if requested:
-        return requested, False, last_reason
-    return created, True, last_reason
+        return requested, False, last_reason, requests, pr_obs
+    return created, True, last_reason, requests, pr_obs
 
 
 def _outcome(reason) -> str:
@@ -183,13 +219,15 @@ def _counts(snap) -> dict:
 def build(home: Path, snap) -> Review:
     status = status_of(snap)
     slug, number = _slug_number(snap)
-    requested_at, inferred, reason = _log_facts(home, snap.key)
+    requested_at, inferred, reason, requests, pr = _log_facts(home, snap.key)
     try:
         in_needs_phase = Phase(snap.phase) in _NEEDS_YOU_PHASES
     except ValueError:
         in_needs_phase = False
     needs = status in _NEEDS_YOU_STATUSES or (status == ReviewStatus.OTHER and in_needs_phase)
     brief = snap.review_brief or {}
+    first = requests[0] if requests else {}
+    where = first.get("where") if isinstance(first.get("where"), dict) else {}
     return Review(
         key=snap.key, slug=slug, number=number,
         url=snap.review_url or (f"https://github.com/{slug}/pull/{number}" if slug else None),
@@ -197,8 +235,16 @@ def build(home: Path, snap) -> Review:
         head_sha=snap.review_head_sha, round=snap.review_round, status=status,
         needs_you=needs, findings=_counts(snap), verdict=brief.get("verdict"),
         pending=snap.review_pending, source=snap.review_source,
-        requested_at=requested_at, requested_at_inferred=inferred, requester=None,
-        outcome=_outcome(reason) if status == ReviewStatus.CLOSED else None)
+        requested_at=requested_at, requested_at_inferred=inferred,
+        requested_by=_who(first.get("requester")),
+        outcome=_outcome(reason) if status == ReviewStatus.CLOSED else None,
+        requests=tuple(requests), via=first.get("via"),
+        where_label=_where_label(first.get("via"), where) if first else None,
+        where_url=where.get("permalink"),
+        last_request=requests[-1] if requests else None, request_count=len(requests),
+        title=pr.get("title"), pr_state=pr.get("state"), draft=pr.get("draft"),
+        additions=pr.get("additions"), deletions=pr.get("deletions"),
+        changed_files=pr.get("changed_files"))
 
 
 def load(home: Path, key: str) -> Review:

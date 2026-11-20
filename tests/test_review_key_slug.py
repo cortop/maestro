@@ -75,7 +75,7 @@ def test_idempotent_and_distinct_keys(board, monkeypatch):
     n = event_log.last_seq(home, "R-7-same-title")
     vcs.title = "A renamed title"  # a retitled PR still resolves to the minted ticket
     assert _review(vcs, 7, monkeypatch) == 0
-    assert event_log.last_seq(home, "R-7-same-title") == n
+    assert event_log.last_seq(home, "R-7-same-title") == n + 1  # the new title is observed, nothing else
     assert not (home / "events" / "R-7-a-renamed-title.jsonl").exists()
     _mint(board, monkeypatch, 8, "Same title")
     assert event_log.last_seq(home, "R-8-same-title") > 0
@@ -92,5 +92,5 @@ def test_legacy_key_still_resolves(board, monkeypatch):
     _mint(board, monkeypatch, 9, None)
     n = event_log.last_seq(home, "review-acme-widgets-9")
     _mint(board, monkeypatch, 9, "Now it has a title")
-    assert event_log.last_seq(home, "review-acme-widgets-9") == n
+    assert event_log.last_seq(home, "review-acme-widgets-9") == n + 1  # the new title is observed
     assert cli.main(["status"]) == 0

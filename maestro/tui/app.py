@@ -749,7 +749,8 @@ class MaestroTUI(App):
             if not url:
                 return
             try:
-                made = ops_mod.start_review(config_mod.load(str(self._home)), url, source="tui", vcs=self._vcs)
+                made = human_actions.start_review(config_mod.load(str(self._home)), url, source="tui",
+                                               vcs=self._vcs, via="tui")
             except store.MaestroError as exc:
                 self.notify(str(exc), severity="error")
                 return
