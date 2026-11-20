@@ -470,6 +470,41 @@ def cmd_cmd(args) -> int:
     return 0
 
 
+def _review_line(r) -> str:
+    where = f"{r.slug}#{r.number}" if r.slug else r.key
+    flag = " *" if r.needs_you else ""
+    return f"{r.key}  {r.status.value}{flag}  {where}  round {r.round}"
+
+
+def cmd_reviews(args) -> int:
+    """[human] list inbound reviews, or `reviews show <key>` for one."""
+    from . import review as review_mod
+    cfg = _cfg(args)
+    rest = list(args.rest or [])
+    if rest and rest[0] == "show":
+        if len(rest) != 2 or not rest[1]:
+            raise store.MaestroError("usage: maestro reviews show <key> [--json]")
+        key = rest[1]
+        if not review_mod.is_review(snap_mod.load(cfg.home, key)):
+            raise store.MaestroError(f"{key}: not a review ticket")
+        r = review_mod.load(cfg.home, key)
+        if args.json:
+            _print(r.to_dict())
+        else:
+            for k, v in r.to_dict().items():
+                print(f"{k}: {v}")
+        return 0
+    if rest:
+        raise store.MaestroError("usage: maestro reviews [--json] [--all] | reviews show <key>")
+    rows = review_mod.list_reviews(cfg.home, include_closed=args.all)
+    if args.json:
+        _print([r.to_dict() for r in rows])
+    else:
+        for r in rows:
+            print(_review_line(r))
+    return 0
+
+
 def cmd_status(args) -> int:
     cfg = _cfg(args)
     board = store.board_state(cfg.home)
@@ -1750,6 +1785,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip in-process dispatch nudge after sending command")
 
     add("status", cmd_status, "summary of all tickets")
+    sp = add("reviews", cmd_reviews, "[human] list inbound PR reviews; `reviews show <key>` for one")
+    sp.add_argument("rest", nargs="*", help="`show <key>` to print one review")
+    sp.add_argument("--json", action="store_true"); sp.add_argument("--all", action="store_true",
+                                                                    help="include closed reviews")
     sp = add("show", cmd_show, "snapshot + events for one ticket")
     sp.add_argument("key"); sp.add_argument("--tail", type=int, default=12)
     sp = add("logs", cmd_logs, "view captured session logs for a ticket")

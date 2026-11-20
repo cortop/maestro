@@ -113,6 +113,7 @@ Supporting:
   numbers); `tests/test_diagram.py` fails on drift. It pins literal
   `decisions[...]["outcome"] = "..."` assignments and a few exact source lines in
   `dispatcher.py` — keep them literal when refactoring.
+- `review/` — the inbound-review entity (someone else's PR): typed `Review`, `ReviewStatus` and loaders over a `review`-kind ticket (`maestro reviews`).
 - `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).
 - `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, evidence, rounds, why, fleet, deps, deps_layout)
   shared by the TUI and the web UI; the TUI wraps them in Rich, the web UI in HTML.
