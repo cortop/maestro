@@ -1,7 +1,7 @@
 """view.reviews: groups, history window, counts without logs, sentences, detail timeline."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from maestro import event_log, store
 from maestro import snapshot as snap_mod
