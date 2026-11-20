@@ -4,7 +4,7 @@ Real CLI and git; only the code-host read (`pr_head`) is faked.
 """
 import pytest
 
-from conftest import git, make_origin_and_repo
+from conftest import make_origin_and_repo
 from maestro import cli, event_log, ops, snapshot as snap_mod, store
 from maestro.config import Config
 from test_review_kind import FakeVCS, _push_pr_head
