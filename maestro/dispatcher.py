@@ -2764,7 +2764,7 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
         if not snap.qa_all_passing(spec_path.read_text(encoding="utf-8")):
             continue
         if active is None:
-            active = sessions.list_active()
+            active = _without_watcher(sessions.list_active())
         if key in active:
             continue
         if len(active) >= cfg.max_concurrency:
@@ -2793,7 +2793,7 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
                 _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding,
                                      pr_number=pr_number, pr_url=entry.get("url"),
                                      pr_branch=entry.get("branch"), pr_base=entry.get("base"))
-                active = sessions.list_active()
+                active = _without_watcher(sessions.list_active())
                 fired.append(key)
                 break
             continue
@@ -2803,7 +2803,7 @@ def sync_post_qa_skill(cfg: Config, sessions: SessionManager, now: float, *,
         if ev is None:
             continue  # already fired for this exact QA-pass fingerprint
         _spawn_post_qa_skill(cfg, sessions, key, skill, runner, runner_model, binding)
-        active = sessions.list_active()
+        active = _without_watcher(sessions.list_active())
         fired.append(key)
     return {"fired": fired}
 
@@ -2856,7 +2856,7 @@ def trigger_post_qa_skill(cfg: Config, sessions: SessionManager, key: str, *,
     skill = binding.post_qa_skill
     if not skill:
         raise store.MaestroError(f"{key}: no post_qa_skill configured for this ticket's repo binding")
-    active = sessions.list_active()
+    active = _without_watcher(sessions.list_active())
     if key in active:
         raise store.MaestroError(f"{key}: already has an active session")
     runner, runner_model = _post_qa_skill_runner(cfg, binding)
@@ -4009,6 +4009,8 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     out = _HookResults()
     if filter_keys is None:
         out.minted = _run_hook("mint_new_tickets", hook_errors, mint_new_tickets, cfg, default=[])
+    # T-288: right after minting, so a slow worktree/VCS sync cannot delay the poll.
+    _run_hook("slack_watcher", hook_errors, slack_watcher.sync, cfg, sessions, now, default={})
     _run_hook("sync_external_sources", hook_errors, sync_external_sources, cfg, now)
     _run_hook("sync_linear_status", hook_errors, sync_linear_status, cfg, now, default={})
     out.scheduled_fired = _run_hook("run_scheduled_tasks", hook_errors, run_scheduled_tasks,
@@ -4029,7 +4031,6 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     # The one hook that needs `sessions`: it spawns the post-QA skill itself.
     _run_hook("sync_post_qa_skill", hook_errors, sync_post_qa_skill, cfg, sessions, now,
               runner_probe=runner_probe, runner_verdict=runner_verdict, default={})
-    _run_hook("slack_watcher", hook_errors, slack_watcher.sync, cfg, sessions, now, default={})
     _run_hook("backup", hook_errors, backup.maybe_backup, cfg, now)
     _run_hook("compact_tick", hook_errors, run_compact_tick, cfg, now)
     _run_hook("archive_tick", hook_errors, run_archive_tick, cfg, now)
@@ -4055,6 +4056,11 @@ def _run_sweep_hooks(sweep: _Sweep, sessions: SessionManager, filter_keys: froze
     return out
 
 
+def _without_watcher(active: set[str]) -> set[str]:
+    """*active* minus the Slack watcher: it neither waits for a reconciler slot nor takes one."""
+    return active - {slack_watcher.WATCHER_KEY}
+
+
 def _active_agent_keys(sessions: SessionManager, home: Path) -> set[str]:
     """Keys holding a live agent session. A dispatcher-owned test-run claim
     (RB-14) is not an agent and never eats into `max_concurrency`
@@ -4062,7 +4068,7 @@ def _active_agent_keys(sessions: SessionManager, home: Path) -> set[str]:
     restack`/`gt submit` restack subprocess (`_start_restack`) is the same
     shape -- detached, dispatcher-owned, not an agent session -- so it gets
     the identical exclusion."""
-    active = sessions.list_active()
+    active = _without_watcher(sessions.list_active())
     return active - {k for k, c in claims.all_claims(home).items()
                       if c.get("kind") in ("testrun", "restack")}
 

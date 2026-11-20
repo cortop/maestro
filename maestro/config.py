@@ -468,9 +468,9 @@ class Config:
     # the human's user id and at least one read tool before it ever spawns.
     slack_active_hours: str = "09:00-19:00"  # local "HH:MM-HH:MM" window the fast interval applies in ("" = always)
     slack_channel: str | None = None         # the one channel the watcher reads
-    slack_daily_cap: int = 300               # watcher sessions per UTC day (0 = uncapped)
+    slack_daily_cap: int = 900               # watcher sessions per UTC day (0 = uncapped)
     slack_idle_interval: int = 1800          # seconds between polls outside the active hours
-    slack_interval: int = 120                # seconds between polls inside the active hours
+    slack_interval: int = 60                 # seconds between polls inside the active hours
     slack_mcp_config: str | None = None      # `claude --mcp-config` value (JSON file or string) for the watcher only
     slack_model: str = "haiku"               # the cheapest configured model
     slack_read_tools: list = field(default_factory=list)  # Slack plugin read tools the session is granted
@@ -1618,9 +1618,9 @@ worktree_timeout = 600           # `git worktree add`/adopt's own timeout (MTO-1
 # slack_active_hours = "09:00-19:00"   # T-255: local window the fast slack_interval applies in
                                   # ("" = always); outside it slack_idle_interval applies
 # slack_channel = "C0123456789"   # the one channel the watcher reads; unset keeps the watcher dark
-# slack_daily_cap = 300           # watcher sessions per UTC day (0 = uncapped)
+# slack_daily_cap = 900           # watcher sessions per UTC day (0 = uncapped)
 # slack_idle_interval = 1800      # seconds between polls outside the active hours
-# slack_interval = 120            # seconds between polls inside the active hours
+# slack_interval = 60             # seconds between polls inside the active hours
 # slack_mcp_config = '{"mcpServers": {"slack": {"type": "http", "url": "https://..."}}}'
                                   # the watcher's own `claude --mcp-config` (a JSON file path or
                                   # string); required while reconcile_strict_mcp strips every

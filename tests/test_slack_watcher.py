@@ -237,12 +237,12 @@ def test_not_in_spawn_ledger_budget_or_floor(home):
 
 
 def test_own_daily_cap(home):
-    cfg, sessions = _cfg(home, slack_daily_cap=2, slack_interval=10), DryRunSessions()
+    cfg, sessions = _cfg(home, slack_daily_cap=2, slack_interval=60), DryRunSessions()
     t = 3_000_000.0
     results = []
     for i in range(4):
         sessions._active.clear()
-        results.append(slack_watcher.sync(cfg, sessions, t + i * 20))
+        results.append(slack_watcher.sync(cfg, sessions, t + i * 60))
     assert [r["spawned"] for r in results] == [True, True, False, False]
     assert results[2]["reason"] == "daily cap reached"
     # A new UTC day resets it.
@@ -310,7 +310,7 @@ def test_web_fleet_page_shows_the_watcher_panel(home):
     slack_watcher.sync(cfg, DryRunSessions(), store.now_epoch())
     with TestClient(create_app(home)) as c:
         html = c.get("/fleet").text
-    assert 'id="slack-watcher"' in html and "1/300 polls today" in html
+    assert 'id="slack-watcher"' in html and "1/900 polls today" in html
 
 
 def test_doctor_warns_when_slack_tools_unavailable(home):
