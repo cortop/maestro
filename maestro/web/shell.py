@@ -11,9 +11,10 @@ from fastapi.templating import Jinja2Templates
 from .. import fleet, projection, ratelimit, spend, store
 from ..config import Config
 from ..view import board as board_view
+from ..view import reviews as reviews_view
 from .guard import WriteGuard
 
-NAV = (("now", "Now", "/"), ("tickets", "Tickets", "/tickets"), ("activity", "Activity", "/activity"), ("fleet", "Fleet", "/fleet"))
+NAV = (("now", "Now", "/"), ("tickets", "Tickets", "/tickets"), ("reviews", "Reviews", "/reviews"), ("activity", "Activity", "/activity"), ("fleet", "Fleet", "/fleet"))
 
 
 class Shell:
@@ -49,14 +50,17 @@ class Shell:
     def render(self, request: Request, name: str, *, nav: str = "now", **ctx) -> HTMLResponse:
         """Render *name*. A full page (and the header's own fragment) gets the header status and
         nav badges; any other ``_fragment`` skips that work."""
-        if not name.startswith("_") or name == "_shell_status.html":
+        if not name.startswith("_") or name in ("_shell_status.html", "_shell_nav.html"):
             st = self.status()
             needs = st["needs"]
+            rv = reviews_view.counts(self.home)["needs_you"]
             ctx = {"shell_status": st,
                    "nav_badges": {
                        "now": {"count": needs, "alert": needs > 0,
                                "sub": f"{needs} need you" if needs != 1 else "1 needs you"},
                        "tickets": {"count": st["tickets"], "alert": False, "sub": f"{st['tickets']} tickets"},
+                       "reviews": {"count": rv, "alert": rv > 0,
+                                   "sub": f"{rv} need you" if rv != 1 else "1 needs you"},
                        "activity": {"count": 0, "alert": False, "sub": "recent events"},
                        "fleet": {"count": 0, "alert": False, "sub": st["state"]}},
                    **ctx}

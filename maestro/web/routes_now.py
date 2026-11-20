@@ -53,6 +53,10 @@ def register(app: FastAPI, shell: Shell) -> None:
     def shell_status(request: Request):
         return shell.render(request, "_shell_status.html")
 
+    @app.get("/shell/nav", response_class=HTMLResponse)
+    def shell_nav(request: Request, current: str = ""):
+        return shell.render(request, "_shell_nav.html", nav=current)
+
     @app.get("/now/headline", response_class=HTMLResponse)
     def headline(request: Request):
         return shell.render(request, "_now_headline.html", **now_ctx(shell))

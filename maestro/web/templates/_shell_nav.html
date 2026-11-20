@@ -1,0 +1,5 @@
+<nav class="site-nav" aria-label="Primary" hx-get="/shell/nav?current={{ nav }}" hx-trigger="sse:board" hx-swap="outerHTML">
+  {% for id, label, href in nav_items %}{% set b = nav_badges[id] %}
+  <a href="{{ href }}"{% if b.count %} data-count="{{ b.count }}"{% endif %}{% if b.alert %} data-alert{% endif %} data-sub="{{ b.sub }}"{% if id == nav %} class="current" aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
