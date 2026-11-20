@@ -94,7 +94,8 @@ def register(app: FastAPI, shell: Shell) -> None:
     @app.get("/t/{key}", response_class=HTMLResponse)
     def ticket_page(request: Request, key: str, tab: str | None = Query(None)):
         require(key)
-        return shell.render(request, "ticket.html", nav="tickets", tab=tab, **head_ctx(shell, key))
+        is_review = ticket_view.ticket(home, key, store.now_epoch()).snap.kind == "review"
+        return shell.render(request, "ticket.html", nav="reviews" if is_review else "tickets", tab=tab, **head_ctx(shell, key))
 
     @app.get("/t/{key}/head", response_class=HTMLResponse)
     def ticket_head(request: Request, key: str):

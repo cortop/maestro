@@ -13,13 +13,13 @@
 {% if c.counts is defined %}
 <article class="card review" data-key="{{ c.key }}" data-group="needs-you" data-kind="review">
   <div class="card-inner">
-    <div class="card-title"><span><a href="/t/{{ c.key }}?tab=review">{{ c.key }}</a> // REVIEW</span>
+    <div class="card-title"><span><a href="/reviews/{{ c.key }}">{{ c.key }}</a> // REVIEW</span>
       <span class="waiting">waiting {{ c.waiting_s|dur }}</span></div>
     <div class="card-body">
       <p class="card-ticket keep">{{ c.url }}{% if c.author %} · by {{ c.author }}{% endif %}</p>
       <p class="card-question">{{ c.title }}</p>
       <p class="card-counts">{% for sev, n in c.counts.items() %}{{ n }} {{ sev }}{{ " · " if not loop.last }}{% endfor %}{% if c.verdict %} · suggested: {{ c.verdict }}{% endif %}</p>
-      <div class="card-actions"><a class="btn btn-primary" href="/t/{{ c.key }}?tab=review">Open the review</a></div>
+      <div class="card-actions"><a class="btn btn-primary" href="/reviews/{{ c.key }}">Open the review</a></div>
       {{ blocks(c) }}
     </div>
   </div>

@@ -27,7 +27,7 @@ def test_now_page_shows_review_card_linking_to_review_tab(client):
     html = client.get("/").text
     card = html.split('data-kind="review"')[1].split("</article>")[0]
     assert 'class="card review"' in html and "REVIEW" in card
-    assert 'href="/t/T-60?tab=review"' in card
+    assert 'href="/reviews/T-60"' in card
     assert "octo-reviewer" in card and "1 blocking" in card and "1 nit" in card
     assert "Shall I" not in card  # not rendered as a plain question card
 

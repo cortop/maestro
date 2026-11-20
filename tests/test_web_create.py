@@ -61,7 +61,7 @@ def test_review_links_to_ticket_and_inline_refusals(home, tmp_path, monkeypatch)
     with c:
         c.headers[TOKEN_HEADER] = app.state.guard.token
         r = c.post("/new/review", data={"url": URL})
-        assert r.status_code == 200 and f'href="/t/{REVIEW_KEY}"' in r.text
+        assert r.status_code == 200 and f'href="/reviews/{REVIEW_KEY}"' in r.text
         assert snap_mod.load(home, REVIEW_KEY).kind == "review"
         r = c.post("/new/review", data={"url": URL})
         assert r.status_code == 200 and "no new review round" in r.text

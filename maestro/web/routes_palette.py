@@ -37,8 +37,8 @@ def ticket_entries(shell: Shell, key: str) -> list[dict]:
         out.append(_post(f"Retry {key}", f"/t/{key}/retry", "ctrl+r"))
         out.append(_go(f"Discard {key}", f"/t/{key}", "confirm on the ticket", "ctrl+d"))
     if write and snap.kind == "review" and snap.phase == "awaiting-human" and snap.review_brief:
-        out.append(_go(f"Create pending review for {key}", f"/t/{key}?tab=review",
-                       "edit, then create on the Review tab"))
+        out.append(_go(f"Create pending review for {key}", f"/reviews/{key}",
+                       "edit, then create on the review page"))
     if write:
         spec = f"/t/{key}?tab=spec"
         out.append(_go(f"Edit spec of {key}", spec, "editor on the Spec tab", "E"))

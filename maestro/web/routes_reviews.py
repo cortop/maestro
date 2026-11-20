@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
-from .. import human_actions, ops, store
+from .. import human_actions, ops, review as review_pkg, store
+from ..review.model import _where_label
 from ..view import reviews as reviews_view
 from .routes_actions import Nudge
 from .routes_new import _form
@@ -64,6 +65,85 @@ def reviews_ctx(shell: Shell, filter_: str, **extra) -> dict:
             "show_history": filter_ == "history", "msg": None, "error": None, **extra}
 
 
+def clock(iso: str | None) -> str:
+    """A timestamp as HH:MM (UTC), or empty when unparseable."""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return ""
+    return (dt.astimezone(timezone.utc) if dt.tzinfo else dt).strftime("%H:%M")
+
+
+def _span(a: str | None, b: str | None) -> str:
+    """Whole minutes (or seconds) from *a* to *b*; empty when either is missing or b is not later."""
+    try:
+        s = int((datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds())
+    except (TypeError, ValueError):
+        return ""
+    return "" if s <= 0 else (f"{s // 60}m" if s >= 60 else f"{s}s")
+
+
+# Per rail step: its label, then the timeline labels whose first hit starts it.
+_RAIL = (("asked", "asked", "filed"), ("tests", "round started"), ("reviewing", "tests done"),
+         ("brief ready", "brief ready"), ("on github", "pending created"), ("closed", "closed"))
+_RAIL_AT = {"queued": 0, "testing": 1, "reviewing": 2, "brief-ready": 3, "blocked": 3, "stranded": 3,
+            "failed": 3, "other": 3, "pending-on-github": 4, "closed": 5}
+
+
+def rail(row, timeline: list[dict]) -> list[dict]:
+    """The six review steps with start time, duration and visited/current flags."""
+    last: dict[str, str | None] = {}
+    for e in timeline:
+        last.setdefault(e["label"], e["ts"])
+    cur = _RAIL_AT.get(row.status, 3)
+    starts = [next((last[n] for n in names[1:] if n in last), None) for names in _RAIL]
+    out = []
+    for i, names in enumerate(_RAIL):
+        nxt = next((t for t in starts[i + 1:] if t), None)
+        out.append({"label": names[0], "time": clock(starts[i]),
+                    "span": _span(starts[i], nxt) if i < cur else "",
+                    "visited": i <= cur, "current": i == cur, "dispatcher": names[0] == "tests"})
+    return out
+
+
+_TIMELINE_TEXT = {"asked": "Asked", "filed": "Noticed by maestro", "round started": "Review round started",
+                  "tests done": "Tests finished", "brief ready": "Brief ready",
+                  "pending created": "Pending review created on GitHub", "closed": "Closed"}
+
+
+def timeline_rows(timeline: list[dict]) -> list[dict]:
+    out, prev = [], None
+    for e in timeline:
+        out.append({"text": _TIMELINE_TEXT.get(e["label"], e["label"]), "time": clock(e["ts"]),
+                    "after": _span(prev, e["ts"]) if prev else ""})
+        prev = e["ts"]
+    return out
+
+
+def request_rows(requests: list[dict]) -> list[dict]:
+    out = []
+    for q in requests:
+        who = q.get("requester") if isinstance(q.get("requester"), dict) else {}
+        where = q.get("where") if isinstance(q.get("where"), dict) else {}
+        out.append({"by": who.get("name"), "at": q.get("requested_ts"),
+                    "label": _where_label(q.get("via"), where) or q.get("via"),
+                    "url": where.get("permalink")})
+    return out
+
+
+def detail_ctx(shell: Shell, key: str, **extra) -> dict:
+    now = store.now_epoch()
+    d = reviews_view.detail(shell.home, shell.cfg(), key, now)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"no such review: {key}")
+    r = review_pkg.load(shell.home, key)
+    return {"d": d, "row": d.row, "r": r, "key": key, "now": now, "when": when, "clock": clock,
+            "rail": rail(d.row, d.timeline), "timeline": timeline_rows(d.timeline),
+            "requests": request_rows(d.requests),
+            "can_rereview": r.stale and d.row.status == "brief-ready",
+            "can_retry": d.row.status == "blocked", "msg": None, "error": None, **extra}
+
+
 def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
     @app.get("/reviews", response_class=HTMLResponse)
     def reviews(request: Request, filter: str = Query("open")):
@@ -73,12 +153,25 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
     def reviews_rows(request: Request, filter: str = Query("open")):
         return shell.render(request, "_reviews_rows.html", **reviews_ctx(shell, filter))
 
-    def respond(request: Request, filter_: str, fn) -> HTMLResponse:
+    @app.get("/reviews/{key}", response_class=HTMLResponse)
+    def review_page(request: Request, key: str):
+        return shell.render(request, "review.html", nav="reviews", **detail_ctx(shell, key))
+
+    @app.get("/reviews/{key}/head", response_class=HTMLResponse)
+    def review_head(request: Request, key: str):
+        return shell.render(request, "_review_head.html", **detail_ctx(shell, key))
+
+    def respond(request: Request, filter_: str, fn, key: str | None = None, page: str = "") -> HTMLResponse:
         msg = error = None
         try:
             msg = fn()
         except store.MaestroError as e:
             error = str(e)
+        if page == "detail":
+            resp = shell.render(request, "_review_head.html", **detail_ctx(shell, key, msg=msg, error=error))
+            if error:
+                resp.status_code = 409
+            return resp
         resp = shell.render(request, "_reviews_rows.html", **reviews_ctx(shell, filter_, msg=msg, error=error))
         if error:
             resp.status_code = 409
@@ -87,7 +180,7 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
     def make(fn):
         async def handler(request: Request, key: str | None = None) -> HTMLResponse:
             f = _form(await request.body())
-            return await run_in_threadpool(respond, request, f.get("filter", "open"), lambda: fn(f, key))
+            return await run_in_threadpool(respond, request, f.get("filter", "open"), lambda: fn(f, key), key, f.get("page", ""))
         handler.__name__ = f"reviews_{fn.__name__}"
         return handler
 
@@ -110,4 +203,11 @@ def register(app: FastAPI, shell: Shell, nudge: Nudge | None, vcs=None) -> None:
 
     shell.guard.post(app, "/reviews/start", make(start), response_class=HTMLResponse)
     shell.guard.post(app, "/reviews/{key}/dismiss", make(dismiss), response_class=HTMLResponse)
+    def rereview(f: dict, key) -> str:
+        ops.rereview(shell.cfg(), key, vcs=vcs)
+        if nudge is not None:
+            nudge(key)
+        return f"{key} re-reviewing."
+
+    shell.guard.post(app, "/reviews/{key}/rereview", make(rereview), response_class=HTMLResponse)
     shell.guard.post(app, "/reviews/{key}/retry", make(retry), response_class=HTMLResponse)
