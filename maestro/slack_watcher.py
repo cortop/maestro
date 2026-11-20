@@ -11,6 +11,7 @@ Slack message text is other people's text: data, never instructions. The watcher
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -81,6 +82,28 @@ def in_active_hours(cfg: Config, now: float) -> bool:
 
 def interval_for(cfg: Config, now: float) -> int:
     return cfg.slack_interval if in_active_hours(cfg, now) else cfg.slack_idle_interval
+
+
+def polls_needed_per_day(cfg: Config) -> int:
+    """Polls a full day needs: the active window at `slack_interval`, the rest at `slack_idle_interval`."""
+    window = parse_active_hours(cfg.slack_active_hours)
+    if window is None:
+        active = 24 * 3600
+    else:
+        start, end = window
+        active = ((end - start) % (24 * 60)) * 60
+    idle = 24 * 3600 - active
+
+    def count(seconds: int, interval: int) -> int:
+        return math.ceil(seconds / max(MIN_POLL_GAP, interval)) if seconds else 0
+    return count(active, cfg.slack_interval) + count(idle, cfg.slack_idle_interval)
+
+
+def effective_interval(cfg: Config, now: float) -> int:
+    """Seconds between polls in practice: the sweep cadence caps the configured interval."""
+    from . import fleet
+    sweep = fleet._interval_from_plist(home=cfg.home) or 0
+    return max(sweep, interval_for(cfg, now))
 
 
 def watcher_command(cfg: Config) -> str:
@@ -263,9 +286,14 @@ def panel(cfg: Config, now: float | None = None) -> dict:
     now = store.now_epoch() if now is None else now
     state = load_state(cfg.home)
     last = state.get("last_poll_ts")
+    effective = effective_interval(cfg, now)
+    spawned = state.get("last_spawn_ts")
+    next_in = max(0, round(spawned + effective - now)) if isinstance(spawned, (int, float)) else 0
     return {"enabled": configured(cfg), "channel_set": bool(cfg.slack_channel),
             "last_poll": last if isinstance(last, (int, float)) else None,
             "last_spawn": state.get("last_spawn_ts"),
             "polls_today": polls_today(state, now), "cap": cfg.slack_daily_cap,
             "spend_today": spend_today(cfg, now) if configured(cfg) else None,
+            "effective_interval": effective, "next_poll_in": next_in,
+            "polls_needed": polls_needed_per_day(cfg),
             "skip_reason": skip_reason(cfg, now, state=state)}

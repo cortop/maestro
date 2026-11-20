@@ -191,6 +191,7 @@
         {% elif not slack.enabled %}<p id="slack-watcher" class="mono dim">not configured</p>
         {% else %}
         <p id="slack-watcher" class="mono">last poll {{ ago(slack.last_poll) if slack.last_poll is not none else "never" }} · {{ slack.polls_today }}{% if slack.cap %}/{{ slack.cap }}{% endif %} polls today · {% if slack.spend_today is none %}spend unknown{% else %}${{ "%.2f"|format(slack.spend_today) }} spent today{% endif %}</p>
+        <p id="slack-cadence" class="mono">polls every {{ slack.effective_interval }}s · next poll in {{ slack.next_poll_in }}s · {{ slack.polls_needed }} polls/day needed</p>
         {% if slack.skip_reason and slack.skip_reason != "not due" %}<p class="dim">idle: {{ slack.skip_reason }}</p>{% endif %}
         {% endif %}
       </div>

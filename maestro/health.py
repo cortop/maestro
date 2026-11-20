@@ -1118,6 +1118,37 @@ def _mcp_config_servers(cfg: Config) -> dict[str, bool] | None:
     return {re.sub(r"[^a-z0-9]+", "_", str(n).lower()): True for n in servers}
 
 
+def check_slack_cadence(cfg: Config, now: float, *, plist=None) -> dict:
+    """WARN when the Slack watcher polls less often than configured: a launchd sweep interval
+    above `slack_interval`, a `slack_daily_cap` below the polls a day needs, a reached cap, or a
+    stale last completed poll inside the active hours. ``ok`` while the watcher is unconfigured."""
+    name = "slack_cadence"
+    if not slack_watcher.configured(cfg):
+        return {"name": name, "status": "ok", "detail": "slack watcher not configured", "problems": []}
+    state = slack_watcher.load_state(cfg.home)
+    problems = []
+    sweep = fleet._interval_from_plist(plist, home=cfg.home)
+    if sweep and sweep > cfg.slack_interval:
+        problems.append(f"sweep interval {sweep}s exceeds slack_interval {cfg.slack_interval}s: the watcher "
+                        f"polls every {sweep}s at best (run `maestro fleet up --interval 60`)")
+    needed = slack_watcher.polls_needed_per_day(cfg)
+    if cfg.slack_daily_cap and cfg.slack_daily_cap < needed:
+        problems.append(f"slack_daily_cap {cfg.slack_daily_cap} is below the {needed} polls a day "
+                        "the configured intervals need: polling stops before the day ends")
+    if cfg.slack_daily_cap and slack_watcher.polls_today(state, now) >= cfg.slack_daily_cap:
+        problems.append(f"daily cap {cfg.slack_daily_cap} reached: no more polls today")
+    last = state.get("last_poll_ts")
+    if slack_watcher.in_active_hours(cfg, now):
+        limit = max(3 * cfg.slack_interval, 300)
+        if isinstance(last, (int, float)) and now - last > limit:
+            reason = slack_watcher.skip_reason(cfg, now, state=state) or "none (a poll is due)"
+            problems.append(f"last completed poll {round(now - last)}s ago (limit {limit}s); "
+                            f"skip reason: {reason}")
+    if problems:
+        return {"name": name, "status": "warn", "detail": "; ".join(problems), "problems": problems}
+    return {"name": name, "status": "ok", "detail": "slack polling at its configured cadence", "problems": []}
+
+
 def check_slack_tools(cfg: Config, now: float, *, probe=None) -> dict:
     """WARN when the Slack read tools `slack_read_tools` names are not reachable: each
     ``mcp__<server>__<tool>`` needs its server listed and usable by ``claude mcp list``,
@@ -2209,6 +2240,7 @@ CHECKS = (
     check_repo_preflight,
     check_runner_binary,
     check_serving_checkout,
+    check_slack_cadence,
     check_slack_tools,
     check_spawn_floor,
     check_unknown_repo_bindings,
