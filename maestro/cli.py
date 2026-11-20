@@ -480,6 +480,10 @@ def _review_line(r) -> str:
         line += f"  asked by {r.requested_by}"
     if r.requested_at and not r.requested_at_inferred:
         line += f"  at {r.requested_at}"
+    if r.outcome:
+        line += f"  closed: {r.outcome}"
+    if r.previous_key:
+        line += f"  after {r.previous_key}"
     return line
 
 

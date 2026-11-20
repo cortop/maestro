@@ -3325,22 +3325,61 @@ def review_key(number: int, title: str | None) -> str | None:
     return store.validate_key(f"R-{number}-{slug}") if slug else None
 
 
-def _existing_review_key(cfg: Config, owner: str, name: str, number: int) -> str | None:
-    """The key already minted for this PR (legacy or slug-style), matched by `external_id`."""
+def _review_logs_for_pr(cfg: Config, owner: str, name: str, number: int) -> list[dict]:
+    """Every review of this PR, oldest first, found by probing event logs (live and archived).
+
+    Never reads a cached snapshot. Each row is ``{key, archived, events, created}``; the PR
+    identity is the `external_id` on the log's `TicketCreated`, compared case-insensitively."""
     legacy = f"REVIEW-{owner}-{name}-{number}".lower()
+    slug_prefix = f"r-{number}-"
     want = f"{owner}/{name}#{number}".lower()
-    candidates = [legacy] + sorted(
-        p.stem for p in (cfg.home / "events").glob(f"R-{number}-*.jsonl")
-        if not p.name.endswith(".archive.jsonl"))
-    for k in candidates:
-        try:
-            store.validate_key(k)
-            if event_log.last_seq(cfg.home, k) > 0 and \
-                    (snap_mod.load(cfg.home, k).external_id or "").lower() == want:
-                return k
-        except store.MaestroError:
+    found = []
+    for archived, folder in ((False, cfg.home / "events"), (True, cfg.home / "events" / "_archive")):
+        if not folder.is_dir():
             continue
-    return None
+        for p in sorted(folder.glob("*.jsonl")):
+            stem = p.name[:-len(".jsonl")]
+            low = stem.lower()
+            if stem.endswith(".archive") or not (low.startswith(legacy) or low.startswith(slug_prefix)):
+                continue
+            try:
+                store.validate_key(stem)
+                evs = event_log.read(cfg.home, stem) if not archived else \
+                    store.read_jsonl(p) + store.read_jsonl(store.archived_events_archive_path(cfg.home, stem))
+            except store.MaestroError:
+                continue
+            created = next((e for e in evs if e.get("type") == E.TICKET_CREATED), None)
+            payload = (created or {}).get("payload") or {}
+            if created is None or str(payload.get("external_id") or "").lower() != want:
+                continue
+            found.append({"key": stem, "archived": archived, "events": evs,
+                          "created": str(created.get("ts") or "")})
+    found.sort(key=lambda r: (r["created"], r["key"]))
+    return found
+
+
+def _existing_review_key(cfg: Config, owner: str, name: str, number: int) -> str | None:
+    """The live review's key for this PR (the latest one), or None."""
+    live = [r for r in _review_logs_for_pr(cfg, owner, name, number) if not r["archived"]]
+    return live[-1]["key"] if live else None
+
+
+def _dispatcher_mod():
+    from . import dispatcher  # lazy: the dispatcher imports this module
+    return dispatcher
+
+
+def _review_key_taken(home: Path, key: str) -> bool:
+    return (event_log.last_seq(home, key) > 0 or store.archived_events_path(home, key).exists()
+            or store.archived_events_archive_path(home, key).exists())
+
+
+def _next_review_key(home: Path, base: str) -> str:
+    """*base* with the first free numeric suffix (`-2`, `-3`, ...), probing live and archived logs."""
+    n = 2
+    while _review_key_taken(home, f"{base}-{n}"):
+        n += 1
+    return store.validate_key(f"{base}-{n}")
 
 
 def _review_binding(cfg: Config, slug: str) -> str | None:
@@ -3401,9 +3440,10 @@ def _clean_display(value, cap: int) -> str | None:
 
 def _record_review_request(cfg: Config, key: str, *, via: str, requested_ts: str | None,
                            requester: dict | None, where: dict | None, slug: str, number: int,
-                           url: str, head_sha: str | None) -> None:
+                           url: str, head_sha: str | None, previous_key: str | None = None,
+                           again: bool = False) -> str:
     """Append one `ReviewRequested`: who asked, when and where. Idempotent per Slack message ts,
-    or per `via` plus head sha for the other surfaces."""
+    or per `via` plus head sha for the other surfaces (plus the request time when *again*). Returns that anchor."""
     clean = None
     if isinstance(requester, dict):
         rid = _clean_display(requester.get("id"), _REVIEW_NAME_CAP)
@@ -3414,10 +3454,27 @@ def _record_review_request(cfg: Config, key: str, *, via: str, requested_ts: str
                "where": where, "pr": {"slug": slug, "number": number, "url": url}}
     if head_sha:
         payload["head_sha"] = head_sha
+    if previous_key:
+        payload["previous_key"] = previous_key
     anchor = where.get("message_ts") if via == "slack" and where.get("message_ts") else \
-        f"{via}-{head_sha or 'nohead'}"
+        f"{via}-{head_sha or 'nohead'}" + (f"-{payload['requested_ts']}" if again else "")
     _append(cfg, key, E.REVIEW_REQUESTED, payload, actor="human",
             sid=f"review-requested-{key}-{anchor}")
+    return str(anchor)
+
+
+REVIEW_CLOSE_OUTCOMES = ("submitted", "pr-merged", "pr-closed", "dismissed")
+
+
+def record_review_closed(cfg: Config, key: str, outcome: str, *, review_state: str | None = None,
+                         actor: str = "human") -> None:
+    """Append `ReviewClosed` (why a review ends) just before its phase change to done; once per review."""
+    if outcome not in REVIEW_CLOSE_OUTCOMES:
+        raise store.MaestroError(f"outcome must be one of {', '.join(REVIEW_CLOSE_OUTCOMES)} (got {outcome!r})")
+    payload = {"outcome": outcome}
+    if review_state:
+        payload["review_state"] = review_state
+    _append(cfg, key, E.REVIEW_CLOSED, payload, actor=actor, sid=f"review-closed-{key}")
 
 
 def _record_review_pr(cfg: Config, key: str, head: dict) -> None:
@@ -3480,52 +3537,83 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
     owner, name, number = m.group(1), m.group(2), int(m.group(3))
     slug = f"{owner}/{name}"
     legacy_key = store.validate_key(f"REVIEW-{owner}-{name}-{number}".lower())
-    key = _existing_review_key(cfg, owner, name, number)
     url = f"https://github.com/{slug}/pull/{number}"
-    snap = snap_mod.load(cfg.home, key) if key else None
-    if snap is not None and snap.open_questions:
-        seen: dict = {}
-        if _review_binding(cfg, slug) is not None:
-            try:  # best effort: a failed read only costs the head sha on this record
-                seen = _read_pr_head(cfg, slug, number, vcs)
-            except Exception:
-                seen = {}
-        _record_review_request(cfg, key, via=via, requested_ts=requested_ts, requester=requester,
-                               where=where, slug=slug, number=number, url=url,
-                               head_sha=seen.get("head_sha"))
-        if seen.get("head_sha"):
-            _record_review_pr(cfg, key, seen)
-        return {"key": key, "minted": False, "started": False, "reason": "question open"}
-
     repo_name = _review_binding(cfg, slug)
     head: dict = {}
-    refusal = None
-    if repo_name is None:
-        refusal = ("unbound", f"{slug} is not bound in any [repos.<name>] table. Bind it in "
-                              f"config.toml then re-run `maestro review {url}`, or dismiss this ticket.")
-    else:
-        binding = repos_mod._binding_from_table(cfg, repo_name, cfg.repos[repo_name])
-        head = _read_pr_head(cfg, slug, number, vcs)
-        if head.get("error") or not head.get("head_sha"):
-            raise store.MaestroError(
-                f"{key or legacy_key}: cannot read PR head for {url} ({head.get('error') or 'no head sha'})")
-        if head.get("is_fork"):
-            refusal = ("fork", f"{url} comes from a fork; reviews only check out branches in "
-                               f"{slug} itself. Dismiss this ticket, or review it by hand.")
+    head_error: Exception | None = None
+    if repo_name is not None:  # read before the mint lock: the lock never covers a network call
+        try:
+            head = _read_pr_head(cfg, slug, number, vcs)
+        except Exception as exc:
+            head_error = exc
+    req = dict(via=via, requested_ts=requested_ts, requester=requester, where=where,
+               slug=slug, number=number, url=url)
 
-    minted = snap is None
-    if minted:
-        key = review_key(number, head.get("title"))
-        if key is None or event_log.last_seq(cfg.home, key) > 0:
-            key = legacy_key  # no usable title, or another repo's PR owns the slug key
-        mint_one(cfg, key=key, prefix=None, title=f"Review {slug}#{number}",
-                 ticket_args={"intent": f"Review {url} (someone else's pull request).",
-                              "kind": "review", "repo": repo_name,
-                              "external_source": "github-pr", "external_id": f"{slug}#{number}"})
-        snap = snap_mod.load(cfg.home, key)
-    _record_review_request(cfg, key, via=via, requested_ts=requested_ts, requester=requester,
-                           where=where, slug=slug, number=number, url=url,
-                           head_sha=head.get("head_sha"))
+    with store.file_lock(_dispatcher_mod()._mint_lock_target(cfg.home)):
+        logs = _review_logs_for_pr(cfg, owner, name, number)
+        latest = logs[-1] if logs else None
+        key = latest["key"] if latest and not latest["archived"] else None
+        snap = snap_mod.fold(key, latest["events"]) if key else None
+        previous = None
+        if str(head.get("state") or "").upper() in ("MERGED", "CLOSED"):
+            if key:  # the request is recorded; the PR being closed starts no round
+                _record_review_request(cfg, key, **req, head_sha=head.get("head_sha"))
+                _record_review_pr(cfg, key, head)
+            return {"key": key, "minted": False, "started": False, "reason": "pr not open"}
+        if snap is not None and snap.phase == Phase.DONE.value:
+            covered = {snap.review_head_sha} | {
+                (e.get("payload") or {}).get("head_sha") for e in latest["events"]
+                if e.get("type") == E.REVIEW_ROUND_STARTED}
+            if head.get("head_sha") and head["head_sha"] in covered:
+                anchor = _record_review_request(cfg, key, **req, head_sha=head["head_sha"], again=True)
+                _record_review_pr(cfg, key, head)
+                from . import notify
+                notify.push(cfg, key, "asked-again", url=url,
+                            requester=((requester or {}).get("name") or (requester or {}).get("id")),
+                            dedupe=anchor)
+                return {"key": key, "minted": False, "started": False, "reason": "asked again"}
+            previous, key, snap = key, None, None
+        elif latest is not None and latest["archived"]:
+            previous = latest["key"]
+        if snap is not None and snap.open_questions:
+            seen = head if head.get("head_sha") else {}
+            _record_review_request(cfg, key, **req, head_sha=seen.get("head_sha"))
+            if seen:
+                _record_review_pr(cfg, key, seen)
+            return {"key": key, "minted": False, "started": False, "reason": "question open"}
+
+        refusal = None
+        if repo_name is None:
+            refusal = ("unbound", f"{slug} is not bound in any [repos.<name>] table. Bind it in "
+                                  f"config.toml then re-run `maestro review {url}`, or dismiss this ticket.")
+        else:
+            binding = repos_mod._binding_from_table(cfg, repo_name, cfg.repos[repo_name])
+            if head_error is not None:
+                raise head_error
+            if head.get("error") or not head.get("head_sha"):
+                raise store.MaestroError(
+                    f"{key or legacy_key}: cannot read PR head for {url} ({head.get('error') or 'no head sha'})")
+            if head.get("is_fork"):
+                refusal = ("fork", f"{url} comes from a fork; reviews only check out branches in "
+                                   f"{slug} itself. Dismiss this ticket, or review it by hand.")
+
+        minted = snap is None
+        if minted:
+            if logs:  # a later review of a PR already reviewed: the first key plus a numeric suffix
+                key = _next_review_key(cfg.home, logs[0]["key"])
+            else:
+                key = review_key(number, head.get("title"))
+                if key is None or _review_key_taken(cfg.home, key):
+                    key = legacy_key  # no usable title, or another repo's PR owns the slug key
+                if _review_key_taken(cfg.home, key):
+                    key = _next_review_key(cfg.home, key)
+            _dispatcher_mod().mint_one(
+                cfg, key=key, prefix=None, title=f"Review {slug}#{number}", locked=True,
+                ticket_args={"intent": f"Review {url} (someone else's pull request).",
+                             "kind": "review", "repo": repo_name,
+                             "external_source": "github-pr", "external_id": f"{slug}#{number}"})
+            snap = snap_mod.load(cfg.home, key)
+    _record_review_request(cfg, key, **req, head_sha=head.get("head_sha"), previous_key=previous)
     if head.get("head_sha"):
         _record_review_pr(cfg, key, head)
     if refusal is not None:
@@ -3533,20 +3621,21 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
         if qid not in _resolved_qids(cfg, key):
             ask(cfg, key, f"{key}: {refusal[1]}", qid=qid, actor="human")
         return {"key": key, "minted": minted, "started": False, "reason": refusal[0]}
-    if snap.review_head_sha == head["head_sha"]:
-        return {"key": key, "minted": False, "started": False, "reason": "up to date"}
-
-    wt = _review_checkout(cfg, key, binding, number, head["head_sha"])
-    payload = {"head_sha": head["head_sha"], "url": url}
-    if source:
-        payload["source"] = source
-    if head.get("author"):
-        payload["author"] = head["author"]
-    _append(cfg, key, E.REVIEW_ROUND_STARTED, payload, actor="human",
-            sid=f"review-round-{key}-{head['head_sha']}")
-    if Phase(snap.phase) != Phase.READY:
-        set_phase(cfg, key, Phase.READY, reason=f"review round at {head['head_sha'][:12]}",
-                  actor="human", force=True)
+    with store.file_lock(cfg.home / "derived" / f"review-round-{key}"):  # one round start per review at a time
+        snap = snap_mod.load(cfg.home, key)
+        if snap.review_head_sha == head["head_sha"]:
+            return {"key": key, "minted": False, "started": False, "reason": "up to date"}
+        wt = _review_checkout(cfg, key, binding, number, head["head_sha"])
+        payload = {"head_sha": head["head_sha"], "url": url}
+        if source:
+            payload["source"] = source
+        if head.get("author"):
+            payload["author"] = head["author"]
+        _append(cfg, key, E.REVIEW_ROUND_STARTED, payload, actor="human",
+                sid=f"review-round-{key}-{head['head_sha']}")
+        if Phase(snap.phase) != Phase.READY:
+            set_phase(cfg, key, Phase.READY, reason=f"review round at {head['head_sha'][:12]}",
+                      actor="human", force=True)
     return {"key": key, "minted": minted, "started": True, "worktree": str(wt),
             "head_sha": head["head_sha"]}
 

@@ -754,7 +754,7 @@ class MaestroTUI(App):
             except store.MaestroError as exc:
                 self.notify(str(exc), severity="error")
                 return
-            self.notify(f"Review started: {made.get('key', url)}")
+            self.notify(f"Review started: {made.get('key') or url}")
             self._nudge(made.get("key"))
             self._refresh_now_tab()
 
