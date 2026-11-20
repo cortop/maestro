@@ -1557,6 +1557,9 @@ def _drift_policy_cursor_path(home: Path) -> Path:
     return home / "derived" / ".drift_policy_cursor.json"
 
 
+GIT_LOCAL_TIMEOUT = 60  # seconds; bound for every local (non-network) git call in a sweep
+
+
 def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
     """Keep other tickets' worktrees from drifting behind a just-merged base branch.
 
@@ -1703,7 +1706,8 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
                 continue  # this group only -- siblings still fetch/route below
         try:
             fetch = subprocess.run(["git", "-C", repo_path, "fetch", "-q", "origin", base],
-                                   capture_output=True, text=True)
+                                   capture_output=True, text=True,
+                                   timeout=binding.worktree_fetch_timeout)
             if fetch.returncode != 0:
                 errors[f"{real}@{base}"] = (fetch.stderr or "fetch failed").strip()
                 continue
@@ -1713,16 +1717,16 @@ def sync_worktrees(cfg: Config, now: float | None = None) -> dict:
             # whatever branch is checked out, so guard it explicitly rather than relying on
             # base not being checked out; a detached HEAD (symbolic-ref fails) also no-ops
             head = subprocess.run(["git", "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT)
             if head.returncode == 0 and head.stdout.strip() == base:
                 subprocess.run(["git", "-C", repo_path, "merge", "-q", "--ff-only", f"origin/{base}"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT)
 
             for key in group["keys"]:
                 wt = store.worktree_path(home, key)
                 behind = subprocess.run(
                     ["git", "-C", str(wt), "rev-list", "--count", f"HEAD..origin/{base}"],
-                    capture_output=True, text=True,
+                    capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT,
                 )
                 if behind.returncode != 0:
                     continue
@@ -1808,7 +1812,7 @@ def _conflicts_with_base(wt: Path, base: str) -> bool:
     """
     result = subprocess.run(
         ["git", "-C", str(wt), "merge-tree", "--write-tree", "HEAD", f"origin/{base}"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT,
     )
     return result.returncode == 1
 
@@ -2068,8 +2072,11 @@ def sync_review_pending(cfg: Config, now: float) -> dict:
         wt = store.worktree_path(home, key)
         binding = repos.resolve(cfg, home, key)
         if wt.exists() and binding.path:
-            subprocess.run(["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
-                           capture_output=True, text=True)
+            try:
+                subprocess.run(["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
+                               capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass  # the worktree stays; `maestro gc-worktrees` reclaims it
     cursor["review_pending"] = now
     store.write_json(cursor_path, cursor)
     return {"checked": checked}
@@ -2102,10 +2109,13 @@ def _route_if_merged(cfg: Config, key: str, status: dict,
         # tracks the worktree registration.
         binding = repos_mod.resolve(cfg, cfg.home, key)
         if binding.path:
-            result = subprocess.run(
-                ["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
-                capture_output=True, text=True,
-            )
+            try:
+                result = subprocess.run(
+                    ["git", "-C", binding.path, "worktree", "remove", str(wt), "--force"],
+                    capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                result = subprocess.CompletedProcess([], 1, "", "worktree remove timed out")
             if result.returncode != 0 and worktree_removal_errors is not None:
                 worktree_removal_errors[key] = (result.stderr or result.stdout
                                                 or "worktree remove failed").strip()
