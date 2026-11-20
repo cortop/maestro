@@ -127,6 +127,16 @@ def status_of(snap) -> ReviewStatus:
     return ReviewStatus.OTHER
 
 
+def needs_you_of(snap, status: ReviewStatus | None = None) -> bool:
+    """Whether *snap* waits on the human, from the snapshot alone."""
+    status = status or status_of(snap)
+    try:
+        in_needs_phase = Phase(snap.phase) in _NEEDS_YOU_PHASES
+    except ValueError:
+        in_needs_phase = False
+    return status in _NEEDS_YOU_STATUSES or (status == ReviewStatus.OTHER and in_needs_phase)
+
+
 def _slug_number(snap) -> tuple[str | None, int | None]:
     for text, rx in ((snap.review_url, _URL_RE), (snap.external_id, _SLUG_RE)):
         m = rx.search(text) if isinstance(text, str) else None
@@ -227,11 +237,7 @@ def build(home: Path, snap) -> Review:
     status = status_of(snap)
     slug, number = _slug_number(snap)
     requested_at, inferred, reason, requests, pr, closed = _log_facts(home, snap.key)
-    try:
-        in_needs_phase = Phase(snap.phase) in _NEEDS_YOU_PHASES
-    except ValueError:
-        in_needs_phase = False
-    needs = status in _NEEDS_YOU_STATUSES or (status == ReviewStatus.OTHER and in_needs_phase)
+    needs = needs_you_of(snap, status)
     brief = snap.review_brief or {}
     first = requests[0] if requests else {}
     where = first.get("where") if isinstance(first.get("where"), dict) else {}

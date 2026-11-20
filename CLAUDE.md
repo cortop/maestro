@@ -115,7 +115,7 @@ Supporting:
   `dispatcher.py` — keep them literal when refactoring.
 - `review/` — the inbound-review entity (someone else's PR): typed `Review`, `ReviewStatus` and loaders over a `review`-kind ticket (`maestro reviews`).
 - `providers/` — pluggable tracker / VCS / fetcher / model adapters (selected in config).
-- `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, evidence, rounds, why, fleet, deps, deps_layout)
+- `view/` — textual-free, rich-free, stdlib-only view-models (board, ticket, events, evidence, rounds, why, fleet, deps, deps_layout, reviews)
   shared by the TUI and the web UI; the TUI wraps them in Rich, the web UI in HTML.
 - `web/` — `maestro web`: FastAPI + Jinja2 + htmx server-rendered UI with `/stream` SSE
   (`web` extra; core never imports it, `tests/test_import_graph.py` enforces it).

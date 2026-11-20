@@ -7,6 +7,7 @@ from pathlib import Path
 from .. import event_log, ops, snapshot as snap_mod, store
 from ..config import Config
 from . import events as ev_view
+from . import reviews as reviews_view
 from . import rounds as rounds_view
 from . import why as why_view
 
@@ -16,8 +17,7 @@ RAIL_ORDER = ("triaging", "researching", "awaiting-human", "ready", "implementin
 # Phases whose bounce back to implementing means a CI / QA / test failure sent it back.
 _FAIL_SOURCES = frozenset({"qa", "awaiting-ci", "in-review", "verifying"})
 # A review ticket never builds: its rail is the inbound-review pipeline, in its own words.
-REVIEW_RAIL = (("ready", "queued"), ("verifying", "tests"), ("qa", "checking"),
-               ("awaiting-human", "brief ready"), ("done", "submitted"))
+REVIEW_RAIL = reviews_view.RAIL
 
 
 @dataclass(frozen=True)
@@ -134,18 +134,8 @@ def status_sentence(home: Path, key: str, snap: snap_mod.Snapshot) -> str:
 
 
 def _review_status(snap: snap_mod.Snapshot) -> str:
-    """The status sentence of a `review` ticket: checking, brief ready, or waiting on the submit."""
-    if snap.phase == "done":
-        return "Review finished."
-    if snap.phase == "degraded":
-        return "Parked by the dispatcher" + (f": {snap.last_error}" if snap.last_error else ".")
-    if snap.phase == "awaiting-human":
-        if snap.review_brief:
-            return "Brief ready: edit the comments, then waiting on your submit."
-        return "Waiting on you to answer."
-    if snap.phase == "verifying":
-        return "The dispatcher is running the PR's tests, then an agent checks it."
-    return "An agent is checking the pull request."
+    """The status sentence of a `review` ticket (`reviews_view.status_sentence`)."""
+    return reviews_view.status_sentence(snap)
 
 
 def dispatch_card(home: Path, key: str, snap: snap_mod.Snapshot, cfg: Config, now: float) -> dict:
