@@ -1871,6 +1871,7 @@ class MaestroTUI(App):
                 return
             create_args: dict = {
                 "priority": result["priority"],
+                "auto_acs": True,
             }
             if result.get("intent"):
                 create_args["intent"] = result["intent"]

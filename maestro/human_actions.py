@@ -217,7 +217,7 @@ def queue_ticket(cfg: Config, title: str, *, priority: int = 3, nudge: Nudge | N
     board = store.board_state(cfg.home)
     if board["state"] in ("missing", "uninitialized", "partial"):
         raise store.MaestroError(f"{cfg.home} is not a maestro board ({board['state']}); run `maestro init` first")
-    entry = inbox.append_new(cfg.home, title, args={"priority": int(priority)})
+    entry = inbox.append_new(cfg.home, title, args={"priority": int(priority), "auto_acs": True})
     _fire(nudge, None)
     return entry
 
