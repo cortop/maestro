@@ -103,7 +103,7 @@ CATEGORY_OF = {
     **dict.fromkeys((ev_types.PR_OPENED, ev_types.PR_UPDATED, ev_types.CI_OBSERVED,
                      ev_types.CI_RERUN_REQUESTED, ev_types.REVIEW_FEEDBACK_RECEIVED,
                      ev_types.REVIEW_REPLY_POSTED, ev_types.REVIEW_ROUND_STARTED, ev_types.REVIEW_FINDING_RECORDED,
-                     ev_types.REVIEW_REQUESTED, ev_types.REVIEW_PR_OBSERVED,
+                     ev_types.REVIEW_REQUESTED, ev_types.REVIEW_PR_OBSERVED, ev_types.REVIEW_CLOSED,
                      ev_types.REVIEW_BRIEF_WRITTEN, ev_types.REVIEW_PENDING_CREATED,
                      ev_types.RESTACK_QUEUED,
                      ev_types.RESTACK_COMPLETED, ev_types.TICKET_STACKED,
