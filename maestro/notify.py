@@ -27,6 +27,7 @@ from pathlib import Path
 
 from . import snapshot as snap_mod, store
 from .config import Config
+from .review.model import is_review
 from .statemachine import Phase
 
 WATCHED_PHASES = {Phase.AWAITING_HUMAN.value, Phase.DEGRADED.value, Phase.DONE.value}
@@ -41,8 +42,13 @@ def _question_text(snap: snap_mod.Snapshot) -> str:
     return next(iter(snap.open_questions.values()), "") if snap.open_questions else ""
 
 
-def _run_command(cmd: str, key: str, phase: str, question: str) -> None:
-    env = dict(os.environ, KEY=key, PHASE=phase, QUESTION=question)
+def _run_command(cmd: str, key: str, phase: str, question: str, *, kind: str = "ticket",
+                 event: str | None = None, title: str = "", url: str = "",
+                 requester: str = "") -> None:
+    # title/requester are other people's text: environment values only, never in the command string.
+    env = dict(os.environ, KEY=key, PHASE=phase, QUESTION=question, KIND=kind,
+               EVENT=event if event is not None else phase, TITLE=title, URL=url,
+               REQUESTER=requester)
     try:
         subprocess.run(cmd, shell=True, env=env, timeout=_TIMEOUT,
                         capture_output=True, check=False)
@@ -58,6 +64,62 @@ def _post_webhook(url: str, payload: dict) -> None:
         urllib.request.urlopen(req, timeout=_TIMEOUT).close()
     except (urllib.error.URLError, OSError, ValueError):
         pass  # an unreachable webhook must never abort the sweep
+
+
+_PUSH_CURSOR_KEY = "__push__"  # dedupe tokens live beside the per-key phase entries
+
+
+def _deliver(cfg: Config, key: str, *, kind: str, event: str, phase: str, question: str,
+             title: str, url: str, requester: str, text: str) -> None:
+    if cfg.notify_command:
+        _run_command(cfg.notify_command, key, phase, question or text, kind=kind,
+                     event=event, title=title, url=url, requester=requester)
+    for hook in cfg.webhook_urls:
+        payload = {"key": key, "phase": phase, "question": question or text, "title": title,
+                   "kind": kind, "event": event}
+        if url:
+            payload["url"] = url
+        if requester:
+            payload["requester"] = requester
+        _post_webhook(hook, payload)
+
+
+def _review_event(snap: snap_mod.Snapshot) -> str | None:
+    """The event a review's phase entry maps to, or None when it pushes nothing."""
+    if snap.phase == Phase.AWAITING_HUMAN.value:
+        if any(q.startswith("review-brief-") for q in snap.open_questions):
+            return "brief-ready"
+        return "blocked"
+    if snap.phase == Phase.DEGRADED.value:
+        return "failed"
+    return None
+
+
+def push(cfg: Config, key: str, event: str, *, title: str | None = None,
+         url: str | None = None, requester: str | None = None, text: str | None = None,
+         dedupe: str = "") -> bool:
+    """Push the named *event* for *key* to ``notify_command`` and ``webhook_urls``, once per
+    (key, event, dedupe token). Returns True when it fired."""
+    if not cfg.notify_command and not cfg.webhook_urls:
+        return False
+    home = cfg.home
+    cursor_path = _cursor_path(home)
+    cursor = store.read_json(cursor_path, {}) or {}
+    seen = cursor.get(_PUSH_CURSOR_KEY)
+    if not isinstance(seen, dict):
+        seen = {}
+    token = f"{key}\x00{event}\x00{dedupe}"
+    if token in seen:
+        return False
+    seen[token] = True
+    cursor[_PUSH_CURSOR_KEY] = seen
+    store.write_json(cursor_path, cursor)
+    snap = snap_mod.load(home, key)
+    kind = "review" if is_review(snap) else "ticket"
+    _deliver(cfg, key, kind=kind, event=event, phase=snap.phase, question="",
+             title=title if title is not None else snap_mod.display_title(home, snap),
+             url=url or "", requester=requester or "", text=text or "")
+    return True
 
 
 def maybe_notify(cfg: Config, now: float) -> list[str]:
@@ -80,16 +142,15 @@ def maybe_notify(cfg: Config, now: float) -> list[str]:
         if snap.phase != cursor.get(key):
             cursor[key] = snap.phase
             changed = True
-            if snap.phase in WATCHED_PHASES:
-                question = _question_text(snap)
-                if cfg.notify_command:
-                    _run_command(cfg.notify_command, key, snap.phase, question)
-                for url in cfg.webhook_urls:
-                    _post_webhook(url, {
-                        "key": key, "phase": snap.phase,
-                        "question": question,
-                        "title": snap_mod.display_title(home, snap),
-                    })
+            review = is_review(snap)
+            event = _review_event(snap) if review else (
+                snap.phase if snap.phase in WATCHED_PHASES else None)
+            if event is not None:
+                _deliver(cfg, key, kind="review" if review else "ticket", event=event,
+                         phase=snap.phase, question=_question_text(snap), text="",
+                         title=snap_mod.display_title(home, snap),
+                         url=(snap.review_url or "") if review else "",
+                         requester=(snap.review_author or "") if review else "")
                 fired.append(key)
 
     if changed:
