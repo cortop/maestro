@@ -45,13 +45,13 @@ from .. import inbox
 from .. import ops as ops_mod
 from .. import snapshot as snap_mod
 from .. import store
-from ..review import model as review_mod
 from ..config import Config
 from ..dispatcher import existing_prefixes
 from ..dispatcher import spec_runner
 from ..projection import _PHASE_RANK
 from ..projection import parse_query
 from ..projection import ticket_rows
+from ..review import model as review_mod
 from ..sessions import build_routing_sessions
 from ..sessions import reap_children
 from ..statemachine import Phase

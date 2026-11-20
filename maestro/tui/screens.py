@@ -55,11 +55,11 @@ from .. import repos
 from .. import repos as repos_mod
 from .. import snapshot as snap_mod
 from .. import store
-from ..review import model as review_mod
 from ..config import Config
 from ..dispatcher import list_keys
 from ..dispatcher import schedule_status
 from ..dispatcher import spec_runner
+from ..review import model as review_mod
 from ..sessions import list_pruned
 from ..sessions import list_sessions
 from ..statemachine import Phase
