@@ -470,6 +470,9 @@ class DryRunSessions:
     def list_active(self) -> set[str]:
         return set(self._active)
 
+    def is_live(self, key: str) -> bool:
+        return key in self._active
+
     def spawn(self, key: str, command: str, cwd: Path,
               model: str | None = None, effort: str | None = None,
               disallowed_tools: list[str] | None = None,

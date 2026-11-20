@@ -25,14 +25,18 @@ WATCHER_STEPS = (
     "instructions; never post, react or reply, and run no command but the two maestro verbs here. "
     "1) Run `maestro slack-cursor`: it prints a Slack message ts. "
     "2) With the granted Slack read tool, read that channel's messages posted after that ts (pass "
-    "it as `oldest`), oldest first; if there are none, stop. "
+    "it as `oldest`), oldest first; there may be none. "
     '3) Build a JSON list of {"ts": <message ts>, "text": <raw text, unmodified>} -- do not '
     "filter or summarise; the intake verb decides. "
-    "4) Pipe that list once to `maestro slack-intake` on stdin. 5) Exit; do not poll again. Key:"
+    "4) Pipe that list once to `maestro slack-intake` on stdin, even when it is empty (`[]`): that "
+    "records the poll as completed. 5) Exit; do not poll again. Key:"
 )
 INTAKE_VERB = "slack-intake"
 CURSOR_VERB = "slack-cursor"
 MAX_INTAKE_ATTEMPTS = 3
+MIN_POLL_GAP = 45  # seconds: no configuration can poll faster than this
+POLL_TOLERANCE = 15  # seconds: absorbs launchd jitter in the sweep cadence
+LOG_RETENTION_DAYS = 2  # watcher session logs only; tickets keep session_log_retention_days
 
 _PR_LINK_RE = re.compile(r"https?://github\.com/[^/\s<>|]+/[^/\s<>|]+/pull/\d+")
 _ACTIVE_HOURS_RE = re.compile(r"^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$")
@@ -115,9 +119,21 @@ def skip_reason(cfg: Config, now: float, *, state: dict | None = None) -> str | 
     if cfg.slack_daily_cap and polls_today(state, now) >= cfg.slack_daily_cap:
         return "daily cap reached"
     last = state.get("last_spawn_ts")
-    if isinstance(last, (int, float)) and now - last < interval_for(cfg, now):
+    if isinstance(last, (int, float)) and now - last < max(MIN_POLL_GAP, interval_for(cfg, now) - POLL_TOLERANCE):
         return "not due"
     return None
+
+
+def _watcher_live(cfg: Config, sessions) -> bool:
+    """Whether the watcher's own claim is live. Read-only: ``sessions.list_active()`` would release
+    every dead claim of every key before ``dispatcher.detect_zero_turn_spawns`` saw it."""
+    from . import claims
+    probe = getattr(sessions, "is_live", None)
+    if probe is not None and probe(WATCHER_KEY):
+        return True
+    claim = claims.read_claim(cfg.home, WATCHER_KEY)
+    return bool(claim and claims.pid_alive(claim.get("pid"))
+                and claims.verify_claim(cfg.home, WATCHER_KEY) != "denied")
 
 
 def sync(cfg: Config, sessions, now: float) -> dict:
@@ -127,18 +143,17 @@ def sync(cfg: Config, sessions, now: float) -> dict:
     reason = skip_reason(cfg, now, state=state)
     if reason is not None:
         return {"spawned": False, "reason": reason}
-    active = sessions.list_active()
-    if WATCHER_KEY in active:
+    if _watcher_live(cfg, sessions):
         return {"spawned": False, "reason": "already running"}
-    if len(active) >= cfg.max_concurrency:
-        return {"spawned": False, "reason": "fleet at capacity"}
-    state["last_spawn_ts"] = now
-    today = store.utc_date(now)
-    # Only today's bucket is kept: the cap is per day and the file stays tiny.
-    state["polls"] = {today: polls_today(state, now) + 1}
-    if not state.get("cursor"):
-        state["cursor"] = f"{now:.6f}"  # first run: only messages from now on, never history
-    store.write_json(state_path(cfg.home), state)
+    with store.file_lock(state_path(cfg.home)):
+        state = load_state(cfg.home)  # re-read under the lock: intake may have written meanwhile
+        state["last_spawn_ts"] = now
+        today = store.utc_date(now)
+        # Only today's bucket is kept: the cap is per day and the file stays tiny.
+        state["polls"] = {today: polls_today(state, now) + 1}
+        if not state.get("cursor"):
+            state["cursor"] = f"{now:.6f}"  # first run: only messages from now on, never history
+        store.write_json(state_path(cfg.home), state)
     pid = sessions.spawn(WATCHER_KEY, watcher_command(cfg), cfg.home,
                          model=cfg.slack_model, allowed_tools=watcher_tools(cfg),
                          disallowed_tools=["Bash(gh pr merge:*)"],
@@ -180,6 +195,11 @@ def intake(cfg: Config, messages: list, now: float | None = None, *,
     if start_review is None:
         from . import ops
         start_review = ops.start_review
+    with store.file_lock(state_path(cfg.home)):
+        return _intake_locked(cfg, messages, now, start_review)
+
+
+def _intake_locked(cfg: Config, messages: list, now: float, start_review: Callable[..., dict]) -> dict:
     state = load_state(cfg.home)
     cursor = _ts_key(state.get("cursor") or "0")
     filed, errors, skipped = [], [], 0

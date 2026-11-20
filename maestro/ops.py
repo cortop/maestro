@@ -2824,7 +2824,10 @@ def _prune_plan(cfg: Config, key: str, *, now: float | None = None) -> list[dict
     from . import claims
     from .sessions import list_sessions
 
-    retention_days = cfg.session_log_retention_days
+    from .slack_watcher import WATCHER_KEY, LOG_RETENTION_DAYS
+
+    # T-288: one watcher session per sweep makes thousands of logs; they keep only a short window.
+    retention_days = LOG_RETENTION_DAYS if key == WATCHER_KEY else cfg.session_log_retention_days
     max_per_ticket = cfg.session_log_max_per_ticket
     if not retention_days and not max_per_ticket:
         return []
