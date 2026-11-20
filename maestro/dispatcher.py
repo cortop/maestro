@@ -2072,6 +2072,9 @@ def sync_review_pending(cfg: Config, now: float) -> dict:
                 reason = f"pull request {status['state'].lower()}"
                 outcome = f"pr-{status['state'].lower()}"
         if reason is None:
+            if review_mod.status_of(snap) in (review_mod.ReviewStatus.BRIEF_READY,
+                                              review_mod.ReviewStatus.PENDING_ON_GITHUB):
+                _observe_review_head(cfg, key, snap, number, slug, vcs, cred.env)
             continue
         try:
             expect = snap.observed_seq
@@ -2089,6 +2092,28 @@ def sync_review_pending(cfg: Config, now: float) -> dict:
     cursor["review_pending"] = now
     store.write_json(cursor_path, cursor)
     return {"checked": checked}
+
+
+def _observe_review_head(cfg: Config, key: str, snap, number: int, slug: str | None, vcs,
+                         env: dict | None) -> None:
+    """T-296: record the PR's head for a brief-ready or pending review (`ReviewPrObserved`, only on
+    change) and push `updated` once per head that differs from the reviewed one."""
+    from . import notify
+    from . import ops
+    head = vcs.pr_head(number, slug, env=env)
+    sha = head.get("head_sha")
+    if head.get("error") or not sha:
+        return
+    seen = None
+    for e in event_log.read(cfg.home, key):
+        if e.get("type") == E.REVIEW_PR_OBSERVED:
+            seen = (e.get("payload") or {}).get("head_sha")
+    ops._record_review_pr(cfg, key, head)
+    if sha != snap.review_head_sha and sha != seen:
+        notify.push(cfg, key, "updated", url=snap.review_url or "",
+                    requester=snap.review_author or "",
+                    text=f"the PR has new commits ({sha[:12]}); the brief is for {str(snap.review_head_sha)[:12]}",
+                    dedupe=sha)
 
 
 def remove_review_worktree(cfg: Config, key: str) -> None:
@@ -4142,6 +4167,18 @@ def _start_review_round(cfg: Config, key: str, snap) -> str | None:
 _BRIEF_ANSWER_COMMANDS = frozenset({"ans", "answer", "msg"})
 
 
+def ops_mod_superseded() -> str:
+    from . import ops
+    return ops.REVIEW_SUPERSEDED_ANSWER
+
+
+def _finish_superseded_review(cfg: Config, key: str, snap) -> None:
+    """Set a review to `ready` after its question was superseded by a new round."""
+    from . import ops
+    ops.set_phase(cfg, key, Phase.READY, reason="review round started; question superseded",
+                  actor="dispatcher", force=True, expect=snap.observed_seq)
+
+
 def _is_brief_answer_only(home: Path, key: str, snap) -> bool:
     """True when every open question is a `review-brief-*` one and every pending inbox
     command is an answer or message aimed at it (no qid, or a brief qid)."""
@@ -4237,6 +4274,17 @@ def _fold_and_gate(sweep: _Sweep, key: str, active: set[str]):
             _run_hook(f"review-brief-answer:{key}", hook_errors, _consume_brief_answer, home, key)
         decisions[key] = {"outcome": "review_brief_answer_ignored",
                           "reason": "answer to a review brief: use the review actions instead"}
+        return None
+    # T-296: a review whose brief/blocked question was superseded by a new round but whose phase
+    # change has not landed (a crash between the two) is handed on to `ready`, never spawned.
+    if (review_mod.is_review(snap) and snap.phase == Phase.AWAITING_HUMAN.value
+            and not snap.open_questions and snap.answered_questions
+            and list(snap.answered_questions.values())[-1] == ops_mod_superseded()):
+        if not dry_run:
+            _run_hook(f"review-superseded:{key}", hook_errors, _finish_superseded_review,
+                      sweep.cfg, key, snap)
+        decisions[key] = {"outcome": "review_superseded",
+                          "reason": "a new review round replaced the question; moving to ready"}
         return None
     # T-250: a review-kind ticket's pending round (`ready`) has no reconciler yet.
     if snap.kind == "review" and snap.phase in (Phase.TRIAGING.value, Phase.READY.value):

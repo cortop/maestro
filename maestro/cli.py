@@ -484,11 +484,13 @@ def _review_line(r) -> str:
         line += f"  closed: {r.outcome}"
     if r.previous_key:
         line += f"  after {r.previous_key}"
+    if r.stale:
+        line += "  STALE: new commits"
     return line
 
 
 def cmd_reviews(args) -> int:
-    """[human] list inbound reviews, or `reviews show <key>` for one."""
+    """[human] list inbound reviews, or `reviews show|rereview|retry <key>` for one."""
     from . import review as review_mod
     cfg = _cfg(args)
     rest = list(args.rest or [])
@@ -505,8 +507,21 @@ def cmd_reviews(args) -> int:
             for k, v in r.to_dict().items():
                 print(f"{k}: {v}")
         return 0
+    if rest and rest[0] in ("rereview", "retry"):
+        if len(rest) != 2 or not rest[1]:
+            raise store.MaestroError(f"usage: maestro reviews {rest[0]} <key>")
+        verb = ops.rereview if rest[0] == "rereview" else ops.retry_review
+        res = verb(cfg, rest[1])
+        if args.json:
+            _print(res)
+        else:
+            print(f"{rest[1]}: round started at {str(res.get('head_sha') or '')[:12]}"
+                  if res.get("started") else f"{rest[1]}: {res.get('reason')}")
+        return 0
     if rest:
-        raise store.MaestroError("usage: maestro reviews [--json] [--all] | reviews show <key>")
+        raise store.MaestroError(
+            "usage: maestro reviews [--json] [--all] | reviews show <key> | "
+            "reviews rereview <key> | reviews retry <key>")
     rows = review_mod.list_reviews(cfg.home, include_closed=args.all)
     if args.json:
         _print([r.to_dict() for r in rows])
@@ -1797,8 +1812,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip in-process dispatch nudge after sending command")
 
     add("status", cmd_status, "summary of all tickets")
-    sp = add("reviews", cmd_reviews, "[human] list inbound PR reviews; `reviews show <key>` for one")
-    sp.add_argument("rest", nargs="*", help="`show <key>` to print one review")
+    sp = add("reviews", cmd_reviews, "[human] list inbound PR reviews; `reviews show|rereview|retry <key>` for one")
+    sp.add_argument("rest", nargs="*", help="`show <key>`, `rereview <key>` (new commits) or `retry <key>` (blocked)")
     sp.add_argument("--json", action="store_true"); sp.add_argument("--all", action="store_true",
                                                                     help="include closed reviews")
     sp = add("show", cmd_show, "snapshot + events for one ticket")

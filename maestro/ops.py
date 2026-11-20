@@ -3575,7 +3575,20 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
             previous, key, snap = key, None, None
         elif latest is not None and latest["archived"]:
             previous = latest["key"]
-        if snap is not None and snap.open_questions:
+        moved = bool(snap is not None and snap.review_head_sha and head.get("head_sha")
+                     and head["head_sha"] != snap.review_head_sha)
+        if moved and snap.review_pending:  # a new round would orphan the pending GitHub review
+            anchor = _record_review_request(cfg, key, **req, head_sha=head["head_sha"], again=True)
+            _record_review_pr(cfg, key, head)
+            from . import notify
+            notify.push(cfg, key, "asked-again", url=url,
+                        requester=((requester or {}).get("name") or (requester or {}).get("id")),
+                        text=("the PR has new commits; submit or delete your pending review "
+                              f"(#{snap.review_pending.get('review_id')}) first, then re-run the request"),
+                        dedupe=anchor)
+            return {"key": key, "minted": False, "started": False, "reason": "pending review"}
+        resume = moved and any(str(q).startswith("review-brief-") for q in snap.open_questions)
+        if snap is not None and snap.open_questions and not resume:
             seen = head if head.get("head_sha") else {}
             _record_review_request(cfg, key, **req, head_sha=seen.get("head_sha"))
             if seen:
@@ -3621,7 +3634,23 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
         if qid not in _resolved_qids(cfg, key):
             ask(cfg, key, f"{key}: {refusal[1]}", qid=qid, actor="human")
         return {"key": key, "minted": minted, "started": False, "reason": refusal[0]}
-    with store.file_lock(cfg.home / "derived" / f"review-round-{key}"):  # one round start per review at a time
+    return _begin_review_round(cfg, key, binding, number, head, url, source=source, minted=minted,
+                               repo_name=None)
+
+
+REVIEW_SUPERSEDED_ANSWER = "superseded: the review moved on"
+_REVIEW_RESOLVABLE_QIDS = ("review-brief-", "review-unbound-", "review-fork-")
+
+
+def _begin_review_round(cfg: Config, key: str, binding: repos_mod.RepoBinding, number: int,
+                        head: dict, url: str, *, source: str | None = None, minted: bool = False,
+                        repo_name: str | None = None) -> dict:
+    """Start a round at *head*: check it out, append `ReviewRoundStarted`, resolve the open
+    brief/blocked question as superseded, then set the phase to ready, in that order, so no
+    sweep in between finds an answered question and spawns the generic awaiting-human skill
+    (the dispatcher also finishes a crash-interrupted hand-over). *repo_name* binds a review
+    minted unbound. One round start per review at a time."""
+    with store.file_lock(cfg.home / "derived" / f"review-round-{key}"):
         snap = snap_mod.load(cfg.home, key)
         if snap.review_head_sha == head["head_sha"]:
             return {"key": key, "minted": False, "started": False, "reason": "up to date"}
@@ -3631,13 +3660,86 @@ def start_review(cfg: Config, pr_url: str, *, source: str | None = None,
             payload["source"] = source
         if head.get("author"):
             payload["author"] = head["author"]
+        if repo_name:
+            payload["repo"] = repo_name
         _append(cfg, key, E.REVIEW_ROUND_STARTED, payload, actor="human",
                 sid=f"review-round-{key}-{head['head_sha']}")
+        for qid in list(snap.open_questions):
+            if str(qid).startswith(_REVIEW_RESOLVABLE_QIDS):
+                _append(cfg, key, E.QUESTION_ANSWERED,
+                        {"qid": qid, "answer": REVIEW_SUPERSEDED_ANSWER},
+                        actor="human", sid=f"ans-{key}-superseded-{qid}")
         if Phase(snap.phase) != Phase.READY:
             set_phase(cfg, key, Phase.READY, reason=f"review round at {head['head_sha'][:12]}",
                       actor="human", force=True)
     return {"key": key, "minted": minted, "started": True, "worktree": str(wt),
             "head_sha": head["head_sha"]}
+
+
+def _review_target(cfg: Config, key: str, verb: str):
+    """(snapshot, slug, number) of a `review` ticket, or a refusal."""
+    from .review import model as review_model
+    snap = snap_mod.load(cfg.home, key)
+    if snap.kind != "review":
+        raise store.MaestroError(f"{key}: {verb} only applies to a review ticket (kind={snap.kind})")
+    slug, number = review_model._slug_number(snap)
+    if not slug or number is None:
+        raise store.MaestroError(f"{key}: {verb}: the review has no PR to read")
+    return snap, slug, number
+
+
+def rereview(cfg: Config, key: str, *, vcs: object | None = None) -> dict:
+    """[human] T-296: start a new round for a brief-ready review whose PR head moved.
+
+    Refuses while a pending GitHub review exists (GitHub allows one per user per PR, a new
+    round would orphan it) and when the head has not moved."""
+    snap, slug, number = _review_target(cfg, key, "rereview")
+    if snap.review_pending:
+        raise store.MaestroError(
+            f"{key}: submit or delete your pending review first, then re-run `maestro reviews rereview {key}`")
+    if not any(str(q).startswith("review-brief-") for q in snap.open_questions):
+        raise store.MaestroError(f"{key}: rereview needs a brief-ready review (no open brief question)")
+    repo_name = _review_binding(cfg, slug)
+    if repo_name is None:
+        raise store.MaestroError(f"{key}: {slug} is not bound in any [repos.<name>] table")
+    head = _read_pr_head(cfg, slug, number, vcs)
+    if head.get("error") or not head.get("head_sha"):
+        raise store.MaestroError(f"{key}: cannot read PR head ({head.get('error') or 'no head sha'})")
+    if head.get("head_sha") == snap.review_head_sha:
+        raise store.MaestroError(f"{key}: no new commits (head is still {snap.review_head_sha[:12]})")
+    if str(head.get("state") or "").upper() in ("MERGED", "CLOSED"):
+        raise store.MaestroError(f"{key}: the pull request is {str(head['state']).lower()}")
+    if head.get("is_fork"):
+        raise store.MaestroError(f"{key}: the pull request now comes from a fork")
+    _record_review_pr(cfg, key, head)
+    binding = repos_mod._binding_from_table(cfg, repo_name, cfg.repos[repo_name])
+    return _begin_review_round(cfg, key, binding, number, head,
+                               snap.review_url or f"https://github.com/{slug}/pull/{number}")
+
+
+def retry_review(cfg: Config, key: str, *, vcs: object | None = None) -> dict:
+    """[human] T-296: re-run the request of a blocked review (unbound repo, or a fork PR).
+
+    Refuses while the repo is still unbound or the PR is still from a fork."""
+    snap, slug, number = _review_target(cfg, key, "retry")
+    blocked = [q for q in snap.open_questions if str(q).startswith(("review-unbound-", "review-fork-"))]
+    if not blocked:
+        raise store.MaestroError(f"{key}: retry needs a blocked review (no open unbound/fork question)")
+    repo_name = _review_binding(cfg, slug)
+    if repo_name is None:
+        raise store.MaestroError(f"{key}: {slug} is still not bound in any [repos.<name>] table")
+    head = _read_pr_head(cfg, slug, number, vcs)
+    if head.get("error") or not head.get("head_sha"):
+        raise store.MaestroError(f"{key}: cannot read PR head ({head.get('error') or 'no head sha'})")
+    if head.get("is_fork"):
+        raise store.MaestroError(f"{key}: the pull request is still from a fork")
+    if str(head.get("state") or "").upper() in ("MERGED", "CLOSED"):
+        raise store.MaestroError(f"{key}: the pull request is {str(head['state']).lower()}")
+    _record_review_pr(cfg, key, head)
+    binding = repos_mod._binding_from_table(cfg, repo_name, cfg.repos[repo_name])
+    return _begin_review_round(cfg, key, binding, number, head,
+                               snap.review_url or f"https://github.com/{slug}/pull/{number}",
+                               repo_name=repo_name)
 
 
 REVIEW_SEVERITIES = ("blocking", "question", "nit")

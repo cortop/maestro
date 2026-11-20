@@ -571,6 +571,7 @@ def _fold_review_round_started(s: Snapshot, p: dict, seq, t: str) -> None:
     s.review_url = p.get("url", s.review_url)
     s.review_source = p.get("source") or s.review_source
     s.review_author = p.get("author") or s.review_author
+    s.repo = p.get("repo") or s.repo
     s.review_head_sha = p.get("head_sha", s.review_head_sha)
     s.review_round += 1
     s.review_comments = []
