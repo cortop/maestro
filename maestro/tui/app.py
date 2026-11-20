@@ -51,6 +51,7 @@ from ..dispatcher import spec_runner
 from ..projection import _PHASE_RANK
 from ..projection import parse_query
 from ..projection import ticket_rows
+from ..review import model as review_mod
 from ..sessions import build_routing_sessions
 from ..sessions import reap_children
 from ..statemachine import Phase
@@ -211,18 +212,25 @@ def _load_live(home: Path, cfg: Config) -> dict[str, dict]:
     return out
 
 
+def _review_hits(home: Path) -> list[tuple[str, str, str]]:
+    """(key, title, phase) per review: palette-reachable, on no ticket surface."""
+    snaps = [snap_mod.load(home, k) for k in sorted(review_mod.review_keys(home))]
+    return [(s.key, s.title, s.phase) for s in snaps]
+
+
 def _load_board(home: Path) -> dict:
     """Everything `_populate` renders, read off the UI thread (T-163 enabler 4)."""
     try:
         cfg = config_mod.load(str(home))
     except store.MaestroError:
         cfg = Config(home=home)
-    rows = ticket_rows(home)
+    rows = ticket_rows(home)  # tickets only: it already splits reviews off
     live = _load_live(home, cfg)
     statuses = board_view.live_statuses(home, frozenset(k for k, v in live.items() if v.get("claimed")))
     return {
         "rows": rows,
         "snaps": {r[-1]: snap_mod.load(home, r[-1]) for r in rows},
+        "review_hits": _review_hits(home),
         "graph": depgraph.build(home),
         "live": live,
         "live_status": statuses,
@@ -446,7 +454,7 @@ class MaestroTUI(App):
         Binding("n", "create", "New"),
         Binding("enter", "focus_detail", "Detail"),
         Binding("i", "inbox_message", "Inbox"),
-        Binding("R", "review_panel", "Review"),
+        Binding("R", "review_panel", "Own PRs"),
         Binding("W", "decisions", "Decisions"),
         Binding("[", "narrow_detail", "Detail-", show=False),
         Binding("]", "widen_detail", "Detail+", show=False),
@@ -594,6 +602,7 @@ class MaestroTUI(App):
         self._red_toasted: dict[str, tuple] = {}
         # T-162: what the command palette searches (refreshed by `_populate`; never read from disk).
         self._palette_tickets: list[tuple[str, str, str]] = []
+        self._review_hits: list[tuple[str, str, str]] = []  # reviews: palette-reachable, not on Tickets
         self._palette_proposals: set[str] = set()
 
     def _base_stack(self) -> list:
@@ -1545,6 +1554,7 @@ class MaestroTUI(App):
     def _apply_board(self, data: dict) -> None:
         self._rows = data["rows"]
         self._snaps = data["snaps"]
+        self._review_hits = data.get("review_hits", [])
         self._graph = data["graph"]
         self._live = data["live"]
         self._live_status = data.get("live_status", {})
@@ -1615,6 +1625,8 @@ class MaestroTUI(App):
         search that hides it) only when the current view doesn't show it. Returns success."""
         while len(self.screen_stack) > 1:  # back to the board
             self.pop_screen()
+        if any(k == key for k, _t, _p in self._review_hits):
+            return self._select_review(key)
         if key not in self._snaps:
             self.notify(f"{key}: no such ticket", severity="warning")
             return False
@@ -1636,6 +1648,18 @@ class MaestroTUI(App):
         self._selected_key = key
         self._show_detail(key, self._snaps.get(key))
         return True
+
+    def _select_review(self, key: str) -> bool:
+        """Show review *key* selected on the Reviews tab."""
+        self._show_tab("tab-reviews")
+        rows = self._reviews_rows()
+        for i, row in enumerate(rows):
+            if row.key == key:
+                self._reviews_idx = i
+                self._paint_reviews()
+                return True
+        self.notify(f"{key}: not on the Reviews tab", severity="warning")
+        return False
 
     def _open_ticket_screen(self, key: str, screen_name: str) -> None:
         """Push one of a ticket's sub-screens (palette sub-hits)."""
@@ -2534,7 +2558,8 @@ class MaestroTUI(App):
                     self.notify(f"{key}: {phase}", severity="warning", timeout=6)
         self._prev_phases = new_phases
         self._snap_cache = {k: (sn.phase, len(sn.open_questions)) for k, sn in snaps_by_key.items()}
-        self._palette_tickets = [(r[-1], r[2], snaps_by_key[r[-1]].phase) for r in all_rows]
+        self._palette_tickets = ([(r[-1], r[2], snaps_by_key[r[-1]].phase) for r in all_rows]
+                                 + list(self._review_hits))
 
         # Build filter bar: show counts per filter, bold the active one
         parts = []

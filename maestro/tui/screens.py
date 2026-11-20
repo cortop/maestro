@@ -59,6 +59,7 @@ from ..config import Config
 from ..dispatcher import list_keys
 from ..dispatcher import schedule_status
 from ..dispatcher import spec_runner
+from ..review import model as review_mod
 from ..sessions import list_pruned
 from ..sessions import list_sessions
 from ..statemachine import Phase
@@ -2078,7 +2079,7 @@ class ReviewScreen(Screen):
         table = self.query_one("#review-table", DataTable)
         keep = self._key
         snaps = [s for s in (snap_mod.load(self._home, k) for k in list_keys(self._home))
-                 if s.phase in REVIEW_PHASES]
+                 if s.phase in REVIEW_PHASES and not review_mod.is_review(s)]
         snaps.sort(key=lambda s: s.key)
         table.clear()
         for s in snaps:
