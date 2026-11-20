@@ -55,6 +55,7 @@ from .. import repos
 from .. import repos as repos_mod
 from .. import snapshot as snap_mod
 from .. import store
+from ..review import model as review_mod
 from ..config import Config
 from ..dispatcher import list_keys
 from ..dispatcher import schedule_status
@@ -2078,7 +2079,7 @@ class ReviewScreen(Screen):
         table = self.query_one("#review-table", DataTable)
         keep = self._key
         snaps = [s for s in (snap_mod.load(self._home, k) for k in list_keys(self._home))
-                 if s.phase in REVIEW_PHASES]
+                 if s.phase in REVIEW_PHASES and not review_mod.is_review(s)]
         snaps.sort(key=lambda s: s.key)
         table.clear()
         for s in snaps:
