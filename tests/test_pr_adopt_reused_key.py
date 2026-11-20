@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 
-from maestro import cli, inbox, snapshot as snap_mod, store
+from maestro import cli, inbox, snapshot as snap_mod
 from maestro import dispatcher as disp
 from maestro.config import load
 
-from test_open_pr_verb import BRANCH, KEY, _commit, _gh_calls, _opened, env, gout  # noqa: F401
+import test_open_pr_verb as _base
+from test_open_pr_verb import BRANCH, KEY, _commit, _gh_calls, _opened, gout  # noqa: F401
+
+env = _base.env  # the fixture, re-exported under its own name
 
 
 def _put(state, number, st, sha):
@@ -32,7 +35,7 @@ def test_merged_pr_at_other_sha_creates_new_pr(home, env, capsys):
 
 def test_open_pr_is_adopted(home, env, capsys):
     wt, state = env
-    sha = _commit(wt, "a.txt")
+    _commit(wt, "a.txt")
     _put(state, 7, "OPEN", "1" * 40)
     out = _run(home, capsys)
     assert out["opened"][0]["number"] == 7
