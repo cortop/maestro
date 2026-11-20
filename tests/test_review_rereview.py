@@ -218,7 +218,7 @@ def test_retry_refuses_while_the_pr_is_from_a_fork(board, capsys):
 
 def test_reviews_listing_marks_a_stale_review(board, capsys):
     home, vcs, origin, repo, tmp, _p = board
-    key = _briefed(home, vcs)
+    _briefed(home, vcs)
     vcs.sha = _push_pr_head(origin, repo, tmp, "pr-two")
     _sweep(home, 20_000)
     capsys.readouterr()
